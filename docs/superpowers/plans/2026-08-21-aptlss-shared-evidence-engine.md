@@ -461,5 +461,3 @@ Inspect GitHub and CircleCI checks. If CircleCI fails, identify the first failin
 - Dirty-worktree protection: Task 1.
 
 No task performs an external action during assessment, planning, test or browser verification.
-
-

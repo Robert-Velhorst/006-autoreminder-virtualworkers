@@ -299,4 +299,3 @@ uncommitted local migrations that may exist in other working directories.
 - Rewriting or deleting historical evidence when a newer assessment differs.
 - Fabricating source proof, inflating confidence, or treating model output as a
   primary source.
-
