@@ -14,6 +14,14 @@ import {
   workspaceEvidenceLinks,
 } from "../drizzle/schema";
 import { getActiveWaitingReason, getActiveWaitingReasons, getWaitingReasonHistory, recordAptlssWaitingReason, resolveAptlssWaitingReason } from "./aptlssWaitingReasonDb";
+import {
+  AptlssEvidenceGraphError,
+  createEvidenceConflict,
+  getCardEvidence,
+  getOpenVerificationFollowups,
+  recordWorkerEvidenceAssertion,
+  resolveVerificationFollowup,
+} from "./aptlssEvidenceGraphDb";
 import { selectWorkQueueNextAction } from "./aptlssWorkQueue";
 import {
   ensureBrowserTabCollectorToken,
@@ -24,7 +32,7 @@ import {
 } from "./browserTabHygiene";
 import { getDb } from "./db";
 import { DecisionOutcomeError, getDecisionHistory, recordDecisionOutcome } from "./decisionOutcomesDb";
-import { generateOperatorDailyPlan, getOperatorDailyPlan, updateOperatorDailyPlan, type OperatorDailyPlanPayload } from "./operatorDailyPlan";
+import { generateOperatorDailyPlan, getOperatorDailyPlan, replanOperatorRemainingDay, updateOperatorDailyPlan, type OperatorDailyPlanPayload } from "./operatorDailyPlan";
 import {
   buildOperatorEvidenceSummary,
   type OperatorAssessmentEvidence,
@@ -309,6 +317,72 @@ export const operatorRouter = router({
     .input(z.object({ cardId: z.string() }))
     .mutation(({ input, ctx }) => resolveAptlssWaitingReason(ctx.user.id, input.cardId)),
 
+  getCardEvidence: operatorProcedure
+    .input(z.object({ cardId: z.string().min(1), limit: z.number().int().min(1).max(100).default(30) }))
+    .query(({ input, ctx }) => getCardEvidence(ctx.user.id, input.cardId, input.limit)),
+  getVerificationFollowups: operatorProcedure
+    .input(z.object({ cardId: z.string().min(1).optional() }).optional())
+    .query(({ input, ctx }) => getOpenVerificationFollowups(ctx.user.id, input?.cardId)),
+  recordEvidenceAssertion: workerMutation
+    .input(z.object({
+      cardId: z.string().min(1).optional(),
+      title: z.string().trim().min(3).max(512),
+      detail: z.string().trim().min(3).max(8_000),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      try {
+        return await recordWorkerEvidenceAssertion({
+          vaId: ctx.user.id,
+          cardId: input.cardId,
+          title: input.title,
+          detail: input.detail,
+          recordedBy: String(ctx.user.openId),
+        });
+      } catch (error) {
+        if (error instanceof AptlssEvidenceGraphError) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+        }
+        throw error;
+      }
+    }),
+  createEvidenceConflict: workerMutation
+    .input(z.object({
+      sourceEvidenceId: z.number().int().positive(),
+      assertedEvidenceId: z.number().int().positive(),
+      cardId: z.string().min(1).optional(),
+      question: z.string().trim().min(3).max(4_000),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      try {
+        return await createEvidenceConflict({
+          ...input,
+          vaId: ctx.user.id,
+          createdBy: String(ctx.user.openId),
+        });
+      } catch (error) {
+        if (error instanceof AptlssEvidenceGraphError) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+        }
+        throw error;
+      }
+    }),
+  resolveVerificationFollowup: workerMutation
+    .input(z.object({ followupId: z.number().int().positive(), resolution: z.string().trim().min(3).max(4_000) }))
+    .mutation(async ({ input, ctx }) => {
+      try {
+        return await resolveVerificationFollowup({
+          ...input,
+          vaId: ctx.user.id,
+          resolvedBy: String(ctx.user.openId),
+        });
+      } catch (error) {
+        if (error instanceof AptlssEvidenceGraphError) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+        }
+        throw error;
+      }
+    }),
+
   recordDecisionOutcome: workerMutation
     .input(z.object({ stepId: z.number().int().positive(), outcome: z.string().trim().min(3).max(5_000) }))
     .mutation(async ({ input, ctx }) => {
@@ -343,6 +417,24 @@ export const operatorRouter = router({
     .mutation(async ({ input, ctx }) => {
       const worker = await resolveWorkerOperatorContext(ctx.user);
       return generateOperatorDailyPlan(worker.userId, input?.dateKey, input?.force ?? false, worker);
+    }),
+  replanRemainingDay: workerMutation
+    .input(z.object({
+      dateKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      completedBlockIds: z.array(z.string()).default([]),
+      activeBlockId: z.string().optional(),
+      now: z.string().datetime().optional(),
+    }).optional())
+    .mutation(async ({ input, ctx }) => {
+      const worker = await resolveWorkerOperatorContext(ctx.user);
+      return replanOperatorRemainingDay({
+        vaId: worker.userId,
+        dateKey: input?.dateKey,
+        completedBlockIds: input?.completedBlockIds ?? [],
+        activeBlockId: input?.activeBlockId,
+        now: input?.now ? new Date(input.now) : new Date(),
+        worker,
+      });
     }),
   updateDailyPlan: workerMutation
     .input(dailyPlanPayloadSchema)
