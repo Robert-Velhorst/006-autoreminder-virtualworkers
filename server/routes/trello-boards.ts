@@ -1,6 +1,9 @@
 import { Router } from 'express';
+import { requireAdmin } from '../middleware/auth';
 
 const router = Router();
+router.use(requireAdmin);
+const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
 
 interface TrelloBoard {
   id: string;
@@ -15,6 +18,16 @@ interface BoardOption {
   id: string;
   name: string;
   url: string;
+}
+
+export function trelloBoardsErrorMessage(status: number) {
+  if (status === 401 || status === 403) {
+    return 'Trello authentication failed. Your API credentials may be invalid or expired.';
+  }
+  if (status === 429) {
+    return 'Trello is rate-limiting board requests. Please try again shortly.';
+  }
+  return 'Failed to fetch Trello boards. Please try again later.';
 }
 
 /**
@@ -36,20 +49,14 @@ router.get('/', async (req, res) => {
     // Fetch boards from Trello API
     const url = `https://api.trello.com/1/members/me/boards?key=${apiKey}&token=${token}&filter=open`;
     
-    const response = await fetch(url);
+    const response = await fetch(url, { signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS) });
 
     if (!response.ok) {
       const errorText = await response.text();
       console.error('[TrelloBoards] Trello API error:', errorText);
       
-      if (response.status === 401) {
-        return res.status(401).json({
-          error: 'Trello authentication failed. Your API credentials may be invalid or expired.',
-        });
-      }
-
       return res.status(response.status).json({
-        error: `Failed to fetch Trello boards: ${errorText}`,
+        error: trelloBoardsErrorMessage(response.status),
       });
     }
 

@@ -1,8 +1,22 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterAll, afterEach, describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock fetch for Trello API calls
 const mockFetch = vi.fn();
+const originalFetch = global.fetch;
+const originalTrelloApiKey = process.env.TRELLO_API_KEY;
+const originalTrelloToken = process.env.TRELLO_TOKEN;
 global.fetch = mockFetch;
+
+afterEach(() => {
+  if (originalTrelloApiKey === undefined) delete process.env.TRELLO_API_KEY;
+  else process.env.TRELLO_API_KEY = originalTrelloApiKey;
+  if (originalTrelloToken === undefined) delete process.env.TRELLO_TOKEN;
+  else process.env.TRELLO_TOKEN = originalTrelloToken;
+});
+
+afterAll(() => {
+  global.fetch = originalFetch;
+});
 
 describe('Individual Card Re-analyze', () => {
   beforeEach(() => {

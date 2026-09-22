@@ -5,6 +5,7 @@ import { getDb } from '../db';
 import { appSettings } from '../../drizzle/schema';
 import { eq, and } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
+import { normalizeDailySchedule } from '../dailySchedule';
 
 // Validation schemas
 const conflictDetectionSettingsSchema = z.object({
@@ -414,7 +415,9 @@ export const settingsRouter = router({
     if (!rows[0]?.value) return defaultSchedule;
 
     try {
-      return { ...defaultSchedule, ...JSON.parse(rows[0].value) };
+      const savedSchedule = { ...defaultSchedule, ...JSON.parse(rows[0].value) };
+      const normalized = normalizeDailySchedule(savedSchedule);
+      return normalized.ok ? normalized.value : defaultSchedule;
     } catch {
       return defaultSchedule;
     }
@@ -440,12 +443,16 @@ export const settingsRouter = router({
         throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database not available" });
       }
 
-      const value = JSON.stringify(input);
+      const normalized = normalizeDailySchedule(input);
+      if (!normalized.ok) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: normalized.error });
+      }
+      const value = JSON.stringify(normalized.value);
       await db.insert(appSettings).values({
         vaId,
         key: "daily_schedule",
         value,
       }).onDuplicateKeyUpdate({ set: { value } });
-      return input;
+      return normalized.value;
     }),
 });

@@ -16,7 +16,7 @@ interface TrelloCredentials {
   token: string;
 }
 
-interface ChecklistItem {
+export interface ChecklistItem {
   step: string;
   timeMinutes: number;
   aptlssType: 'A' | 'P' | 'T' | 'L' | 'S';
@@ -84,7 +84,7 @@ export class TrelloChecklistSyncService {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
-    });
+    }, { maxRetries: 0 });
     
     if (!response.ok) {
       throw new Error(`Failed to create checklist: ${response.statusText}`);
@@ -103,7 +103,7 @@ export class TrelloChecklistSyncService {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, pos: position }),
-    });
+    }, { maxRetries: 0 });
     
     if (!response.ok) {
       throw new Error(`Failed to add checklist item: ${response.statusText}`);
@@ -120,7 +120,7 @@ export class TrelloChecklistSyncService {
     
     const response = await fetchWithRetry(url, {
       method: 'PUT',
-    });
+    }, { maxRetries: 0 });
     
     if (!response.ok) {
       throw new Error(`Failed to update checklist item: ${response.statusText}`);
@@ -135,7 +135,7 @@ export class TrelloChecklistSyncService {
     
     const response = await fetchWithRetry(url, {
       method: 'DELETE',
-    });
+    }, { maxRetries: 0 });
     
     if (!response.ok) {
       throw new Error(`Failed to delete checklist: ${response.statusText}`);

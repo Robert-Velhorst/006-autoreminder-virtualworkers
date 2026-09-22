@@ -7,7 +7,11 @@ export interface BatchTemplate {
   id: string;
   name: string;
   description: string;
-  operationType: 'reanalyze' | 'reschedule' | 'conflict_resolution' | 'optimization';
+  operationType:
+    | "reanalyze"
+    | "reschedule"
+    | "conflict_resolution"
+    | "optimization";
   icon?: string;
   config: {
     taskFilter?: {
@@ -32,21 +36,27 @@ export interface BatchTemplate {
   tags?: string[];
 }
 
+export type BatchTemplatePeriod = "all" | "daily" | "weekly" | "monthly";
+
+const RUNNABLE_BATCH_TEMPLATE_OPERATION_TYPES = new Set<
+  BatchTemplate["operationType"]
+>(["reanalyze", "reschedule"]);
+
 /**
  * Predefined batch operation templates
  */
 export const BATCH_TEMPLATES: BatchTemplate[] = [
   {
-    id: 'daily-optimization',
-    name: 'Daily Optimization',
-    description: 'Optimize all tasks scheduled for today',
-    operationType: 'optimization',
-    icon: '⚡',
+    id: "daily-optimization",
+    name: "Daily Optimization",
+    description: "Optimize all tasks scheduled for today",
+    operationType: "optimization",
+    icon: "⚡",
     config: {
       taskFilter: {
         dateRange: {
-          start: 'today',
-          end: 'today',
+          start: "today",
+          end: "today",
         },
       },
       options: {
@@ -57,19 +67,19 @@ export const BATCH_TEMPLATES: BatchTemplate[] = [
       },
     },
     estimatedDuration: 10,
-    tags: ['daily', 'optimization', 'quick'],
+    tags: ["daily", "optimization", "quick"],
   },
   {
-    id: 'weekly-reanalysis',
-    name: 'Weekly Re-analysis',
-    description: 'Re-analyze all tasks for the upcoming week',
-    operationType: 'reanalyze',
-    icon: '📊',
+    id: "weekly-reanalysis",
+    name: "Weekly Re-analysis",
+    description: "Re-analyze all tasks for the upcoming week",
+    operationType: "reanalyze",
+    icon: "📊",
     config: {
       taskFilter: {
         dateRange: {
-          start: 'today',
-          end: '+7d',
+          start: "today",
+          end: "+7d",
         },
       },
       options: {
@@ -81,17 +91,17 @@ export const BATCH_TEMPLATES: BatchTemplate[] = [
       },
     },
     estimatedDuration: 30,
-    tags: ['weekly', 'reanalysis', 'comprehensive'],
+    tags: ["weekly", "reanalysis", "comprehensive"],
   },
   {
-    id: 'high-priority-reanalyze',
-    name: 'High Priority Re-analysis',
-    description: 'Re-analyze all high-priority tasks',
-    operationType: 'reanalyze',
-    icon: '🔴',
+    id: "high-priority-reanalyze",
+    name: "High Priority Re-analysis",
+    description: "Re-analyze all high-priority tasks",
+    operationType: "reanalyze",
+    icon: "🔴",
     config: {
       taskFilter: {
-        priority: ['high', 'critical'],
+        priority: ["high", "critical"],
       },
       options: {
         parallelLimit: 2,
@@ -102,14 +112,14 @@ export const BATCH_TEMPLATES: BatchTemplate[] = [
       },
     },
     estimatedDuration: 20,
-    tags: ['priority', 'urgent', 'reanalysis'],
+    tags: ["priority", "urgent", "reanalysis"],
   },
   {
-    id: 'overbooked-resolution',
-    name: 'Overbooked Resolution',
-    description: 'Resolve all overbooked scheduling conflicts',
-    operationType: 'conflict_resolution',
-    icon: '⚠️',
+    id: "overbooked-resolution",
+    name: "Overbooked Resolution",
+    description: "Resolve all overbooked scheduling conflicts",
+    operationType: "conflict_resolution",
+    icon: "⚠️",
     config: {
       options: {
         parallelLimit: 1,
@@ -119,17 +129,17 @@ export const BATCH_TEMPLATES: BatchTemplate[] = [
       },
     },
     estimatedDuration: 15,
-    tags: ['conflict', 'resolution', 'scheduling'],
+    tags: ["conflict", "resolution", "scheduling"],
   },
   {
-    id: 'batch-reschedule',
-    name: 'Batch Reschedule',
-    description: 'Reschedule all pending tasks',
-    operationType: 'reschedule',
-    icon: '📅',
+    id: "batch-reschedule",
+    name: "Batch Reschedule",
+    description: "Reschedule all pending tasks",
+    operationType: "reschedule",
+    icon: "📅",
     config: {
       taskFilter: {
-        status: ['pending', 'unscheduled'],
+        status: ["pending", "unscheduled"],
       },
       options: {
         parallelLimit: 5,
@@ -139,17 +149,17 @@ export const BATCH_TEMPLATES: BatchTemplate[] = [
       },
     },
     estimatedDuration: 25,
-    tags: ['reschedule', 'pending', 'batch'],
+    tags: ["reschedule", "pending", "batch"],
   },
   {
-    id: 'complex-task-analysis',
-    name: 'Complex Task Analysis',
-    description: 'Deep analysis of complex tasks (complexity >= 7)',
-    operationType: 'reanalyze',
-    icon: '🧠',
+    id: "complex-task-analysis",
+    name: "Complex Task Analysis",
+    description: "Deep analysis of complex tasks (complexity >= 7)",
+    operationType: "reanalyze",
+    icon: "🧠",
     config: {
       taskFilter: {
-        complexity: ['7', '8', '9', '10'],
+        complexity: ["7", "8", "9", "10"],
       },
       options: {
         parallelLimit: 1,
@@ -160,14 +170,14 @@ export const BATCH_TEMPLATES: BatchTemplate[] = [
       },
     },
     estimatedDuration: 45,
-    tags: ['complex', 'analysis', 'deep'],
+    tags: ["complex", "analysis", "deep"],
   },
   {
-    id: 'worker-load-balance',
-    name: 'Worker Load Balance',
-    description: 'Rebalance task assignments across workers',
-    operationType: 'optimization',
-    icon: '⚖️',
+    id: "worker-load-balance",
+    name: "Worker Load Balance",
+    description: "Rebalance task assignments across workers",
+    operationType: "optimization",
+    icon: "⚖️",
     config: {
       options: {
         parallelLimit: 2,
@@ -177,19 +187,19 @@ export const BATCH_TEMPLATES: BatchTemplate[] = [
       },
     },
     estimatedDuration: 20,
-    tags: ['load-balance', 'workers', 'optimization'],
+    tags: ["load-balance", "workers", "optimization"],
   },
   {
-    id: 'month-end-analysis',
-    name: 'Month-End Analysis',
-    description: 'Comprehensive analysis of all tasks for month-end review',
-    operationType: 'reanalyze',
-    icon: '📈',
+    id: "month-end-analysis",
+    name: "Month-End Analysis",
+    description: "Comprehensive analysis of all tasks for month-end review",
+    operationType: "reanalyze",
+    icon: "📈",
     config: {
       taskFilter: {
         dateRange: {
-          start: 'month-start',
-          end: 'today',
+          start: "month-start",
+          end: "today",
         },
       },
       options: {
@@ -201,7 +211,7 @@ export const BATCH_TEMPLATES: BatchTemplate[] = [
       },
     },
     estimatedDuration: 60,
-    tags: ['month-end', 'review', 'comprehensive'],
+    tags: ["month-end", "review", "comprehensive"],
   },
 ];
 
@@ -238,6 +248,19 @@ export const searchTemplates = (query: string): BatchTemplate[] => {
       t.tags?.some(tag => tag.toLowerCase().includes(lowerQuery))
   );
 };
+
+/** Filter templates by their explicit planning cadence tag. */
+export const filterTemplatesByPeriod = (
+  templates: readonly BatchTemplate[],
+  period: BatchTemplatePeriod
+): BatchTemplate[] => {
+  if (period === "all") return [...templates];
+  return templates.filter(template => template.tags?.includes(period));
+};
+
+/** Mirrors the server batch-operation allowlist so the UI cannot offer a 501 action. */
+export const isBatchTemplateRunnable = (template: BatchTemplate): boolean =>
+  RUNNABLE_BATCH_TEMPLATE_OPERATION_TYPES.has(template.operationType);
 
 /**
  * Get frequently used templates

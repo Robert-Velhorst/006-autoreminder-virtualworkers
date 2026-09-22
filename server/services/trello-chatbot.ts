@@ -14,8 +14,13 @@ import {
   vaProfiles 
 } from '../../drizzle/schema';
 
-const TRELLO_API_KEY = process.env.TRELLO_API_KEY;
-const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
+const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
+
+function trelloCredentials() {
+  const key = process.env.TRELLO_API_KEY?.trim();
+  const token = process.env.TRELLO_TOKEN?.trim();
+  return key && token ? { key, token } : null;
+}
 
 // Bot command patterns
 const BOT_MENTION_PATTERN = /@bot\s+(\w+)(?:\s+(.*))?/i;
@@ -63,27 +68,36 @@ export function parseBotCommand(
   };
 }
 
-// GLOBAL KILL SWITCH - Set to false to disable all automated notifications
-// This prevents the bot from posting any comments to Trello
-const NOTIFICATIONS_ENABLED = process.env.NOTIFICATIONS_ENABLED === 'true' || process.env.NODE_ENV === 'production' || true;
+export function isTrelloCommentAutomationEnabled(env: Record<string, string | undefined> = process.env) {
+  return env.NOTIFICATIONS_ENABLED === 'true';
+}
+
+export const TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE =
+  'Trello comment automation is disabled. Set NOTIFICATIONS_ENABLED=true after reviewing the outbound-action policy.';
 
 /**
  * Post a comment to a Trello card
  */
 export async function postTrelloComment(cardId: string, text: string): Promise<boolean> {
   // Check global kill switch
-  if (!NOTIFICATIONS_ENABLED) {
-    console.log('[TrelloChatbot] NOTIFICATIONS DISABLED - would have posted:', text.substring(0, 100) + '...');
+  if (!isTrelloCommentAutomationEnabled()) {
+    console.log(`[TrelloChatbot] ${TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE}`);
+    return false;
+  }
+  const credentials = trelloCredentials();
+  if (!credentials) {
+    console.error('[TrelloChatbot] Cannot post comment because Trello credentials are not configured');
     return false;
   }
   
   try {
     const response = await fetch(
-      `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
+      `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}/actions/comments?${new URLSearchParams(credentials).toString()}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
+        signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS),
       }
     );
     return response.ok;
@@ -619,7 +633,11 @@ export async function handleTrelloWebhook(payload: any): Promise<void> {
         '', // We don't get the response comment ID back from Trello
         response.text,
         posted ? 'success' : 'failed',
-        posted ? undefined : 'Failed to post comment to Trello'
+        posted
+          ? undefined
+          : isTrelloCommentAutomationEnabled()
+            ? 'Trello did not accept the comment'
+            : TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE
       );
     }
 

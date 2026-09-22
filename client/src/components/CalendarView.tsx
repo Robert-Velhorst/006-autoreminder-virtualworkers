@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { ChevronLeft, ChevronRight, Calendar as CalendarIcon, Clock, GripVertical } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { canRescheduleCalendarTask } from './calendarInteraction';
 
 interface Task {
   id: string;
@@ -39,6 +40,7 @@ export function CalendarView({
   const [currentDate, setCurrentDate] = useState(new Date());
   const [viewMode, setViewMode] = useState<ViewMode>('week');
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
+  const canReschedule = canRescheduleCalendarTask(onTaskReschedule);
 
   // Get week start (Monday)
   const getWeekStart = (date: Date) => {
@@ -251,10 +253,10 @@ export function CalendarView({
                   isToday(date) && 'border-primary border-2',
                   !isCurrentMonth(date) && viewMode === 'month' && 'opacity-50',
                   isNonWorking && 'bg-muted/50',
-                  draggedTask && 'hover:bg-primary/10'
+                  canReschedule && draggedTask && 'hover:bg-primary/10'
                 )}
-                onDragOver={handleDragOver}
-                onDrop={(e) => handleDrop(e, date)}
+                onDragOver={canReschedule ? handleDragOver : undefined}
+                onDrop={canReschedule ? (e) => handleDrop(e, date) : undefined}
               >
                 <div className={cn(
                   "text-xs font-medium mb-1 flex items-center justify-between",
@@ -270,9 +272,9 @@ export function CalendarView({
                   {dayTasks.slice(0, viewMode === 'week' ? undefined : 3).map(task => (
                     <div
                       key={task.id}
-                      draggable
-                      onDragStart={(e) => handleDragStart(e, task)}
-                      onDragEnd={handleDragEnd}
+                      draggable={canReschedule}
+                      onDragStart={canReschedule ? (e) => handleDragStart(e, task) : undefined}
+                      onDragEnd={canReschedule ? handleDragEnd : undefined}
                       onClick={() => onTaskClick?.(task)}
                       className={cn(
                         "group text-xs p-1 rounded cursor-pointer transition-all",
@@ -282,7 +284,7 @@ export function CalendarView({
                       )}
                     >
                       <div className="flex items-start gap-1">
-                        <GripVertical className="h-3 w-3 opacity-0 group-hover:opacity-100 flex-shrink-0 mt-0.5" />
+                        {canReschedule && <GripVertical className="h-3 w-3 opacity-0 group-hover:opacity-100 flex-shrink-0 mt-0.5" />}
                         <div className="flex-1 min-w-0">
                           <div className="truncate font-medium">
                             {task.description.substring(0, 30)}

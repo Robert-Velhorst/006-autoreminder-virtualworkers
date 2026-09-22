@@ -569,7 +569,7 @@ export default function PriorityCommandCenter() {
   });
   const batchMoveToDoing = trpc.aptlss.batchMoveToDoing.useMutation({
     onSuccess: (res) => {
-      toast.success(`Moved ${res.count} card(s) to DOING`, { description: "Trello comment posted." });
+      toast.success(`Moved ${res.count} card(s) to DOING`, { description: "Trello card state updated." });
       utils.aptlss.getCommandCenter.invalidate();
     },
   });

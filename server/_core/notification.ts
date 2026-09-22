@@ -8,6 +8,7 @@ export type NotificationPayload = {
 
 const TITLE_MAX_LENGTH = 1200;
 const CONTENT_MAX_LENGTH = 20000;
+const NOTIFICATION_REQUEST_TIMEOUT_MS = 15_000;
 
 const trimValue = (value: string): string => value.trim();
 const isNonEmptyString = (value: unknown): value is string =>
@@ -87,6 +88,7 @@ export async function notifyOwner(
   try {
     const response = await fetch(endpoint, {
       method: "POST",
+      signal: AbortSignal.timeout(NOTIFICATION_REQUEST_TIMEOUT_MS),
       headers: {
         accept: "application/json",
         authorization: `Bearer ${ENV.forgeApiKey}`,

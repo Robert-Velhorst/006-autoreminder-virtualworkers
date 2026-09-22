@@ -4,7 +4,8 @@ import { dateKeyInTimeZone } from "../shared/workerTime";
 import { getWorkLaneRank } from "../shared/workLanePriority";
 import { getAllAptlssPlans } from "./aptlssDb";
 import { getDb } from "./db";
-import { getAllCardStates, getAllPriorityScores, getOpenStepsForCard } from "./aptlssStepsDb";
+import { getAllCardStates, getAllPriorityScores, getOpenStepsForCards } from "./aptlssStepsDb";
+import { indexWorkQueueSteps } from "./operatorWorkQueueIndex";
 import type { WorkerOperatorContext } from "./workerOperatorContext";
 
 type ScheduleSettings = {
@@ -33,6 +34,7 @@ export type OperatorPlanBlock = {
 };
 
 export type OperatorDailyPlanPayload = {
+  planningImpact?: import("../shared/aptlssManagerPlanImpact").ManagerPlanImpact;
   version: 2;
   dateKey: string;
   generatedAt: string;
@@ -206,8 +208,9 @@ export async function generateOperatorDailyPlan(
     return persistOperatorPlan(vaId, payload);
   }
 
-  const candidates = await Promise.all(plans.map(async (plan) => {
-    const steps = await getOpenStepsForCard(vaId, plan.cardId);
+  const stepsByCardId = indexWorkQueueSteps(await getOpenStepsForCards(vaId, plans.map((plan) => plan.cardId)));
+  const candidates = plans.map((plan) => {
+    const steps = stepsByCardId.get(plan.cardId) ?? [];
     const state = stateMap.get(plan.cardId);
     const score = scoreMap.get(plan.cardId);
     const parsed = parsePlan(plan.planJson);
@@ -216,7 +219,7 @@ export async function generateOperatorDailyPlan(
       Math.min(120, score?.estimatedRemainingMinutes || steps.reduce((total, step) => total + step.estimatedMinutes, 0) || 30),
     );
     return { plan, parsed, state, score, steps, estimatedMinutes };
-  }));
+  });
 
   candidates.sort((left, right) => {
     const lane = getWorkLaneRank(left.plan.listName) - getWorkLaneRank(right.plan.listName);

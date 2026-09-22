@@ -39,7 +39,10 @@ export function getSessionCookieOptions(
   //       ? hostname
   //       : undefined;
 
-  const secure = isSecureRequest(req);
+  // Production must fail closed if TLS termination is misconfigured. A
+  // development loopback request can still use the non-secure cookie needed
+  // for local testing.
+  const secure = process.env.NODE_ENV === "production" || isSecureRequest(req);
 
   return {
     httpOnly: true,

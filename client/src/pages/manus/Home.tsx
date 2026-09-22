@@ -256,7 +256,7 @@ function ComplianceTrendChip() {
   );
 }
 
-// ─── Trello Comment Token Settings ──────────────────────────────────────────
+// ─── Trello Power-Up setup ──────────────────────────────────────────────────
 function useTrelloClientKey() {
   const [clientApiKey, setClientApiKey] = useState("");
 
@@ -291,152 +291,6 @@ function TrelloClientKeyCopyField() {
     >
       {clientApiKey}
     </code>
-  );
-}
-
-function TrelloCommentTokenSettings() {
-  const { data: tokenData, refetch } = trpc.trello.getCommentToken.useQuery(undefined, {
-    // Token rarely changes; 5-min stale time (was 30 s). Mutation already calls refetch() on save.
-    staleTime: 5 * 60_000,
-  });
-  const setTokenMutation = trpc.trello.setCommentToken.useMutation({
-    onSuccess: () => {
-      toast.success(tokenInput.trim() ? "Comment token saved — comments will now post as Worker" : "Comment token cleared — using default board token");
-      setTokenInput("");
-      setIsEditing(false);
-      refetch();
-    },
-    onError: (e) => toast.error(`Failed to save token: ${e.message}`),
-  });
-
-  const [tokenInput, setTokenInput] = useState("");
-  const [isEditing, setIsEditing] = useState(false);
-  const clientApiKey = useTrelloClientKey();
-
-  const handleSave = () => {
-    const trimmed = tokenInput.trim();
-    if (!trimmed) {
-      toast.error("Token cannot be empty. Use Clear to remove the token.");
-      return;
-    }
-    setTokenMutation.mutate({ token: trimmed });
-  };
-
-  const handleClear = () => {
-    if (!confirm("Remove the custom comment token? Comments will revert to posting as the board owner.")) return;
-    setTokenMutation.mutate({ token: null });
-  };
-
-  return (
-    <div className={`rounded-xl border p-5 ${tokenData?.isSet ? 'border-blue-500/30 bg-blue-500/5' : 'border-amber-500/40 bg-amber-500/8'}`}>
-      <h3 className="text-sm font-semibold text-foreground mb-1 flex items-center gap-2">
-        <MessageSquare className="w-4 h-4 text-blue-500" />
-        Trello Comment Token
-        {!tokenData?.isSet && (
-          <span className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-600 dark:text-amber-400 border border-amber-500/40">
-            <AlertTriangle className="w-3 h-3" />
-            Action required
-          </span>
-        )}
-      </h3>
-
-      {/* Banner when token is not set */}
-      {!tokenData?.isSet && (
-        <div className="mb-3 rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2.5 text-xs text-amber-700 dark:text-amber-300 leading-relaxed">
-          <strong>Comments are currently posting as the board owner.</strong> This means comment detection
-          relies on the Trello @mention workaround.
-          Set your personal token below so comments post directly under your account — this is the most reliable setup.
-        </div>
-      )}
-
-      <p className="text-xs text-muted-foreground mb-4">
-        To get Worker's token: go to{" "}
-        {clientApiKey ? (
-          <a
-            href={`https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&key=${encodeURIComponent(clientApiKey)}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-blue-500 hover:underline"
-          >
-            this Trello authorization page
-          </a>
-        ) : (
-          <span className="font-medium text-amber-600 dark:text-amber-300">
-            the authorization page after the server API key is configured
-          </span>
-        )}
-        {" "}while logged in as Worker, click <strong>Allow</strong>, and paste the token below.
-      </p>
-      <div className="flex items-center gap-3 mb-4">
-        {tokenData?.isSet ? (
-          <>
-            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-              <CheckCircle className="w-3.5 h-3.5" />
-              Worker's personal token active — comments post as Worker
-            </span>
-            <code className="text-xs text-muted-foreground bg-muted/50 px-2 py-0.5 rounded font-mono">
-              {tokenData.preview}
-            </code>
-          </>
-        ) : (
-          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400">
-            <AlertTriangle className="w-3.5 h-3.5" />
-            No personal token — posting as board owner
-          </span>
-        )}
-      </div>
-      {isEditing ? (
-        <div className="space-y-3">
-          <input
-            type="password"
-            placeholder="Paste Worker's Trello token here…"
-            value={tokenInput}
-            onChange={(e) => setTokenInput(e.target.value)}
-            className="w-full h-9 text-sm border border-border rounded-md bg-background text-foreground px-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 font-mono"
-            autoFocus
-          />
-          <div className="flex gap-2">
-            <Button
-              size="sm"
-              className="bg-blue-600 hover:bg-blue-700 text-white"
-              onClick={handleSave}
-              disabled={setTokenMutation.isPending || !tokenInput.trim()}
-            >
-              {setTokenMutation.isPending ? "Saving…" : "Save Token"}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => { setIsEditing(false); setTokenInput(""); }}
-            >
-              Cancel
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <div className="flex gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            className="border-blue-500/40 text-blue-600 dark:text-blue-400 hover:bg-blue-500/10"
-            onClick={() => setIsEditing(true)}
-          >
-            {tokenData?.isSet ? "Replace Token" : "Set Token"}
-          </Button>
-          {tokenData?.isSet && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="border-red-500/40 text-red-600 dark:text-red-400 hover:bg-red-500/10"
-              onClick={handleClear}
-              disabled={setTokenMutation.isPending}
-            >
-              Clear Token
-            </Button>
-          )}
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -1506,7 +1360,7 @@ function HomeInner() {
                 {!isCollapsed && (
                   <div className="flex-1 flex items-center justify-between min-w-0 gap-1">
                     <span className={`text-xs font-medium truncate ${hoursLoading ? 'text-muted-foreground' : progressColor.text}`}>
-                      {hoursLoading ? 'Loading…' : weeklyHours ? `${weeklyHours.totalHours}h / 50-55h` : '50-55 hrs/week'}
+                      {hoursLoading ? 'Loading…' : weeklyHours ? `${weeklyHours.totalHours}h / ${weeklyHours.targetMin}-${weeklyHours.targetMax}h` : 'Weekly hours unavailable'}
                     </span>
                     <TodayHoursChip />
                   </div>
@@ -1737,7 +1591,6 @@ function HomeInner() {
                   </div>
                 </div>
               </div>
-              <TrelloCommentTokenSettings />
               <DailyGoalSettings />
               <DailyScheduleSettings onGoToSchedule={() => setActiveSection("routine")} />
               <ReplyMonitorBadgeSettings />

@@ -1,12 +1,12 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, it, expect } from 'vitest';
-import aptlssRouter from './routes/aptlss';
+import trelloConfigRouter from './routes/trello-config';
 
 describe('Task Scheduling and Sync Features', () => {
   const app = express();
   app.use(express.json());
-  app.use('/api', aptlssRouter);
+  app.use('/api/trello', trelloConfigRouter);
   const cachedTasks = [
     {
       id: 'task-1',
@@ -138,15 +138,13 @@ describe('Task Scheduling and Sync Features', () => {
       }
     });
 
-    it('should have sync endpoint available', async () => {
-      // Test that the endpoint exists (will fail with 400 for invalid data, not 404)
+    it('protects the sync endpoint from unauthenticated writes', async () => {
       const mockTaskId = 'test_task_id';
       const response = await request(app)
         .put(`/api/trello/tasks/${mockTaskId}/complete`)
         .send({ isCompleted: true });
 
-      expect(response.status).not.toBe(404);
-      expect([400, 500]).toContain(response.status);
+      expect(response.status).toBe(401);
     });
   });
 

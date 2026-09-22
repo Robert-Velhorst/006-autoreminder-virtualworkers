@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   Archive,
   BrainCircuit,
+  BellRing,
   CalendarDays,
   Check,
   ChevronDown,
@@ -39,7 +40,6 @@ import { useTheme } from "@/contexts/ThemeContext";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -51,6 +51,10 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { getWorkLaneRank } from "@shared/workLanePriority";
 import { formatWorkerDate } from "@shared/workerTime";
 import { toast } from "sonner";
+import WorkerReminders from "./WorkerReminders";
+import ManagerCoach from "@/components/ManagerCoach";
+import ManagerShadowSettings from "@/components/ManagerShadowSettings";
+import ManagerVerificationFollowups from "@/components/ManagerVerificationFollowups";
 
 type OperatorCard = {
   cardId: string;
@@ -116,11 +120,20 @@ type OperatorCard = {
   }>;
 };
 
+function nextInstruction(card: OperatorCard) {
+  const step = card.steps.find(item => item.status !== "complete");
+  if (/require.*approval|execute the highest.priority open step/i.test(card.nextBestAction ?? "")) {
+    return step ? `${step.requiresRobert ? "Decision needed: " : "Next step: "}${step.title}` : "The next action is not specified. Open the task and record the missing question before starting.";
+  }
+  return card.nextBestAction || "Open the task and identify the next action before starting.";
+}
+
 const NAVIGATION = [
   { path: "/worker", label: "Today", description: "Now and next", icon: LayoutDashboard },
   { path: "/worker/plan", label: "Plan My Day", description: "Time blocks", icon: CalendarDays },
   { path: "/worker/decisions", label: "Decisions", description: "Required outcomes", icon: BrainCircuit },
   { path: "/worker/evidence", label: "Evidence", description: "Connected facts", icon: FileCheck2 },
+  { path: "/worker/reminders", label: "Reminders", description: "Commitments and follow-up", icon: BellRing },
 ] as const;
 
 function priorityTone(tier: string) {
@@ -141,6 +154,49 @@ function evidenceTone(status: "linked" | "live" | "missing") {
   return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
 }
 
+type BrowserConnectionSnapshot = {
+  connected?: boolean;
+  collectorConfigured?: boolean;
+  status?: string | null;
+  capturedAt?: Date | string | null;
+  actionableTabs?: number;
+};
+
+function describeBrowserConnection(status?: BrowserConnectionSnapshot) {
+  if (status?.connected) {
+    return {
+      label: "Connected",
+      detail: `${status.actionableTabs ?? 0} actionable tabs are currently visible.`,
+      healthy: true,
+    };
+  }
+
+  if (status?.status === "stale") {
+    const lastInventory = status.capturedAt
+      ? `The last inventory was ${new Date(status.capturedAt).toLocaleString()}.`
+      : "The last inventory is outside the configured freshness window.";
+    return {
+      label: "Stale",
+      detail: `${lastInventory} Reopen the browser collector to refresh tab compliance.`,
+      healthy: false,
+    };
+  }
+
+  if (status?.collectorConfigured) {
+    return {
+      label: "Waiting for data",
+      detail: "The collector token is configured, but no browser inventory has been received yet.",
+      healthy: false,
+    };
+  }
+
+  return {
+    label: "Setup required",
+    detail: "Install and authorize the local collector before tab compliance can be trusted.",
+    healthy: false,
+  };
+}
+
 function uncertaintyTone(severity: "high" | "medium" | "low") {
   if (severity === "high") return "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300";
   if (severity === "medium") return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
@@ -155,7 +211,7 @@ function formatDuration(minutes: number | null) {
   return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
 }
 
-export default function WorkerOperator({ view = "today" }: { view?: "today" | "plan" | "decisions" | "evidence" | "settings" }) {
+export default function WorkerOperator({ view = "today" }: { view?: "today" | "plan" | "decisions" | "evidence" | "reminders" | "settings" }) {
   const [, navigate] = useLocation();
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
@@ -227,7 +283,7 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
           </div>
           <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">{theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}</Button>
         </header>
-        <main className="mx-auto w-full max-w-[1280px] p-4 md:p-6">
+        <main className={`mx-auto w-full min-w-0 p-4 md:p-6 ${view === "today" ? "" : "max-w-[1280px]"}`}>
           {(apiHealth.error || (apiHealth.data && apiHealth.data.runtime !== "unified-node")) && (
             <Alert variant="destructive" className="mb-5">
               <AlertTriangle className="size-4" />
@@ -241,6 +297,7 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
           {view === "plan" && <PlanView founderName={founderName} timeZone={timeZone} />}
           {view === "decisions" && <DecisionsView founderName={founderName} />}
           {view === "evidence" && <EvidenceView />}
+          {view === "reminders" && <WorkerReminders />}
           {view === "settings" && <WorkerSettingsView />}
         </main>
       </div>
@@ -251,6 +308,7 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
 function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; onOpenDecisions: () => void }) {
   const utils = trpc.useUtils();
   const [selected, setSelected] = useState<OperatorCard | null>(null);
+  const [hasPrimary, setHasPrimary] = useState(false);
   const actionQuery = trpc.trello.actionAlerts.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const intelligenceQuery = trpc.operator.getWorkQueueContext.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const timerQuery = trpc.timer.getActive.useQuery(undefined, { staleTime: 15_000 });
@@ -291,14 +349,16 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
   const next = cards.slice(1, 4);
   const openDecisions = cards.reduce((total, card) => total + card.steps.filter((step) => step.requiresRobert && step.status !== "complete").length, 0);
   const plan = planQuery.data?.schedule;
+  const isWaiting = (card: OperatorCard) => getWorkLaneRank(card.listName) === 0 || !!card.waitingReason;
+  const canStart = (card: OperatorCard) => !isWaiting(card) && !timerQuery.isLoading && !timerQuery.error && !startTimer.isPending && timerQuery.data?.cardId !== card.cardId;
 
-  const begin = (card: OperatorCard) => startTimer.mutate({
+  const begin = (card: OperatorCard) => { if (!canStart(card)) return; startTimer.mutate({
     cardId: card.cardId,
     cardName: card.cardName,
     cardUrl: card.cardUrl,
     boardName: card.boardName,
     listName: card.listName,
-  });
+  }); };
   const refreshEvidence = async () => {
     const [intelligenceResult, actionResult] = await Promise.all([
       intelligenceQuery.refetch(),
@@ -313,7 +373,8 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
 
   return (
     <div className="space-y-5">
-      <PageHeading title="Today" description="Work from one trusted sequence. Context and deeper actions stay out of the execution path." />
+      <PageHeading title="Today" description="" />
+      <ManagerCoach onPrimaryChange={setHasPrimary} />
       {browserQuery.data?.shouldWarn && (
         <Alert className="border-amber-500/40 bg-amber-500/5">
           <Archive className="size-4 text-amber-500" />
@@ -325,7 +386,7 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
         <div className="space-y-4">
           <Card className="gap-0 rounded-lg border-blue-500/30 py-0">
             <CardHeader className="border-b py-4">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase text-emerald-500"><span className="size-2 rounded-full bg-emerald-500" />Now</div>
+              <div className="text-xs font-semibold uppercase text-muted-foreground">{hasPrimary ? "Other work" : now && isWaiting(now) ? "Waiting for a prerequisite" : "Next task"}</div>
             </CardHeader>
             <CardContent className="p-5">
               {intelligenceQuery.isLoading ? <QueueSkeleton /> : now ? (
@@ -333,13 +394,13 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
                   <button type="button" className="min-w-0 text-left" onClick={() => setSelected(now)}>
                     <div className="mb-2 flex flex-wrap items-center gap-2"><h2 className="text-lg font-semibold">{now.cardName}</h2><Badge variant="outline" className={priorityTone(now.priorityTier)}>{now.priorityTier}</Badge></div>
                     <p className="text-sm text-muted-foreground">{now.boardName} · {now.listName}</p>
-                    <div className="mt-4 border-l-2 border-blue-500 pl-3"><div className="text-[11px] font-semibold uppercase text-muted-foreground">Exactly next</div><p className="mt-1 text-sm font-medium">{now.nextBestAction || "Review the card and define the next concrete action."}</p></div>
+                    <div className="mt-4 border-l-2 border-blue-500 pl-3"><div className="text-[11px] font-semibold uppercase text-muted-foreground">{isWaiting(now) ? "Prerequisite to check" : "Next action"}</div><p className="mt-1 text-sm font-medium">{nextInstruction(now)}</p></div>
                     {now.waitingReason && <p className="mt-3 text-xs text-amber-600 dark:text-amber-300">Waiting evidence: {now.waitingReason.nextAction}</p>}
                   </button>
                   <div className="flex flex-col justify-end gap-2">
-                    <Button onClick={() => begin(now)} disabled={startTimer.isPending || timerQuery.data?.cardId === now.cardId}>
+                    <Button onClick={() => begin(now)} disabled={!canStart(now)}>
                       {startTimer.isPending ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-                      {timerQuery.data?.cardId === now.cardId ? "Timer running" : "Start timer"}
+                      {timerQuery.data?.cardId === now.cardId ? "Timer running" : isWaiting(now) ? "Waiting - review first" : "Start timer"}
                     </Button>
                     <Button variant="outline" onClick={() => setSelected(now)}>Open details</Button>
                   </div>
@@ -351,9 +412,9 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
           </Card>
 
           <Card className="gap-0 rounded-lg py-0">
-            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Next up</CardTitle><CardDescription>Only the next three cards are shown.</CardDescription></CardHeader>
+            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Next up</CardTitle></CardHeader>
             <CardContent className="p-0">
-              {next.length ? next.map((card, index) => (
+              {intelligenceQuery.isLoading ? <QueueSkeleton /> : intelligenceQuery.error ? <p role="alert" className="p-4">Tasks could not be loaded. Refresh to try again.</p> : next.length ? next.map((card, index) => (
                 <button key={card.cardId} type="button" onClick={() => setSelected(card)} className="grid w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-3 border-b px-4 py-3 text-left last:border-b-0 hover:bg-accent/40">
                   <span className="flex size-6 items-center justify-center rounded border text-xs text-muted-foreground">{index + 1}</span>
                   <span className="min-w-0"><span className="block truncate text-sm font-medium">{card.cardName}</span><span className="block truncate text-xs text-muted-foreground">{card.listName} · {card.nextBestAction ?? "Review next action"}</span></span>
@@ -363,20 +424,23 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
             </CardContent>
           </Card>
 
-          <QueueLanes cards={cards} onSelect={setSelected} />
+          {!intelligenceQuery.isLoading && !intelligenceQuery.error && <QueueLanes cards={cards} onSelect={setSelected} />}
         </div>
 
         <aside className="space-y-3">
-          <ContextMetric icon={CalendarDays} label="Plan health" value={plan ? `${plan.planHealth.confidence}%` : "Not generated"} detail={plan ? `${plan.planHealth.scheduledMinutes} min scheduled` : "Create today's time blocks"} onClick={onOpenPlan} />
+          {planQuery.isLoading || timerQuery.isLoading || intelligenceQuery.isLoading || browserQuery.isLoading ? <p role="status" className="p-4 text-sm text-muted-foreground">Loading your work summary...</p> : planQuery.error || timerQuery.error || intelligenceQuery.error || browserQuery.error ? <p role="alert" className="p-4 text-sm">Some work information is unavailable. Refresh before relying on these totals.</p> : <>
+          <ContextMetric icon={CalendarDays} label="Day plan" value={plan ? (plan.planHealth.availableMinutes === 0 && !plan.blocks.length ? "Protected day" : "Available") : "Not generated"} detail={plan ? `${plan.planHealth.scheduledMinutes} min scheduled` : "Create today's time blocks"} onClick={onOpenPlan} />
           <ContextMetric icon={Timer} label="Time now" value={timerQuery.data ? "Tracking" : "Stopped"} detail={timerQuery.data?.cardName ?? "No active timer"} />
           <ContextMetric icon={BrainCircuit} label="Decisions" value={`${openDecisions} open`} detail="Outcome required to close" onClick={onOpenDecisions} />
           <ContextMetric icon={Archive} label="Browser hygiene" value={browserQuery.data?.connected ? `${browserQuery.data.actionableTabs} tabs` : "Disconnected"} detail={browserQuery.data?.connected ? `Limit ${browserQuery.data.allowedTabs}` : "Collector has not reported"} />
+          </>}
         </aside>
       </div>
       <CardInspector
         card={selected}
         onClose={() => setSelected(null)}
         onStart={begin}
+        canStart={canStart}
         onRefresh={refreshEvidence}
         refreshing={intelligenceQuery.isFetching || actionQuery.isFetching}
       />
@@ -392,7 +456,7 @@ function QueueLanes({ cards, onSelect }: { cards: OperatorCard[]; onSelect: (car
   ];
   return (
     <Card className="gap-0 rounded-lg py-0">
-      <CardHeader className="border-b py-4"><CardTitle className="text-sm">Queue lanes</CardTitle><CardDescription>Collapsed by default to keep the sequence readable.</CardDescription></CardHeader>
+      <CardHeader className="border-b py-4"><CardTitle className="text-sm">All tasks</CardTitle></CardHeader>
       <CardContent className="p-0">
         {lanes.map((lane) => <Lane key={lane.key} label={lane.label} cards={lane.cards} onSelect={onSelect} />)}
       </CardContent>
@@ -427,15 +491,19 @@ function CardInspector({
   card,
   onClose,
   onStart,
+  canStart,
   onRefresh,
   refreshing,
 }: {
   card: OperatorCard | null;
   onClose: () => void;
   onStart: (card: OperatorCard) => void;
+  canStart: (card: OperatorCard) => boolean;
   onRefresh: () => Promise<void>;
   refreshing: boolean;
 }) {
+  const { user } = useAuth();
+  const showDiagnostics = user?.role === "admin";
   const [preferredWidth, setPreferredWidth] = useState(INSPECTOR_DEFAULT_WIDTH);
   const [viewportWidth, setViewportWidth] = useState(() => typeof window === "undefined" ? 1_280 : window.innerWidth);
   const resizeState = useRef<{ startX: number; startWidth: number; nextWidth: number } | null>(null);
@@ -474,6 +542,8 @@ function CardInspector({
     forecast: null,
     confidenceProfile: null,
   };
+
+  const visibleIssues = showDiagnostics ? evidenceSummary.issues : evidenceSummary.issues.filter(issue => issue.id !== "forecast-calibration");
 
   const saveWidth = (value: number) => {
     const width = Math.max(INSPECTOR_MIN_WIDTH, Math.min(desktopMax, value));
@@ -572,27 +642,23 @@ function CardInspector({
             <div className="space-y-6 px-5 py-5">
               <section className="border-l-2 border-blue-500 pl-4">
                 <InspectorLabel>Exactly next</InspectorLabel>
-                <p className="text-sm font-medium">{card.nextBestAction ?? "No next action recorded."}</p>
+                <p className="text-sm font-medium">{nextInstruction(card)}</p>
               </section>
 
-              <div className={wide ? "grid grid-cols-2 gap-6" : "space-y-6"}>
+              {showDiagnostics && <div className={wide ? "grid grid-cols-2 gap-6" : "space-y-6"}>
                 <section>
                   <InspectorLabel>Assessment</InspectorLabel>
                   <p className="text-sm leading-relaxed">{card.stateReason ?? card.planSummary ?? "No assessment context available."}</p>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <Badge variant="outline" className={priorityTone(card.priorityTier)}>{card.priorityTier} / {card.priorityScore}</Badge>
-                    {card.confidenceScore !== null && <Badge variant="outline">{card.confidenceScore}% confidence</Badge>}
+                    <Badge variant="outline">Uncalibrated assessment</Badge>
                   </div>
                 </section>
 
                 <section>
                   <div className="flex items-center justify-between gap-3">
-                    <InspectorLabel>Confidence</InspectorLabel>
-                    {evidenceSummary.confidenceProfile?.targetScore && (
-                      <span className="text-xs text-muted-foreground">Target {evidenceSummary.confidenceProfile.targetScore}%</span>
-                    )}
+                    <InspectorLabel>Evidence assessment</InspectorLabel>
                   </div>
-                  <Progress value={card.confidenceScore ?? 0} className="mt-2 h-2" />
                   <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
                     {card.confidenceReason ?? "No confidence explanation recorded."}
                   </p>
@@ -602,11 +668,11 @@ function CardInspector({
                     </ul>
                   ) : null}
                 </section>
-              </div>
+              </div>}
 
               <section>
                 <div className="flex items-center justify-between gap-3">
-                  <InspectorLabel>Evidence coverage</InspectorLabel>
+                  <InspectorLabel>Connected sources</InspectorLabel>
                   <Button variant="ghost" size="sm" onClick={() => void onRefresh()} disabled={refreshing}>
                     <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />
                     Refresh
@@ -629,12 +695,12 @@ function CardInspector({
 
               <section>
                 <div className="flex items-center justify-between gap-3">
-                  <InspectorLabel>Uncertainty controls</InspectorLabel>
-                  <Badge variant="outline">{evidenceSummary.issues.length} open</Badge>
+                  <InspectorLabel>Checks before continuing</InspectorLabel>
+                  <Badge variant="outline">{visibleIssues.length} open</Badge>
                 </div>
-                {evidenceSummary.issues.length ? (
+                {visibleIssues.length ? (
                   <div className={`mt-2 grid gap-3 ${wide ? "grid-cols-2" : "grid-cols-1"}`}>
-                    {evidenceSummary.issues.map((issue) => (
+                    {visibleIssues.map((issue) => (
                       <div key={issue.id} className="rounded-md border p-4">
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex min-w-0 items-start gap-2">
@@ -654,12 +720,14 @@ function CardInspector({
                 ) : (
                   <div className="mt-2 flex items-center gap-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-4 text-sm">
                     <ShieldCheck className="size-4 text-emerald-500" />
-                    No material uncertainty remains in the currently connected evidence.
+                    No additional checks are listed. Verify the task instructions and source before acting.
                   </div>
                 )}
               </section>
 
-              {evidenceSummary.forecast && (
+              <ManagerVerificationFollowups key={card.cardId} cardId={card.cardId} />
+
+              {showDiagnostics && evidenceSummary.forecast && (
                 <section>
                   <InspectorLabel>Remaining-time range</InspectorLabel>
                   <div className="mt-2 grid grid-cols-3 divide-x rounded-md border">
@@ -672,7 +740,7 @@ function CardInspector({
               )}
 
               <section>
-                <InspectorLabel>APTLSS steps</InspectorLabel>
+                <InspectorLabel>Task steps</InspectorLabel>
                 <div className={`mt-2 grid gap-2 ${wide ? "grid-cols-2" : "grid-cols-1"}`}>
                   {card.steps.length ? card.steps.map((step) => (
                     <div key={step.id} className="flex gap-2 rounded-md border p-3 text-sm">
@@ -686,7 +754,7 @@ function CardInspector({
             </div>
           </div>
           <div className="grid shrink-0 gap-2 border-t bg-background p-4 sm:grid-cols-2">
-            <Button onClick={() => onStart(card)}><Play className="size-4" />Start timer</Button>
+            <Button disabled={!canStart(card)} onClick={() => onStart(card)}><Play className="size-4" />Start timer</Button>
             <Button variant="outline" asChild><a href={card.cardUrl} target="_blank" rel="noreferrer">Open Trello <ExternalLink className="size-4" /></a></Button>
           </div>
         </>}
@@ -703,19 +771,24 @@ function PlanView({ founderName, timeZone }: { founderName: string; timeZone: st
     onError: (error) => toast.error(error.message),
   });
   const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!mutation.isPending) return;
+    const started = Date.now();
+    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1_000)), 1_000);
+    return () => window.clearInterval(timer);
+  }, [mutation.isPending]);
   const run = (force: boolean) => {
     setElapsed(0);
-    const timer = window.setInterval(() => setElapsed((value) => value + 1), 1_000);
-    mutation.mutate({ force }, { onSettled: () => window.clearInterval(timer) });
+    mutation.mutate({ force });
   };
   const plan = query.data?.schedule;
-  const progress = mutation.isPending ? Math.min(92, 15 + elapsed * 8) : 0;
-  const stage = elapsed < 2 ? "Loading APTLSS state" : elapsed < 5 ? "Protecting breaks and ranking lanes" : "Validating and saving blocks";
   return (
     <div className="space-y-5">
-      <PageHeading title="Plan My Day" description="One agenda. Detail remains available inside each block instead of separate duplicate views." actions={<Button onClick={() => run(Boolean(plan))} disabled={mutation.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{plan ? "Regenerate plan" : "Generate plan"}</Button>} />
-      {mutation.isPending && <Card className="gap-3 rounded-lg p-5"><div className="flex justify-between text-sm"><span className="font-medium">{stage}</span><span className="text-muted-foreground">about {Math.max(1, 12 - elapsed)}s left</span></div><Progress value={progress} /><p className="text-xs text-muted-foreground">{progress}% complete · live estimate adjusts as validation runs</p></Card>}
-      {query.isLoading ? <QueueSkeleton /> : !plan ? <Alert><Inbox className="size-4" /><AlertTitle>No saved plan</AlertTitle><AlertDescription>Generate from the current APTLSS plans, states, priorities, and configured schedule.</AlertDescription></Alert> : (
+      <PageHeading title="Plan My Day" description="" actions={<Button onClick={() => run(Boolean(plan))} disabled={mutation.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{plan ? "Regenerate plan" : "Generate plan"}</Button>} />
+      {mutation.isPending && <div role="status" aria-live="polite" className="flex flex-wrap items-center gap-3 border-b p-4"><Loader2 className="size-4 animate-spin" /><span>Generating plan</span><span className="text-sm text-muted-foreground">{elapsed}s elapsed · completion estimate unavailable</span></div>}
+      {query.error && <Alert variant="destructive"><AlertTitle>Plan could not be loaded</AlertTitle><AlertDescription>{query.error.message}<Button variant="outline" size="sm" onClick={() => void query.refetch()}>Retry</Button></AlertDescription></Alert>}
+      {mutation.error && <Alert variant="destructive"><AlertTitle>Plan generation could not be confirmed</AlertTitle><AlertDescription>{mutation.error.message} Reload the saved plan before retrying to check whether generation completed.</AlertDescription></Alert>}
+      {query.isLoading ? <QueueSkeleton /> : !plan && !query.error ? <Alert><Inbox className="size-4" /><AlertTitle>No saved plan</AlertTitle><AlertDescription>Create a plan using your tasks and working hours.</AlertDescription></Alert> : plan ? (
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
           <Card className="gap-0 rounded-lg py-0">
             <CardHeader className="border-b py-4"><CardTitle className="text-sm">Today’s agenda</CardTitle><CardDescription>{plan.constraints.startTime}–{plan.constraints.endTime} · {timeZone} · configured breaks protected</CardDescription></CardHeader>
@@ -730,13 +803,15 @@ function PlanView({ founderName, timeZone }: { founderName: string; timeZone: st
             </CardContent>
           </Card>
           <div className="space-y-3">
-            <ContextMetric icon={Gauge} label="Confidence" value={`${plan.planHealth.confidence}%`} detail="Evidence-backed, capped below certainty" />
+            <ContextMetric icon={Gauge} label="Before you start" value={plan.planHealth.availableMinutes === 0 && !plan.blocks.length ? "Day off" : "Check sources"} detail={plan.planHealth.availableMinutes === 0 && !plan.blocks.length ? "No working time scheduled" : "Advice still requires source verification"} />
             <ContextMetric icon={Clock3} label="Scheduled" value={`${Math.round(plan.planHealth.scheduledMinutes / 60 * 10) / 10}h`} detail={`${plan.planHealth.gaps} min remains available`} />
             <ContextMetric icon={BrainCircuit} label={`${founderName} items`} value={`${plan.robertItems.length}`} detail="Visible even when unscheduled" />
             <ContextMetric icon={ListTodo} label="Unscheduled" value={`${plan.unscheduledCards.length}`} detail="Retained for replanning" />
+            {!!plan.robertItems.length && <details className="border-t py-3"><summary className="cursor-pointer text-sm font-medium">Decision details ({plan.robertItems.length})</summary><ul className="mt-3 space-y-3 text-sm">{plan.robertItems.map(item => <li key={`${item.cardId}:${item.stepId}`}><p className="font-medium">{item.cardName}</p><p className="text-muted-foreground">{item.decision}</p></li>)}</ul></details>}
+            {!!plan.unscheduledCards.length && <details className="border-t py-3"><summary className="cursor-pointer text-sm font-medium">Unscheduled details ({plan.unscheduledCards.length})</summary><ul className="mt-3 space-y-3 text-sm">{plan.unscheduledCards.map(item => <li key={item.cardId}><p className="font-medium">{item.cardName}</p><p className="text-muted-foreground">{item.reason}</p></li>)}</ul></details>}
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -747,7 +822,10 @@ function DecisionsView({ founderName }: { founderName: string }) {
   const history = trpc.operator.getDecisionHistory.useQuery({ limit: 20 }, { staleTime: 30_000 });
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [outcome, setOutcome] = useState("");
+  const [showAllDecisions, setShowAllDecisions] = useState(false);
   const selected = queue.data?.items.find((item) => item.stepId === selectedId) ?? queue.data?.items[0] ?? null;
+  const decisionItems = queue.data?.items ?? [];
+  const visibleDecisionItems = showAllDecisions ? decisionItems : decisionItems.slice(0, 8);
   const mutation = trpc.operator.recordDecisionOutcome.useMutation({
     onSuccess: () => {
       setOutcome("");
@@ -766,13 +844,20 @@ function DecisionsView({ founderName }: { founderName: string }) {
           <Card className="gap-0 rounded-lg py-0">
             <CardHeader className="border-b py-4"><CardTitle className="text-sm">Decision inbox</CardTitle><CardDescription>Highest-priority unresolved decision first.</CardDescription></CardHeader>
             <CardContent className="p-0">
-              {queue.isLoading ? <div className="p-4"><QueueSkeleton /></div> : queue.data?.items.length ? queue.data.items.map((item, index) => (
-                <button key={item.stepId} type="button" onClick={() => setSelectedId(item.stepId)} className={`grid w-full grid-cols-[28px_minmax(0,1fr)_auto] gap-3 border-b px-4 py-3 text-left last:border-b-0 hover:bg-accent/40 ${selected?.stepId === item.stepId ? "bg-accent/50" : ""}`}>
-                  <span className="flex size-6 items-center justify-center rounded border text-xs">{index + 1}</span>
-                  <span className="min-w-0"><span className="block truncate text-sm font-medium">{item.cardName}</span><span className="block truncate text-xs text-muted-foreground">{item.stepTitle}</span></span>
-                  <Badge variant="outline" className={priorityTone(item.tier)}>{item.tier}</Badge>
-                </button>
-              )) : <EmptyState title="Decision inbox is clear" detail={`New ${founderName}-required APTLSS steps will appear here.`} />}
+              {queue.isLoading ? <div className="p-4"><QueueSkeleton /></div> : decisionItems.length ? <>
+                {visibleDecisionItems.map((item, index) => (
+                  <button key={item.stepId} type="button" onClick={() => setSelectedId(item.stepId)} className={`grid w-full grid-cols-[28px_minmax(0,1fr)_auto] gap-3 border-b px-4 py-3 text-left hover:bg-accent/40 ${selected?.stepId === item.stepId ? "bg-accent/50" : ""}`}>
+                    <span className="flex size-6 items-center justify-center rounded border text-xs">{index + 1}</span>
+                    <span className="min-w-0"><span className="block truncate text-sm font-medium">{item.cardName}</span><span className="block truncate text-xs text-muted-foreground">{item.stepTitle}</span></span>
+                    <Badge variant="outline" className={priorityTone(item.tier)}>{item.tier}</Badge>
+                  </button>
+                ))}
+                {decisionItems.length > 8 && <div className="p-3">
+                  <Button className="w-full" variant="ghost" onClick={() => setShowAllDecisions((value) => !value)}>
+                    {showAllDecisions ? "Show fewer decisions" : `Show ${decisionItems.length - 8} more decisions`}
+                  </Button>
+                </div>}
+              </> : <EmptyState title="Decision inbox is clear" detail={`New ${founderName}-required APTLSS steps will appear here.`} />}
             </CardContent>
           </Card>
           <RecentOutcomes rows={history.data ?? []} />
@@ -803,26 +888,29 @@ function EvidenceView() {
   const intelligence = trpc.operator.getWorkQueueContext.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const compliance = trpc.compliance.getHistory.useQuery({ limit: 7 }, { retry: false, staleTime: 60_000 });
   const email = trpc.emailInbox.getPendingCount.useQuery(undefined, { retry: false, staleTime: 60_000 });
+  const google = trpc.operator.getGoogleEvidenceStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const latest = compliance.data?.[0] ?? null;
+  const browserConnection = describeBrowserConnection(status.data);
   return (
     <div className="space-y-5">
-      <PageHeading title="Evidence" description="Connected facts are visible here; execution actions remain in Today and Decisions." />
+      <PageHeading title="Evidence" description="" />
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <ContextMetric icon={ShieldCheck} label="APTLSS cards" value={`${intelligence.data?.cards.length ?? 0}`} detail="Plans joined to states and scores" />
-        <ContextMetric icon={Clock3} label="Waiting reasons" value={`${waiting.data?.length ?? 0}`} detail="Free-flow reasons interpreted" />
-        <ContextMetric icon={Archive} label="Browser collector" value={status.data?.connected ? "Connected" : "Disconnected"} detail={status.data?.capturedAt ? `Last seen ${new Date(status.data.capturedAt).toLocaleTimeString()}` : "No inventory received"} />
+        <ContextMetric icon={ShieldCheck} label="Tasks" value={`${intelligence.data?.cards.length ?? 0}`} detail="Tasks with recorded steps" />
+        <ContextMetric icon={Clock3} label="Waiting reasons" value={`${waiting.data?.length ?? 0}`} detail="Recorded blockers and follow-ups" />
+        <ContextMetric icon={Archive} label="Browser connection" value={browserConnection.label} detail={browserConnection.detail} />
         <ContextMetric icon={History} label="Daily compliance" value={latest ? `${latest.compliancePct}%` : "No snapshot"} detail={latest ? `${latest.evidenceCount} source facts checked` : "Record a verified snapshot"} />
       </div>
       <Card className="gap-0 rounded-lg py-0">
-        <CardHeader className="border-b py-4"><CardTitle className="text-sm">Evidence boundaries</CardTitle><CardDescription>What the consolidated layer knows and what it still needs.</CardDescription></CardHeader>
+        <CardHeader className="border-b py-4"><CardTitle className="text-sm">Connected sources</CardTitle></CardHeader>
         <CardContent className="divide-y p-0">
-          <EvidenceRow label="Trello and APTLSS" status={intelligence.error ? "Needs attention" : "Connected"} detail={intelligence.error?.message ?? "Plans, card state, priority and open steps are joined by card ID."} />
-          <EvidenceRow label="Waiting reasons" status="Operational" detail="Free-text is classified into actor, missing item, follow-up and next action with confidence and missing-information flags." />
-          <EvidenceRow label="Browser tabs" status={status.data?.connected ? "Connected" : "Setup required"} detail={status.data?.connected ? `${status.data.actionableTabs} actionable tabs are currently visible.` : "Install and authorize the local collector before tab compliance can be trusted."} />
+          <EvidenceRow label="Trello tasks" status={intelligence.error ? "Needs attention" : "Connected"} detail={intelligence.error?.message ?? "Task status, priority and remaining steps."} />
+          <EvidenceRow label="Waiting reasons" status="Operational" detail="Recorded reasons tasks are waiting and who needs to respond." />
+          <EvidenceRow label="Browser tabs" status={browserConnection.label} detail={browserConnection.detail} />
           <EvidenceRow label="Communication" status={latest?.verificationStatus ?? "No snapshot"} detail={latest ? `${latest.messageReplied}/${latest.messageTotal} messages answered; ${latest.messageNeedsClarification} need clarification.` : "No verified communication snapshot is available yet."} />
-          <EvidenceRow label="Gmail processing" status={email.error ? "Needs attention" : `${email.data?.count ?? 0} pending`} detail={latest ? `${latest.emailCompleted}/${latest.emailTotal} retained emails were processed or archived for the latest snapshot.` : "Inbox tasks are retained without changing Gmail automatically."} />
+          <EvidenceRow label="Gmail processing" status={!google.data?.credentialsReady ? "Setup required" : email.error ? "Needs attention" : `${email.data?.count ?? 0} pending`} detail={!google.data?.credentialsReady ? google.data?.setupMessage ?? "Google credentials have not been checked yet." : latest ? `${latest.emailCompleted}/${latest.emailTotal} retained emails were processed or archived for the latest snapshot.` : "Inbox tasks are retained without changing Gmail automatically."} />
+          <EvidenceRow label="Google Drive" status={!google.data?.credentialsReady ? "Setup required" : google.data.drive.lastSyncedAt ? "Connected" : "Waiting for first sync"} detail={!google.data?.credentialsReady ? google.data?.setupMessage ?? "Google credentials have not been checked yet." : google.data.drive.lastSyncedAt ? `File list last checked ${new Date(google.data.drive.lastSyncedAt).toLocaleString()}. Only files matched to a task are included.` : "No Drive files have been checked for your tasks yet."} />
           <EvidenceRow label="Time accountability" status={latest ? `${Math.round(latest.trackedSeconds / 360) / 10}h tracked` : "No snapshot"} detail={latest ? `${Math.round(latest.overtimeSeconds / 360) / 10}h overtime against the configured worker schedule.` : "Completed timer entries are included in the next snapshot."} />
-          <EvidenceRow label="Browser history" status={`${history.data?.length ?? 0} days`} detail="End-of-day browser snapshots are retained separately from task and communication evidence." />
+          <EvidenceRow label="Browser history" status={`${history.data?.length ?? 0} days`} detail="Your recorded end-of-day tab checks." />
         </CardContent>
       </Card>
     </div>
@@ -835,6 +923,7 @@ function WorkerSettingsView() {
   const policy = trpc.operator.getBrowserTabPolicy.useQuery(undefined, { staleTime: 60_000 });
   const browser = trpc.operator.getBrowserTabStatus.useQuery(undefined, { retry: false, staleTime: 30_000 });
   const email = trpc.emailInbox.getPendingCount.useQuery(undefined, { retry: false, staleTime: 60_000 });
+  const google = trpc.operator.getGoogleEvidenceStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const apiHealth = trpc.system.health.useQuery(
     { timestamp: 0 },
     { retry: 1, staleTime: 30_000, refetchInterval: 60_000 },
@@ -844,6 +933,13 @@ function WorkerSettingsView() {
   const [warningMinutes, setWarningMinutes] = useState(30);
   const [staleMinutes, setStaleMinutes] = useState(10);
   const [includePinnedTabs, setIncludePinnedTabs] = useState(false);
+  const [gmailEnabled, setGmailEnabled] = useState(true);
+  const [gmailInterval, setGmailInterval] = useState(60);
+  const [gmailLookback, setGmailLookback] = useState(30);
+  const [driveEnabled, setDriveEnabled] = useState(true);
+  const [driveInterval, setDriveInterval] = useState(180);
+  const [driveLookback, setDriveLookback] = useState(30);
+  const [driveFolderId, setDriveFolderId] = useState("");
 
   useEffect(() => {
     if (!policy.data) return;
@@ -853,6 +949,17 @@ function WorkerSettingsView() {
     setStaleMinutes(policy.data.staleAfterMinutes);
     setIncludePinnedTabs(policy.data.includePinnedTabs);
   }, [policy.data]);
+
+  useEffect(() => {
+    if (!google.data) return;
+    setGmailEnabled(google.data.settings.gmail.enabled);
+    setGmailInterval(google.data.settings.gmail.intervalMinutes);
+    setGmailLookback(google.data.settings.gmail.lookbackDays);
+    setDriveEnabled(google.data.settings.drive.enabled);
+    setDriveInterval(google.data.settings.drive.intervalMinutes);
+    setDriveLookback(google.data.settings.drive.lookbackDays);
+    setDriveFolderId(google.data.settings.drive.folderId ?? "");
+  }, [google.data]);
 
   const savePolicy = trpc.operator.setBrowserTabPolicy.useMutation({
     onSuccess: () => {
@@ -873,12 +980,43 @@ function WorkerSettingsView() {
     },
     onError: (error) => toast.error(error.message),
   });
+  const saveGoogle = trpc.operator.updateGoogleEvidenceSettings.useMutation({
+    onSuccess: () => {
+      void utils.operator.getGoogleEvidenceStatus.invalidate();
+      toast.success("Google evidence settings saved");
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const syncGoogle = trpc.operator.syncGoogleEvidence.useMutation({
+    onSuccess: (result) => {
+      void utils.operator.getGoogleEvidenceStatus.invalidate();
+      void utils.emailInbox.getPendingCount.invalidate();
+      void utils.operator.getWorkQueueContext.invalidate();
+      if (!result.configured) {
+        toast.error(result.message ?? "Google evidence is not configured");
+      } else if (result.message) {
+        toast.error(result.message);
+      } else {
+        toast.success(`Evidence refreshed: ${result.gmail.imported} emails and ${result.drive.imported} Drive files checked`);
+      }
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const disconnectGoogle = trpc.operator.disconnectGoogleEvidence.useMutation({
+    onSuccess: () => {
+      void utils.operator.getGoogleEvidenceStatus.invalidate();
+      toast.success("Google worker connection removed");
+    },
+    onError: (error) => toast.error(error.message),
+  });
   const worker = context.data;
+  const browserConnection = describeBrowserConnection(browser.data);
   const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
   return (
     <div className="space-y-5">
-      <PageHeading title="Settings" description="Personal operating controls for this worker profile. Founder and system administration remain separate." />
+      <PageHeading title="Settings" description="" />
+      <ManagerShadowSettings />
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
         <Card className="gap-0 rounded-lg py-0">
           <CardHeader className="border-b py-4">
@@ -886,6 +1024,14 @@ function WorkerSettingsView() {
             <CardDescription>Warn near the end of the working day when the connected browser exceeds the agreed limit.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-5 p-5">
+            <details className="border-b pb-4" open={!browser.data?.collectorConfigured}>
+              <summary className="cursor-pointer text-sm font-medium">Connect this work browser</summary>
+              <div className="mt-3 space-y-3 text-sm text-muted-foreground">
+                <Button variant="outline" asChild><a href="/downloads/worker-browser-collector.zip" download>Download browser collector</a></Button>
+                <ol className="list-decimal space-y-2 pl-5"><li>Extract the download. In Chrome or Edge Extensions, enable developer mode and choose Load unpacked. Select the extracted folder.</li><li>Create a pairing token below. This replaces any previous token for this worker.</li><li>In the extension settings, enter this dashboard address: <span className="break-all font-mono">{window.location.origin}</span>. Paste the token, enable reporting and choose Save and test.</li></ol>
+                <p>The collector reports tab counts, website domains and pinned state. It does not send page contents, URL paths or tab titles. Closing tabs always requires your selection and confirmation.</p>
+              </div>
+            </details>
             <div className="flex items-center justify-between gap-4">
               <div><Label htmlFor="browser-policy-enabled">End-of-day checks</Label><p className="mt-1 text-xs text-muted-foreground">Keep tab hygiene evidence active for this profile.</p></div>
               <Switch id="browser-policy-enabled" checked={enabled} onCheckedChange={setEnabled} />
@@ -893,7 +1039,7 @@ function WorkerSettingsView() {
             <div className="grid gap-4 sm:grid-cols-3">
               <NumberSetting id="max-open-tabs" label="Allowed tabs" value={maxOpenTabs} min={0} max={50} onChange={setMaxOpenTabs} />
               <NumberSetting id="warning-minutes" label="Warn before end" value={warningMinutes} min={0} max={240} suffix="min" onChange={setWarningMinutes} />
-              <NumberSetting id="stale-minutes" label="Collector stale after" value={staleMinutes} min={2} max={120} suffix="min" onChange={setStaleMinutes} />
+              <NumberSetting id="stale-minutes" label="Warn if disconnected for" value={staleMinutes} min={2} max={120} suffix="min" onChange={setStaleMinutes} />
             </div>
             <div className="flex items-center justify-between gap-4 rounded-md border p-3">
               <div><Label htmlFor="include-pinned">Count pinned tabs</Label><p className="mt-1 text-xs text-muted-foreground">Pinned reference tabs are excluded by default.</p></div>
@@ -901,7 +1047,7 @@ function WorkerSettingsView() {
             </div>
             <div className="flex flex-wrap justify-end gap-2">
               <Button variant="outline" onClick={() => collectorToken.mutate()} disabled={collectorToken.isPending}>
-                {collectorToken.isPending ? <Loader2 className="size-4 animate-spin" /> : <Copy className="size-4" />}Copy collector token
+                {collectorToken.isPending ? <Loader2 className="size-4 animate-spin" /> : <Copy className="size-4" />}Create and copy pairing token
               </Button>
               <Button
                 onClick={() => savePolicy.mutate({
@@ -933,17 +1079,55 @@ function WorkerSettingsView() {
             <CardHeader className="border-b py-4"><CardTitle className="text-sm">Evidence connections</CardTitle></CardHeader>
             <CardContent className="divide-y p-0">
               <ConnectionRow
-                label="Backend API"
+                label="Dashboard connection"
                 value={apiHealth.data?.runtime === "unified-node" ? "Connected" : apiHealth.isLoading ? "Checking" : "Unavailable"}
                 healthy={apiHealth.data?.runtime === "unified-node"}
               />
-              <ConnectionRow label="Trello identity" value={worker?.trelloMemberId ? "Configured" : "Uses token owner"} healthy={Boolean(worker?.trelloMemberId)} />
-              <ConnectionRow label="Gmail queue" value={`${email.data?.count ?? 0} pending`} healthy={!email.error} />
-              <ConnectionRow label="Browser collector" value={browser.data?.connected ? "Connected" : browser.data?.collectorConfigured ? "Waiting for data" : "Setup required"} healthy={Boolean(browser.data?.connected)} />
+              <ConnectionRow label="Trello account" value={worker?.trelloMemberId ? "Configured" : "Shared account"} healthy={Boolean(worker?.trelloMemberId)} />
+              <ConnectionRow label="Gmail evidence" value={!google.data?.credentialsReady ? "Setup required" : `${email.data?.count ?? 0} pending`} healthy={Boolean(google.data?.credentialsReady) && !email.error} />
+              <ConnectionRow label="Google Drive" value={!google.data?.credentialsReady ? "Setup required" : google.data.drive.lastSyncedAt ? "Connected" : "Waiting for sync"} healthy={Boolean(google.data?.credentialsReady && google.data.drive.lastSyncedAt)} />
+              <ConnectionRow label="Browser connection" value={browserConnection.label} healthy={browserConnection.healthy} />
             </CardContent>
           </Card>
         </div>
       </div>
+      <Card className="gap-0 rounded-lg py-0">
+        <CardHeader className="border-b py-4">
+          <CardTitle className="text-sm">Google connection</CardTitle>
+          <CardDescription>Read-only access. Nothing is sent, archived, labelled, or moved in Google.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5 p-5">
+          {!google.data?.credentialsReady && <Alert>
+            <AlertTriangle className="size-4" />
+            <AlertTitle>Google connection needs setup</AlertTitle>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{google.data?.setupMessage ?? "Checking the Google connection."}</span>{google.data?.clientConfigured && <Button size="sm" asChild><a href="/api/google-evidence/connect">Connect Google</a></Button>}</AlertDescription>
+          </Alert>}
+          {google.data?.lastError && <Alert variant="destructive">
+            <AlertTriangle className="size-4" />
+            <AlertTitle>Last Google sync needs attention</AlertTitle>
+            <AlertDescription>{google.data.lastError}</AlertDescription>
+          </Alert>}
+          <details><summary className="cursor-pointer text-sm font-medium">Google sync preferences</summary>
+          <div className="mt-4 grid gap-5 lg:grid-cols-2">
+            <section className="space-y-4 rounded-md border p-4">
+              <div className="flex items-center justify-between gap-4"><div><Label htmlFor="gmail-evidence-enabled">Gmail intake</Label><p className="mt-1 text-xs text-muted-foreground">Keeps only the newest message in each inbox thread.</p></div><Switch id="gmail-evidence-enabled" checked={gmailEnabled} onCheckedChange={setGmailEnabled} /></div>
+              <div className="grid gap-4 sm:grid-cols-2"><NumberSetting id="gmail-interval" label="Check every" value={gmailInterval} min={15} max={1440} suffix="min" onChange={setGmailInterval} /><NumberSetting id="gmail-lookback" label="Look back" value={gmailLookback} min={1} max={90} suffix="days" onChange={setGmailLookback} /></div>
+              <p className="text-xs text-muted-foreground">{google.data?.gmail.lastSyncedAt ? `Last checked ${new Date(google.data.gmail.lastSyncedAt).toLocaleString()}.` : "No Gmail data collected yet."}</p>
+            </section>
+            <section className="space-y-4 rounded-md border p-4">
+              <div className="flex items-center justify-between gap-4"><div><Label htmlFor="drive-evidence-enabled">Drive metadata</Label><p className="mt-1 text-xs text-muted-foreground">Links files only when the card ID or full card title matches exactly.</p></div><Switch id="drive-evidence-enabled" checked={driveEnabled} onCheckedChange={setDriveEnabled} /></div>
+              <div className="grid gap-4 sm:grid-cols-2"><NumberSetting id="drive-interval" label="Check every" value={driveInterval} min={15} max={1440} suffix="min" onChange={setDriveInterval} /><NumberSetting id="drive-lookback" label="Look back" value={driveLookback} min={1} max={90} suffix="days" onChange={setDriveLookback} /></div>
+              <div className="space-y-2"><Label htmlFor="drive-folder-id">Optional folder ID</Label><Input id="drive-folder-id" value={driveFolderId} onChange={(event) => setDriveFolderId(event.target.value)} placeholder="All accessible files when empty" /><p className="text-xs text-muted-foreground">{google.data?.drive.lastSyncedAt ? `Last checked ${new Date(google.data.drive.lastSyncedAt).toLocaleString()}.` : "No Drive metadata collected yet."}</p></div>
+            </section>
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            {google.data?.connectionMode === "worker" && <Button variant="outline" onClick={() => disconnectGoogle.mutate()} disabled={disconnectGoogle.isPending}>{disconnectGoogle.isPending && <Loader2 className="size-4 animate-spin" />}Disconnect Google</Button>}
+            <Button variant="outline" onClick={() => syncGoogle.mutate({ gmail: gmailEnabled, drive: driveEnabled })} disabled={syncGoogle.isPending}>{syncGoogle.isPending && <Loader2 className="size-4 animate-spin" />}Sync now</Button>
+            <Button onClick={() => saveGoogle.mutate({ gmail: { enabled: gmailEnabled, intervalMinutes: gmailInterval, lookbackDays: gmailLookback }, drive: { enabled: driveEnabled, intervalMinutes: driveInterval, lookbackDays: driveLookback, folderId: driveFolderId.trim() || null } })} disabled={saveGoogle.isPending}>{saveGoogle.isPending && <Loader2 className="size-4 animate-spin" />}Save sync preferences</Button>
+          </div>
+          </details>
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -973,7 +1157,7 @@ function EvidenceRow({ label, status, detail }: { label: string; status: string;
 }
 
 function PageHeading({ title, description, actions }: { title: string; description: string; actions?: React.ReactNode }) {
-  return <div className="flex flex-col justify-between gap-3 border-b pb-4 sm:flex-row sm:items-end"><div><h1 className="text-2xl font-semibold">{title}</h1><p className="mt-1 text-sm text-muted-foreground">{description}</p></div>{actions}</div>;
+  return <div className="flex flex-col justify-between gap-3 border-b pb-4 sm:flex-row sm:items-end"><div><h1 className="text-2xl font-semibold">{title}</h1>{description && <p className="mt-1 text-sm text-muted-foreground">{description}</p>}</div>{actions}</div>;
 }
 
 function ContextMetric({ icon: Icon, label, value, detail, onClick }: { icon: typeof Activity; label: string; value: string; detail: string; onClick?: () => void }) {

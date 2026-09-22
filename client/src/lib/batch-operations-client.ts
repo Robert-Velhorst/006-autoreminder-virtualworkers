@@ -3,8 +3,11 @@
  * Handles all communication with the backend batch operations service
  */
 
+export type BatchOperationType = 're_analyze' | 'reschedule' | 'conflict_resolution' | 'optimization';
+export type BatchOperationStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+
 export interface BatchOperationRequest {
-  operationType: 're_analyze' | 'reschedule';
+  operationType: Extract<BatchOperationType, 're_analyze' | 'reschedule'>;
   taskIds?: string[];
   options?: Record<string, any>;
   priority?: 'low' | 'normal' | 'high';
@@ -12,33 +15,86 @@ export interface BatchOperationRequest {
 
 export interface BatchOperationResponse {
   jobId: string;
-  operationType: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-  progress: number;
+  operationType: BatchOperationType;
+  status: BatchOperationStatus;
+  progress?: number;
   totalTasks: number;
-  completedTasks: number;
-  failedTasks: number;
-  createdAt: string;
-  startedAt?: string;
-  completedAt?: string;
-  isPaused?: boolean;
-  pausedAt?: string;
-}
-
-export interface BatchOperationProgress {
-  jobId: string;
-  progress: number;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-  completedTasks: number;
-  failedTasks: number;
+  completedTasks?: number;
+  failedTasks?: number;
+  currentTaskIndex?: number;
   currentTaskName?: string;
-  currentTaskIndex: number;
   elapsedTimeSeconds?: number;
   estimatedTimeSeconds?: number;
   errorLog?: string[];
-  results?: Record<string, any>;
+  results?: Record<string, unknown>;
+  createdAt: string | Date;
+  startedAt?: string | Date;
+  completedAt?: string | Date;
   isPaused?: boolean;
-  pausedAt?: string;
+  pausedAt?: string | Date;
+}
+
+export interface BatchOperationTask {
+  id: string;
+  name: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  progress?: number;
+  error?: string;
+}
+
+export interface NormalizedBatchOperation extends Omit<BatchOperationResponse, 'createdAt' | 'startedAt' | 'completedAt' | 'pausedAt'> {
+  progress: number;
+  completedTasks: number;
+  failedTasks: number;
+  currentTaskIndex: number;
+  createdAt: Date;
+  startedAt?: Date;
+  completedAt?: Date;
+  pausedAt?: Date;
+  tasks: BatchOperationTask[];
+}
+
+export type BatchOperationProgress = NormalizedBatchOperation;
+
+function normalizeNumber(value: unknown, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function normalizeDate(value: string | Date | undefined) {
+  if (!value) return undefined;
+  const result = new Date(value);
+  return Number.isFinite(result.getTime()) ? result : undefined;
+}
+
+export function normalizeBatchOperationResponse(response: BatchOperationResponse): NormalizedBatchOperation {
+  return {
+    ...response,
+    progress: normalizeNumber(response.progress),
+    completedTasks: normalizeNumber(response.completedTasks),
+    failedTasks: normalizeNumber(response.failedTasks),
+    currentTaskIndex: normalizeNumber(response.currentTaskIndex),
+    createdAt: normalizeDate(response.createdAt) ?? new Date(0),
+    startedAt: normalizeDate(response.startedAt),
+    completedAt: normalizeDate(response.completedAt),
+    pausedAt: normalizeDate(response.pausedAt),
+    tasks: [],
+  };
+}
+
+export function getBatchTaskPosition(currentTaskIndex: number, totalTasks: number): number {
+  if (totalTasks <= 0) return 0;
+  return Math.min(totalTasks, Math.max(1, normalizeNumber(currentTaskIndex, 1)));
+}
+
+export function selectBatchOperationForPause<TOperation extends { jobId: string; status: string }>(
+  operations: readonly TOperation[],
+  requestedJobId?: string,
+) {
+  if (requestedJobId) {
+    return operations.find((operation) => operation.jobId === requestedJobId && operation.status === 'running') ?? null;
+  }
+  return operations.find((operation) => operation.status === 'running') ?? null;
 }
 
 class BatchOperationsClient {

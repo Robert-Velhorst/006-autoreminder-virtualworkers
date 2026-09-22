@@ -48,10 +48,15 @@ The server accepts the old local names `TrelloAPIKey` and `TrelloAPIToken`
 during transition, but production configuration should use the canonical
 uppercase names.
 
+`OPENAI_REQUEST_TIMEOUT_MS` is optional. It defaults to 120 seconds and is
+capped at five minutes so an unavailable provider cannot hold operator work
+indefinitely.
+
 ## Optional Integrations
 
 - `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, and
-  `NOTIFICATIONS_ENABLED=true` enable outbound email notifications.
+  `NOTIFICATIONS_ENABLED=true` enable outbound email notifications and
+  automated Trello comments.
 - `TRELLO_WEBHOOK_CALLBACK_URL` and `TRELLO_WEBHOOK_SECRET` enable verified
   Trello push updates after a public HTTPS domain exists.
 - `SCHEDULED_TASK_SECRET` protects explicitly exposed scheduled-task routes.

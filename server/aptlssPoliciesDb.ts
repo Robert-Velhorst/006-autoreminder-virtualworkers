@@ -30,8 +30,10 @@ const DEFAULT_POLICIES: Omit<AptlssOperationalPolicy, "id" | "vaId" | "createdAt
   { ruleKey: "done_gate_require_checklist_complete", label: "Done Gate: Require Checklist Complete", description: "Block Done if any APTLSS checklist item is still open.", value: "true", category: "done_gate", enabled: 1 },
   { ruleKey: "done_gate_require_no_unanswered", label: "Done Gate: Require No Unanswered Questions", description: "Block Done if there is an unanswered question in the card comments.", value: "true", category: "done_gate", enabled: 1 },
   { ruleKey: "confidence_auto_proceed_threshold", label: "Confidence Auto-Proceed Threshold (%)", description: "Plans with confidence above this threshold may proceed automatically.", value: "85", category: "scheduling", enabled: 1 },
-  { ruleKey: "confidence_flag_threshold", label: "Confidence Flag-for-Review Threshold (%)", description: "Plans with confidence below this threshold are flagged for Joyce review.", value: "65", category: "scheduling", enabled: 1 },
+  { ruleKey: "confidence_flag_threshold", label: "Confidence Flag-for-Review Threshold (%)", description: "Plans with confidence below this threshold are flagged for worker review.", value: "65", category: "scheduling", enabled: 1 },
 ];
+
+const LEGACY_CONFIDENCE_REVIEW_DESCRIPTION = "Plans with confidence below this threshold are flagged for assigned-worker review.";
 
 export async function getAllPolicies(vaId: number): Promise<AptlssOperationalPolicy[]> {
   const db = await getDb();
@@ -49,6 +51,16 @@ export async function getAllPolicies(vaId: number): Promise<AptlssOperationalPol
     return db.select().from(aptlssOperationalPolicies)
       .where(eq(aptlssOperationalPolicies.vaId, vaId))
       .orderBy(aptlssOperationalPolicies.category, aptlssOperationalPolicies.ruleKey);
+  }
+  const legacyReviewPolicy = rows.find((policy) => policy.ruleKey === "confidence_flag_threshold"
+    && policy.description === LEGACY_CONFIDENCE_REVIEW_DESCRIPTION);
+  if (legacyReviewPolicy) {
+    await db.update(aptlssOperationalPolicies)
+      .set({ description: DEFAULT_POLICIES.find((policy) => policy.ruleKey === "confidence_flag_threshold")!.description, updatedAt: new Date() })
+      .where(eq(aptlssOperationalPolicies.id, legacyReviewPolicy.id));
+    return rows.map((policy) => policy.id === legacyReviewPolicy.id
+      ? { ...policy, description: DEFAULT_POLICIES.find((defaultPolicy) => defaultPolicy.ruleKey === "confidence_flag_threshold")!.description }
+      : policy);
   }
   return rows;
 }
@@ -122,6 +134,32 @@ export async function getFollowUpDraftById(id: number): Promise<AutoFollowUpDraf
   if (!db) return null;
   const rows = await db.select().from(autoFollowUpDrafts).where(eq(autoFollowUpDrafts.id, id)).limit(1);
   return rows[0] ?? null;
+}
+
+export async function getFollowUpDraftByIdForWorker(
+  vaId: number,
+  id: number,
+): Promise<AutoFollowUpDraft | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db.select().from(autoFollowUpDrafts)
+    .where(and(eq(autoFollowUpDrafts.id, id), eq(autoFollowUpDrafts.vaId, vaId)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function setFollowUpDraftStatusForWorker(
+  vaId: number,
+  id: number,
+  status: "sent" | "dismissed",
+): Promise<boolean> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db.update(autoFollowUpDrafts)
+    .set({ status, updatedAt: new Date() })
+    .where(and(eq(autoFollowUpDrafts.id, id), eq(autoFollowUpDrafts.vaId, vaId)));
+  const value = Array.isArray(result) ? result[0] : result;
+  return Number((value as { affectedRows?: unknown } | undefined)?.affectedRows ?? 0) === 1;
 }
 
 export async function markFollowUpDraftSent(id: number): Promise<void> {

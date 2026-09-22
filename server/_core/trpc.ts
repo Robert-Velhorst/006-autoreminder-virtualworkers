@@ -27,6 +27,26 @@ const requireUser = t.middleware(async opts => {
 
 export const protectedProcedure = t.procedure.use(requireUser);
 
+// Dashboard operations expose worker evidence and founder controls. Generic
+// authenticated accounts must not be able to invoke those procedures.
+export const operatorAccountProcedure = protectedProcedure.use(
+  t.middleware(async opts => {
+    const { ctx, next } = opts;
+    const user = ctx.user;
+
+    if (!user || (user.role !== "admin" && user.role !== "worker")) {
+      throw new TRPCError({ code: "FORBIDDEN", message: "Operator access requires an admin or worker account" });
+    }
+
+    return next({
+      ctx: {
+        ...ctx,
+        user,
+      },
+    });
+  }),
+);
+
 export const adminProcedure = t.procedure.use(
   t.middleware(async opts => {
     const { ctx, next } = opts;

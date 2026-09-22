@@ -29,6 +29,13 @@ class RequestQueue {
     timeoutErrors: 0,
   };
   private readonly defaultTimeout = 60000; // 60 seconds
+  private readonly maxPendingRequests: number;
+
+  constructor(maxPendingRequests = Number(process.env.REQUEST_QUEUE_MAX_PENDING ?? 250)) {
+    this.maxPendingRequests = Number.isFinite(maxPendingRequests)
+      ? Math.max(1, Math.floor(maxPendingRequests))
+      : 250;
+  }
 
   /**
    * Execute a request with deduplication
@@ -47,6 +54,10 @@ class RequestQueue {
       this.metrics.deduplicatedRequests++;
       console.log(`[RequestQueue] Deduplicating request: ${key}`);
       return existing.promise;
+    }
+
+    if (this.pendingRequests.size >= this.maxPendingRequests) {
+      throw new Error(`Request queue is at capacity (${this.maxPendingRequests} pending requests)`);
     }
 
     // Create new pending request

@@ -1,4 +1,4 @@
-export const WAITING_REASON_INTERPRETER_VERSION = "1.0.0";
+export const WAITING_REASON_INTERPRETER_VERSION = "1.1.0";
 
 export const WAITING_REASON_CATEGORIES = [
   "approval",
@@ -14,7 +14,8 @@ export const WAITING_REASON_CATEGORIES = [
   "unclear",
 ] as const;
 
-export const WAITING_ON_TYPES = ["robert", "joyce", "external_party", "dependency", "unknown"] as const;
+// `joyce` remains accepted for historical records. New assessments use `worker`.
+export const WAITING_ON_TYPES = ["robert", "worker", "joyce", "external_party", "dependency", "unknown"] as const;
 export const WAITING_URGENCIES = ["critical", "high", "normal", "low"] as const;
 export const WAITING_NEXT_STEP_TYPES = [
   "request_approval",
@@ -372,7 +373,7 @@ function detectCategory(reason: string): WaitingReasonCategory {
     if (pattern.test(reason)) return category;
   }
   if (/\b(waiting|pending|still\s+waiting|no\s+reply|hasn'?t\s+replied|heard\s+back|chasing|wacht(?:en|end)?|nog\s+geen\s+reactie|niets\s+gehoord|navragen)\b/i.test(reason)) return "external_reply";
-  if (/\b(i|we|joyce|ik|wij)\s+(?:still\s+|nog\s+)?(?:need|must|have|moet(?:en)?|heb(?:ben)?\s+nodig)\s+(?:to|te)\b/i.test(reason)) return "internal_action";
+  if (/\b(i|we|worker|virtual\s+worker|va|joyce|ik|wij)\s+(?:still\s+|nog\s+)?(?:need|must|have|moet(?:en)?|heb(?:ben)?\s+nodig)\s+(?:to|te)\b/i.test(reason)) return "internal_action";
   return "unclear";
 }
 
@@ -417,6 +418,11 @@ function extractNamedParty(reason: string) {
   return null;
 }
 
+function isInternalWorkerReason(reason: string) {
+  return /\b(?:worker|virtual\s+worker|va|joyce)\b/i.test(reason)
+    || /\b(i|we|ik|wij)\s+(?:still\s+|nog\s+)?(?:need|must|have|moet(?:en)?|heb(?:ben)?\s+nodig)\s+(?:to|te)\b/i.test(reason);
+}
+
 function detectWaitingOn(reason: string, category: WaitingReasonCategory) {
   if (category === "dependency") {
     const dependency = extractDependencyName(reason);
@@ -425,15 +431,13 @@ function detectWaitingOn(reason: string, category: WaitingReasonCategory) {
   if (/\brobert\b/i.test(reason)) return { waitingOn: "robert" as const, waitingOnName: "Robert" };
 
   const namedParty = extractNamedParty(reason);
-  if (namedParty && !/\bjoyce\b/i.test(namedParty)) {
+  if (namedParty && !/\b(?:joyce|worker|va)\b/i.test(namedParty)) {
     return { waitingOn: "external_party" as const, waitingOnName: namedParty };
   }
   const role = EXTERNAL_ROLES.find((value) => new RegExp(`\\b${value}\\b`, "i").test(reason));
   if (role) return { waitingOn: "external_party" as const, waitingOnName: titleCase(role) };
+  if (isInternalWorkerReason(reason)) return { waitingOn: "worker" as const, waitingOnName: "Worker" };
 
-  if (/\bjoyce\b/i.test(reason) || /\b(i|we|ik|wij)\s+(?:still\s+|nog\s+)?(?:need|must|have|moet(?:en)?|heb(?:ben)?\s+nodig)\s+(?:to|te)\b/i.test(reason)) {
-    return { waitingOn: "joyce" as const, waitingOnName: "Joyce" };
-  }
   return { waitingOn: "unknown" as const, waitingOnName: null };
 }
 
@@ -601,13 +605,13 @@ function deriveFollowUp({
         : "APTLSS scheduled the checkpoint 24 hours after the recorded contact.",
     };
   }
-  if (waitingOn === "robert" || waitingOn === "joyce" || waitingOn === "unknown") {
+  if (waitingOn === "robert" || waitingOn === "worker" || waitingOn === "joyce" || waitingOn === "unknown") {
     return {
       followUpAt: new Date(nowMs),
       source: "immediate" as const,
       reason: waitingOn === "robert"
         ? "A Robert decision can be prepared and presented immediately."
-        : "Joyce can clarify or resolve this internal blocker immediately.",
+        : "The assigned worker can clarify or resolve this internal blocker immediately.",
     };
   }
   const delayMs = waitingOn === "dependency" ? 4 * 60 * 60 * 1_000 : DAY_MS;
@@ -638,7 +642,7 @@ function actorLabel(waitingOn: WaitingOnType, waitingOnName: string | null) {
   if (waitingOnName) return waitingOnName;
   if (waitingOn === "external_party") return "the external party";
   if (waitingOn === "dependency") return "the dependency";
-  if (waitingOn === "joyce") return "Joyce";
+  if (waitingOn === "worker" || waitingOn === "joyce") return "the assigned worker";
   if (waitingOn === "robert") return "Robert";
   return "an unidentified blocker";
 }
@@ -675,7 +679,7 @@ function buildNextAction({
     return {
       nextStepType,
       isActionableNow: true,
-      nextAction: `Prepare a bounded ${nextStepType === "request_approval" ? "approval" : "decision"} request for Robert now: ${item}. Include Joyce's recommendation, the deadline, and the cost of delay.`,
+      nextAction: `Prepare a bounded ${nextStepType === "request_approval" ? "approval" : "decision"} request for Robert now: ${item}. Include a recommended option, the deadline, and the cost of delay.`,
     };
   }
   if (waitingOn === "dependency") {
@@ -685,11 +689,11 @@ function buildNextAction({
       nextAction: `${dueNow ? "Check" : "Schedule a check of"} ${party} ${timing}; resume this card only after completion evidence is visible.`,
     };
   }
-  if (waitingOn === "joyce") {
+  if (waitingOn === "worker" || waitingOn === "joyce") {
     return {
       nextStepType: "complete_internal_action",
       isActionableNow: true,
-      nextAction: `Resolve Joyce's internal blocker now: ${item}. Then reassess the card before starting unrelated work.`,
+      nextAction: `Resolve the assigned worker's internal blocker now: ${item}. Then reassess the card before starting unrelated work.`,
     };
   }
   if (waitingOn === "unknown") {
@@ -825,13 +829,16 @@ export function mergeWaitingReasonInterpretation(base: WaitingReasonInterpretati
     ? candidate.category as WaitingReasonCategory
     : base.category;
   const actorLocked = base.signals.includes("actor:explicit");
-  const candidateActor = WAITING_ON_TYPES.includes(candidate.waitingOn as WaitingOnType) ? candidate.waitingOn as WaitingOnType : null;
+  const requestedCandidateActor = WAITING_ON_TYPES.includes(candidate.waitingOn as WaitingOnType)
+    ? candidate.waitingOn as WaitingOnType
+    : null;
+  const candidateActor = requestedCandidateActor === "joyce" ? "worker" : requestedCandidateActor;
   const candidateName = textSupportedByReason(candidate.waitingOnName, base.rawReason)
     ? normalizeWhitespace(candidate.waitingOnName!).slice(0, 256)
     : null;
   const candidateActorSupported = candidateActor === "external_party" ? Boolean(candidateName)
     : candidateActor === "robert" ? /\brobert\b/i.test(base.rawReason)
-      : candidateActor === "joyce" ? /\b(joyce|i|we)\b/i.test(base.rawReason)
+      : candidateActor === "worker" ? /\b(worker|virtual\s+worker|va|joyce|i|we|ik|wij)\b/i.test(base.rawReason)
         : candidateActor === "dependency" ? base.category === "dependency"
           : false;
   const waitingOn = !actorLocked && candidateActor && candidateActor !== "unknown" && candidateActorSupported
@@ -840,7 +847,7 @@ export function mergeWaitingReasonInterpretation(base: WaitingReasonInterpretati
   const waitingOnName = waitingOn === base.waitingOn && base.waitingOnName
     ? base.waitingOnName
     : waitingOn === "robert" ? "Robert"
-      : waitingOn === "joyce" ? "Joyce"
+      : waitingOn === "worker" || waitingOn === "joyce" ? "Worker"
         : candidateName;
   const requestedItem = base.requestedItem
     ?? (textSupportedByReason(candidate.requestedItem, base.rawReason) ? normalizeWhitespace(candidate.requestedItem!).slice(0, 300) : null);

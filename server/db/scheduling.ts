@@ -40,6 +40,8 @@ async function getPool(): Promise<mysql.Pool | null> {
 export interface ScheduleHistoryRecord {
   id: string;
   taskId: string;
+  founderId: number;
+  assignmentId: number;
   cardTrelloId?: string;
   previousStartTime?: Date;
   previousEndTime?: Date;
@@ -112,15 +114,17 @@ export async function insertScheduleHistory(record: Omit<ScheduleHistoryRecord, 
   const id = uuidv4();
   const query = `
     INSERT INTO task_schedule_history (
-      id, taskId, cardTrelloId, previousStartTime, previousEndTime,
+      id, taskId, founderId, assignmentId, cardTrelloId, previousStartTime, previousEndTime,
       newStartTime, newEndTime, changedBy, reason, source,
       hadConflicts, conflictDetails, createdAt
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
   `;
 
   const values = [
     id,
     record.taskId,
+    record.founderId,
+    record.assignmentId,
     record.cardTrelloId || null,
     record.previousStartTime || null,
     record.previousEndTime || null,
@@ -142,20 +146,20 @@ export async function insertScheduleHistory(record: Omit<ScheduleHistoryRecord, 
   }
 }
 
-export async function getScheduleHistory(taskId: string, limit: number = 50): Promise<ScheduleHistoryRecord[]> {
+export async function getScheduleHistory(taskId: string, assignmentId: number, limit: number = 50): Promise<ScheduleHistoryRecord[]> {
   const pool = await getPool();
   if (!pool) return [];
 
   const query = `
     SELECT * FROM task_schedule_history 
-    WHERE taskId = ? 
+    WHERE taskId = ? AND assignmentId = ?
     ORDER BY createdAt DESC 
     LIMIT ?
   `;
 
   const connection = await pool.getConnection();
   try {
-    const [rows] = await connection.execute(query, [taskId, limit]);
+    const [rows] = await connection.execute(query, [taskId, assignmentId, limit]);
     return (rows as any[]).map(row => ({
       ...row,
       hadConflicts: Boolean(row.hadConflicts)
@@ -221,21 +225,23 @@ export async function getScheduleHistoryForActor(
   const connection = await pool.getConnection();
   try {
     const [ownedRows] = await connection.execute(
-      `SELECT ta.id
+      `SELECT ta.id, ta.founderId, ta.vaId, ta.taskId, ta.startTime, ta.endTime, ta.status
        FROM task_assignments ta
        ${scope.join}
        WHERE ta.taskId = ? AND ${scope.clause}
        LIMIT 1`,
       [taskId, scope.value],
     );
-    if (!(ownedRows as any[])[0]) return null;
+    const assignmentRow = (ownedRows as any[])[0];
+    if (!assignmentRow) return null;
+    const assignment = mapScheduledTask(assignmentRow);
 
     const [rows] = await connection.query(
       `SELECT * FROM task_schedule_history
-       WHERE taskId = ?
+       WHERE taskId = ? AND assignmentId = ?
        ORDER BY createdAt DESC
        LIMIT ${safeLimit}`,
-      [taskId],
+      [taskId, assignment.id],
     );
     return (rows as any[]).map((row) => ({
       ...row,
@@ -292,13 +298,15 @@ export async function rescheduleTaskForActor(
     const historyId = uuidv4();
     await connection.execute(
       `INSERT INTO task_schedule_history (
-        id, taskId, cardTrelloId, previousStartTime, previousEndTime,
+        id, taskId, founderId, assignmentId, cardTrelloId, previousStartTime, previousEndTime,
         newStartTime, newEndTime, changedBy, reason, source,
         hadConflicts, conflictDetails, createdAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
         historyId,
         assignment.taskId,
+        assignment.founderId,
+        assignment.id,
         options.cardTrelloId || assignment.taskId.split(':')[0] || null,
         assignment.startTime || null,
         assignment.endTime || null,
@@ -360,11 +368,11 @@ export async function undoLastRescheduleForActor(
 
     const [historyRows] = await connection.execute(
       `SELECT * FROM task_schedule_history
-       WHERE taskId = ?
+       WHERE taskId = ? AND assignmentId = ?
        ORDER BY createdAt DESC
        LIMIT 1
        FOR UPDATE`,
-      [assignment.taskId],
+      [assignment.taskId, assignment.id],
     );
     const previous = (historyRows as any[])[0];
     if (!previous?.previousStartTime || !previous?.previousEndTime) {
@@ -384,13 +392,15 @@ export async function undoLastRescheduleForActor(
     const historyId = uuidv4();
     await connection.execute(
       `INSERT INTO task_schedule_history (
-        id, taskId, cardTrelloId, previousStartTime, previousEndTime,
+        id, taskId, founderId, assignmentId, cardTrelloId, previousStartTime, previousEndTime,
         newStartTime, newEndTime, changedBy, reason, source,
         hadConflicts, conflictDetails, createdAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Undo reschedule', 'manual', 0, NULL, NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Undo reschedule', 'manual', 0, NULL, NOW())`,
       [
         historyId,
         assignment.taskId,
+        assignment.founderId,
+        assignment.id,
         previous.cardTrelloId || assignment.taskId.split(':')[0] || null,
         assignment.startTime || null,
         assignment.endTime || null,
@@ -498,7 +508,7 @@ export async function updateBatchOperation(jobId: string, updates: Partial<Batch
   const pool = await getPool();
   if (!pool) throw new Error('Database not available');
 
-  const allowedFields = ['status', 'progress', 'completedTasks', 'failedTasks', 'currentTaskIndex', 'currentTaskName', 'results', 'errorLog', 'startedAt', 'completedAt', 'elapsedTimeSeconds'];
+  const allowedFields = ['status', 'progress', 'completedTasks', 'failedTasks', 'currentTaskIndex', 'currentTaskName', 'estimatedTimeSeconds', 'results', 'errorLog', 'startedAt', 'completedAt', 'elapsedTimeSeconds'];
   const setClauses: string[] = [];
   const values: any[] = [];
 

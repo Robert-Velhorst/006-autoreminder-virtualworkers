@@ -15,6 +15,19 @@ export function requireAuthenticated(req: Request, res: Response, next: NextFunc
   next();
 }
 
+export function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  const user = requestUser(req);
+  if (!user) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  if (user.role !== "admin") {
+    res.status(403).json({ error: "Forbidden - admin only" });
+    return;
+  }
+  next();
+}
+
 export async function resolveWorkerProfileId(req: Request, requestedWorkerId?: unknown) {
   const user = requestUser(req);
   if (!user) return null;

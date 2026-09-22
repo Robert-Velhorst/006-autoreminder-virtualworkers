@@ -4,19 +4,17 @@ packages:
 allowBuilds:
   '@tailwindcss/oxide': true
   esbuild: true
-
-patchedDependencies:
-  wouter@3.7.1: patches/wouter@3.7.1.patch
-
 overrides:
   tailwindcss>nanoid: 3.3.7
-  dompurify: 3.4.12
+  socket.io-parser: 4.2.7
+  mermaid: 11.16.1
+  dompurify: 3.4.13
   engine.io: 6.6.7
   lodash: 4.18.1
   lodash-es: 4.18.1
   mdast-util-to-hast: 13.2.1
-  mermaid: 11.16.0
   path-to-regexp: 0.1.13
-  socket.io-parser: 4.2.6
   uuid: 13.0.2
   ws: 8.21.1
+patchedDependencies:
+  wouter@3.7.1: patches/wouter@3.7.1.patch

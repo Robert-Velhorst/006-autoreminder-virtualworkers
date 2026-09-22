@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from "crypto";
+import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { and, desc, eq, like } from "drizzle-orm";
 import {
   browserTabDailyEvidence,
@@ -20,6 +20,8 @@ import { resolveWorkerOperatorContextById } from "./workerOperatorContext";
 const POLICY_KEY = "browserTabPolicy";
 const COLLECTOR_TOKEN_KEY = "browserTabCollectorToken";
 const MAX_STORED_TABS = 250;
+const COLLECTOR_TOKEN_HASH_PREFIX = "sha256:";
+const LEGACY_COLLECTOR_TOKEN_HASH_PREFIX = "sha256hex:";
 
 export interface BrowserTabInventoryItem {
   id: string;
@@ -94,9 +96,17 @@ export async function setBrowserTabPolicy(vaId: number, input: Partial<BrowserTa
 
 export async function ensureBrowserTabCollectorToken(vaId: number) {
   const existing = await readWorkerSetting(COLLECTOR_TOKEN_KEY, vaId);
-  if (existing?.trim()) return existing.trim();
+  // Older installations stored the raw collector token. Preserve an already
+  // configured extension once, then replace the database value with a hash.
+  if (existing?.trim()
+    && !existing.startsWith(COLLECTOR_TOKEN_HASH_PREFIX)
+    && !existing.startsWith(LEGACY_COLLECTOR_TOKEN_HASH_PREFIX)) {
+    const token = existing.trim();
+    await writeSetting(scopedSettingKey(COLLECTOR_TOKEN_KEY, vaId), hashBrowserTabCollectorToken(token), vaId);
+    return token;
+  }
   const token = randomBytes(32).toString("base64url");
-  await writeSetting(scopedSettingKey(COLLECTOR_TOKEN_KEY, vaId), token, vaId);
+  await writeSetting(scopedSettingKey(COLLECTOR_TOKEN_KEY, vaId), hashBrowserTabCollectorToken(token), vaId);
   return token;
 }
 
@@ -104,11 +114,26 @@ export async function hasBrowserTabCollectorToken(vaId: number) {
   return Boolean((await readWorkerSetting(COLLECTOR_TOKEN_KEY, vaId))?.trim());
 }
 
-function tokenMatches(expected: string | null | undefined, candidate: string | null | undefined) {
-  if (!expected || !candidate) return false;
+export function hashBrowserTabCollectorToken(token: string) {
+  return `${COLLECTOR_TOKEN_HASH_PREFIX}${createHash("sha256").update(token).digest("base64url")}`;
+}
+
+export function browserTabCollectorTokenMatches(stored: string | null | undefined, candidate: string | null | undefined) {
+  if (!stored || !candidate) return false;
+  const expected = stored.startsWith(COLLECTOR_TOKEN_HASH_PREFIX)
+    ? stored
+    : stored.startsWith(LEGACY_COLLECTOR_TOKEN_HASH_PREFIX)
+      ? stored
+      : hashBrowserTabCollectorToken(stored);
+  const actual = hashBrowserTabCollectorToken(candidate);
+  const legacyActual = `${LEGACY_COLLECTOR_TOKEN_HASH_PREFIX}${createHash("sha256").update(candidate).digest("hex")}`;
   const expectedBuffer = Buffer.from(expected);
-  const candidateBuffer = Buffer.from(candidate);
-  return expectedBuffer.length === candidateBuffer.length && timingSafeEqual(expectedBuffer, candidateBuffer);
+  const actualBuffer = Buffer.from(expected.startsWith(LEGACY_COLLECTOR_TOKEN_HASH_PREFIX) ? legacyActual : actual);
+  return expectedBuffer.length === actualBuffer.length && timingSafeEqual(expectedBuffer, actualBuffer);
+}
+
+function tokenMatches(expected: string | null | undefined, candidate: string | null | undefined) {
+  return browserTabCollectorTokenMatches(expected, candidate);
 }
 
 async function legacyCollectorOwnerId() {

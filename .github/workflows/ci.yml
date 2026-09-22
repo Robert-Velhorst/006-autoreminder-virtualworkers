@@ -55,12 +55,41 @@ jobs:
           rm -f gitleaks-report.json
           exit "$status"
       - run: pnpm check
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level=high
       - name: Apply canonical migrations
         run: pnpm exec drizzle-kit migrate
       - name: Verify consolidated schema parity
         run: pnpm db:verify-parity
       - run: pnpm test
       - run: pnpm build
+      - name: Install browser engines for the portal smoke matrix
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+      - name: Run the worker portal browser smoke matrix
+        shell: bash
+        env:
+          PORT: "3025"
+          HOST: "127.0.0.1"
+          NODE_ENV: development
+          REMINDER_WORKER_ENABLED: "false"
+          BRIEFING_SCHEDULER_ENABLED: "false"
+          E2E_BASE_URL: http://127.0.0.1:3025
+        run: |
+          set -euo pipefail
+          pnpm exec tsx server/_core/index.ts > server.log 2>&1 &
+          app_pid=$!
+          cleanup() {
+            kill "$app_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3025/api/health/ready >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:3025/api/health/ready >/dev/null
+          pnpm test:e2e
       - name: Build the production container
         run: docker build --tag va-dashboard:ci .
       - name: Verify migration metadata matches the schema

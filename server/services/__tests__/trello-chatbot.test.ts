@@ -1,7 +1,69 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { parseBotCommand, processBotCommand } from '../trello-chatbot';
+import {
+  isTrelloCommentAutomationEnabled,
+  parseBotCommand,
+  postTrelloComment,
+  processBotCommand,
+} from '../trello-chatbot';
 
 describe('Trello Chatbot', () => {
+  describe('external comment safety', () => {
+    it('requires an explicit notification opt-in before automation can post to Trello', () => {
+      expect(isTrelloCommentAutomationEnabled({})).toBe(false);
+      expect(isTrelloCommentAutomationEnabled({ NOTIFICATIONS_ENABLED: 'false', NODE_ENV: 'production' })).toBe(false);
+      expect(isTrelloCommentAutomationEnabled({ NOTIFICATIONS_ENABLED: 'true' })).toBe(true);
+    });
+
+    it('does not make a Trello request while automation is disabled', async () => {
+      const fetchSpy = vi.fn();
+      const originalSetting = process.env.NOTIFICATIONS_ENABLED;
+      process.env.NOTIFICATIONS_ENABLED = 'false';
+      vi.stubGlobal('fetch', fetchSpy);
+
+      try {
+        await expect(postTrelloComment('card123', 'A protected test comment')).resolves.toBe(false);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        if (originalSetting === undefined) {
+          delete process.env.NOTIFICATIONS_ENABLED;
+        } else {
+          process.env.NOTIFICATIONS_ENABLED = originalSetting;
+        }
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('bounds an approved outbound Trello comment without retrying the mutation', async () => {
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+      const originalSetting = process.env.NOTIFICATIONS_ENABLED;
+      const originalKey = process.env.TRELLO_API_KEY;
+      const originalToken = process.env.TRELLO_TOKEN;
+      process.env.NOTIFICATIONS_ENABLED = 'true';
+      process.env.TRELLO_API_KEY = 'test-key';
+      process.env.TRELLO_TOKEN = 'test-token';
+      vi.stubGlobal('fetch', fetchSpy);
+
+      try {
+        await expect(postTrelloComment('card/with space', 'Approved update')).resolves.toBe(true);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(fetchSpy.mock.calls[0]?.[0]).toContain('cards/card%2Fwith%20space/actions/comments');
+        expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({ method: 'POST' });
+        expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+      } finally {
+        if (originalSetting === undefined) {
+          delete process.env.NOTIFICATIONS_ENABLED;
+        } else {
+          process.env.NOTIFICATIONS_ENABLED = originalSetting;
+        }
+        if (originalKey === undefined) delete process.env.TRELLO_API_KEY;
+        else process.env.TRELLO_API_KEY = originalKey;
+        if (originalToken === undefined) delete process.env.TRELLO_TOKEN;
+        else process.env.TRELLO_TOKEN = originalToken;
+        vi.unstubAllGlobals();
+      }
+    });
+  });
+
   describe('parseBotCommand', () => {
     it('should parse @bot status command', () => {
       const result = parseBotCommand(

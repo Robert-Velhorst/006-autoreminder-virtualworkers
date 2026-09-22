@@ -1,0 +1,14 @@
+# Use with the existing project's Compose file and credentials after rehearsal.
+# This file does not configure new public ingress or change any provider secret.
+services:
+  app:
+    image: ${PILOT_IMAGE:-va-dashboard:joyce-shadow-pilot}
+    environment:
+      APTLSS_MANAGER_PILOT_WORKER_IDS: "2"
+      APTLSS_MANAGER_SHADOW_ONLY: "true"
+      APTLSS_MANAGER_SCHEDULER: "true"
+      APTLSS_SAFETY_ATTESTATION: /app/pilot-proof/aptlss-safety.json
+    volumes:
+      - ${PILOT_PROOF_DIRECTORY:?Set the verified pilot proof directory}:/app/pilot-proof:ro
+  migrate:
+    image: ${PILOT_IMAGE:-va-dashboard:joyce-shadow-pilot}

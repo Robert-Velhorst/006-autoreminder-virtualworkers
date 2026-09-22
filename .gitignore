@@ -117,3 +117,4 @@ temp/
 .playwright-cli/
 playwright-report/
 test-results/
+artifacts/

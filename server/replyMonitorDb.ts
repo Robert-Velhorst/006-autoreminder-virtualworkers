@@ -4,6 +4,7 @@
  */
 
 import { getDb, incrementPayLogD1 } from "./db";
+import { sql } from "drizzle-orm";
 
 /** Get today's date in EAT (UTC+3) as YYYY-MM-DD */
 function todayEAT(): string {
@@ -13,6 +14,29 @@ function todayEAT(): string {
 // ─── Shared types ─────────────────────────────────────────────────────────────
 
 export type ReplySource = "trello" | "upwork";
+
+export const MAX_REPLY_MONITOR_PAGE_SIZE = 200;
+
+export function normalizeReplyMonitorLimit(limit: number | undefined, fallback: number): number {
+  if (!Number.isFinite(limit)) return fallback;
+  return Math.min(Math.max(Math.floor(limit as number), 1), MAX_REPLY_MONITOR_PAGE_SIZE);
+}
+
+function parameterizedSql(statement: string, values: unknown[]) {
+  const fragments = statement.split("?");
+  if (fragments.length !== values.length + 1) {
+    throw new Error("SQL placeholder count does not match the supplied values");
+  }
+  const chunks = [sql.raw(fragments[0])];
+  for (const [index, value] of values.entries()) {
+    chunks.push(sql`${value}`, sql.raw(fragments[index + 1]));
+  }
+  return sql.join(chunks);
+}
+
+function executeStatement(db: any, statement: string, values: unknown[] = []) {
+  return db.execute(parameterizedSql(statement, values));
+}
 
 // ─── Reply Threads ────────────────────────────────────────────────────────────
 
@@ -29,7 +53,7 @@ export interface ReplyThreadRow {
   lastNonWorkerAuthor: string;
   lastNonWorkerText: string;
   lastWorkerReplyAt: Date | null;
-  status: string;
+  status: "pending" | "replied" | "overdue" | "inactive";
   demerited: boolean;
   updatedAt: Date;
 }
@@ -48,20 +72,22 @@ export async function upsertReplyThread(vaId: number, data: {
   lastNonWorkerAuthor: string;
   lastNonWorkerText: string;
   lastWorkerReplyAt: Date | null;
-  status: "pending" | "replied" | "overdue" | "ok";
+  status: "pending" | "replied" | "overdue";
   demerited: boolean;
 }): Promise<void> {
   const db = await getDb();
-  if (!db) return;
+  if (!db) throw new Error("Database not available");
   const toStr = (d: Date | null) =>
     d ? d.toISOString().slice(0, 19).replace("T", " ") : null;
+  const lastNonWorkerText = (data.lastNonWorkerText || "").slice(0, 2000);
   try {
-    await (db as any).execute(
+    await executeStatement(db,
       `INSERT INTO reply_threads
          (vaId, source, cardId, cardName, cardUrl, boardName, listName,
           lastNonWorkerMsgAt, lastNonWorkerAuthor, lastNonWorkerText,
-          lastWorkerReplyAt, status, demerited)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          lastWorkerReplyAt, lastNonJoyceMsgAt, lastNonJoyceAuthor,
+          lastNonJoyceText, lastJoyceReplyAt, status, demerited)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
          cardName = VALUES(cardName),
          cardUrl = VALUES(cardUrl),
@@ -71,6 +97,10 @@ export async function upsertReplyThread(vaId: number, data: {
          lastNonWorkerAuthor = VALUES(lastNonWorkerAuthor),
          lastNonWorkerText = VALUES(lastNonWorkerText),
          lastWorkerReplyAt = VALUES(lastWorkerReplyAt),
+         lastNonJoyceMsgAt = VALUES(lastNonJoyceMsgAt),
+         lastNonJoyceAuthor = VALUES(lastNonJoyceAuthor),
+         lastNonJoyceText = VALUES(lastNonJoyceText),
+         lastJoyceReplyAt = VALUES(lastJoyceReplyAt),
          status = VALUES(status),
          demerited = VALUES(demerited),
          updatedAt = NOW()`,
@@ -78,13 +108,32 @@ export async function upsertReplyThread(vaId: number, data: {
         vaId, data.source, data.cardId, data.cardName, data.cardUrl,
         data.boardName, data.listName,
         toStr(data.lastNonWorkerMsgAt), data.lastNonWorkerAuthor,
-        (data.lastNonWorkerText || "").slice(0, 2000),
-        toStr(data.lastWorkerReplyAt), data.status, data.demerited ? 1 : 0,
+        lastNonWorkerText, toStr(data.lastWorkerReplyAt),
+        toStr(data.lastNonWorkerMsgAt), data.lastNonWorkerAuthor,
+        lastNonWorkerText, toStr(data.lastWorkerReplyAt),
+        data.status, data.demerited ? 1 : 0,
       ]
     );
   } catch (e) {
     console.error("[DB] upsertReplyThread failed:", e);
+    throw e;
   }
+}
+
+export async function deactivateMissingTrelloReplyThreads(vaId: number, activeCardIds: string[]): Promise<number> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const ids = Array.from(new Set(activeCardIds.filter(Boolean)));
+  const placeholders = ids.map(() => "?").join(", ");
+  const condition = ids.length ? `AND cardId NOT IN (${placeholders})` : "";
+  const result = await executeStatement(db,
+    `UPDATE reply_threads
+     SET status = 'inactive', updatedAt = NOW()
+     WHERE vaId = ? AND source = 'trello' AND status IN ('pending', 'overdue') ${condition}`,
+    [vaId, ...ids],
+  );
+  const data = Array.isArray(result) ? result[0] : result;
+  return Number((data as { affectedRows?: number } | undefined)?.affectedRows ?? 0);
 }
 
 // Alias for Upwork
@@ -94,7 +143,7 @@ export async function getPendingReplyThreads(vaId: number): Promise<ReplyThreadR
   const db = await getDb();
   if (!db) return [];
   try {
-    const rows = await (db as any).execute(
+    const rows = await executeStatement(db,
       `SELECT id, vaId, source, cardId, cardName, cardUrl, boardName, listName,
               lastNonWorkerMsgAt, lastNonWorkerAuthor, lastNonWorkerText,
               lastWorkerReplyAt, status, demerited, updatedAt
@@ -119,16 +168,17 @@ export async function getPendingReplyThreads(vaId: number): Promise<ReplyThreadR
 export async function getAllReplyThreads(vaId: number, limit = 100): Promise<ReplyThreadRow[]> {
   const db = await getDb();
   if (!db) return [];
+  const safeLimit = normalizeReplyMonitorLimit(limit, 100);
   try {
-    const rows = await (db as any).execute(
+    const rows = await executeStatement(db,
       `SELECT id, vaId, source, cardId, cardName, cardUrl, boardName, listName,
               lastNonWorkerMsgAt, lastNonWorkerAuthor, lastNonWorkerText,
               lastWorkerReplyAt, status, demerited, updatedAt
        FROM reply_threads
        WHERE vaId = ?
        ORDER BY lastNonWorkerMsgAt DESC
-       LIMIT ${limit}`,
-      [vaId]
+       LIMIT ?`,
+      [vaId, safeLimit]
     );
     const data = Array.isArray(rows) ? rows[0] : rows;
     return (Array.isArray(data) ? data : []).map((r: any) => ({
@@ -147,7 +197,7 @@ export async function markReplyThreadReplied(vaId: number, cardId: string, sourc
   const db = await getDb();
   if (!db) return;
   try {
-    await (db as any).execute(
+    await executeStatement(db,
       `UPDATE reply_threads SET status = 'replied', updatedAt = NOW()
        WHERE cardId = ? AND source = ? AND vaId = ?`,
       [cardId, source, vaId]
@@ -161,7 +211,7 @@ export async function markReplyThreadDemerited(vaId: number, cardId: string, sou
   const db = await getDb();
   if (!db) return;
   try {
-    await (db as any).execute(
+    await executeStatement(db,
       `UPDATE reply_threads SET demerited = 1, updatedAt = NOW()
        WHERE cardId = ? AND source = ? AND vaId = ?`,
       [cardId, source, vaId]
@@ -205,7 +255,7 @@ export async function insertVagueReplyFlag(vaId: number, data: {
   if (!db) return null;
   const flaggedAtStr = data.flaggedAt.toISOString().slice(0, 19).replace("T", " ");
   try {
-    const result = await (db as any).execute(
+    const result = await executeStatement(db,
       `INSERT IGNORE INTO vague_reply_flags
          (vaId, source, cardId, cardName, cardUrl, actionId, messageText, flaggedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -229,7 +279,7 @@ export async function getActiveVagueReplyFlags(vaId: number): Promise<VagueFlagR
   const db = await getDb();
   if (!db) return [];
   try {
-    const rows = await (db as any).execute(
+    const rows = await executeStatement(db,
       `SELECT id, vaId, source, cardId, cardName, cardUrl, actionId, messageText,
               flaggedAt, resolvedAt, resolvedBy, demeritIssued, demeritIssuedAt
        FROM vague_reply_flags
@@ -250,15 +300,15 @@ export async function getActiveVagueReplyFlags(vaId: number): Promise<VagueFlagR
   }
 }
 
-export async function resolveVagueReplyFlag(id: number): Promise<void> {
+export async function resolveVagueReplyFlag(vaId: number, id: number): Promise<void> {
   const db = await getDb();
   if (!db) return;
   try {
-    await (db as any).execute(
+    await executeStatement(db,
       `UPDATE vague_reply_flags
        SET resolvedAt = NOW(), resolvedBy = 'manual', updatedAt = NOW()
-       WHERE id = ?`,
-      [id]
+       WHERE id = ? AND vaId = ?`,
+      [id, vaId]
     );
   } catch (e) {
     console.error("[DB] resolveVagueReplyFlag failed:", e);
@@ -269,7 +319,7 @@ export async function autoDemeritVagueReplyFlag(id: number): Promise<void> {
   const db = await getDb();
   if (!db) return;
   try {
-    await (db as any).execute(
+    await executeStatement(db,
       `UPDATE vague_reply_flags
        SET resolvedAt = NOW(), resolvedBy = 'auto_demerit',
            demeritIssued = 1, demeritIssuedAt = NOW(), updatedAt = NOW()
@@ -284,15 +334,16 @@ export async function autoDemeritVagueReplyFlag(id: number): Promise<void> {
 export async function getAllVagueReplyFlags(vaId: number, limit = 50): Promise<VagueFlagRow[]> {
   const db = await getDb();
   if (!db) return [];
+  const safeLimit = normalizeReplyMonitorLimit(limit, 50);
   try {
-    const rows = await (db as any).execute(
+    const rows = await executeStatement(db,
       `SELECT id, vaId, source, cardId, cardName, cardUrl, actionId, messageText,
               flaggedAt, resolvedAt, resolvedBy, demeritIssued, demeritIssuedAt
        FROM vague_reply_flags
        WHERE vaId = ?
        ORDER BY flaggedAt DESC
-       LIMIT ${limit}`,
-      [vaId]
+       LIMIT ?`,
+      [vaId, safeLimit]
     );
     const data = Array.isArray(rows) ? rows[0] : rows;
     return (Array.isArray(data) ? data : []).map((r: any) => ({
@@ -318,7 +369,7 @@ export async function autoDemeriteExpiredVagueFlags(vaId: number): Promise<numbe
     .slice(0, 19)
     .replace("T", " ");
   try {
-    const rows = await (db as any).execute(
+    const rows = await executeStatement(db,
       `SELECT id FROM vague_reply_flags
        WHERE resolvedAt IS NULL AND demeritIssued = 0 AND flaggedAt <= ? AND vaId = ?`,
       [ONE_HOUR_AGO, vaId]
@@ -377,7 +428,7 @@ export async function insertUnsignedFlag(vaId: number, data: {
   if (!db) return null;
   const flaggedAtStr = data.flaggedAt.toISOString().slice(0, 19).replace("T", " ");
   try {
-    const result = await (db as any).execute(
+    const result = await executeStatement(db,
       `INSERT IGNORE INTO unsigned_message_flags
          (vaId, source, cardId, cardName, cardUrl, actionId, messageText, flaggedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -398,7 +449,7 @@ export async function getActiveUnsignedFlags(vaId: number): Promise<UnsignedFlag
   const db = await getDb();
   if (!db) return [];
   try {
-    const rows = await (db as any).execute(
+    const rows = await executeStatement(db,
       `SELECT id, vaId, source, cardId, cardName, cardUrl, actionId, messageText,
               flaggedAt, resolvedAt, resolvedBy, demeritIssued, demeritIssuedAt
        FROM unsigned_message_flags
@@ -419,16 +470,16 @@ export async function getActiveUnsignedFlags(vaId: number): Promise<UnsignedFlag
   }
 }
 
-export async function resolveUnsignedFlag(id: number, note?: string): Promise<void> {
+export async function resolveUnsignedFlag(vaId: number, id: number, note?: string): Promise<void> {
   const db = await getDb();
   if (!db) return;
   try {
-    await (db as any).execute(
+    await executeStatement(db,
       `UPDATE unsigned_message_flags
        SET resolvedAt = NOW(), resolvedBy = 'manual',
            resolutionNote = ?, updatedAt = NOW()
-       WHERE id = ?`,
-      [note ?? null, id]
+       WHERE id = ? AND vaId = ?`,
+      [note ?? null, id, vaId]
     );
   } catch (e) {
     console.error("[DB] resolveUnsignedFlag failed:", e);
@@ -439,7 +490,7 @@ export async function autoDemeritUnsignedFlag(id: number): Promise<void> {
   const db = await getDb();
   if (!db) return;
   try {
-    await (db as any).execute(
+    await executeStatement(db,
       `UPDATE unsigned_message_flags
        SET resolvedAt = NOW(), resolvedBy = 'auto_demerit',
            demeritIssued = 1, demeritIssuedAt = NOW(), updatedAt = NOW()
@@ -454,15 +505,16 @@ export async function autoDemeritUnsignedFlag(id: number): Promise<void> {
 export async function getAllUnsignedFlags(vaId: number, limit = 50): Promise<UnsignedFlagRow[]> {
   const db = await getDb();
   if (!db) return [];
+  const safeLimit = normalizeReplyMonitorLimit(limit, 50);
   try {
-    const rows = await (db as any).execute(
+    const rows = await executeStatement(db,
       `SELECT id, vaId, source, cardId, cardName, cardUrl, actionId, messageText,
               flaggedAt, resolvedAt, resolvedBy, demeritIssued, demeritIssuedAt
        FROM unsigned_message_flags
        WHERE vaId = ?
        ORDER BY flaggedAt DESC
-       LIMIT ${limit}`,
-      [vaId]
+       LIMIT ?`,
+      [vaId, safeLimit]
     );
     const data = Array.isArray(rows) ? rows[0] : rows;
     return (Array.isArray(data) ? data : []).map((r: any) => ({
@@ -488,7 +540,7 @@ export async function autoDemeriteExpiredUnsignedFlags(vaId: number): Promise<nu
     .slice(0, 19)
     .replace("T", " ");
   try {
-    const rows = await (db as any).execute(
+    const rows = await executeStatement(db,
       `SELECT id FROM unsigned_message_flags
        WHERE resolvedAt IS NULL AND demeritIssued = 0 AND flaggedAt <= ? AND vaId = ?`,
       [ONE_HOUR_AGO, vaId]

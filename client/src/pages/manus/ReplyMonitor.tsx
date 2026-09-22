@@ -419,18 +419,16 @@ export default function ReplyMonitor() {
   });
 
   const triggerScan = trpc.replyMonitor.triggerScan.useMutation({
-    onSuccess: () => {
-      toast.success("Scan started — results will refresh in ~30 seconds.");
-      setTimeout(() => {
-        utils.replyMonitor.getPendingThreads.invalidate();
-        utils.replyMonitor.getActiveVagueFlags.invalidate();
-        utils.replyMonitor.getActiveUnsignedFlags.invalidate();
-        utils.replyMonitor.getAllThreads.invalidate();
-        utils.replyMonitor.getAllVagueFlags.invalidate();
-        utils.replyMonitor.getAllUnsignedFlags.invalidate();
-      }, 30_000);
+    onSuccess: async (result) => {
+      await Promise.all([
+        utils.replyMonitor.getPendingThreads.invalidate(),
+        utils.replyMonitor.getAllThreads.invalidate(),
+      ]);
+      toast.success(
+        `Checked ${result.scannedCards} cards: ${result.pending} pending, ${result.overdue} overdue, ${result.replied} answered.`,
+      );
     },
-    onError: () => toast.error("Failed to start scan."),
+    onError: (error) => toast.error(error.message || "Reply evidence scan failed."),
   });
 
   const overdueCount = pendingThreads.filter(t => t.status === "overdue").length;
@@ -448,7 +446,7 @@ export default function ReplyMonitor() {
             Reply Monitor
           </h2>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Trello + Upwork · 12h reply rule · vague reply detection · signature enforcement
+            Trello reply evidence · 12-hour response rule · read-only provider scan
           </p>
         </div>
         <Button

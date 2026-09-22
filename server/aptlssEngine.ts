@@ -475,6 +475,7 @@ export async function computeAndSavePriorityScore(
 
 const CHECKLIST_NAME = "APTLSS Execution Checklist";
 const TRELLO_API = "https://api.trello.com/1";
+const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
 
 function trelloHeaders() {
   return { "Content-Type": "application/json" };
@@ -484,6 +485,13 @@ function trelloAuth() {
   const key = process.env.TrelloAPIKey || process.env.TRELLO_API_KEY || '';
   const token = process.env.TrelloAPIToken || process.env.TRELLO_TOKEN || '';
   return `key=${key}&token=${token}`;
+}
+
+function trelloRequest(url: string, init: RequestInit = {}) {
+  return fetch(url, {
+    ...init,
+    signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS),
+  });
 }
 
 /** Fetch the current APTLSS checklist for a card (null if none). */
@@ -501,7 +509,7 @@ async function createChecklist(
   cardId: string,
   steps: AptlssStepInput[]
 ): Promise<string> {
-  const res = await fetch(
+  const res = await trelloRequest(
     `${TRELLO_API}/checklists?${trelloAuth()}`,
     {
       method: "POST",
@@ -513,7 +521,7 @@ async function createChecklist(
   const checklist = await res.json();
 
   for (const step of steps) {
-    await fetch(
+    const itemResponse = await trelloRequest(
       `${TRELLO_API}/checklists/${checklist.id}/checkItems?${trelloAuth()}`,
       {
         method: "POST",
@@ -521,6 +529,9 @@ async function createChecklist(
         body: JSON.stringify({ name: step.title }),
       }
     );
+    if (!itemResponse.ok) {
+      throw new Error(`Trello createChecklist item failed: ${itemResponse.status}`);
+    }
   }
 
   return checklist.id;
@@ -531,7 +542,7 @@ async function addCheckItem(
   checklistId: string,
   title: string
 ): Promise<string> {
-  const res = await fetch(
+  const res = await trelloRequest(
     `${TRELLO_API}/checklists/${checklistId}/checkItems?${trelloAuth()}`,
     {
       method: "POST",
@@ -550,10 +561,11 @@ async function deleteCheckItem(
   checklistId: string,
   checkItemId: string
 ): Promise<void> {
-  await fetch(
+  const res = await trelloRequest(
     `${TRELLO_API}/cards/${cardId}/checkItem/${checkItemId}?${trelloAuth()}`,
     { method: "DELETE" }
   );
+  if (!res.ok) throw new Error(`Trello deleteCheckItem failed: ${res.status}`);
 }
 
 /** Rename a check item (used to mark as [REPLACED]). */
@@ -562,7 +574,7 @@ async function renameCheckItem(
   checkItemId: string,
   newName: string
 ): Promise<void> {
-  await fetch(
+  const res = await trelloRequest(
     `${TRELLO_API}/cards/${cardId}/checkItem/${checkItemId}?${trelloAuth()}`,
     {
       method: "PUT",
@@ -570,6 +582,7 @@ async function renameCheckItem(
       body: JSON.stringify({ name: newName }),
     }
   );
+  if (!res.ok) throw new Error(`Trello renameCheckItem failed: ${res.status}`);
 }
 
 /**
@@ -590,15 +603,16 @@ export async function writeChecklistToTrello(
     // No checklist yet — create fresh
     const checklistId = await createChecklist(cardId, newSteps);
     // Fetch the newly created checklist to get check item IDs
-    const res = await fetch(
+    const res = await trelloRequest(
       `${TRELLO_API}/checklists/${checklistId}/checkItems?${trelloAuth()}`
     );
-    if (res.ok) {
-      const items: { id: string; name: string }[] = await res.json();
-      newSteps.forEach((step, idx) => {
-        if (items[idx]) stepCheckItemIds[step.stepNumber] = items[idx].id;
-      });
+    if (!res.ok) {
+      throw new Error(`Trello fetchChecklistItems failed: ${res.status}`);
     }
+    const items: { id: string; name: string }[] = await res.json();
+    newSteps.forEach((step, idx) => {
+      if (items[idx]) stepCheckItemIds[step.stepNumber] = items[idx].id;
+    });
     return { checklistId, stepCheckItemIds };
   }
 

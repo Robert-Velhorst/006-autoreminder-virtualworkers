@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -26,7 +26,6 @@ interface TaskSelectorProps {
 
 export function TaskSelector({ onTaskSelect, selectedTaskId }: TaskSelectorProps) {
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [filteredTasks, setFilteredTasks] = useState<Task[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -40,46 +39,32 @@ export function TaskSelector({ onTaskSelect, selectedTaskId }: TaskSelectorProps
     }
   );
 
-  // Search tasks
-  const { data: searchData, isLoading: isSearching } = trpc.atis.searchTasks.useQuery(
-    { query: searchQuery },
-    {
-      enabled: searchQuery.length > 0 && isOpen,
-      staleTime: 2 * 60 * 1000, // 2 minutes
-    }
-  );
-
   // Update tasks list when data is fetched
   useEffect(() => {
     if (tasksData?.success && tasksData.tasks) {
       setTasks(tasksData.tasks);
-      setFilteredTasks(tasksData.tasks);
       setError(null);
     } else if (tasksData?.error) {
       setError(tasksData.error);
       setTasks([]);
-      setFilteredTasks([]);
     }
   }, [tasksData]);
 
-  // Update filtered tasks when search data is fetched
-  useEffect(() => {
-    if (searchQuery.length > 0 && searchData?.success && searchData.tasks) {
-      setFilteredTasks(searchData.tasks);
-      setError(null);
-    } else if (searchQuery.length > 0 && searchData?.error) {
-      setError(searchData.error);
-      setFilteredTasks([]);
-    }
-  }, [searchData, searchQuery]);
+  // All open cards are loaded once per picker session. Filtering locally avoids
+  // re-enumerating every Trello board on each keystroke.
+  const filteredTasks = useMemo(() => {
+    const normalizedQuery = searchQuery.trim().toLowerCase();
+    if (!normalizedQuery) return tasks;
+    return tasks.filter((task) =>
+      task.name.toLowerCase().includes(normalizedQuery)
+      || task.boardName.toLowerCase().includes(normalizedQuery),
+    );
+  }, [tasks, searchQuery]);
 
   // Handle search input change
   const handleSearchChange = (query: string) => {
     setSearchQuery(query);
-    if (query.length === 0) {
-      setFilteredTasks(tasks);
-      setError(null);
-    }
+    setError(null);
   };
 
   // Get selected task name
@@ -138,7 +123,7 @@ export function TaskSelector({ onTaskSelect, selectedTaskId }: TaskSelectorProps
               )}
 
               {/* Loading State */}
-              {(isLoadingTasks || isSearching) && (
+              {isLoadingTasks && (
                 <div className="flex items-center justify-center py-6">
                   <Loader2 className="h-4 w-4 animate-spin text-muted-foreground mr-2" />
                   <span className="text-sm text-muted-foreground">Loading tasks...</span>
@@ -146,7 +131,7 @@ export function TaskSelector({ onTaskSelect, selectedTaskId }: TaskSelectorProps
               )}
 
               {/* Task List */}
-              {!isLoadingTasks && !isSearching && filteredTasks.length > 0 && (
+              {!isLoadingTasks && filteredTasks.length > 0 && (
                 <div className="space-y-1 max-h-64 overflow-y-auto">
                   {filteredTasks.map((task) => (
                     <button
@@ -172,7 +157,7 @@ export function TaskSelector({ onTaskSelect, selectedTaskId }: TaskSelectorProps
               )}
 
               {/* Empty State */}
-              {!isLoadingTasks && !isSearching && filteredTasks.length === 0 && (
+              {!isLoadingTasks && filteredTasks.length === 0 && (
                 <div className="text-center py-6">
                   <p className="text-sm text-muted-foreground">
                     {searchQuery ? 'No tasks found matching your search' : 'No tasks available'}

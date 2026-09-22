@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Review tabs</title>
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+      body { width: 360px; margin: 0; background: #0b0f17; color: #e7eaf0; }
+      header { padding: 14px 16px; border-bottom: 1px solid #293142; }
+      h1 { margin: 0; font-size: 15px; } p { margin: 4px 0 0; color: #9ca6b7; font-size: 12px; }
+      #tabs { max-height: 420px; overflow: auto; }
+      label { display: grid; grid-template-columns: 18px 1fr; gap: 9px; padding: 10px 14px; border-bottom: 1px solid #1e2634; cursor: pointer; }
+      strong, small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      strong { font-size: 12px; } small { margin-top: 3px; color: #8792a5; }
+      footer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #293142; }
+      button { flex: 1; height: 34px; border: 1px solid #3b82f6; border-radius: 6px; background: #2563eb; color: white; font-weight: 650; cursor: pointer; }
+      button.secondary { background: transparent; color: #bfdbfe; }
+      #empty { padding: 24px 16px; text-align: center; color: #9ca6b7; }
+    </style>
+  </head>
+  <body>
+    <header><h1>Open work tabs</h1><p>Select completed or duplicate tabs to close.</p></header>
+    <button id="settings" type="button">Connection settings</button><p id="status" role="status"></p><div id="tabs"></div>
+    <footer><button type="button" class="secondary" id="select-all">Select all</button><button type="button" id="close-selected">Close selected</button></footer>
+    <script src="popup.js"></script>
+  </body>
+</html>

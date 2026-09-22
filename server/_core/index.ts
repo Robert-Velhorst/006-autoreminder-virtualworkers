@@ -9,6 +9,7 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { sdk } from "./sdk";
 import { serveStatic } from "./static";
+import { configureCompression } from "./compression";
 import aptlssRoutes from "../routes/aptlss.js";
 import workingHoursRoutes from "../routes/working-hours.js";
 import holidaysRoutes from "../routes/holidays.js";
@@ -17,6 +18,7 @@ import cacheRoutes from "../routes/cache.js";
 import queueRoutes from "../routes/queue.js";
 import metricsRoutes from "../routes/metrics.js";
 import vaManagementRoutes from "../routes/va-management.js";
+import workerInvitationRoutes from "../workerInvitationRoutes.js";
 import atisRoutes from "../routes/atis.js";
 import notificationPreferencesRoutes from "../routes/notification-preferences.js";
 import notificationHistoryRoutes from "../routes/notification-history.js";
@@ -35,17 +37,32 @@ import advancedSchedulingRoutes from "../routes/advanced-scheduling.js";
 import atisPhasesRoutes from "../routes/atis-phases.js";
 import batchOperationsRoutes from "../routes/batch-operations.js";
 import healthRoutes from "../routes/health.js";
+import { registerHaiConnectorRoutes } from "../haiConnectorRoutes.js";
 import { websocketService } from "../services/websocket.js";
 import { getRequestBodyLimit, securityHeaders } from "../middleware/security.js";
-import { warmUpCache, scheduleCacheRefresh } from "../services/cache-warming.js";
+import { requireTrustedSessionOrigin } from "../middleware/sessionOriginProtection.js";
 import { initializeRedis, closeRedis } from "../services/redis.js";
-import { startBriefingScheduler } from "../services/briefing-scheduler.js";
-import { startManusScheduler } from "../services/manus-scheduler.js";
-import { apiRateLimiter, authRateLimiter, aptlssGenerationRateLimiter } from "../middleware/rate-limiter.js";
+import { startBriefingScheduler, stopBriefingScheduler } from "../services/briefing-scheduler.js";
+import { startManusScheduler, stopManusScheduler } from "../services/manus-scheduler.js";
+import {
+  apiRateLimiter,
+  apiRateLimiterWithAnonymousSessionProbeBypass,
+  authRateLimiter,
+  authRateLimiterWithReadProbeBypass,
+  aptlssGenerationRateLimiter,
+} from "../middleware/rate-limiter.js";
 import { log } from "../utils/logger.js";
 import { registerBrowserTabRoutes } from "../browserTabRoutes.js";
-import { assertLocalAuthBypassConfiguration } from "./localAuthBypass.js";
+import { assertLocalAuthBypassConfiguration, isLocalAuthBypassEnabled } from "./localAuthBypass.js";
 import { assertProductionConfiguration } from "./productionConfig.js";
+import { getTrustedProxyHops } from "./trustedProxy.js";
+import { getPendingRequestQueueCap } from "./requestQueueCapacity.js";
+import googleEvidenceRoutes from "../googleEvidenceRoutes.js";
+import { startReminderWorker, stopReminderWorker } from "../reminderOrchestration.js";
+import { initializeWebhookAutoRegister, stopWebhookAutoRegister } from "../services/webhook-auto-register.js";
+import { startMaintenanceCenter, stopMaintenanceCenter } from "../maintenanceCenter.js";
+import { startManagerScheduler, stopManagerScheduler } from "../aptlssManagerService.js";
+import { closeDb } from "../db.js";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -80,6 +97,7 @@ function positiveInteger(value: string | undefined, fallback: number, maximum: n
 
 const MAX_CONCURRENT = positiveInteger(process.env.MAX_CONCURRENT_REQUESTS, 100, 10_000);
 const QUEUE_TIMEOUT_MS = positiveInteger(process.env.REQUEST_QUEUE_TIMEOUT_MS, 30_000, 300_000);
+const MAX_PENDING_REQUESTS = getPendingRequestQueueCap();
 
 let activeRequests = 0;
 const waitQueue: Array<() => void> = [];
@@ -89,6 +107,11 @@ function acquireSlot(): Promise<void> {
     if (activeRequests < MAX_CONCURRENT) {
       activeRequests++;
       resolve();
+      return;
+    }
+
+    if (waitQueue.length >= MAX_PENDING_REQUESTS) {
+      reject(new Error('Request queue capacity reached'));
       return;
     }
 
@@ -150,7 +173,9 @@ async function startServer() {
   assertProductionConfiguration();
   assertLocalAuthBypassConfiguration();
   const app = express();
-  app.set("trust proxy", true);
+  app.disable("x-powered-by");
+  configureCompression(app);
+  app.set("trust proxy", getTrustedProxyHops());
   const server = createServer(app);
 
   app.use(securityHeaders);
@@ -159,11 +184,21 @@ async function startServer() {
   app.use(concurrencyLimiter);
   
   const requestBodyLimit = getRequestBodyLimit();
-  app.use(express.json({ limit: requestBodyLimit }));
+  app.use(express.json({
+    limit: requestBodyLimit,
+    verify: (req, _res, buffer) => {
+      if ((req as express.Request).originalUrl.startsWith('/api/trello-webhook')) {
+        (req as typeof req & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
+      }
+    },
+  }));
   app.use(express.urlencoded({ limit: requestBodyLimit, extended: true }));
 
   // Health probes must remain public and must not consume the UI/API rate budget.
   app.use("/api/health", healthRoutes);
+  // Conventional platform readiness alias. Mounting the health router here
+  // makes GET /readyz perform the same database and Redis checks as /api/health.
+  app.use("/readyz", healthRoutes);
 
   // Authentication middleware for all /api routes
   app.use('/api', async (req: any, res, next) => {
@@ -177,14 +212,27 @@ async function startServer() {
   });
 
   // Authenticated users receive independent API budgets even behind one proxy.
-  app.use('/api', apiRateLimiter);
+  app.use('/api', apiRateLimiterWithAnonymousSessionProbeBypass);
+  // Cookie-authenticated browser writes must originate from this dashboard.
+  // Token-based collectors and unauthenticated provider callbacks bypass this gate.
+  app.use('/api', requireTrustedSessionOrigin);
   
   // OAuth callback under /api/oauth/callback (Manus OAuth - kept for compatibility)
   registerOAuthRoutes(app);
   // Browser-extension collector uses its own scoped bearer token.
   registerBrowserTabRoutes(app);
+  // HAI receives a separate owner-scoped, read-only feed with a revocable token.
+  registerHaiConnectorRoutes(app);
   // Local auth routes (username/password login - works without Manus) with strict rate limiting
-  app.use('/api/auth', authRateLimiter, localAuthRoutes);
+  app.use('/api/auth', authRateLimiterWithReadProbeBypass, localAuthRoutes);
+  // One-time worker invitation inspection and acceptance remain public but rate-limited.
+  app.use('/api/worker-invitations', authRateLimiter, workerInvitationRoutes);
+  // Worker-scoped Google OAuth and read-only evidence connection.
+  app.use("/api/google-evidence", googleEvidenceRoutes);
+  // Worker-authorized Trello card actions must precede the broad legacy
+  // APTLSS router, which reserves its /trello namespace for administrators.
+  // Unmatched Trello reads still continue to the legacy router below.
+  app.use("/api/trello", trelloConfigRoutes);
   // Only APTLSS mutations are generation-limited; reads and unrelated APIs
   // must not share the five-per-minute generation budget.
   app.use("/api", aptlssGenerationRateLimiter, aptlssRoutes);
@@ -218,8 +266,6 @@ async function startServer() {
   app.use("/api/trello-webhook", trelloWebhookRoutes);
   // Chatbot API (alias for trello-webhook)
   app.use("/api/chatbot", trelloWebhookRoutes);
-  // Trello Configuration API
-  app.use("/api/trello", trelloConfigRoutes);
   // Trello Boards API (for board selector)
   app.use("/api/trello-boards", trelloBoardsRoutes);
   app.use("/api/handoff", handoffRoutes);
@@ -259,9 +305,11 @@ async function startServer() {
   }
 
   const preferredPort = parseInt(process.env.PORT || "3000");
-  const port = await findAvailablePort(preferredPort);
+  const port = process.env.NODE_ENV === "production"
+    ? preferredPort
+    : await findAvailablePort(preferredPort);
 
-  if (port !== preferredPort) {
+  if (process.env.NODE_ENV !== "production" && port !== preferredPort) {
     console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
   }
 
@@ -271,18 +319,18 @@ async function startServer() {
   // Initialize WebSocket server
   websocketService.initialize(server);
 
-  // Warm up cache on startup
-  try {
-    await warmUpCache();
-    log.info('Cache warming completed');
-    // Schedule periodic cache refresh every 60 minutes
-    scheduleCacheRefresh(60);
-    log.info('Periodic cache refresh scheduled');
-    // Start automated schedulers
+  // A local bypass server is an operator UI for the existing runtime. Do not
+  // start a second set of schedulers against the same production database.
+  if (isLocalAuthBypassEnabled()) {
+    console.warn("[Server] Local auth bypass enabled; background workers are disabled for this development process");
+  } else {
+    // Schedulers are independent from cache warming. External email briefings
+    // remain disabled unless explicitly enabled by configuration.
     startBriefingScheduler();
     startManusScheduler();
-  } catch (error) {
-    log.error('Cache warming failed', error as Error);
+    startReminderWorker();
+    startMaintenanceCenter();
+    startManagerScheduler();
   }
 
   const host = process.env.HOST ?? "127.0.0.1";
@@ -292,10 +340,25 @@ async function startServer() {
       host,
       environment: process.env.NODE_ENV,
     });
+    const webhookUrl = process.env.TRELLO_WEBHOOK_CALLBACK_URL?.trim()
+      || process.env.WEBHOOK_BASE_URL?.trim()
+      || process.env.PUBLIC_URL?.trim()
+      || process.env.APP_URL?.trim();
+    if (webhookUrl) {
+      await initializeWebhookAutoRegister(webhookUrl, false);
+    }
   });
 
   // Graceful shutdown handling
+  let shuttingDown = false;
   const gracefulShutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const shutdownDeadline = setTimeout(() => {
+      log.fatal('Forced shutdown after timeout');
+      process.exit(1);
+    }, 10000);
+    shutdownDeadline.unref();
     log.info('Shutting down gracefully...');
     
     // Close WebSocket connections
@@ -306,19 +369,23 @@ async function startServer() {
     }
 
     // Close Redis connections
+    stopBriefingScheduler();
+    stopManusScheduler();
+    stopReminderWorker();
+    stopMaintenanceCenter();
+    stopWebhookAutoRegister();
+    // Drain manager leases before ending its database pool.
+    await stopManagerScheduler();
     await closeRedis();
     
     // Close HTTP server
-    server.close(() => {
+    server.close(async () => {
+      await closeDb();
+      clearTimeout(shutdownDeadline);
       log.info('HTTP server closed');
       process.exit(0);
     });
     
-    // Force exit after 10 seconds
-    setTimeout(() => {
-      log.fatal('Forced shutdown after timeout');
-      process.exit(1);
-    }, 10000);
   };
 
   process.on('SIGTERM', gracefulShutdown);

@@ -1,5 +1,5 @@
 /**
- * ActionAlerts — Live Trello-synced daily action reminders for Joyce.
+ * ActionAlerts — Live Trello-synced daily action reminders for the active worker.
  *
  * Three actionable panels only:
  *   1. Overdue Cards          — cards past their due date
@@ -153,11 +153,6 @@ function QuickComment({
 }) {
   const [text, setText] = useState("");
   const utils = trpc.useUtils();
-  // Fetch comment token status to show the "posted as" chip.
-  // Token rarely changes; share cache with Settings (5-min staleTime).
-  const { data: tokenStatus } = trpc.trello.getCommentToken.useQuery(undefined, {
-    staleTime: 5 * 60_000,
-  });
   const postComment = trpc.trello.postComment.useMutation({
     onSuccess: () => {
       toast.success("Comment posted to Trello");
@@ -179,8 +174,6 @@ function QuickComment({
   const namePattern = [
     cleanPattern(firstWord),
     cleanPattern(workerName.toLowerCase()),
-    "joyce",
-    "angel"
   ].filter(Boolean).join("|");
   const SIGNATURE_RE = new RegExp(`~\\s*(${namePattern})\\s*$`, 'i');
   const hasSignature = SIGNATURE_RE.test(text.trim());
@@ -218,26 +211,10 @@ function QuickComment({
               Missing signature — end with "~ {workerName}"
             </span>
           )}
-          {/* Posted-as chip */}
-          {tokenStatus?.isSet ? (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
-              Posting as {workerName}
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 inline-block" />
-              Posting as board owner
-              <a
-                href="#settings"
-                onClick={(e) => { e.preventDefault(); e.stopPropagation(); onClose(); /* navigate to settings handled by parent */ }}
-                className="underline hover:no-underline ml-0.5"
-                title="Go to Settings to set your personal token"
-              >
-                · Fix in Settings
-              </a>
-            </span>
-          )}
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-blue-500/15 text-blue-600 dark:text-blue-400 border border-blue-500/30">
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 inline-block" />
+            Posts through the configured dashboard integration
+          </span>
         </div>
         <div className="flex items-center gap-1.5">
           <button
@@ -535,7 +512,7 @@ function ActionSection({
 /**
  * DefaultActionBanner — shows the active default action rule for a given APTLSS card state.
  * Fetches the rule via tRPC (with 5-min stale time) and renders a small blue banner.
- * Rendered beneath each DOING card row so Joyce always knows the recommended next action.
+ * Rendered beneath each DOING card row so the active worker always knows the recommended next action.
  */
 function DefaultActionBanner({ state }: { state: string }) {
   const { data } = trpc.aptlss.getDefaultActionForState.useQuery(
@@ -617,12 +594,6 @@ export default function ActionAlerts() {
   useEffect(() => {
     if (data && !isFetching) setLastSynced(new Date());
   }, [data, isFetching]);
-
-  useEffect(() => {
-    const es = new EventSource("/api/sse/trello");
-    es.addEventListener("trello-invalidate", () => { refetch(); });
-    return () => { es.close(); };
-  }, [refetch]);
 
   const { data: streakData } = trpc.streak.get.useQuery({}, { staleTime: 5 * 60_000 });
   const todayEAT = getTodayEAT();

@@ -19,7 +19,7 @@ import {
   taskExecutionPlan,
   atisAnalysisSessions,
 } from '../../drizzle/schema';
-import { eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
@@ -342,7 +342,10 @@ export async function getAnalysisSession(id: string) {
 export async function getAnalysisSessionByTask(taskId: string) {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(atisAnalysisSessions).where(eq(atisAnalysisSessions.taskId, taskId));
+  return db.select()
+    .from(atisAnalysisSessions)
+    .where(eq(atisAnalysisSessions.taskId, taskId))
+    .orderBy(desc(atisAnalysisSessions.updatedAt));
 }
 
 export async function updateAnalysisSession(id: string, data: any) {

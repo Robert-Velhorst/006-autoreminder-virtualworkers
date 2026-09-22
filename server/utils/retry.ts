@@ -8,6 +8,7 @@ export interface RetryOptions {
   maxDelayMs?: number;
   backoffMultiplier?: number;
   retryableStatuses?: number[];
+  timeoutMs?: number;
   onRetry?: (attempt: number, error: any, delayMs: number) => void;
 }
 
@@ -17,6 +18,7 @@ const DEFAULT_OPTIONS: Required<RetryOptions> = {
   maxDelayMs: 30000, // 30 seconds
   backoffMultiplier: 2,
   retryableStatuses: [429, 500, 502, 503, 504], // Rate limit + server errors
+  timeoutMs: 15_000,
   onRetry: () => {},
 };
 
@@ -61,7 +63,12 @@ export async function fetchWithRetry(
 
   for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
     try {
-      const response = await fetch(url, init);
+      // Create a fresh timeout for each attempt. A caller-provided signal keeps
+      // its existing cancellation semantics.
+      const requestInit = init?.signal
+        ? init
+        : { ...init, signal: AbortSignal.timeout(opts.timeoutMs) };
+      const response = await fetch(url, requestInit);
 
       // If response is successful or non-retryable error, return immediately
       if (response.ok || !opts.retryableStatuses.includes(response.status)) {

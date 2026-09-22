@@ -5,10 +5,16 @@ import trelloConfigRoutes from './trello-config';
 
 describe('Trello Config Routes', () => {
   let app: Express;
+  const originalTrelloApiKey = process.env.TRELLO_API_KEY;
+  const originalTrelloToken = process.env.TRELLO_TOKEN;
 
   beforeEach(() => {
     app = express();
     app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as any).user = { id: 1, openId: 'admin-1', role: 'admin' };
+      next();
+    });
     app.use('/api/trello', trelloConfigRoutes);
 
     // Mock environment variables
@@ -18,6 +24,10 @@ describe('Trello Config Routes', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    if (originalTrelloApiKey === undefined) delete process.env.TRELLO_API_KEY;
+    else process.env.TRELLO_API_KEY = originalTrelloApiKey;
+    if (originalTrelloToken === undefined) delete process.env.TRELLO_TOKEN;
+    else process.env.TRELLO_TOKEN = originalTrelloToken;
   });
 
   describe('PUT /api/trello/tasks/:taskId/complete', () => {
@@ -85,8 +95,8 @@ describe('Trello Config Routes', () => {
           isCompleted: true,
         });
 
-      expect(response.status).toBe(500);
-      expect(response.body.error).toContain('Failed to update card status');
+      expect(response.status).toBe(502);
+      expect(response.body.error).toBe('Could not update the Trello card status');
     });
   });
 
@@ -100,15 +110,64 @@ describe('Trello Config Routes', () => {
       expect(response.status).toBe(500);
       expect(response.body.error).toContain('Trello credentials not configured');
     });
+
+    it('rejects a worker before listing labels from the shared Trello account', async () => {
+      const workerApp = express();
+      workerApp.use(express.json());
+      workerApp.use((req, _res, next) => {
+        (req as any).user = { id: 2, openId: 'worker-2', role: 'worker' };
+        next();
+      });
+      workerApp.use('/api/trello', trelloConfigRoutes);
+
+      await request(workerApp)
+        .get('/api/trello/labels')
+        .expect(403, { error: 'Forbidden - admin only' });
+    });
+  });
+
+  describe('GET /api/trello/boards/list', () => {
+    it('rejects a worker before listing boards from the shared Trello account', async () => {
+      const workerApp = express();
+      workerApp.use(express.json());
+      workerApp.use((req, _res, next) => {
+        (req as any).user = { id: 2, openId: 'worker-2', role: 'worker' };
+        next();
+      });
+      workerApp.use('/api/trello', trelloConfigRoutes);
+
+      await request(workerApp)
+        .get('/api/trello/boards/list')
+        .expect(403, { error: 'Forbidden - admin only' });
+    });
   });
 
   describe('GET /api/trello/completion-labels', () => {
-    it('should return empty labels when user is not authenticated', async () => {
-      const response = await request(app)
+    it('rejects requests when user is not authenticated', async () => {
+      const unauthenticated = express();
+      unauthenticated.use(express.json());
+      unauthenticated.use('/api/trello', trelloConfigRoutes);
+      const response = await request(unauthenticated)
         .get('/api/trello/completion-labels');
-
-      // Since we don't have auth middleware, this will return 401
       expect(response.status).toBe(401);
+    });
+  });
+
+  describe('PUT /api/trello/cards/:cardId/due', () => {
+    it('rejects invalid dates before calling Trello', async () => {
+      const response = await request(app)
+        .put('/api/trello/cards/card-123/due')
+        .send({ dueDate: 'not-a-date' });
+      expect(response.status).toBe(400);
+    });
+
+    it('reports unavailable Trello configuration instead of fake success', async () => {
+      delete process.env.TRELLO_API_KEY;
+      const response = await request(app)
+        .put('/api/trello/cards/card-123/due')
+        .send({ dueDate: '2026-08-15T12:00:00.000Z' });
+      expect(response.status).toBe(503);
+      expect(response.body.error).toContain('not configured');
     });
   });
 });

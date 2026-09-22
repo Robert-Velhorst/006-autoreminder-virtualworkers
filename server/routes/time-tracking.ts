@@ -1,10 +1,19 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../db';
-import { timeEntries } from '../../drizzle/schema';
+import { timeEntries, vaProfiles, type User } from '../../drizzle/schema';
 import { eq, and, desc, gte, lte, sql } from 'drizzle-orm';
+import { requireAuthenticated } from '../middleware/auth';
 
 const router = Router();
+router.use('/time-tracking', requireAuthenticated);
+
+export function timeTrackingOwnership(user: User, workerFounderId?: number | null) {
+  return {
+    vaId: user.id,
+    founderId: user.role === 'worker' ? workerFounderId ?? user.id : user.id,
+  };
+}
 
 function nonNegativeDurationMinutes(entry: { durationMinutes?: number | null }) {
   return Math.max(0, Number(entry.durationMinutes) || 0);
@@ -27,7 +36,7 @@ router.get('/time-tracking/active', async (req: any, res: Response) => {
     const activeTimer = await db.select()
       .from(timeEntries)
       .where(and(
-        eq(timeEntries.founderId, user.id),
+        eq(timeEntries.vaId, user.id),
         sql`${timeEntries.endTime} IS NULL`
       ))
       .orderBy(desc(timeEntries.startTime))
@@ -66,7 +75,7 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
     const existingActive = await db.select()
       .from(timeEntries)
       .where(and(
-        eq(timeEntries.founderId, user.id),
+        eq(timeEntries.vaId, user.id),
         sql`${timeEntries.endTime} IS NULL`
       ))
       .limit(1);
@@ -78,11 +87,19 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
       });
     }
 
-    // Create new time entry
+    const workerProfile = user.role === 'worker'
+      ? await db.select({ founderId: vaProfiles.founderId })
+        .from(vaProfiles)
+        .where(eq(vaProfiles.userId, user.id))
+        .limit(1)
+      : [];
+    const ownership = timeTrackingOwnership(user, workerProfile[0]?.founderId);
+
+    // Create new time entry. `vaId` is always the signed-in account, matching
+    // the operator timer and preventing workers from reading another worker's time.
     const result = await db.insert(timeEntries).values({
       taskId,
-      vaId: user.id, // Using user.id as vaId for now
-      founderId: user.id,
+      ...ownership,
       startTime: new Date(),
       notes: notes || null,
     });
@@ -90,7 +107,7 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
     // Fetch the created entry
     const newEntry = await db.select()
       .from(timeEntries)
-      .where(eq(timeEntries.founderId, user.id))
+      .where(eq(timeEntries.vaId, user.id))
       .orderBy(desc(timeEntries.id))
       .limit(1);
 
@@ -120,7 +137,7 @@ router.post('/time-tracking/stop', async (req: any, res: Response) => {
     const activeTimer = await db.select()
       .from(timeEntries)
       .where(and(
-        eq(timeEntries.founderId, user.id),
+        eq(timeEntries.vaId, user.id),
         sql`${timeEntries.endTime} IS NULL`
       ))
       .limit(1);
@@ -176,7 +193,7 @@ router.post('/time-tracking/pause', async (req: any, res: Response) => {
     const activeTimer = await db.select()
       .from(timeEntries)
       .where(and(
-        eq(timeEntries.founderId, user.id),
+        eq(timeEntries.vaId, user.id),
         sql`${timeEntries.endTime} IS NULL`
       ))
       .limit(1);
@@ -231,7 +248,7 @@ router.get('/time-tracking/task/:taskId', async (req: any, res: Response) => {
     const entries = await db.select()
       .from(timeEntries)
       .where(and(
-        eq(timeEntries.founderId, user.id),
+        eq(timeEntries.vaId, user.id),
         eq(timeEntries.taskId, taskId)
       ))
       .orderBy(desc(timeEntries.startTime));
@@ -270,7 +287,7 @@ router.get('/time-tracking/summary', async (req: any, res: Response) => {
 
     let query = db.select()
       .from(timeEntries)
-      .where(eq(timeEntries.founderId, user.id));
+      .where(eq(timeEntries.vaId, user.id));
 
     // If date range provided, filter by it
     if (startDate && endDate) {
@@ -281,7 +298,7 @@ router.get('/time-tracking/summary', async (req: any, res: Response) => {
       query = db.select()
         .from(timeEntries)
         .where(and(
-          eq(timeEntries.founderId, user.id),
+          eq(timeEntries.vaId, user.id),
           gte(timeEntries.startTime, start),
           lte(timeEntries.startTime, end)
         ));
@@ -350,7 +367,7 @@ router.get('/time-tracking/weekly-progress', async (req: any, res: Response) => 
     const weekEntries = await db.select()
       .from(timeEntries)
       .where(and(
-        eq(timeEntries.founderId, user.id),
+        eq(timeEntries.vaId, user.id),
         gte(timeEntries.startTime, startOfWeek),
         lte(timeEntries.startTime, endOfWeek)
       ));

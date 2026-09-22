@@ -11,7 +11,7 @@ import { getDb } from '../db';
 import { vaProfiles, timeEntries } from '../../drizzle/schema';
 import { eq, and, desc, gte, sql } from 'drizzle-orm';
 import { sendProactiveCheckIn } from './ai-chatbot-handler';
-import { postTrelloComment } from './trello-chatbot';
+import { isTrelloCommentAutomationEnabled, postTrelloComment } from './trello-chatbot';
 
 // Default grace period in minutes (15 minutes past expected update time)
 const DEFAULT_GRACE_PERIOD_MINUTES = 15;
@@ -30,6 +30,15 @@ let followUpConfig: FollowUpConfig = {
   respectWorkingHours: true,
   enableAIResponses: true,
 };
+
+// Proactive work can generate an LLM message before attempting a comment.
+// Keep the policy decision at the processor boundary so disabled outbound
+// automation also avoids that otherwise unnecessary model work.
+export function isProactiveFollowUpAutomationEnabled(
+  env: Record<string, string | undefined> = process.env,
+) {
+  return isTrelloCommentAutomationEnabled(env);
+}
 
 // Track pending follow-ups
 interface PendingFollowUp {
@@ -180,6 +189,11 @@ export function recordWorkerUpdate(cardId: string, vaId: number): void {
  * Check and send due follow-ups
  */
 export async function processPendingFollowUps(): Promise<number> {
+  if (!isProactiveFollowUpAutomationEnabled()) {
+    console.log('[ProactiveFollowup] Outbound automation is disabled; skipping pending follow-ups');
+    return 0;
+  }
+
   const now = new Date();
   let followUpsSent = 0;
   

@@ -114,12 +114,35 @@ function TrelloCallbackPage() {
 // Replaces Manus OAuth for local development. Uses username/password auth.
 
 function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [mode, setMode] = useState<'login' | 'register' | 'owner-setup'>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [setupToken, setSetupToken] = useState('');
+  const [ownerSetupAvailable, setOwnerSetupAvailable] = useState(false);
+  const [localPreviewAvailable, setLocalPreviewAvailable] = useState(false);
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (window.location.hostname !== '127.0.0.1' || window.location.port !== '3052') return;
+    let active = true;
+    void fetch('/__local-preview/status')
+      .then(response => response.ok ? response.json() : null)
+      .then(result => { if (active) setLocalPreviewAvailable(result?.available === true); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void fetch('/api/auth/owner-bootstrap/status')
+      .then((response) => response.ok ? response.json() : { available: false })
+      .then((result) => { if (active) setOwnerSetupAvailable(Boolean(result.available)); })
+      .catch(() => { if (active) setOwnerSetupAvailable(false); });
+    return () => { active = false; };
+  }, []);
 
   const handleTrelloLogin = async () => {
     setLoading(true);
@@ -130,9 +153,22 @@ function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
         const err = await res.json();
         throw new Error(err.error || 'Failed to fetch Trello key');
       }
-      const { apiKey } = await res.json();
-      const redirectUrl = `${window.location.origin}/trello-callback`;
-      window.location.href = `https://trello.com/1/authorize?expiration=1day&name=VA+Dashboard&scope=read&response_type=token&key=${apiKey}&return_url=${encodeURIComponent(redirectUrl)}`;
+      const { apiKey, returnUrl } = await res.json() as { apiKey: string; returnUrl?: string | null };
+      const redirectUrl = returnUrl || (import.meta.env.DEV ? `${window.location.origin}/trello-callback` : null);
+      if (!redirectUrl) {
+        throw new Error('Trello sign-in is not configured with a public callback URL. Set TRELLO_LOGIN_RETURN_URL or PUBLIC_URL.');
+      }
+      const authorizationUrl = new URL('https://trello.com/1/authorize');
+      authorizationUrl.search = new URLSearchParams({
+        expiration: '1day',
+        name: 'VA Dashboard',
+        scope: 'read',
+        response_type: 'token',
+        callback_method: 'fragment',
+        key: apiKey,
+        return_url: redirectUrl,
+      }).toString();
+      window.location.assign(authorizationUrl.toString());
     } catch (e) {
       console.error('Trello redirect error:', e);
       const errMsg = e instanceof Error ? e.message : 'Failed to redirect to Trello';
@@ -148,10 +184,20 @@ function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
     setLoading(true);
 
     try {
-      const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/register';
+      if (mode === 'owner-setup' && password !== confirmPassword) {
+        setError('The passwords do not match');
+        return;
+      }
+      const endpoint = mode === 'login'
+        ? '/api/auth/login'
+        : mode === 'register'
+          ? '/api/auth/register'
+          : '/api/auth/owner-bootstrap';
       const body = mode === 'login'
         ? { username, password }
-        : { username, password, name };
+        : mode === 'register'
+          ? { username, password, name }
+          : { token: setupToken, password };
 
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -167,7 +213,7 @@ function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
         setError(errorMessage);
         
         // Show error toast
-        if (mode === 'register') {
+        if (mode === 'register' || mode === 'owner-setup') {
           toast.error('Registration Failed', {
             description: errorMessage,
             duration: 5000,
@@ -185,6 +231,11 @@ function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
       if (mode === 'register') {
         toast.success('Account Created Successfully!', {
           description: `Welcome, ${name || username}! Redirecting to dashboard...`,
+          duration: 3000,
+        });
+      } else if (mode === 'owner-setup') {
+        toast.success('Owner Access Configured', {
+          description: 'The one-time setup is now closed.',
           duration: 3000,
         });
       } else {
@@ -216,7 +267,7 @@ function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
         <div className="space-y-1 text-center">
           <h1 className="text-2xl font-semibold tracking-tight">VA Dashboard</h1>
           <p className="text-sm text-muted-foreground">
-            {mode === 'login' ? 'Sign in to your account' : 'Create a new account'}
+            {mode === 'login' ? 'Sign in to your account' : mode === 'register' ? 'Create a new account' : 'Configure one-time owner access'}
           </p>
         </div>
 
@@ -234,17 +285,23 @@ function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
             </div>
           )}
 
-          <div className="space-y-1.5">
+          {mode === 'owner-setup' && <div className="space-y-1.5">
+            <Label htmlFor="setup-token">Setup token</Label>
+            <Input id="setup-token" type="password" autoComplete="one-time-code" placeholder="Enter the local setup token" value={setupToken} onChange={e => setSetupToken(e.target.value)} disabled={loading} required />
+          </div>}
+
+          {mode !== 'owner-setup' && <div className="space-y-1.5">
             <Label htmlFor="username">Username</Label>
             <Input
               id="username"
               placeholder="Enter username"
+              autoComplete="username"
               value={username}
               onChange={e => setUsername(e.target.value)}
               disabled={loading}
               required
             />
-          </div>
+          </div>}
 
           <div className="space-y-1.5">
             <Label htmlFor="password">Password</Label>
@@ -252,12 +309,19 @@ function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
               id="password"
               type="password"
               placeholder="Enter password"
+              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               value={password}
               onChange={e => setPassword(e.target.value)}
               disabled={loading}
+              minLength={mode === 'login' ? undefined : 12}
               required
             />
           </div>
+
+          {mode === 'owner-setup' && <div className="space-y-1.5">
+            <Label htmlFor="confirm-password">Confirm password</Label>
+            <Input id="confirm-password" type="password" autoComplete="new-password" placeholder="Repeat the password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} disabled={loading} minLength={12} required />
+          </div>}
 
           {error && (
             <p className="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md">
@@ -267,8 +331,12 @@ function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
 
           <Button type="submit" className="w-full" disabled={loading}>
             {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            {mode === 'login' ? 'Sign in' : 'Create account'}
+            {mode === 'login' ? 'Sign in' : mode === 'register' ? 'Create account' : 'Configure owner access'}
           </Button>
+          {mode === 'login' && localPreviewAvailable && <div className="space-y-2">
+            <Button type="button" variant="outline" className="w-full" disabled={loading} onClick={() => window.location.assign('http://127.0.0.1:3053/worker')}>Overslaan - lokale toegang</Button>
+            <p className="text-xs text-muted-foreground">Alleen op deze computer. Je werkt met echte gegevens; opgeslagen wijzigingen zijn echt.</p>
+          </div>}
 
           {mode === 'login' && (
             <>
@@ -293,9 +361,19 @@ function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
                 </svg>
                 Sign in with Trello
               </Button>
+              <p className="text-center text-xs text-muted-foreground">
+                Linked worker accounts sign in with Trello.
+              </p>
             </>
           )}
         </form>
+
+        {mode === 'login' && ownerSetupAvailable && <Button variant="ghost" className="w-full" onClick={() => { setMode('owner-setup'); setError(null); }}>
+          Set up owner access
+        </Button>}
+        {mode === 'owner-setup' && <Button variant="ghost" className="w-full" onClick={() => { setMode('login'); setError(null); }}>
+          Back to sign in
+        </Button>}
 
         {import.meta.env.DEV && <p className="text-center text-sm text-muted-foreground">
           {mode === 'login' ? (

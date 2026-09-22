@@ -67,7 +67,7 @@ export function registerBrowserTabRoutes(app: Express) {
       const invalid = error instanceof z.ZodError;
       res.status(invalid ? 400 : 503).json({
         success: false,
-        error: invalid ? "Invalid browser inventory" : error instanceof Error ? error.message : "Browser inventory failed",
+        error: invalid ? "Invalid browser inventory" : "Browser inventory could not be recorded. Retry shortly.",
       });
     }
   });

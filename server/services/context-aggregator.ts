@@ -16,9 +16,16 @@
 import { getDb } from '../db';
 import { vaProfiles, timeEntries, atisCardUnderstanding } from '../../drizzle/schema';
 import { eq, and, desc } from 'drizzle-orm';
+import { fetchWithRetry } from '../utils/retry';
 
-const TRELLO_API_KEY = process.env.TRELLO_API_KEY;
-const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
+function trelloUrl(path: string, parameters: Record<string, string>): string {
+  const key = process.env.TRELLO_API_KEY?.trim();
+  const token = process.env.TRELLO_TOKEN?.trim();
+  if (!key || !token) {
+    throw new Error('Trello credentials are not configured');
+  }
+  return `https://api.trello.com/1/${path}?${new URLSearchParams({ key, token, ...parameters }).toString()}`;
+}
 
 interface CardContext {
   cardId: string;
@@ -81,9 +88,14 @@ interface AtisContext {
  * Fetch card details from Trello API
  */
 async function fetchCardFromTrello(cardId: string): Promise<any> {
-  const url = `https://api.trello.com/1/cards/${cardId}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&fields=name,desc,due,labels,idBoard,idList&checklists=all&actions=commentCard&actions_limit=10`;
+  const url = trelloUrl(`cards/${encodeURIComponent(cardId)}`, {
+    fields: 'name,desc,due,labels,idBoard,idList',
+    checklists: 'all',
+    actions: 'commentCard',
+    actions_limit: '10',
+  });
   
-  const response = await fetch(url);
+  const response = await fetchWithRetry(url, undefined, { maxRetries: 0 });
   if (!response.ok) {
     throw new Error(`Failed to fetch card from Trello: ${response.status}`);
   }
@@ -95,10 +107,10 @@ async function fetchCardFromTrello(cardId: string): Promise<any> {
  * Fetch board name from Trello
  */
 async function fetchBoardName(boardId: string): Promise<string> {
-  const url = `https://api.trello.com/1/boards/${boardId}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&fields=name`;
+  const url = trelloUrl(`boards/${encodeURIComponent(boardId)}`, { fields: 'name' });
   
   try {
-    const response = await fetch(url);
+    const response = await fetchWithRetry(url, undefined, { maxRetries: 0 });
     if (response.ok) {
       const data = await response.json();
       return data.name;
@@ -113,10 +125,10 @@ async function fetchBoardName(boardId: string): Promise<string> {
  * Fetch list name from Trello
  */
 async function fetchListName(listId: string): Promise<string> {
-  const url = `https://api.trello.com/1/lists/${listId}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&fields=name`;
+  const url = trelloUrl(`lists/${encodeURIComponent(listId)}`, { fields: 'name' });
   
   try {
-    const response = await fetch(url);
+    const response = await fetchWithRetry(url, undefined, { maxRetries: 0 });
     if (response.ok) {
       const data = await response.json();
       return data.name;

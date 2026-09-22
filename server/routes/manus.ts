@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { protectedProcedure, router, publicProcedure } from "../_core/trpc";
+import { adminProcedure, operatorAccountProcedure, router, publicProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import {
   timeEntries,
@@ -19,6 +19,7 @@ import {
   emailTasks,
   cardSnoozes,
   vaProfiles,
+  aptlssPlans,
 } from "../../drizzle/schema";
 import { eq, and, desc, asc, gte, lte, sql, isNull, isNotNull } from "drizzle-orm";
 import { collectComplianceSnapshot } from "../services/manus-scheduler";
@@ -26,10 +27,11 @@ import { parseDateKey } from "../utils/date-only";
 import { calculateCompliancePercentage } from "../complianceMetrics";
 import { dateKeyInTimeZone, dateWindowInTimeZone } from "../../shared/workerTime";
 import { resolveWorkerOperatorContext } from "../workerOperatorContext";
+import { canStartTimerForCard } from "../timerAccess";
 
 // ─── Payment Cycles Router ──────────────────────────────────────────────────
 export const paymentRouter = router({
-  getAllCycles: protectedProcedure.query(async ({ ctx }) => {
+  getAllCycles: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return [];
     const founderId = Number(ctx.user.id);
@@ -38,7 +40,7 @@ export const paymentRouter = router({
       .orderBy(asc(paymentCycles.cycleStart));
   }),
 
-  getCurrentCycle: protectedProcedure.query(async ({ ctx }) => {
+  getCurrentCycle: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return null;
     const founderId = Number(ctx.user.id);
@@ -51,27 +53,40 @@ export const paymentRouter = router({
     return all[0] ?? null;
   }),
 
-  markPaid: protectedProcedure
+  markPaid: adminProcedure
     .input(z.object({ cycleId: z.number() }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const founderId = Number(ctx.user.id);
 
-      await db
-        .update(paymentCycles)
-        .set({ isPaid: true, paidAt: new Date(), paidBy: String(ctx.user.openId) })
-        .where(and(eq(paymentCycles.id, input.cycleId), eq(paymentCycles.founderId, founderId)));
-
-      // Fetch current cycle
-      const cycle = await db
+      const [cycle] = await db
         .select()
         .from(paymentCycles)
-        .where(eq(paymentCycles.id, input.cycleId))
+        .where(and(eq(paymentCycles.id, input.cycleId), eq(paymentCycles.founderId, founderId)))
         .limit(1);
+      if (!cycle) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Payment cycle not found" });
+      }
+      if (cycle.isPaid) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Payment cycle is already settled" });
+      }
 
-      if (cycle[0]) {
-        const currentEnd = new Date(cycle[0].cycleEnd);
+      const updateResult = await db
+        .update(paymentCycles)
+        .set({ isPaid: true, paidAt: new Date(), paidBy: String(ctx.user.openId) })
+        .where(and(
+          eq(paymentCycles.id, input.cycleId),
+          eq(paymentCycles.founderId, founderId),
+          eq(paymentCycles.isPaid, false),
+        ));
+      const updateHeader = Array.isArray(updateResult) ? updateResult[0] : updateResult;
+      if (Number((updateHeader as { affectedRows?: unknown }).affectedRows ?? 0) !== 1) {
+        throw new TRPCError({ code: "CONFLICT", message: "Payment cycle was already settled" });
+      }
+
+      {
+        const currentEnd = new Date(cycle.cycleEnd);
         const nextStart = new Date(currentEnd);
         nextStart.setDate(nextStart.getDate() + 1);
         const nextEnd = new Date(nextStart);
@@ -96,7 +111,7 @@ export const paymentRouter = router({
 
 // ─── Weekly Pay Log Router ──────────────────────────────────────────────────
 export const payLogRouter = router({
-  getAll: protectedProcedure
+  getAll: operatorAccountProcedure
     .input(z.object({ limit: z.number().optional(), vaId: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -112,7 +127,7 @@ export const payLogRouter = router({
         .limit(input.limit ?? 10);
     }),
 
-  getByWeek: protectedProcedure
+  getByWeek: operatorAccountProcedure
     .input(z.object({ weekStart: z.string(), vaId: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -128,7 +143,7 @@ export const payLogRouter = router({
       return results[0] ?? null;
     }),
 
-  upsert: protectedProcedure
+  upsert: adminProcedure
     .input(z.object({
       vaId: z.number().optional(),
       weekStart: z.string(),
@@ -155,8 +170,7 @@ export const payLogRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const founderId = Number(ctx.user.id);
-      const isWorker = ctx.user.role === "worker";
-      const vaId = isWorker ? founderId : (input.vaId || founderId);
+      const vaId = input.vaId || founderId;
 
       const totalMerits = input.meritM1 + input.meritM2 + input.meritM3 + input.meritStreak;
       const totalDemerits = input.demeritD1 + input.demeritD2 + input.demeritD3 + input.demeritD4 +
@@ -209,7 +223,7 @@ export const payLogRouter = router({
 
 // ─── Daily Triage Router ──────────────────────────────────────────────────────
 export const triageRouter = router({
-  getByDate: protectedProcedure
+  getByDate: operatorAccountProcedure
     .input(z.object({ date: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -221,7 +235,7 @@ export const triageRouter = router({
       return rows[0] ?? null;
     }),
 
-  upsert: protectedProcedure
+  upsert: operatorAccountProcedure
     .input(z.object({
       triageDate: z.string(),
       step1Done: z.boolean().optional(),
@@ -272,7 +286,7 @@ export const triageRouter = router({
       }
     }),
 
-  getRecent: protectedProcedure
+  getRecent: operatorAccountProcedure
     .input(z.object({ limit: z.number().optional(), vaId: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -290,7 +304,7 @@ export const triageRouter = router({
 
 // ─── ON-HOLD Daily Checks Router ─────────────────────────────────────────────
 export const onHoldChecksRouter = router({
-  getByDate: protectedProcedure
+  getByDate: operatorAccountProcedure
     .input(z.object({ date: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -301,7 +315,7 @@ export const onHoldChecksRouter = router({
       );
     }),
 
-  markChecked: protectedProcedure
+  markChecked: operatorAccountProcedure
     .input(z.object({
       cardId: z.string(),
       cardName: z.string(),
@@ -344,7 +358,7 @@ export const onHoldChecksRouter = router({
 
 // ─── Streak Router ──────────────────────────────────────────────────────────
 export const streakRouter = router({
-  get: protectedProcedure
+  get: operatorAccountProcedure
     .input(z.object({ vaId: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -385,7 +399,7 @@ export const streakRouter = router({
       return { currentStreak, longestStreak };
     }),
 
-  record: protectedProcedure
+  record: operatorAccountProcedure
     .input(z.object({
       streakDate: z.string(),
       completedBeforeDeadline: z.boolean(),
@@ -419,7 +433,7 @@ export const streakRouter = router({
 
 // ─── Sunday Checklist Router ───────────────────────────────────────────────
 export const sundayRouter = router({
-  getByDate: protectedProcedure
+  getByDate: operatorAccountProcedure
     .input(z.object({ date: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -431,7 +445,7 @@ export const sundayRouter = router({
       return rows[0] ?? null;
     }),
 
-  upsert: protectedProcedure
+  upsert: operatorAccountProcedure
     .input(z.object({
       sundayDate: z.string(),
       trelloArchived: z.boolean().optional(),
@@ -475,7 +489,7 @@ export const sundayRouter = router({
 
 // ─── Time Tracker Router ────────────────────────────────────────────────────
 export const timerRouter = router({
-  start: protectedProcedure
+  start: operatorAccountProcedure
     .input(z.object({
       cardId: z.string(),
       cardName: z.string(),
@@ -487,6 +501,17 @@ export const timerRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const vaId = Number(ctx.user.id);
+      const workerPlan = ctx.user.role === "worker"
+        ? await db.select({ cardId: aptlssPlans.cardId }).from(aptlssPlans)
+          .where(and(eq(aptlssPlans.vaId, vaId), eq(aptlssPlans.cardId, input.cardId)))
+          .limit(1)
+        : [];
+      if (!canStartTimerForCard(ctx.user.role, Boolean(workerPlan[0]))) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "You can only start a timer for a card in your work queue",
+        });
+      }
       const profiles = await db.select({ founderId: vaProfiles.founderId })
         .from(vaProfiles)
         .where(eq(vaProfiles.userId, vaId))
@@ -523,7 +548,7 @@ export const timerRouter = router({
       return { id: (result as any).insertId, cardId: input.cardId, cardName: input.cardName, startedAt: startTime };
     }),
 
-  stop: protectedProcedure
+  stop: operatorAccountProcedure
     .input(z.object({ cardId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
@@ -549,7 +574,7 @@ export const timerRouter = router({
       return { ...running[0], stoppedAt: now, durationSeconds };
     }),
 
-  getActive: protectedProcedure.query(async ({ ctx }) => {
+  getActive: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return null;
     const vaId = Number(ctx.user.id);
@@ -568,7 +593,7 @@ export const timerRouter = router({
       : null;
   }),
 
-  getByCard: protectedProcedure
+  getByCard: operatorAccountProcedure
     .input(z.object({ cardId: z.string(), limit: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -579,7 +604,7 @@ export const timerRouter = router({
       ).orderBy(desc(timeEntries.startTime)).limit(input.limit ?? 20);
     }),
 
-  getDailySummary: protectedProcedure
+  getDailySummary: operatorAccountProcedure
     .input(z.object({ date: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -621,7 +646,7 @@ export const timerRouter = router({
       return Array.from(map.values()).sort((a, b) => b.totalSeconds - a.totalSeconds);
     }),
 
-  getWeeklyTotal: protectedProcedure
+  getWeeklyTotal: operatorAccountProcedure
     .input(z.object({ startDate: z.string(), endDate: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -648,7 +673,7 @@ export const timerRouter = router({
       };
     }),
 
-  delete: protectedProcedure
+  delete: operatorAccountProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
@@ -658,7 +683,7 @@ export const timerRouter = router({
       return { success: true };
     }),
 
-  updateEntry: protectedProcedure
+  updateEntry: operatorAccountProcedure
     .input(z.object({
       id: z.number(),
       durationSeconds: z.number().int().min(0).max(86400),
@@ -685,7 +710,7 @@ export const timerRouter = router({
       return { success: true, id: input.id, durationSeconds: input.durationSeconds, stoppedAt: newStoppedAt };
     }),
 
-  getEntriesForCard: protectedProcedure
+  getEntriesForCard: operatorAccountProcedure
     .input(z.object({ cardId: z.string(), date: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -714,7 +739,7 @@ export const timerRouter = router({
       }));
     }),
 
-  getWeeklyBreakdown: protectedProcedure
+  getWeeklyBreakdown: operatorAccountProcedure
     .input(z.object({ startDate: z.string(), endDate: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -786,7 +811,7 @@ function normalizeComplianceSnapshot(row: ComplianceSnapshot) {
 }
 
 export const complianceRouter = router({
-  getHistory: protectedProcedure
+  getHistory: operatorAccountProcedure
     .input(z.object({ limit: z.number().optional(), vaId: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -802,7 +827,7 @@ export const complianceRouter = router({
       return rows.map(normalizeComplianceSnapshot);
     }),
 
-  getRollingAvg: protectedProcedure
+  getRollingAvg: operatorAccountProcedure
     .input(z.object({ days: z.number().int().min(1).max(365).default(7) }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -821,7 +846,7 @@ export const complianceRouter = router({
       };
     }),
 
-  getWeekAvg: protectedProcedure
+  getWeekAvg: operatorAccountProcedure
     .input(z.object({ weekStart: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -844,7 +869,7 @@ export const complianceRouter = router({
       };
     }),
 
-  recordNow: protectedProcedure.mutation(async ({ ctx }) => {
+  recordNow: operatorAccountProcedure.mutation(async ({ ctx }) => {
     const db = await getDb();
     if (!db) {
       throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
@@ -864,14 +889,14 @@ export const complianceRouter = router({
 
 // ─── Email Inbox Router ──────────────────────────────────────────────────────
 export const emailInboxRouter = router({
-  getAll: protectedProcedure.query(async ({ ctx }) => {
+  getAll: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return [];
     const vaId = Number(ctx.user.id);
     return db.select().from(emailTasks).where(eq(emailTasks.vaId, vaId)).orderBy(desc(emailTasks.receivedAt));
   }),
 
-  getPending: protectedProcedure.query(async ({ ctx }) => {
+  getPending: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return [];
     const vaId = Number(ctx.user.id);
@@ -880,7 +905,7 @@ export const emailInboxRouter = router({
     ).orderBy(desc(emailTasks.receivedAt));
   }),
 
-  getPendingCount: protectedProcedure.query(async ({ ctx }) => {
+  getPendingCount: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return { count: 0 };
     const vaId = Number(ctx.user.id);
@@ -890,7 +915,7 @@ export const emailInboxRouter = router({
     return { count: Number(results[0]?.count || 0) };
   }),
 
-  updateStatus: protectedProcedure
+  updateStatus: operatorAccountProcedure
     .input(z.object({
       id: z.number().int(),
       status: z.enum(["pending", "processed", "archived"]),
@@ -914,7 +939,7 @@ export const emailInboxRouter = router({
       return { success: true };
     }),
 
-  archiveAll: protectedProcedure.mutation(async ({ ctx }) => {
+  archiveAll: operatorAccountProcedure.mutation(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
     const vaId = Number(ctx.user.id);
@@ -924,7 +949,7 @@ export const emailInboxRouter = router({
     return { success: true, archived: (result as any).affectedRows || 0 };
   }),
 
-  upsertBatch: protectedProcedure
+  upsertBatch: operatorAccountProcedure
     .input(z.array(z.object({
       gmailMessageId: z.string(),
       gmailThreadId: z.string(),
@@ -964,7 +989,7 @@ export const emailInboxRouter = router({
 
 // ─── Card Snoozes Router ─────────────────────────────────────────────────────
 export const cardSnoozeRouter = router({
-  snooze: protectedProcedure
+  snooze: operatorAccountProcedure
     .input(z.object({
       cardId: z.string(),
       cardName: z.string(),
@@ -991,7 +1016,7 @@ export const cardSnoozeRouter = router({
       return { success: true };
     }),
 
-  cancel: protectedProcedure
+  cancel: operatorAccountProcedure
     .input(z.object({ cardId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
@@ -1003,7 +1028,7 @@ export const cardSnoozeRouter = router({
       return { success: true };
     }),
 
-  getActive: protectedProcedure.query(async ({ ctx }) => {
+  getActive: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return [];
     const vaId = Number(ctx.user.id);
@@ -1012,7 +1037,7 @@ export const cardSnoozeRouter = router({
     );
   }),
 
-  getForCard: protectedProcedure
+  getForCard: operatorAccountProcedure
     .input(z.object({ cardId: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -1024,7 +1049,7 @@ export const cardSnoozeRouter = router({
       return results[0] ?? null;
     }),
 
-  getSnoozedIds: protectedProcedure.query(async ({ ctx }) => {
+  getSnoozedIds: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return { cardIds: [] };
     const vaId = Number(ctx.user.id);

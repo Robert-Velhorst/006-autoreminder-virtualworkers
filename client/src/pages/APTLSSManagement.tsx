@@ -735,13 +735,14 @@ export default function APTLSSManagement() {
 
   //  Job details auto-refresh
   useEffect(() => {
-    if (!selectedJobId) return;
+    const selectedJob = history.find((job: any) => job.id === selectedJobId);
+    if (!selectedJobId || selectedJob?.status !== "running") return;
     const id = window.setInterval(
       () => void toggleJobDetails(selectedJobId, true),
       HISTORY_REFRESH_MS
     );
     return () => window.clearInterval(id);
-  }, [selectedJobId]);
+  }, [selectedJobId, history]);
 
   //  Generation status polling
   useEffect(() => {

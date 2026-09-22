@@ -7,6 +7,10 @@ import metricsRoutes from './routes/metrics';
 import batchOperationRoutes from './routes/batch-operations';
 import advancedSchedulingRoutes from './routes/advanced-scheduling';
 import vaManagementRoutes from './routes/va-management';
+import aptlssRoutes from './routes/aptlss';
+import trelloBoardsRoutes from './routes/trello-boards';
+import performanceRoutes from './routes/performance-optimization';
+import { readFileSync } from 'node:fs';
 
 const worker = {
   id: 42,
@@ -27,6 +31,9 @@ function appWithUser(user?: typeof worker | { id: number; openId: string; role: 
   app.use('/batch-operations', batchOperationRoutes);
   app.use('/scheduling', advancedSchedulingRoutes);
   app.use('/va', vaManagementRoutes);
+  app.use('/legacy', aptlssRoutes);
+  app.use('/trello-boards', trelloBoardsRoutes);
+  app.use('/performance', performanceRoutes);
   return app;
 }
 
@@ -75,5 +82,34 @@ describe('legacy API hardening', () => {
 
     const adminApp = appWithUser({ id: 1, openId: 'admin-1', role: 'admin' });
     await request(adminApp).get('/va/worker/profile').expect(403);
+  });
+
+  it('keeps the legacy APTLSS administration surface out of the worker portal', async () => {
+    await request(appWithUser()).get('/legacy/aptlss/history').expect(401);
+    await request(appWithUser(worker)).get('/legacy/aptlss/history').expect(403);
+  });
+
+  it('does not intercept unrelated API routes before tRPC handles them', async () => {
+    const app = express();
+    app.use('/api', aptlssRoutes);
+    app.get('/api/trpc/auth.me', (_req, res) => res.json({ result: { data: null } }));
+
+    await request(app)
+      .get('/api/trpc/auth.me')
+      .expect(200, { result: { data: null } });
+  });
+
+  it('keeps Trello checklist completion in the single active Trello router', () => {
+    const legacySource = readFileSync(new URL('./routes/aptlss.ts', import.meta.url), 'utf8');
+    const activeSource = readFileSync(new URL('./routes/trello-config.ts', import.meta.url), 'utf8');
+
+    expect(legacySource).not.toContain("router.put('/trello/tasks/:taskId/complete'");
+    expect(activeSource).toContain("router.put('/tasks/:taskId/complete'");
+  });
+
+  it('keeps integration inventory and system performance admin-only', async () => {
+    await request(appWithUser()).get('/trello-boards').expect(401);
+    await request(appWithUser(worker)).get('/trello-boards').expect(403);
+    await request(appWithUser(worker)).get('/performance/metrics').expect(403);
   });
 });

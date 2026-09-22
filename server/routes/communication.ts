@@ -4,7 +4,12 @@ import { taskAssignments, vaProfiles } from "../../drizzle/schema";
 import { getDb } from "../db";
 import { requireAuthenticated, requestUser, resolveWorkerProfileId } from "../middleware/auth";
 import { storeConversation } from "../services/chatbot-history";
-import { postTrelloComment } from "../services/trello-chatbot";
+import {
+  isTrelloCommentAutomationEnabled,
+  postTrelloComment,
+  TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE,
+} from "../services/trello-chatbot";
+import { fetchAuthorizedTrelloCard, TrelloAccessError } from "../trelloCardAccess";
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -20,11 +25,29 @@ router.post("/ask-founder", async (req, res) => {
   if (!db) return res.status(503).json({ error: "Database unavailable" });
 
   try {
+    const user = requestUser(req)!;
     const [worker] = await db.select().from(vaProfiles).where(eq(vaProfiles.id, workerId)).limit(1);
     if (!worker) return res.status(404).json({ error: "Worker profile not found" });
 
+    const [assignment] = await db.select({ id: taskAssignments.id })
+      .from(taskAssignments)
+      .where(and(
+        eq(taskAssignments.taskId, taskId),
+        eq(taskAssignments.vaId, workerId),
+      ))
+      .limit(1);
+    if (!assignment) {
+      return res.status(404).json({ error: "Task is not assigned to this worker" });
+    }
+
+    await fetchAuthorizedTrelloCard(user, taskId, { fields: 'idMembers' });
+
     const normalizedQuestion = question.trim();
     const commentText = `**[Worker Question]**\n${worker.name} asked:\n"${normalizedQuestion}"`;
+
+    if (!isTrelloCommentAutomationEnabled()) {
+      return res.status(409).json({ success: false, error: TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE });
+    }
     const posted = await postTrelloComment(taskId, commentText);
 
     await storeConversation({
@@ -43,6 +66,9 @@ router.post("/ask-founder", async (req, res) => {
     return res.json({ success: true });
   } catch (error) {
     console.error("[Communication] Error processing ask-founder:", error);
+    if (error instanceof TrelloAccessError) {
+      return res.status(error.status).json({ error: error.message });
+    }
     return res.status(500).json({ error: "Failed to process question" });
   }
 });

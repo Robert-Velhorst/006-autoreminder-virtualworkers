@@ -26,14 +26,31 @@ import { getDb } from "./db";
 import { DecisionOutcomeError, getDecisionHistory, recordDecisionOutcome } from "./decisionOutcomesDb";
 import { generateOperatorDailyPlan, getOperatorDailyPlan, updateOperatorDailyPlan, type OperatorDailyPlanPayload } from "./operatorDailyPlan";
 import {
+  clearGoogleRefreshToken,
+  getGoogleEvidenceStatus,
+  syncWorkerGoogleEvidence,
+  updateGoogleEvidenceSettings,
+} from "./googleEvidence";
+import {
   buildOperatorEvidenceSummary,
   type OperatorAssessmentEvidence,
   type OperatorEvidenceSourceKey,
   type OperatorIntelligenceSnapshot,
 } from "./operatorEvidence";
 import { protectedProcedure, router } from "./_core/trpc";
+import { indexWorkQueueSteps } from "./operatorWorkQueueIndex";
 import { resolveWorkerOperatorContext } from "./workerOperatorContext";
 import { interpretWaitingReasonForWorker } from "./workerWaitingReason";
+import { canRecordWaitingReasonForCard } from "./timerAccess";
+import { getManagerStatus, runManager, submitManagerUpdate, updateManagerPolicy } from "./aptlssManagerService";
+import { closeManagerTrial, getManagerReviewInbox, managerCorrectionRevokeInputSchema, managerReviewInboxInputSchema, managerReviewInputSchema, managerTrialInputSchema, recordManagerReview, restartManagerTrial, restoreManagerPlan, revokeManagerCorrection, setManagerMode } from "./aptlssManagerReviewService";
+import { AptlssEvidenceGraphError, createEvidenceConflict, getCardEvidence, getOpenVerificationFollowups, recordWorkerEvidenceAssertion, resolveVerificationFollowup } from "./aptlssEvidenceGraphDb";
+import { assertManagerPilotWorker } from "./aptlssManagerPilot";
+
+const managerReviewer = protectedProcedure.use(async ({ ctx, next }) => {
+  if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Founder/admin access is required" });
+  return next({ ctx });
+});
 
 const operatorProcedure = protectedProcedure.use(async ({ ctx, next }) => {
   if (ctx.user.role !== "worker") {
@@ -115,22 +132,79 @@ const dailyPlanPayloadSchema = z.object({
 });
 
 export const operatorRouter = router({
+  getManagerReviewInbox: managerReviewer.input(managerReviewInboxInputSchema.optional())
+    .query(({ ctx, input }) => getManagerReviewInbox(ctx.user.id, input?.vaId, input?.page)),
+  recordManagerReview: managerReviewer.input(managerReviewInputSchema)
+    .mutation(({ ctx, input }) => recordManagerReview(ctx.user.id, input)),
+  closeManagerTrial: managerReviewer.input(managerTrialInputSchema)
+    .mutation(({ ctx, input }) => closeManagerTrial(ctx.user.id, input)),
+  restartManagerTrial: managerReviewer.input(managerTrialInputSchema)
+    .mutation(({ ctx, input }) => restartManagerTrial(ctx.user.id, input)),
+  revokeManagerCorrection: managerReviewer.input(managerCorrectionRevokeInputSchema)
+    .mutation(({ ctx, input }) => revokeManagerCorrection(ctx.user.id, input)),
+  setManagerMode: managerReviewer.input(z.object({ vaId: z.number().int().positive(), mode: z.enum(["shadow", "active"]) }))
+    .mutation(({ ctx, input }) => setManagerMode(ctx.user.id, input.vaId, input.mode)),
+  restoreManagerPlan: managerReviewer.input(z.object({ vaId: z.number().int().positive(), runId: z.number().int().positive() }))
+    .mutation(({ ctx, input }) => restoreManagerPlan(ctx.user.id, input.vaId, input.runId)),
+  runManagerForReview: managerReviewer.input(z.object({ vaId: z.number().int().positive() }))
+    .mutation(({ input }) => runManager(input.vaId, "founder_review")),
+  getManagerStatus: operatorProcedure.query(({ ctx }) => getManagerStatus(Number(ctx.user.id))),
+  runManager: workerMutation.input(z.object({ trigger: z.enum(["manual", "worker_update"]).optional() }).optional())
+    .mutation(({ ctx, input }) => runManager(Number(ctx.user.id), input?.trigger ?? "manual")),
+  updateManagerPolicy: workerMutation.input(z.object({ enabled: z.boolean(), intervalMinutes: z.number().int().min(1).max(60) }).strict())
+    .mutation(({ ctx, input }) => updateManagerPolicy(Number(ctx.user.id), input)),
+  submitManagerUpdate: workerMutation.input(z.object({ cardId: z.string().min(1), detail: z.string().trim().min(3).max(8000), interventionId: z.string().optional() }))
+    .mutation(({ ctx, input }) => submitManagerUpdate(Number(ctx.user.id), input.cardId, input.detail, input.interventionId)),
+  getCardEvidence: operatorProcedure.input(z.object({ cardId: z.string().min(1), limit: z.number().int().min(1).max(100).default(30) }))
+    .query(({ ctx, input }) => getCardEvidence(ctx.user.id, input.cardId, input.limit)),
+  getVerificationFollowups: operatorProcedure.input(z.object({ cardId: z.string().min(1).optional() }).optional())
+    .query(({ ctx, input }) => getOpenVerificationFollowups(ctx.user.id, input?.cardId)),
+  recordEvidenceAssertion: workerMutation.input(z.object({ cardId: z.string().min(1).optional(), title: z.string().trim().min(3).max(512), detail: z.string().trim().min(3).max(8000) }))
+    .mutation(async ({ ctx, input }) => {
+      assertManagerPilotWorker(ctx.user.id);
+      try {
+        return await recordWorkerEvidenceAssertion({ ...input, vaId: ctx.user.id, recordedBy: ctx.user.openId });
+      } catch (error) {
+        if (error instanceof AptlssEvidenceGraphError) throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+        throw error;
+      }
+    }),
+  createEvidenceConflict: workerMutation.input(z.object({ sourceEvidenceId: z.number().int().positive(), assertedEvidenceId: z.number().int().positive(), cardId: z.string().min(1).optional(), question: z.string().trim().min(3).max(4000) }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await createEvidenceConflict({ ...input, vaId: ctx.user.id, createdBy: ctx.user.openId });
+      } catch (error) {
+        if (error instanceof AptlssEvidenceGraphError) throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+        throw error;
+      }
+    }),
+  resolveVerificationFollowup: workerMutation.input(z.object({ followupId: z.number().int().positive(), resolution: z.string().trim().min(3).max(4000), sourceEvidenceId: z.number().int().positive().optional(), sourceQuote: z.string().trim().min(3).max(4000).optional() }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        const result = await resolveVerificationFollowup({ ...input, vaId: ctx.user.id, resolvedBy: ctx.user.openId });
+        await runManager(ctx.user.id, "worker_update").catch(() => null);
+        return result;
+      } catch (error) {
+        if (error instanceof AptlssEvidenceGraphError) throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+        throw error;
+      }
+    }),
   getContext: operatorProcedure.query(async ({ ctx }) => resolveWorkerOperatorContext(ctx.user)),
 
   getWorkQueueContext: operatorProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Database unavailable" });
     const vaId = Number(ctx.user.id);
-    const [plans, states, scores, steps, waitingReasons] = await Promise.all([
+    const [plans, waitingReasons] = await Promise.all([
       db.select().from(aptlssPlans).where(eq(aptlssPlans.vaId, vaId)),
-      db.select().from(cardStates).where(eq(cardStates.vaId, vaId)),
-      db.select().from(priorityScores).where(eq(priorityScores.vaId, vaId)),
-      db.select().from(aptlssSteps).where(eq(aptlssSteps.vaId, vaId)),
       getActiveWaitingReasons(vaId),
     ]);
     const cardIds = plans.map((plan) => plan.cardId);
-    const [assessments, linkedEvidence, linkedCommunication, linkedEmails, completedTimeEntries] = cardIds.length
+    const [states, scores, steps, assessments, linkedEvidence, linkedCommunication, linkedEmails, completedTimeEntries] = cardIds.length
       ? await Promise.all([
+          db.select().from(cardStates).where(and(eq(cardStates.vaId, vaId), inArray(cardStates.cardId, cardIds))),
+          db.select().from(priorityScores).where(and(eq(priorityScores.vaId, vaId), inArray(priorityScores.cardId, cardIds))),
+          db.select().from(aptlssSteps).where(and(eq(aptlssSteps.vaId, vaId), inArray(aptlssSteps.cardId, cardIds))),
           db.select().from(aptlssAssessments)
             .where(inArray(aptlssAssessments.cardId, cardIds))
             .orderBy(desc(aptlssAssessments.assessedAt)),
@@ -140,12 +214,16 @@ export const operatorRouter = router({
           }).from(workspaceEvidenceLinks)
             .innerJoin(workspaceEvidenceItems, eq(workspaceEvidenceItems.id, workspaceEvidenceLinks.evidenceId))
             .where(and(
+              eq(workspaceEvidenceItems.vaId, vaId),
               inArray(workspaceEvidenceLinks.cardId, cardIds),
               eq(workspaceEvidenceItems.active, true),
             )),
           db.select({ cardId: communicationEvidence.linkedCardId })
             .from(communicationEvidence)
-            .where(inArray(communicationEvidence.linkedCardId, cardIds)),
+            .where(and(
+              eq(communicationEvidence.vaId, vaId),
+              inArray(communicationEvidence.linkedCardId, cardIds),
+            )),
           db.select({ cardId: emailTasks.trelloCardId })
             .from(emailTasks)
             .where(and(
@@ -161,13 +239,14 @@ export const operatorRouter = router({
               inArray(timeEntries.cardId, cardIds),
             )),
         ])
-      : [[], [], [], [], []];
+      : [[], [], [], [], [], [], [], []];
     const latestAssessment = new Map<string, typeof assessments[number]>();
     assessments.forEach((assessment) => {
       if (!latestAssessment.has(assessment.cardId)) latestAssessment.set(assessment.cardId, assessment);
     });
     const stateMap = new Map(states.map((item) => [item.cardId, item]));
     const scoreMap = new Map(scores.map((item) => [item.cardId, item]));
+    const stepsByCardId = indexWorkQueueSteps(steps);
     const waitingMap = new Map(waitingReasons.map((item) => [item.cardId, item]));
     const sourceCounts = new Map<string, Partial<Record<Exclude<OperatorEvidenceSourceKey, "time">, number>>>();
     const completedTimeSamples = new Map<string, number>();
@@ -194,7 +273,7 @@ export const operatorRouter = router({
         const state = stateMap.get(plan.cardId);
         const score = scoreMap.get(plan.cardId);
         const assessment = latestAssessment.get(plan.cardId);
-        const cardSteps = steps.filter((step) => step.cardId === plan.cardId);
+        const cardSteps = stepsByCardId.get(plan.cardId) ?? [];
         const assessmentEvidence = assessment
           ? parseJson<OperatorAssessmentEvidence[]>(assessment.evidenceJson, [])
           : [];
@@ -284,6 +363,14 @@ export const operatorRouter = router({
       due: z.string().nullable().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Database unavailable" });
+      const plannedCard = await db.select({ cardId: aptlssPlans.cardId }).from(aptlssPlans)
+        .where(and(eq(aptlssPlans.vaId, ctx.user.id), eq(aptlssPlans.cardId, input.cardId)))
+        .limit(1);
+      if (!canRecordWaitingReasonForCard(Boolean(plannedCard[0]))) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "You can only record a waiting reason for a card in your work queue" });
+      }
       const worker = await resolveWorkerOperatorContext(ctx.user);
       const interpretation = interpretWaitingReasonForWorker(input.reason, input, {
         workerName: worker.displayName,
@@ -365,4 +452,31 @@ export const operatorRouter = router({
   getBrowserTabEvidenceHistory: operatorProcedure
     .input(z.object({ limit: z.number().int().min(1).max(366).default(30) }).optional())
     .query(({ input, ctx }) => getBrowserTabEvidenceHistory(ctx.user.id, input?.limit ?? 30)),
+
+  getGoogleEvidenceStatus: operatorProcedure.query(({ ctx }) => getGoogleEvidenceStatus(ctx.user.id)),
+  updateGoogleEvidenceSettings: workerMutation
+    .input(z.object({
+      gmail: z.object({
+        enabled: z.boolean().optional(),
+        intervalMinutes: z.number().int().min(15).max(1_440).optional(),
+        lookbackDays: z.number().int().min(1).max(90).optional(),
+      }).optional(),
+      drive: z.object({
+        enabled: z.boolean().optional(),
+        intervalMinutes: z.number().int().min(15).max(1_440).optional(),
+        lookbackDays: z.number().int().min(1).max(90).optional(),
+        folderId: z.string().trim().max(256).nullable().optional(),
+      }).optional(),
+    }))
+    .mutation(({ input, ctx }) => updateGoogleEvidenceSettings(ctx.user.id, input)),
+  syncGoogleEvidence: workerMutation
+    .input(z.object({
+      gmail: z.boolean().optional(),
+      drive: z.boolean().optional(),
+    }).optional())
+    .mutation(({ input, ctx }) => syncWorkerGoogleEvidence(ctx.user.id, input)),
+  disconnectGoogleEvidence: workerMutation.mutation(async ({ ctx }) => {
+    await clearGoogleRefreshToken(ctx.user.id);
+    return { success: true };
+  }),
 });

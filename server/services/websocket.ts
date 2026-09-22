@@ -25,12 +25,17 @@ interface ConnectedClient {
 }
 
 function configuredOrigins() {
-  return [
+  const directOrigins = [
     process.env.PUBLIC_URL,
     process.env.WEBHOOK_BASE_URL,
     process.env.APP_URL,
     process.env.VITE_FRONTEND_URL,
   ].filter((value): value is string => Boolean(value?.trim()));
+  const localOrigins = (process.env.LOCAL_ACCESS_ORIGINS || "")
+    .split(",")
+    .map(value => value.trim())
+    .filter(Boolean);
+  return [...directOrigins, ...localOrigins];
 }
 
 export function isAllowedWebSocketOrigin(origin: string | undefined, allowedOrigins = configuredOrigins()) {
@@ -38,10 +43,6 @@ export function isAllowedWebSocketOrigin(origin: string | undefined, allowedOrig
 
   try {
     const url = new URL(origin);
-    if (process.env.NODE_ENV !== "production" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname)) {
-      return true;
-    }
-
     return allowedOrigins.some(candidate => {
       try {
         return new URL(candidate).origin === url.origin;

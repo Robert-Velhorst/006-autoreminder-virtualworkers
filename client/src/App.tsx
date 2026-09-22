@@ -21,6 +21,7 @@ const RobertDashboard = lazy(() => import("./pages/manus/RobertDashboard"));
 const PriorityCommandCenter = lazy(() => import("./pages/manus/PriorityCommandCenter"));
 const AdminMonitor = lazy(() => import("./pages/manus/AdminMonitor"));
 const WorkerOperator = lazy(() => import("./pages/worker/WorkerOperator"));
+const WorkerInvitationAcceptance = lazy(() => import("./pages/worker/WorkerInvitationAcceptance"));
 
 function RouteLoading() {
   return (
@@ -31,13 +32,10 @@ function RouteLoading() {
 }
 
 
-function Router() {
-  // All routes are wrapped in DashboardLayout which handles authentication
-  // and shows the login form when user is not authenticated
+function ProtectedRoutes() {
   return (
     <DashboardLayout>
-      <Suspense fallback={<RouteLoading />}>
-        <Switch>
+      <Switch>
         <Route path={"/"} component={() => <ProtectedRoute component={Home} allowedRoles={["admin"]} />} />
         <Route path={"/aptlss"} component={() => <ProtectedRoute component={APTLSSManagement} allowedRoles={["admin"]} />} />
         <Route path={"/settings"} component={() => <ProtectedRoute component={Settings} allowedRoles={["admin"]} />} />
@@ -53,14 +51,25 @@ function Router() {
         <Route path={"/worker/plan"} component={() => <ProtectedRoute component={() => <WorkerOperator view="plan" />} allowedRoles={["worker"]} />} />
         <Route path={"/worker/decisions"} component={() => <ProtectedRoute component={() => <WorkerOperator view="decisions" />} allowedRoles={["worker"]} />} />
         <Route path={"/worker/evidence"} component={() => <ProtectedRoute component={() => <WorkerOperator view="evidence" />} allowedRoles={["worker"]} />} />
+        <Route path={"/worker/reminders"} component={() => <ProtectedRoute component={() => <WorkerOperator view="reminders" />} allowedRoles={["worker"]} />} />
         <Route path={"/worker/settings"} component={() => <ProtectedRoute component={() => <WorkerOperator view="settings" />} allowedRoles={["worker"]} />} />
         <Route path={"/worker"} component={() => <ProtectedRoute component={WorkerOperator} allowedRoles={["worker"]} />} />
         <Route path={"/404"} component={NotFound} />
         {/* Final fallback route */}
         <Route component={NotFound} />
-        </Switch>
-      </Suspense>
+      </Switch>
     </DashboardLayout>
+  );
+}
+
+function Router() {
+  return (
+    <Suspense fallback={<RouteLoading />}>
+      <Switch>
+        <Route path="/accept-invite/:token" component={WorkerInvitationAcceptance} />
+        <Route component={ProtectedRoutes} />
+      </Switch>
+    </Suspense>
   );
 }
 
