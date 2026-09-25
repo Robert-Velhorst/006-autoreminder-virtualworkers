@@ -44,7 +44,7 @@
 
 :root {
   /* Soft Minimalist Flow Palette */
-  --primary: oklch(0.65 0.15 250); /* Soft Blue */
+  --primary: oklch(0.488 0.243 264.376);
   --primary-foreground: oklch(0.98 0 0);
   --sidebar-primary: oklch(0.95 0.02 250);
   --sidebar-primary-foreground: oklch(0.3 0.05 250);

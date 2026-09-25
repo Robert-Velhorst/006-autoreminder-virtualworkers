@@ -29,8 +29,8 @@ describe("APTLSS pilot additive migration contract", () => {
     }
   });
 
-  it("schedules exactly one consolidation after the observed foreign migration watermark", () => {
-    expect(journal.entries).toHaveLength(47);
+  it("retains the consolidation and appends only the reviewed additive migrations", () => {
+    expect(journal.entries).toHaveLength(51);
     expect(journal.entries[45]).toMatchObject({
       idx: 45, tag: "0045_aptlss_pilot_consolidation", version: "5", breakpoints: true,
     });
@@ -39,14 +39,24 @@ describe("APTLSS pilot additive migration contract", () => {
     const migrations = readMigrationFiles({ migrationsFolder: path.join(root, "drizzle") });
     expect(migrations.filter(m => m.folderMillis > 1788555042308 && m.folderMillis <= journal.entries[45].when)).toHaveLength(1);
     expect(migrations[45]?.hash).toBe(hash(read(migrationPath)));
+    expect(journal.entries.slice(47).map((entry: { idx: number; tag: string }) => [entry.idx, entry.tag])).toEqual([
+      [47, "0047_worker_queue_trello_due_index"],
+      [48, "0048_structured_manager_worker_updates"],
+      [49, "0049_founder_decision_deadlines"],
+      [50, "0050_founder_decision_disposition"],
+    ]);
+    expect(migrations[50]?.hash).toBe(hash(read("drizzle/0050_founder_decision_disposition.sql")));
   });
 
-  it("preserves all 117 main table definitions and adds exactly the 14 source tables", async () => {
+  it("preserves all 117 main table definitions and adds only additive source tables", async () => {
     const current = await generateMySQLDrizzleJson(schema);
     for (const [name, expected] of Object.entries(baseline.tables)) {
-      expect(hash(JSON.stringify(current.tables[name])), name).toBe(expected);
+      const table = structuredClone(current.tables[name]);
+      if (name === "trello_cached_cards") delete table.indexes.trello_cached_cards_user_card_cached_idx;
+      if (name === "decision_outcomes") delete table.columns.disposition;
+      expect(hash(JSON.stringify(table)), name).toBe(expected);
     }
-    expect(Object.keys(current.tables).filter(name => !(name in baseline.tables)).sort()).toEqual([...names].sort());
+    expect(Object.keys(current.tables).filter(name => !(name in baseline.tables)).sort()).toEqual([...names, "founder_decision_deadlines"].sort());
     for (const name of ["aptlss_manager_state", "aptlss_manager_runs"]) {
       expect(current.tables[name]?.columns.mode).toMatchObject({
         type: "enum('shadow','active')", notNull: true, default: "'shadow'",
@@ -60,11 +70,31 @@ describe("APTLSS pilot additive migration contract", () => {
     const previous = JSON.parse(read("drizzle/meta/0031_snapshot.json"));
     const current = await generateMySQLDrizzleJson(schema);
     expect(snapshot.prevId).toBe(previous.id);
-    const latest = JSON.parse(read("drizzle/meta/0046_snapshot.json"));
-    expect(latest.prevId).toBe(snapshot.id);
+    const review = JSON.parse(read("drizzle/meta/0046_snapshot.json"));
+    const queue = JSON.parse(read("drizzle/meta/0047_snapshot.json"));
+    const update = JSON.parse(read("drizzle/meta/0048_snapshot.json"));
+    const deadline = JSON.parse(read("drizzle/meta/0049_snapshot.json"));
+    const latest = JSON.parse(read("drizzle/meta/0050_snapshot.json"));
+    expect(review.prevId).toBe(snapshot.id);
+    expect(queue.prevId).toBe(review.id);
+    expect(update.prevId).toBe(queue.id);
+    expect(deadline.prevId).toBe(update.id);
+    expect(latest.prevId).toBe(deadline.id);
     expect(latest.tables).toEqual(current.tables);
     expect(latest.views).toEqual(current.views);
-    const retained = structuredClone(latest.tables);
+    const beforeDisposition = structuredClone(latest.tables);
+    delete beforeDisposition.decision_outcomes.columns.disposition;
+    expect(beforeDisposition).toEqual(deadline.tables);
+    const beforeDeadline = structuredClone(deadline.tables);
+    delete beforeDeadline.founder_decision_deadlines;
+    expect(beforeDeadline).toEqual(update.tables);
+    const beforeQueue = structuredClone(queue.tables);
+    delete beforeQueue.trello_cached_cards.indexes.trello_cached_cards_user_card_cached_idx;
+    expect(beforeQueue).toEqual(review.tables);
+    const beforeUpdate = structuredClone(update.tables);
+    for (const column of ["outcome", "deadlineDate", "sourceEvidenceId", "sourceDescription"]) delete beforeUpdate.aptlss_manager_updates.columns[column];
+    expect(beforeUpdate).toEqual(queue.tables);
+    const retained = structuredClone(review.tables);
     delete retained.aptlss_manager_runs.columns.reviewDigest;
     delete retained.aptlss_manager_runs.columns.reviewUrgent;
     delete retained.aptlss_manager_runs.indexes.aptlss_manager_runs_review_idx;
@@ -92,5 +122,37 @@ describe("APTLSS pilot additive migration contract", () => {
     const seeds = statements.filter(s => /^INSERT INTO/.test(s));
     expect(seeds).toHaveLength(4);
     for (const seed of seeds) expect(seed).toMatch(/WHERE NOT EXISTS/);
+  });
+
+  it("guards both later migrations and never removes existing data", () => {
+    for (const file of ["drizzle/0047_worker_queue_trello_due_index.sql", "drizzle/0048_structured_manager_worker_updates.sql"]) {
+      const sql = read(file);
+      expect(sql).toMatch(/information_schema\.(?:STATISTICS|COLUMNS)/);
+      expect(sql).not.toMatch(/\b(?:DROP TABLE|DROP COLUMN|TRUNCATE|DELETE FROM|RENAME TABLE)\b/i);
+      const guarded = [...sql.matchAll(/SET @\w+ = IF\(EXISTS\(/g)].length;
+      expect(guarded).toBe(file.includes("0047") ? 1 : 4);
+      expect([...sql.matchAll(/EXECUTE \w+;/g)]).toHaveLength(guarded);
+    }
+  });
+
+  it("adds only the founder deadline history and guards its index on rerun", () => {
+    const sql = read("drizzle/0049_founder_decision_deadlines.sql");
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS `founder_decision_deadlines`/);
+    expect(sql).toMatch(/information_schema\.STATISTICS/);
+    expect(sql).not.toMatch(/\b(?:DROP TABLE|DROP COLUMN|TRUNCATE|DELETE FROM|RENAME TABLE)\b/i);
+    expect(sql).toMatch(/PREPARE founder_deadline_stmt/);
+    expect(sql).toMatch(/EXECUTE founder_deadline_stmt/);
+  });
+
+  it("adds only an explicit disposition to existing decision outcomes and is rerun-safe", () => {
+    const sql = read("drizzle/0050_founder_decision_disposition.sql");
+    expect(sql).toMatch(/information_schema\.COLUMNS/);
+    expect(sql).toMatch(/TABLE_NAME='decision_outcomes'.*COLUMN_NAME='disposition'/s);
+    expect(sql).toMatch(/ENUM\(''recorded'',''approved'',''rejected''\)/);
+    expect(sql).toMatch(/NOT NULL DEFAULT ''recorded''/);
+    expect(sql).not.toMatch(/\b(?:DROP TABLE|DROP COLUMN|TRUNCATE|DELETE FROM|RENAME TABLE)\b/i);
+    expect(sql).toMatch(/PREPARE founder_decision_disposition_stmt/);
+    expect(sql).toMatch(/EXECUTE founder_decision_disposition_stmt/);
+    expect([...sql.matchAll(/--> statement-breakpoint/g)]).toHaveLength(3);
   });
 });

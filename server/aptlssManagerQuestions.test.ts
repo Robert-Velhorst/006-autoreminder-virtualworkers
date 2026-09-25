@@ -29,8 +29,18 @@ describe("focused manager verification", () => {
     const passages = focused.interventions[0].verification!.passages;
     expect(passages.map(p => p.quote)).toEqual(["Deadline: 2026-09-06", "Deadline: 2026-09-08"]);
     expect(passages[1].kind).toBe("worker");
+    expect(focused.interventions[0].verification?.comparisons).toEqual([{
+      subject: "a", topic: "deadline",
+      left: expect.objectContaining({ evidenceId: "old", value: "2026-09-06", quote: "Deadline: 2026-09-06", kind: "source" }),
+      right: expect.objectContaining({ evidenceId: "new", value: "2026-09-08", quote: "Deadline: 2026-09-08", kind: "worker" }),
+    }]);
     expect(JSON.stringify(focused.interventions)).not.toContain("Unrelated private source");
     expect(focused.interventions[0].evidenceIds).not.toContain("private");
+  });
+  it("does not invent a comparison when the exact incompatible claims are unavailable", () => {
+    const original = result([issue("unknown", "urgent", "What changed?")]);
+    original.assessments[0].facts = [];
+    expect(focusManagerQuestions(input, original).interventions[0].verification?.comparisons).toEqual([]);
   });
   it("never removes execution gates or dependencies when reducing question noise", () => {
     const original = result([issue("conflict", "urgent", "Which fact applies?")]);
@@ -58,6 +68,13 @@ describe("focused manager verification", () => {
     original.assessments[0].uncertainties = ["Missing source-supported fact required for this task: paid"];
     original.assessments[0].facts = [];
     expect(focusManagerQuestions(input, original).interventions[0].question).toContain("payment");
+  });
+  it("asks for the underlying correspondence instead of presenting a notification as a contradiction", () => {
+    const original = result([{ ...issue("notice", "attention", "Which current fact applies?"), issueKind: "source_check", evidenceIds: ["old"] }]);
+    original.assessments[0].facts = [];
+    const focused = focusManagerQuestions(input, original);
+    expect(focused.interventions[0].question).toContain("full message and any document");
+    expect(focused.interventions[0].question).not.toContain("disagree");
   });
   it("turns an ambiguous unknown question into an executable verification request", () => {
     const original = result([issue("unknown", "urgent", "Which unknown applies now?")]);

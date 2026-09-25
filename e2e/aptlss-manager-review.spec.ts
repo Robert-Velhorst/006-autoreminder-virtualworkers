@@ -250,8 +250,10 @@ for (const viewport of [
       );
       expect(initial.runId).toBeGreaterThan(0);
       expect(initial.applied).toBe(false);
-      const action = initial.actions.find(a => a.cardId === cardId)!;
+      const action = initial.actions.find(a => a.cardId === cardId && ["work", "verify", "follow_up"].includes(a.kind))!;
       expect(action).toBeDefined();
+      const correctedTitle = "Review the retained report and note its sections";
+      const correctedCompletion = "Record each finding with its report section number.";
 
       // Exercise the actual grouped SQL query with more than the removed 5,000-row cap.
       const [originalRun] = await rows(
@@ -302,6 +304,10 @@ for (const viewport of [
         .click();
       await details.getByLabel("Guidance topic").fill("report-review");
       await details.getByLabel("Action condition").selectOption(action.kind);
+      await details.getByRole("switch", { name: "Correct a future proposed step" }).click();
+      await details.getByLabel("Step to correct").selectOption(action.id);
+      await details.getByLabel("Corrected next step").fill(correctedTitle);
+      await details.getByLabel("Done when").fill(correctedCompletion);
       const expiry = new Date(Date.now() + 7 * 86400000)
         .toISOString()
         .slice(0, 16);
@@ -319,6 +325,9 @@ for (const viewport of [
       );
       expect(stored.correction).toBe(correctionText);
       expect(stored.cardId).toBe(cardId);
+      expect(JSON.parse(stored.conditionsJson).nextStep).toEqual({
+        actionId: action.id, title: correctedTitle, completionCriteria: correctedCompletion,
+      });
       expect(JSON.parse(stored.evidenceJson)[0].fingerprint).toMatch(
         /^[a-f0-9]{64}$/
       );
@@ -332,9 +341,10 @@ for (const viewport of [
           a.reviewedGuidance?.some(g => g.id === saved.correctionId)
         )
       ).toBe(true);
-      expect(learned.actions.find(a => a.id === action.id)?.kind).toBe(
-        action.kind
-      );
+      expect(learned.actions.find(a => a.id === action.id)).toMatchObject({
+        kind: action.kind, blocked: action.blocked, title: correctedTitle,
+        completionCriteria: correctedCompletion,
+      });
       expect(learned.actions.filter(a => a.kind === "verify").length).toBe(
         initial.actions.filter(a => a.kind === "verify").length
       );

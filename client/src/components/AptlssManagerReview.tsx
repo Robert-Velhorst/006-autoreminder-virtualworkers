@@ -81,10 +81,17 @@ export function ManagerSnapshotDetails({
     id => !evidence.some(item => item.id === id)
   );
   const planBlocks = snapshot.proposal?.blocks.filter(block => !cardId || block.cardId === cardId) ?? [];
-  const unscheduled = [...new Map((snapshot.proposal?.unscheduledCards ?? [])
-    .filter(item => !cardId || item.cardId === cardId)
-    .map(item => [JSON.stringify([item.cardId, item.reason]), item])).values()];
-  const nonWorkingDay = unscheduled.length > 0 && unscheduled.every(item => item.reason === "This is a protected non-working day.");
+  const unscheduledByTask = new Map<string, { cardId: string; cardName: string; reasons: string[] }>();
+  for (const item of snapshot.proposal?.unscheduledCards ?? []) {
+    if (cardId && item.cardId !== cardId) continue;
+    const task = unscheduledByTask.get(item.cardId) ?? { cardId: item.cardId, cardName: item.cardName, reasons: [] };
+    if (!task.reasons.includes(item.reason)) task.reasons.push(item.reason);
+    unscheduledByTask.set(item.cardId, task);
+  }
+  const unscheduled = [...unscheduledByTask.values()];
+  const nonWorkingDay = unscheduled.length > 0 && unscheduled.every(item => item.reasons.length > 0 && item.reasons.every(reason => reason === "This is a protected non-working day."));
+  const visibleUnscheduled = unscheduled.slice(0, 5);
+  const remainingUnscheduled = unscheduled.slice(5);
   return (
     <div className="min-w-0 space-y-6 break-words [overflow-wrap:anywhere]">
       {snapshot.interventions
@@ -327,8 +334,8 @@ export function ManagerSnapshotDetails({
             {!planBlocks.length && !nonWorkingDay && (
               <p className="mt-2 text-xs">No proposed work blocks.</p>
             )}
-            {nonWorkingDay && <p className="mt-2 text-sm text-muted-foreground">These tasks have not been scheduled. Nothing has been marked complete or moved to another day.</p>}
-            {!!unscheduled.length && <details className="mt-3"><summary className="cursor-pointer text-sm font-medium">Not scheduled ({new Set(unscheduled.map(item => item.cardId)).size} tasks)</summary><ul className="mt-2 grid gap-3 sm:grid-cols-2">{unscheduled.map(item => <li key={JSON.stringify([item.cardId,item.reason])} className="min-w-0 border-l-2 pl-3 text-sm"><p className="font-medium">{item.cardName}</p>{!nonWorkingDay && <p className="text-muted-foreground">{item.reason}</p>}</li>)}</ul></details>}
+            {nonWorkingDay && <p className="mt-2 text-sm text-muted-foreground">Today is a protected non-working day. {unscheduled.length} {unscheduled.length === 1 ? "task remains" : "tasks remain"} open; none were completed, removed, or moved to another day.</p>}
+            {!!unscheduled.length && <details className="mt-3"><summary className="cursor-pointer text-sm font-medium">{nonWorkingDay ? "Show affected tasks" : "Tasks not scheduled"} ({unscheduled.length})</summary><ul className="mt-2 grid gap-3 sm:grid-cols-2">{visibleUnscheduled.map(item => <li key={item.cardId} className="min-w-0 border-l-2 pl-3 text-sm"><p className="font-medium">{item.cardName}</p>{!nonWorkingDay && item.reasons.map(reason => <p key={reason} className="text-muted-foreground">{reason}</p>)}</li>)}</ul>{remainingUnscheduled.length > 0 && <details className="mt-3"><summary className="cursor-pointer text-sm font-medium">Show {remainingUnscheduled.length} more {remainingUnscheduled.length === 1 ? "task" : "tasks"}</summary><ul className="mt-2 grid gap-3 sm:grid-cols-2">{remainingUnscheduled.map(item => <li key={item.cardId} className="min-w-0 border-l-2 pl-3 text-sm"><p className="font-medium">{item.cardName}</p>{!nonWorkingDay && item.reasons.map(reason => <p key={reason} className="text-muted-foreground">{reason}</p>)}</li>)}</ul></details>}</details>}
             {snapshot.proposal.robertItems.filter(item => !cardId || item.cardId === cardId).map(item => (
               <p key={item.stepId} className="mt-2 text-xs">
                 Founder decision: {item.cardName}. {item.decision}
@@ -405,6 +412,15 @@ function RunReview({
   const [listName, setListName] = useState("");
   const [conditionState, setConditionState] = useState("");
   const [validUntil, setValidUntil] = useState("");
+  const [replaceNextStep, setReplaceNextStep] = useState(false);
+  const [nextActionId, setNextActionId] = useState("");
+  const [nextTitle, setNextTitle] = useState("");
+  const [nextCompletion, setNextCompletion] = useState("");
+  const editableActions = entry.snapshot.actions.filter(a =>
+    a.cardId === cardId && a.kind === actionKind && ["work", "verify", "follow_up"].includes(a.kind)
+  );
+  const selectedActionId = editableActions.some(a => a.id === nextActionId)
+    ? nextActionId : editableActions[0]?.id ?? "";
   const sourceRecords = entry.snapshot.evidence.filter(
     e =>
       (e.kind === "source" || e.kind === "decision") &&
@@ -417,7 +433,8 @@ function RunReview({
       evidenceIds.length > 0 &&
       (scope === "worker" || !!cardId) &&
       Number.isFinite(Date.parse(validUntil)) &&
-      Date.parse(validUntil) > Date.now());
+      Date.parse(validUntil) > Date.now() &&
+      (!replaceNextStep || (scope === "card" && !!selectedActionId && nextTitle.trim().length >= 3 && nextCompletion.trim().length >= 3)));
   const save = trpc.operator.recordManagerReview.useMutation({
     onSuccess: () => {
       toast.success("Manager review saved");
@@ -479,6 +496,11 @@ function RunReview({
                             ? { state: conditionState.trim() }
                             : {}),
                         },
+                        ...(replaceNextStep ? { nextStep: {
+                          actionId: selectedActionId,
+                          title: nextTitle.trim(),
+                          completionCriteria: nextCompletion.trim(),
+                        } } : {}),
                         validUntil: new Date(validUntil).toISOString(),
                       },
                     }
@@ -575,6 +597,7 @@ function RunReview({
                           onChange={e => {
                             setScope(e.target.value as typeof scope);
                             setEvidenceIds([]);
+                            setReplaceNextStep(false);
                           }}
                         >
                           <option value="card">This card</option>
@@ -595,6 +618,7 @@ function RunReview({
                             onChange={e => {
                               setCardId(e.target.value);
                               setEvidenceIds([]);
+                              setReplaceNextStep(false);
                             }}
                           >
                             {entry.snapshot.cards.map(c => (
@@ -626,9 +650,10 @@ function RunReview({
                           id={`${prefix}-kind`}
                           className={selectClass}
                           value={actionKind}
-                          onChange={e =>
-                            setActionKind(e.target.value as typeof actionKind)
-                          }
+                          onChange={e => {
+                            setActionKind(e.target.value as typeof actionKind);
+                            setReplaceNextStep(false);
+                          }}
                         >
                           <option value="verify">Verify</option>
                           <option value="work">Work</option>
@@ -715,6 +740,33 @@ function RunReview({
                         </p>
                       )}
                     </fieldset>
+                    {scope === "card" && (
+                      <div className="space-y-3 border-t pt-3">
+                        <div className="flex items-center gap-3">
+                          <Switch id={`${prefix}-replace-step`} checked={replaceNextStep} onCheckedChange={setReplaceNextStep} disabled={!editableActions.length} />
+                          <Label htmlFor={`${prefix}-replace-step`}>Correct a future proposed step</Label>
+                        </div>
+                        {replaceNextStep && (
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <div className="space-y-1 sm:col-span-2">
+                              <Label htmlFor={`${prefix}-target-step`}>Step to correct</Label>
+                              <select id={`${prefix}-target-step`} className={selectClass} value={selectedActionId} onChange={e => setNextActionId(e.target.value)}>
+                                {editableActions.map(a => <option key={a.id} value={a.id}>{a.title}</option>)}
+                              </select>
+                            </div>
+                            <div className="space-y-1">
+                              <Label htmlFor={`${prefix}-next-title`}>Corrected next step</Label>
+                              <Input id={`${prefix}-next-title`} value={nextTitle} onChange={e => setNextTitle(e.target.value)} minLength={3} maxLength={300} required />
+                            </div>
+                            <div className="space-y-1">
+                              <Label htmlFor={`${prefix}-next-completion`}>Done when</Label>
+                              <Input id={`${prefix}-next-completion`} value={nextCompletion} onChange={e => setNextCompletion(e.target.value)} minLength={3} maxLength={1000} required />
+                            </div>
+                            <p className="text-xs text-muted-foreground sm:col-span-2">This changes future proposals for this same step and source only. It does not change the saved plan, remove blockers, or send anything.</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </>

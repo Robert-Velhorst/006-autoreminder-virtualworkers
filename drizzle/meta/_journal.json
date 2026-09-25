@@ -330,6 +330,34 @@
       "when": 1789322400000,
       "tag": "0046_manager_review_index",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "5",
+      "when": 1790116975655,
+      "tag": "0047_worker_queue_trello_due_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "5",
+      "when": 1790116975656,
+      "tag": "0048_structured_manager_worker_updates",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "5",
+      "when": 1790128059233,
+      "tag": "0049_founder_decision_deadlines",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "5",
+      "when": 1790285100000,
+      "tag": "0050_founder_decision_disposition",
+      "breakpoints": true
     }
   ]
 }

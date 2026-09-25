@@ -29,6 +29,8 @@ import TIMEZONES from '@/data/timezones';
 import CURRENCIES from '@/data/currencies';
 import WeeklyPayCalculator from './manus/WeeklyPayCalculator';
 import AptlssManagerReview from '@/components/AptlssManagerReview';
+import FounderDecisionInbox from '@/components/FounderDecisionInbox';
+import { trpc } from '@/lib/trpc';
 
 interface VirtualWorker {
   id: number;
@@ -118,7 +120,14 @@ interface TimezoneOverlap {
 }
 
 export default function FounderDashboard() {
-  const [activeTab, setActiveTab] = useState('overview');
+  const [activeTab, setActiveTab] = useState(() =>
+    new URLSearchParams(window.location.search).get('tab') === 'founder-decisions' ? 'founder-decisions' : 'overview');
+  const founderDecisions = trpc.operator.getFounderDecisionInbox.useQuery(undefined, {
+    retry: false, staleTime: 30_000, refetchInterval: 30_000,
+  });
+  const urgentDecisions = founderDecisions.data?.items.filter(item =>
+    item.escalation === 'decision_overdue' || item.escalation === 'decision_due_soon'
+    || item.escalation === 'task_overdue' || item.escalation === 'task_due_soon') ?? [];
   const [workload, setWorkload] = useState<WorkloadItem[]>([]);
   const [assignments, setAssignments] = useState<TaskAssignment[]>([]);
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
@@ -934,8 +943,17 @@ export default function FounderDashboard() {
       </header>
 
       <main className="container py-6">
+        {founderDecisions.error && <p role="alert" className="mb-4 border-l-2 border-red-500 px-3 py-2 text-sm">
+          Decision inbox is unavailable. Reload it before relying on the dashboard.
+        </p>}
+        {activeTab !== 'founder-decisions' && urgentDecisions.length > 0 && <button type="button"
+          onClick={() => setActiveTab('founder-decisions')}
+          className="mb-4 flex w-full items-center gap-2 border-l-2 border-amber-500 bg-amber-500/10 px-3 py-2 text-left text-sm hover:bg-amber-500/15">
+          <AlertTriangle className="size-4 shrink-0" />
+          {urgentDecisions.length} founder {urgentDecisions.length === 1 ? 'decision or task deadline needs' : 'decision or task deadlines need'} attention. Open decisions.
+        </button>}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="grid h-auto w-full grid-cols-2 gap-1 md:grid-cols-4 xl:grid-cols-8">
+          <TabsList className="grid h-auto w-full grid-cols-2 gap-1 md:grid-cols-3 xl:grid-cols-5">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="assignments">Assignments</TabsTrigger>
             <TabsTrigger value="dependencies">Dependencies</TabsTrigger>
@@ -944,9 +962,11 @@ export default function FounderDashboard() {
             <TabsTrigger value="briefings">Briefings</TabsTrigger>
             <TabsTrigger value="paylogs">Pay Logs</TabsTrigger>
             <TabsTrigger value="manager-review">Manager review</TabsTrigger>
+            <TabsTrigger value="founder-decisions">Decisions{urgentDecisions.length > 0 && <Badge variant="destructive" className="ml-2">{urgentDecisions.length}</Badge>}</TabsTrigger>
           </TabsList>
 
           <TabsContent value="manager-review"><AptlssManagerReview /></TabsContent>
+          <TabsContent value="founder-decisions"><FounderDecisionInbox /></TabsContent>
 
           {/* Overview Tab */}
           <TabsContent value="overview" className="space-y-6">

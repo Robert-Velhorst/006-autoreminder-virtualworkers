@@ -32,7 +32,7 @@ if (!/^[1-9]\d{0,4}$/.test(port) || Number(port) > 65535) throw new Error("APTLS
 const env = { ...process.env };
 if (existsSync(".env")) for (const key of Object.keys(parse(readFileSync(".env")))) env[key] = "";
 for (const key of Object.keys(env)) if (/KEY|TOKEN|SECRET|PASSWORD|REDIS|SMTP|OAUTH|WEBHOOK/.test(key.toUpperCase())) env[key] = "";
-Object.assign(env, { NODE_ENV: "development", DATABASE_URL: url, PORT: port, HOST: "127.0.0.1", LOCAL_AUTH_BYPASS: "false", APTLSS_MANAGER_SCHEDULER: "false", NOTIFICATIONS_ENABLED: "false", JWT_SECRET: "aptlss-isolated-browser-tests-only-not-for-production", VITE_APP_ID: "aptlss-test" });
+Object.assign(env, { NODE_ENV: "development", DATABASE_URL: url, PORT: port, HOST: "127.0.0.1", LOCAL_AUTH_BYPASS: "false", APTLSS_MANAGER_SCHEDULER: "false", APTLSS_TEST_DISABLE_BACKGROUND_JOBS: "true", NOTIFICATIONS_ENABLED: "false", JWT_SECRET: "aptlss-isolated-browser-tests-only-not-for-production", VITE_APP_ID: "aptlss-test" });
 // Cookie-authenticated browser sockets need the exact isolated dashboard origin.
 // Never inherit the operator's production origins or outbound webhook base URL.
 Object.assign(env, { LOCAL_ACCESS_ORIGINS: `http://127.0.0.1:${port}`, PUBLIC_URL: "", APP_URL: "", VITE_FRONTEND_URL: "", WEBHOOK_BASE_URL: "" });

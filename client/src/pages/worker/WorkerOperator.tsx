@@ -7,7 +7,6 @@ import {
   BrainCircuit,
   BellRing,
   CalendarDays,
-  Check,
   ChevronDown,
   ChevronRight,
   Clock3,
@@ -49,30 +48,31 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { getWorkLaneRank } from "@shared/workLanePriority";
-import { formatWorkerDate } from "@shared/workerTime";
+import { orderWorkerCards, selectManagerPrimary, selectTodayQueue, workerCardIsWaiting } from "@shared/workerTodayGuidance";
+import { managerStatusQueryOptions } from "@/lib/managerPilotAvailability";
+import { dateKeyInTimeZone, formatWorkerDate } from "@shared/workerTime";
+import { assessWorkerSourceChecks } from "@shared/workerSourceChecks";
 import { toast } from "sonner";
 import WorkerReminders from "./WorkerReminders";
 import ManagerCoach from "@/components/ManagerCoach";
 import ManagerShadowSettings from "@/components/ManagerShadowSettings";
 import ManagerVerificationFollowups from "@/components/ManagerVerificationFollowups";
+import WorkerPlanSuggestion, { workerPlanSuggestionIsCurrent } from "@/components/WorkerPlanSuggestion";
 
 type OperatorCard = {
   cardId: string;
   cardName: string;
   cardUrl: string;
+  trelloCache?: { cachedAt: string; expiresAt: string } | null;
   boardName: string;
   listName: string;
+  dueAt?: string | null;
+  overdue?: boolean;
   nextBestAction: string | null;
-  planSummary: string | null;
   primaryState: string | null;
-  stateReason: string | null;
   actionability: string | null;
   priorityScore: number;
   priorityTier: string;
-  confidenceScore: number | null;
-  confidenceReason: string | null;
-  recommendations: string[];
-  uncertainties: string[];
   evidenceSummary: {
     sources: Array<{
       key: "trello" | "communication" | "gmail" | "google_drive" | "time";
@@ -81,31 +81,14 @@ type OperatorCard = {
       status: "linked" | "live" | "missing";
       detail: string;
     }>;
-    issues: Array<{
-      id: string;
-      title: string;
-      detail: string;
-      resolution: string;
-      severity: "high" | "medium" | "low";
-    }>;
     forecast: {
       p50Minutes: number | null;
       p90Minutes: number | null;
-      sampleSize: number;
-      uncertainty: string | null;
-    } | null;
-    confidenceProfile: {
-      targetScore: number | null;
-      ceiling: number | null;
-      gapToTarget: number | null;
-      dimensions: Partial<Record<"evidence" | "forecast" | "humanValidation" | "consistency", number>>;
-      blockers: string[];
     } | null;
   };
   waitingReason: {
     waitingOn: string;
     nextAction: string;
-    confidenceScore: number;
     followUpAt: Date | string | null;
   } | null;
   steps: Array<{
@@ -115,6 +98,8 @@ type OperatorCard = {
     status: string;
     category: string;
     requiresRobert: boolean;
+    decisionDueAt: string | null;
+    decisionDeferred: boolean;
     completionCriteria: string | null;
     riskIfSkipped: string | null;
   }>;
@@ -126,6 +111,10 @@ function nextInstruction(card: OperatorCard) {
     return step ? `${step.requiresRobert ? "Decision needed: " : "Next step: "}${step.title}` : "The next action is not specified. Open the task and record the missing question before starting.";
   }
   return card.nextBestAction || "Open the task and identify the next action before starting.";
+}
+
+function currentCompletionCriterion(card: OperatorCard) {
+  return card.steps.find(item => item.status !== "complete")?.completionCriteria?.trim() || null;
 }
 
 const NAVIGATION = [
@@ -146,12 +135,6 @@ function priorityTone(tier: string) {
 function initials(value: string) {
   const parts = value.trim().split(/\s+/).filter(Boolean);
   return (parts.length > 1 ? `${parts[0][0]}${parts.at(-1)?.[0]}` : parts[0]?.slice(0, 2) || "W").toUpperCase();
-}
-
-function evidenceTone(status: "linked" | "live" | "missing") {
-  if (status === "linked") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
-  if (status === "live") return "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300";
-  return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
 }
 
 type BrowserConnectionSnapshot = {
@@ -195,12 +178,6 @@ function describeBrowserConnection(status?: BrowserConnectionSnapshot) {
     detail: "Install and authorize the local collector before tab compliance can be trusted.",
     healthy: false,
   };
-}
-
-function uncertaintyTone(severity: "high" | "medium" | "low") {
-  if (severity === "high") return "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300";
-  if (severity === "medium") return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
-  return "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300";
 }
 
 function formatDuration(minutes: number | null) {
@@ -293,7 +270,7 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
               </AlertDescription>
             </Alert>
           )}
-          {view === "today" && <TodayView onOpenPlan={() => navigate("/worker/plan")} onOpenDecisions={() => navigate("/worker/decisions")} />}
+          {view === "today" && <TodayView timeZone={timeZone} onOpenPlan={() => navigate("/worker/plan")} onOpenDecisions={() => navigate("/worker/decisions")} />}
           {view === "plan" && <PlanView founderName={founderName} timeZone={timeZone} />}
           {view === "decisions" && <DecisionsView founderName={founderName} />}
           {view === "evidence" && <EvidenceView />}
@@ -305,12 +282,18 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
   );
 }
 
-function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; onOpenDecisions: () => void }) {
+function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string; onOpenPlan: () => void; onOpenDecisions: () => void }) {
   const utils = trpc.useUtils();
+  const [orderingTime, setOrderingTime] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setOrderingTime(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const [selected, setSelected] = useState<OperatorCard | null>(null);
-  const [hasPrimary, setHasPrimary] = useState(false);
+  const managerQuery = trpc.operator.getManagerStatus.useQuery(undefined, managerStatusQueryOptions);
   const actionQuery = trpc.trello.actionAlerts.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const intelligenceQuery = trpc.operator.getWorkQueueContext.useQuery(undefined, { retry: false, staleTime: 60_000 });
+  const googleQuery = trpc.operator.getGoogleEvidenceStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const timerQuery = trpc.timer.getActive.useQuery(undefined, { staleTime: 15_000 });
   const planQuery = trpc.operator.getDailyPlan.useQuery(undefined, { staleTime: 60_000 });
   const browserQuery = trpc.operator.getBrowserTabStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
@@ -326,7 +309,7 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
       ...(actionQuery.data?.overdueCards ?? []),
     ];
     const alerts = new Map(alertCards.map((card) => [card.id, card]));
-    return [...(intelligenceQuery.data?.cards ?? [])]
+    return orderWorkerCards([...(intelligenceQuery.data?.cards ?? [])]
       .map((card) => {
         const alert = alerts.get(card.cardId);
         return {
@@ -334,23 +317,37 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
           boardName: card.boardName || alert?.boardName || "Unknown board",
           listName: card.listName || alert?.listName || "Unknown list",
         } as OperatorCard;
-      })
-      .sort((left, right) => {
-        const lane = getWorkLaneRank(left.listName) - getWorkLaneRank(right.listName);
-        return lane || right.priorityScore - left.priorityScore;
-      });
-  }, [actionQuery.data, intelligenceQuery.data]);
+      }), orderingTime);
+  }, [actionQuery.data, intelligenceQuery.data, orderingTime]);
   useEffect(() => {
     if (!selected) return;
     const refreshed = cards.find((card) => card.cardId === selected.cardId);
     if (refreshed && refreshed !== selected) setSelected(refreshed);
   }, [cards, selected]);
-  const now = cards[0] ?? null;
-  const next = cards.slice(1, 4);
+  const primary = selectManagerPrimary(managerQuery.data?.snapshot);
+  const { related, first: now, next } = selectTodayQueue(cards, primary?.cardId ?? null);
   const openDecisions = cards.reduce((total, card) => total + card.steps.filter((step) => step.requiresRobert && step.status !== "complete").length, 0);
   const plan = planQuery.data?.schedule;
-  const isWaiting = (card: OperatorCard) => getWorkLaneRank(card.listName) === 0 || !!card.waitingReason;
-  const canStart = (card: OperatorCard) => !isWaiting(card) && !timerQuery.isLoading && !timerQuery.error && !startTimer.isPending && timerQuery.data?.cardId !== card.cardId;
+  const planImpact = managerQuery.data?.snapshot?.proposal?.planningImpact;
+  const hasCurrentSuggestion = !planQuery.isLoading && !planQuery.error && !managerQuery.error && !managerQuery.data?.error && workerPlanSuggestionIsCurrent({
+    impact: planImpact,
+    expectedPlanVersion: managerQuery.data?.snapshot?.planVersion,
+    currentPlanVersion: planQuery.data?.planVersion,
+    currentDateKey: dateKeyInTimeZone(orderingTime, timeZone),
+    hasSavedPlan: !!plan,
+    applied: managerQuery.data?.snapshot?.applied,
+  });
+  const isWaiting = workerCardIsWaiting;
+  const canStart = (card: OperatorCard) => !(primary?.kind === "verification" && primary.cardId === card.cardId) && !isWaiting(card) && !timerQuery.isLoading && !timerQuery.error && !startTimer.isPending && timerQuery.data?.cardId !== card.cardId;
+  const sourceChecksFor = (card: OperatorCard) => assessWorkerSourceChecks({
+    sources: card.evidenceSummary.sources,
+    trelloCache: card.trelloCache ?? null,
+    gmail: googleQuery.data?.gmail ?? null,
+    drive: googleQuery.data?.drive ?? null,
+    googleConnectionReady: googleQuery.data?.credentialsReady ?? null,
+    now: orderingTime,
+  });
+  const nowSources = now ? sourceChecksFor(now) : null;
 
   const begin = (card: OperatorCard) => { if (!canStart(card)) return; startTimer.mutate({
     cardId: card.cardId,
@@ -360,21 +357,22 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
     listName: card.listName,
   }); };
   const refreshEvidence = async () => {
-    const [intelligenceResult, actionResult] = await Promise.all([
+    const [intelligenceResult, actionResult, googleResult] = await Promise.all([
       intelligenceQuery.refetch(),
       actionQuery.refetch(),
+      googleQuery.refetch(),
     ]);
-    if (intelligenceResult.error || actionResult.error) {
-      toast.error(intelligenceResult.error?.message ?? actionResult.error?.message ?? "Evidence refresh failed");
+    if (intelligenceResult.error || actionResult.error || googleResult.error) {
+      toast.error(intelligenceResult.error?.message ?? actionResult.error?.message ?? googleResult.error?.message ?? "Source status reload failed");
       return;
     }
-    toast.success("Card evidence refreshed");
+    toast.success("Saved source status reloaded. This does not sync external accounts.");
   };
 
   return (
     <div className="space-y-5">
       <PageHeading title="Today" description="" />
-      <ManagerCoach onPrimaryChange={setHasPrimary} />
+      <ManagerCoach />
       {browserQuery.data?.shouldWarn && (
         <Alert className="border-amber-500/40 bg-amber-500/5">
           <Archive className="size-4 text-amber-500" />
@@ -386,7 +384,7 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
         <div className="space-y-4">
           <Card className="gap-0 rounded-lg border-blue-500/30 py-0">
             <CardHeader className="border-b py-4">
-              <div className="text-xs font-semibold uppercase text-muted-foreground">{hasPrimary ? "Other work" : now && isWaiting(now) ? "Waiting for a prerequisite" : "Next task"}</div>
+              <div className="text-xs font-semibold uppercase text-muted-foreground">{primary ? "Other work you can continue" : now && isWaiting(now) ? "Waiting for a prerequisite" : "Next task"}</div>
             </CardHeader>
             <CardContent className="p-5">
               {intelligenceQuery.isLoading ? <QueueSkeleton /> : now ? (
@@ -396,6 +394,11 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
                     <p className="text-sm text-muted-foreground">{now.boardName} · {now.listName}</p>
                     <div className="mt-4 border-l-2 border-blue-500 pl-3"><div className="text-[11px] font-semibold uppercase text-muted-foreground">{isWaiting(now) ? "Prerequisite to check" : "Next action"}</div><p className="mt-1 text-sm font-medium">{nextInstruction(now)}</p></div>
                     {now.waitingReason && <p className="mt-3 text-xs text-amber-600 dark:text-amber-300">Waiting evidence: {now.waitingReason.nextAction}</p>}
+                    {(currentCompletionCriterion(now) || now.evidenceSummary.forecast?.p50Minutes !== null && now.evidenceSummary.forecast?.p50Minutes !== undefined) && <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 border-t pt-3 text-xs text-muted-foreground">
+                      {currentCompletionCriterion(now) && <span><span className="font-semibold text-foreground">Done when:</span> {currentCompletionCriterion(now)}</span>}
+                      {now.evidenceSummary.forecast?.p50Minutes !== null && now.evidenceSummary.forecast?.p50Minutes !== undefined && <span><span className="font-semibold text-foreground">Working estimate:</span> {formatDuration(now.evidenceSummary.forecast.p50Minutes)}{now.evidenceSummary.forecast.p90Minutes !== null ? ` to ${formatDuration(now.evidenceSummary.forecast.p90Minutes)}` : ""}</span>}
+                    </div>}
+                    {nowSources?.checks.some(check => check.status !== "current") && <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">Source check needed. Open details to see what to verify before acting.</p>}
                   </button>
                   <div className="flex flex-col justify-end gap-2">
                     <Button onClick={() => begin(now)} disabled={!canStart(now)}>
@@ -403,8 +406,11 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
                       {timerQuery.data?.cardId === now.cardId ? "Timer running" : isWaiting(now) ? "Waiting - review first" : "Start timer"}
                     </Button>
                     <Button variant="outline" onClick={() => setSelected(now)}>Open details</Button>
+                    {/^https?:\/\//i.test(now.cardUrl) && <a href={now.cardUrl} target="_blank" rel="noopener noreferrer" className="text-center text-xs font-medium text-primary underline">Open source card</a>}
                   </div>
                 </div>
+              ) : primary ? (
+                <div className="space-y-3 text-sm"><p>No other task is ready to execute. Follow the work guidance above or review the waiting tasks below.</p>{related && <Button variant="outline" onClick={() => setSelected(related)}>Open related task</Button>}</div>
               ) : (
                 <EmptyState title="No trusted work item yet" detail={intelligenceQuery.error?.message ?? "Generate APTLSS plans or connect Trello to build the queue."} />
               )}
@@ -429,7 +435,7 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
 
         <aside className="space-y-3">
           {planQuery.isLoading || timerQuery.isLoading || intelligenceQuery.isLoading || browserQuery.isLoading ? <p role="status" className="p-4 text-sm text-muted-foreground">Loading your work summary...</p> : planQuery.error || timerQuery.error || intelligenceQuery.error || browserQuery.error ? <p role="alert" className="p-4 text-sm">Some work information is unavailable. Refresh before relying on these totals.</p> : <>
-          <ContextMetric icon={CalendarDays} label="Day plan" value={plan ? (plan.planHealth.availableMinutes === 0 && !plan.blocks.length ? "Protected day" : "Available") : "Not generated"} detail={plan ? `${plan.planHealth.scheduledMinutes} min scheduled` : "Create today's time blocks"} onClick={onOpenPlan} />
+          <ContextMetric icon={CalendarDays} label="Day plan" value={plan ? (plan.planHealth.availableMinutes === 0 && !plan.blocks.length ? "Protected day" : "Available") : "Not generated"} detail={hasCurrentSuggestion ? planImpact?.planChanges?.length ? `${planImpact.planChanges.length} suggested changes to review` : "Plan suggestion to review" : plan ? `${plan.planHealth.scheduledMinutes} min scheduled` : "Create today's time blocks"} onClick={onOpenPlan} />
           <ContextMetric icon={Timer} label="Time now" value={timerQuery.data ? "Tracking" : "Stopped"} detail={timerQuery.data?.cardName ?? "No active timer"} />
           <ContextMetric icon={BrainCircuit} label="Decisions" value={`${openDecisions} open`} detail="Outcome required to close" onClick={onOpenDecisions} />
           <ContextMetric icon={Archive} label="Browser hygiene" value={browserQuery.data?.connected ? `${browserQuery.data.actionableTabs} tabs` : "Disconnected"} detail={browserQuery.data?.connected ? `Limit ${browserQuery.data.allowedTabs}` : "Collector has not reported"} />
@@ -438,11 +444,13 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
       </div>
       <CardInspector
         card={selected}
+        sourceChecks={selected ? sourceChecksFor(selected) : null}
+        timeZone={timeZone}
         onClose={() => setSelected(null)}
         onStart={begin}
         canStart={canStart}
         onRefresh={refreshEvidence}
-        refreshing={intelligenceQuery.isFetching || actionQuery.isFetching}
+        refreshing={intelligenceQuery.isFetching || actionQuery.isFetching || googleQuery.isFetching}
       />
     </div>
   );
@@ -474,7 +482,7 @@ function Lane({ label, cards, onSelect }: { label: string; cards: OperatorCard[]
       <CollapsibleContent>
         {cards.length ? cards.map((card) => (
           <button key={card.cardId} type="button" onClick={() => onSelect(card)} className="flex w-full items-center justify-between gap-3 border-b bg-muted/20 px-6 py-2.5 text-left text-sm hover:bg-accent/50">
-            <span className="truncate">{card.cardName}</span><span className="shrink-0 text-xs text-muted-foreground">{card.priorityScore}</span>
+            <span className="truncate">{card.cardName}</span>
           </button>
         )) : <div className="border-b bg-muted/20 px-6 py-3 text-xs text-muted-foreground">No cards in this lane.</div>}
       </CollapsibleContent>
@@ -489,6 +497,8 @@ const INSPECTOR_MAX_WIDTH = 1_040;
 
 function CardInspector({
   card,
+  sourceChecks,
+  timeZone,
   onClose,
   onStart,
   canStart,
@@ -496,14 +506,14 @@ function CardInspector({
   refreshing,
 }: {
   card: OperatorCard | null;
+  sourceChecks: ReturnType<typeof assessWorkerSourceChecks> | null;
+  timeZone: string;
   onClose: () => void;
   onStart: (card: OperatorCard) => void;
   canStart: (card: OperatorCard) => boolean;
   onRefresh: () => Promise<void>;
   refreshing: boolean;
 }) {
-  const { user } = useAuth();
-  const showDiagnostics = user?.role === "admin";
   const [preferredWidth, setPreferredWidth] = useState(INSPECTOR_DEFAULT_WIDTH);
   const [viewportWidth, setViewportWidth] = useState(() => typeof window === "undefined" ? 1_280 : window.innerWidth);
   const resizeState = useRef<{ startX: number; startWidth: number; nextWidth: number } | null>(null);
@@ -532,18 +542,8 @@ function CardInspector({
       { key: "google_drive" as const, label: "Drive", count: 0, status: "missing" as const, detail: "Refresh to check current evidence" },
       { key: "time" as const, label: "Time", count: 0, status: "missing" as const, detail: "Refresh to check current evidence" },
     ],
-    issues: (card?.uncertainties ?? []).map((detail, index) => ({
-      id: `legacy-uncertainty-${index}`,
-      title: "Assessment gap",
-      detail,
-      resolution: "Refresh the evidence check before relying on this assessment.",
-      severity: "medium" as const,
-    })),
     forecast: null,
-    confidenceProfile: null,
   };
-
-  const visibleIssues = showDiagnostics ? evidenceSummary.issues : evidenceSummary.issues.filter(issue => issue.id !== "forecast-calibration");
 
   const saveWidth = (value: number) => {
     const width = Math.max(INSPECTOR_MIN_WIDTH, Math.min(desktopMax, value));
@@ -645,99 +645,33 @@ function CardInspector({
                 <p className="text-sm font-medium">{nextInstruction(card)}</p>
               </section>
 
-              {showDiagnostics && <div className={wide ? "grid grid-cols-2 gap-6" : "space-y-6"}>
-                <section>
-                  <InspectorLabel>Assessment</InspectorLabel>
-                  <p className="text-sm leading-relaxed">{card.stateReason ?? card.planSummary ?? "No assessment context available."}</p>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Badge variant="outline" className={priorityTone(card.priorityTier)}>{card.priorityTier} / {card.priorityScore}</Badge>
-                    <Badge variant="outline">Uncalibrated assessment</Badge>
-                  </div>
-                </section>
-
-                <section>
-                  <div className="flex items-center justify-between gap-3">
-                    <InspectorLabel>Evidence assessment</InspectorLabel>
-                  </div>
-                  <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-                    {card.confidenceReason ?? "No confidence explanation recorded."}
-                  </p>
-                  {evidenceSummary.confidenceProfile?.blockers.length ? (
-                    <ul className="mt-3 space-y-1 text-xs text-muted-foreground">
-                      {evidenceSummary.confidenceProfile.blockers.slice(0, 3).map((blocker) => <li key={blocker}>- {blocker}</li>)}
-                    </ul>
-                  ) : null}
-                </section>
-              </div>}
-
               <section>
                 <div className="flex items-center justify-between gap-3">
-                  <InspectorLabel>Connected sources</InspectorLabel>
+                  <InspectorLabel>Source checks</InspectorLabel>
                   <Button variant="ghost" size="sm" onClick={() => void onRefresh()} disabled={refreshing}>
                     <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />
-                    Refresh
+                    Reload status
                   </Button>
                 </div>
-                <div className={`mt-2 grid gap-2 ${wide ? "grid-cols-5" : "grid-cols-2"}`}>
-                  {evidenceSummary.sources.map((source) => (
-                    <div key={source.key} className="min-w-0 rounded-md border bg-muted/20 p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-xs font-semibold">{source.label}</span>
-                        <Badge variant="outline" className={`px-1.5 py-0 text-[10px] ${evidenceTone(source.status)}`}>
-                          {source.status}
-                        </Badge>
+                <div className="mt-2 divide-y border-y">
+                  {sourceChecks?.checks.map((check) => (
+                    <div key={check.key} className="py-3 text-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-medium">{check.label}{check.key !== "trello" && <span className="ml-1 font-normal text-muted-foreground">({check.linkedCount} linked)</span>}</span>
+                        <span className={check.status === "current" ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}>
+                          {check.status === "current" ? "Checked" : check.status === "overdue" ? "Check overdue" : check.status === "disabled" ? "Sync off" : check.status === "disconnected" ? "Connection unavailable" : "Check time unknown"}
+                        </span>
                       </div>
-                      <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{source.detail}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">{check.checkedLabel}: {check.checkedAt ? new Date(check.checkedAt).toLocaleString(undefined, { timeZone }) : "not recorded"}</p>
+                      {check.nextAction && <p className="mt-1 text-xs">Next: {check.nextAction}</p>}
                     </div>
                   ))}
                 </div>
-              </section>
-
-              <section>
-                <div className="flex items-center justify-between gap-3">
-                  <InspectorLabel>Checks before continuing</InspectorLabel>
-                  <Badge variant="outline">{visibleIssues.length} open</Badge>
-                </div>
-                {visibleIssues.length ? (
-                  <div className={`mt-2 grid gap-3 ${wide ? "grid-cols-2" : "grid-cols-1"}`}>
-                    {visibleIssues.map((issue) => (
-                      <div key={issue.id} className="rounded-md border p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex min-w-0 items-start gap-2">
-                            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" />
-                            <h3 className="text-sm font-semibold">{issue.title}</h3>
-                          </div>
-                          <Badge variant="outline" className={uncertaintyTone(issue.severity)}>{issue.severity}</Badge>
-                        </div>
-                        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{issue.detail}</p>
-                        <div className="mt-3 border-t pt-3">
-                          <div className="text-[11px] font-semibold uppercase text-muted-foreground">How to resolve</div>
-                          <p className="mt-1 text-sm leading-relaxed">{issue.resolution}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="mt-2 flex items-center gap-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-4 text-sm">
-                    <ShieldCheck className="size-4 text-emerald-500" />
-                    No additional checks are listed. Verify the task instructions and source before acting.
-                  </div>
-                )}
+                {sourceChecks?.coverageGap && <p className="mt-2 text-xs text-muted-foreground">{sourceChecks.coverageGap}</p>}
+                <p className="mt-2 text-xs text-muted-foreground">Reloading status does not sync external accounts.</p>
               </section>
 
               <ManagerVerificationFollowups key={card.cardId} cardId={card.cardId} />
-
-              {showDiagnostics && evidenceSummary.forecast && (
-                <section>
-                  <InspectorLabel>Remaining-time range</InspectorLabel>
-                  <div className="mt-2 grid grid-cols-3 divide-x rounded-md border">
-                    <MetricCell label="P50" value={formatDuration(evidenceSummary.forecast.p50Minutes)} />
-                    <MetricCell label="P90" value={formatDuration(evidenceSummary.forecast.p90Minutes)} />
-                    <MetricCell label="Samples" value={String(evidenceSummary.forecast.sampleSize)} />
-                  </div>
-                  <p className="mt-2 text-xs text-muted-foreground">Use P90 for commitments while uncertainty is medium or high.</p>
-                </section>
-              )}
 
               <section>
                 <InspectorLabel>Task steps</InspectorLabel>
@@ -745,8 +679,11 @@ function CardInspector({
                   {card.steps.length ? card.steps.map((step) => (
                     <div key={step.id} className="flex gap-2 rounded-md border p-3 text-sm">
                       <span className="text-muted-foreground">{step.stepNumber}.</span>
-                      <span className="min-w-0 flex-1">{step.title}</span>
-                      {step.requiresRobert && <Badge variant="outline">Decision</Badge>}
+                      <span className="min-w-0 flex-1">
+                        {step.title}
+                        {step.requiresRobert && <span className="mt-1 block text-xs text-muted-foreground">Waiting for founder decision{step.decisionDeferred && step.decisionDueAt ? ` · review ${new Date(step.decisionDueAt).toLocaleString()}` : ""}</span>}
+                      </span>
+                      {step.requiresRobert && <Badge variant="outline">{step.decisionDeferred ? "Deferred" : "Decision"}</Badge>}
                     </div>
                   )) : <p className="text-sm text-muted-foreground">No structured steps recorded.</p>}
                 </div>
@@ -766,6 +703,7 @@ function CardInspector({
 function PlanView({ founderName, timeZone }: { founderName: string; timeZone: string }) {
   const utils = trpc.useUtils();
   const query = trpc.operator.getDailyPlan.useQuery(undefined, { staleTime: 60_000 });
+  const manager = trpc.operator.getManagerStatus.useQuery(undefined, managerStatusQueryOptions);
   const mutation = trpc.operator.generateDailyPlan.useMutation({
     onSuccess: () => { void utils.operator.getDailyPlan.invalidate(); toast.success("Day plan generated"); },
     onError: (error) => toast.error(error.message),
@@ -788,6 +726,14 @@ function PlanView({ founderName, timeZone }: { founderName: string; timeZone: st
       {mutation.isPending && <div role="status" aria-live="polite" className="flex flex-wrap items-center gap-3 border-b p-4"><Loader2 className="size-4 animate-spin" /><span>Generating plan</span><span className="text-sm text-muted-foreground">{elapsed}s elapsed · completion estimate unavailable</span></div>}
       {query.error && <Alert variant="destructive"><AlertTitle>Plan could not be loaded</AlertTitle><AlertDescription>{query.error.message}<Button variant="outline" size="sm" onClick={() => void query.refetch()}>Retry</Button></AlertDescription></Alert>}
       {mutation.error && <Alert variant="destructive"><AlertTitle>Plan generation could not be confirmed</AlertTitle><AlertDescription>{mutation.error.message} Reload the saved plan before retrying to check whether generation completed.</AlertDescription></Alert>}
+      {!query.isLoading && !query.error && !manager.isLoading && !manager.error && !manager.data?.error && <WorkerPlanSuggestion
+        impact={manager.data?.snapshot?.proposal?.planningImpact}
+        expectedPlanVersion={manager.data?.snapshot?.planVersion}
+        currentPlanVersion={query.data?.planVersion}
+        currentDateKey={dateKeyInTimeZone(Date.now(), timeZone)}
+        hasSavedPlan={!!plan}
+        applied={manager.data?.snapshot?.applied}
+      />}
       {query.isLoading ? <QueueSkeleton /> : !plan && !query.error ? <Alert><Inbox className="size-4" /><AlertTitle>No saved plan</AlertTitle><AlertDescription>Create a plan using your tasks and working hours.</AlertDescription></Alert> : plan ? (
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
           <Card className="gap-0 rounded-lg py-0">
@@ -817,32 +763,20 @@ function PlanView({ founderName, timeZone }: { founderName: string; timeZone: st
 }
 
 function DecisionsView({ founderName }: { founderName: string }) {
-  const utils = trpc.useUtils();
   const queue = trpc.aptlss.getDecisionQueue.useQuery(undefined, { staleTime: 30_000 });
   const history = trpc.operator.getDecisionHistory.useQuery({ limit: 20 }, { staleTime: 30_000 });
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [outcome, setOutcome] = useState("");
   const [showAllDecisions, setShowAllDecisions] = useState(false);
   const selected = queue.data?.items.find((item) => item.stepId === selectedId) ?? queue.data?.items[0] ?? null;
   const decisionItems = queue.data?.items ?? [];
   const visibleDecisionItems = showAllDecisions ? decisionItems : decisionItems.slice(0, 8);
-  const mutation = trpc.operator.recordDecisionOutcome.useMutation({
-    onSuccess: () => {
-      setOutcome("");
-      setSelectedId(null);
-      void utils.aptlss.getDecisionQueue.invalidate();
-      void utils.operator.getDecisionHistory.invalidate();
-      toast.success("Outcome recorded");
-    },
-    onError: (error) => toast.error(error.message),
-  });
   return (
     <div className="space-y-5">
-      <PageHeading title="Decisions" description="Close a decision only by recording what was decided. Nothing is posted or moved in Trello." />
+      <PageHeading title="Decisions" description={`These items await a decision from ${founderName}. Continue with other work until the outcome is recorded.`} />
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-4">
           <Card className="gap-0 rounded-lg py-0">
-            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Decision inbox</CardTitle><CardDescription>Highest-priority unresolved decision first.</CardDescription></CardHeader>
+            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Awaiting founder</CardTitle><CardDescription>Highest-priority unresolved decision first.</CardDescription></CardHeader>
             <CardContent className="p-0">
               {queue.isLoading ? <div className="p-4"><QueueSkeleton /></div> : decisionItems.length ? <>
                 {visibleDecisionItems.map((item, index) => (
@@ -864,11 +798,9 @@ function DecisionsView({ founderName }: { founderName: string }) {
         </div>
         <Card className="h-fit gap-4 rounded-lg p-5 lg:sticky lg:top-20">
           {selected ? <>
-            <div><div className="text-xs font-semibold uppercase text-muted-foreground">Selected decision</div><h2 className="mt-1 font-semibold">{selected.cardName}</h2><p className="mt-1 text-sm text-muted-foreground">{selected.stepTitle}</p></div>
-            <div className="rounded-md border bg-muted/30 p-3"><div className="text-[11px] font-semibold uppercase text-muted-foreground">Recommendation</div><p className="mt-1 text-sm">{selected.recommendedDecision || "No recommendation recorded; use the linked Trello context."}</p></div>
-            <div><label htmlFor="decision-outcome" className="text-sm font-medium">Outcome <span className="text-destructive">*</span></label><Textarea id="decision-outcome" className="mt-2 min-h-28" value={outcome} onChange={(event) => setOutcome(event.target.value)} placeholder="Record the exact decision and any condition that affects the next step." /></div>
-            <Button onClick={() => mutation.mutate({ stepId: selected.stepId, outcome })} disabled={outcome.trim().length < 3 || mutation.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}Record outcome</Button>
-            <Button variant="outline" asChild><a href={selected.cardUrl} target="_blank" rel="noreferrer">Open Trello context <ExternalLink className="size-4" /></a></Button>
+            <div><div className="text-xs font-semibold uppercase text-muted-foreground">Decision owner: {founderName}</div><h2 className="mt-1 font-semibold">{selected.cardName}</h2><p className="mt-1 text-sm text-muted-foreground">{selected.stepTitle}</p></div>
+            <p className="text-sm">This step remains on hold. The founder records the decision; APTLSS then reassesses the card before you continue.</p>
+            {/^https:\/\//i.test(selected.cardUrl) && <Button variant="outline" asChild><a href={selected.cardUrl} target="_blank" rel="noopener noreferrer">Open Trello context <ExternalLink className="size-4" /></a></Button>}
           </> : <EmptyState title="Select a decision" detail="The outcome inspector stays separate from the ordered inbox." />}
         </Card>
       </div>
@@ -876,9 +808,9 @@ function DecisionsView({ founderName }: { founderName: string }) {
   );
 }
 
-function RecentOutcomes({ rows }: { rows: Array<{ id: number; cardName: string; outcome: string; resolvedAt: Date; recommendedDecision: string | null }> }) {
+function RecentOutcomes({ rows }: { rows: Array<{ id: number; cardName: string; outcome: string; resolvedAt: Date }> }) {
   const [open, setOpen] = useState(false);
-  return <Card className="gap-0 rounded-lg py-0"><Collapsible open={open} onOpenChange={setOpen}><CollapsibleTrigger className="flex w-full items-center justify-between p-4 text-left"><span><span className="block text-sm font-semibold">Recent outcomes</span><span className="block text-xs text-muted-foreground">Durable resolution history</span></span>{open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</CollapsibleTrigger><CollapsibleContent className="border-t">{rows.length ? rows.map((row) => <div key={row.id} className="border-b p-4 last:border-b-0"><div className="flex justify-between gap-3"><span className="text-sm font-medium">{row.cardName}</span><span className="shrink-0 text-xs text-muted-foreground">{new Date(row.resolvedAt).toLocaleDateString()}</span></div><p className="mt-1 text-sm">{row.outcome}</p>{row.recommendedDecision && <p className="mt-1 text-xs text-muted-foreground">Recommended: {row.recommendedDecision}</p>}</div>) : <div className="p-4 text-sm text-muted-foreground">No recorded outcomes yet.</div>}</CollapsibleContent></Collapsible></Card>;
+  return <Card className="gap-0 rounded-lg py-0"><Collapsible open={open} onOpenChange={setOpen}><CollapsibleTrigger className="flex w-full items-center justify-between p-4 text-left"><span><span className="block text-sm font-semibold">Recent outcomes</span><span className="block text-xs text-muted-foreground">Durable resolution history</span></span>{open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</CollapsibleTrigger><CollapsibleContent className="border-t">{rows.length ? rows.map((row) => <div key={row.id} className="border-b p-4 last:border-b-0"><div className="flex justify-between gap-3"><span className="text-sm font-medium">{row.cardName}</span><span className="shrink-0 text-xs text-muted-foreground">{new Date(row.resolvedAt).toLocaleDateString()}</span></div><p className="mt-1 text-sm">{row.outcome}</p></div>) : <div className="p-4 text-sm text-muted-foreground">No recorded outcomes yet.</div>}</CollapsibleContent></Collapsible></Card>;
 }
 
 function EvidenceView() {
@@ -1163,10 +1095,6 @@ function PageHeading({ title, description, actions }: { title: string; descripti
 function ContextMetric({ icon: Icon, label, value, detail, onClick }: { icon: typeof Activity; label: string; value: string; detail: string; onClick?: () => void }) {
   const content = <><div className="flex items-center justify-between text-xs font-semibold uppercase text-muted-foreground"><span>{label}</span><Icon className="size-4" /></div><div className="mt-2 text-lg font-semibold">{value}</div><div className="mt-1 text-xs text-muted-foreground">{detail}</div></>;
   return onClick ? <button type="button" onClick={onClick} className="w-full rounded-lg border bg-card p-4 text-left hover:border-blue-500/40 hover:bg-accent/20">{content}</button> : <div className="rounded-lg border bg-card p-4">{content}</div>;
-}
-
-function MetricCell({ label, value }: { label: string; value: string }) {
-  return <div className="min-w-0 p-3 text-center"><div className="text-[11px] font-semibold uppercase text-muted-foreground">{label}</div><div className="mt-1 truncate text-sm font-semibold">{value}</div></div>;
 }
 
 function InspectorLabel({ children }: { children: React.ReactNode }) {

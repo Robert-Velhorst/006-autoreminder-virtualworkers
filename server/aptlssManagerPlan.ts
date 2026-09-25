@@ -470,6 +470,29 @@ export function reconcileManagerPlan(args: {
     !baseline ||
     !isDeepStrictEqual(baseline.blocks, blocks) ||
     !isDeepStrictEqual(baseline.constraints, constraints);
+  const previousById = new Map((baseline?.blocks ?? []).map(block => [block.id, block]));
+  const proposedById = new Map(blocks.map(block => [block.id, block]));
+  const slot = (block: OperatorPlanBlock) => ({ startTime: block.startTime, endTime: block.endTime });
+  const planChanges: NonNullable<ManagerPlanImpact["planChanges"]> = [];
+  for (const block of blocks) {
+    const before = previousById.get(block.id);
+    const kind = !before ? "added" : before.startTime !== block.startTime || before.endTime !== block.endTime
+      ? "moved" : !isDeepStrictEqual(before, block) ? "updated" : null;
+    if (!kind) continue;
+    const action = result.actions.find(item => item.id === block.id);
+    planChanges.push({ kind, blockId: block.id, cardName: block.cardName,
+      before: before ? slot(before) : null, after: slot(block),
+      reason: action?.reason || "No specific reason was recorded for this proposed change.",
+      assumptionIds: ["baseline", "worker", ...(action ? [`action:${action.id}`] : [])] });
+  }
+  for (const block of baseline?.blocks ?? []) {
+    if (proposedById.has(block.id)) continue;
+    const notScheduled = unscheduled.find(item => item.cardId === block.cardId);
+    planChanges.push({ kind: "removed", blockId: block.id, cardName: block.cardName,
+      before: slot(block), after: null,
+      reason: notScheduled?.reason || "The proposal does not retain this block; the specific cause needs review.",
+      assumptionIds: ["baseline", "worker", ...(result.actions.some(item => item.id === block.id) ? [`action:${block.id}`] : [])] });
+  }
   const assumptions: ManagerPlanImpact["assumptions"] = [
     {
       id: "clock",
@@ -967,6 +990,8 @@ export function reconcileManagerPlan(args: {
         : "no_plan",
     scheduleChanged,
     requiresReview: risks.some(risk => risk.requiresReview),
+    planChanges,
+    availabilityChanged: !!baseline && !isDeepStrictEqual(baseline.constraints, constraints),
     assumptions: structuredClone(assumptions),
     deadlines,
     dependencies,
@@ -1014,20 +1039,19 @@ export function reconcileManagerPlan(args: {
   const changes: string[] = [];
   if (unchanged)
     return { plan: { ...structuredClone(existing!), planningImpact }, changes };
-  const previous = new Map((existing?.blocks ?? []).map(b => [b.id, b]));
-  for (const b of blocks) {
-    const old = previous.get(b.id);
-    if (!old) changes.push(`Scheduled ${b.cardName} at ${b.startTime}.`);
-    else if (old.startTime !== b.startTime)
-      changes.push(
-        `Moved ${b.cardName} from ${old.startTime} to ${b.startTime}.`
-      );
+  for (const change of planChanges) {
+    if (change.kind === "added") changes.push(`Scheduled ${change.cardName} at ${change.after!.startTime}.`);
+    else if (change.kind === "moved") changes.push(`Moved ${change.cardName} from ${change.before!.startTime} to ${change.after!.startTime}.`);
+    else if (change.kind === "updated") changes.push(`Updated the proposed work for ${change.cardName} at ${change.after!.startTime}.`);
+    else changes.push(`No longer scheduled: ${change.cardName} at ${change.before!.startTime}. This does not mark the work complete. ${change.reason}`);
   }
+  if (planningImpact.availabilityChanged) changes.push("Worker availability changed; review the proposed working slots.");
   for (const u of unscheduled) {
     const action = result.actions.find(a => a.cardId === u.cardId);
     changes.push(
       `${u.cardName}: ${u.reason}${action?.reason ? ` ${action.reason}.` : ""}${action?.evidenceIds.length ? ` Sources ${action.evidenceIds.join(", ")}.` : ""}`
     );
   }
+  if (!changes.length) changes.push("Plan content changed without a block movement; review the proposal details.");
   return { plan: { ...plan, planningImpact }, changes: [...new Set(changes)] };
 }

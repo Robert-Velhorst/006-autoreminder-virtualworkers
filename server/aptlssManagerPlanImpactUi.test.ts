@@ -21,6 +21,10 @@ function fixture(): Impact {
     baseline: "same_day_plan",
     scheduleChanged: true,
     requiresReview: false,
+    planChanges: [
+      { kind: "moved", blockId: "future", cardName: "Current case", before: { startTime: "10:00", endTime: "10:30" }, after: { startTime: "11:00", endTime: "11:30" }, reason: "A new source needs review first.", assumptionIds: ["card:future"] },
+    ],
+    availabilityChanged: false,
     assumptions: [
       {
         id: "card:future",
@@ -102,6 +106,10 @@ describe("ManagerPlanImpact disclosure", () => {
     );
     for (const text of [
       "Planning impact",
+      "Changes from active plan",
+      "Moved: Current case",
+      "A new source needs review first.",
+      "shadow proposal",
       "Working-time buffer",
       "Unknown",
       "Preserved exactly",
@@ -142,5 +150,14 @@ describe("ManagerPlanImpact disclosure", () => {
     );
     expect(html).not.toContain("<script>");
     expect(html).toContain("&lt;script&gt;");
+  });
+
+  it("labels a legacy impact without block comparison as unknown rather than unchanged", () => {
+    const impact = fixture();
+    delete impact.planChanges;
+    const html = renderToStaticMarkup(createElement(ManagerPlanImpact, { impact }));
+    expect(html).toContain("Block comparison unavailable");
+    expect(html).toContain("comparison was not recorded");
+    expect(html).not.toContain("No changes to scheduled blocks");
   });
 });

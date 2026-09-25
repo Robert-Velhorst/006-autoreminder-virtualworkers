@@ -1,4 +1,5 @@
 import type { ManagerCard, ManagerEvidence } from "../shared/aptlssManager";
+import { gmailContentScope } from "../shared/gmailContentScope";
 import {
   MANAGER_DAY,
   validManagerDate,
@@ -176,6 +177,9 @@ function structuredTaskFacts(e: Evidence): ManagerFact[] | null {
 }
 
 export function extractManagerFacts(e: Evidence): ManagerFact[] {
+  if (e.source === "gmail" && e.kind === "source" &&
+      (e.metadata?.contentScope === "portal_notice" || gmailContentScope("", e.text) === "portal_notice"))
+    return [managerFact(e, e.text, "unknown", "underlying document unread", "unknown")];
   if (unsafeManagerText.test(e.text))
     return [managerFact(e, e.text, "unknown", "unsafe text", "unknown")];
   const structured = structuredTaskFacts(e);
@@ -303,6 +307,16 @@ function supersedes(newer: Evidence, older: Evidence, now: number) {
     n?.truthClass === "human_decision" &&
     n.authority === "authoritative" &&
     !!n.sender?.trim();
+  const sameSourceRecordRevision =
+    newer.source === older.source &&
+    !!n.sourceRecordId?.trim() &&
+    n.sourceRecordId === o?.sourceRecordId &&
+    (n.sender?.trim() || "") === (o?.sender?.trim() || "") &&
+    !!n.sourceRevision?.trim() &&
+    !!o?.sourceRevision?.trim() &&
+    n.sourceRevision !== o.sourceRevision &&
+    n.authority !== "reported" &&
+    n.authority !== "unverified";
   const olderClaims = extractManagerFacts(older).filter(
     f => f.support === "explicit" && f.topic !== "context"
   );
@@ -317,17 +331,19 @@ function supersedes(newer: Evidence, older: Evidence, now: number) {
   return (
     newer.id !== older.id &&
     newer.cardId === older.cardId &&
-    (newer.source === older.source || humanResolution) &&
+    (sameSourceRecordRevision || humanResolution) &&
     newer.kind !== "worker" &&
     n?.truthClass !== "model_proposal" &&
     n?.supersedesEvidenceIds?.includes(older.id) &&
     validMetadata(newer, now) &&
     !!n.sourceDate &&
+    replacementClaims.length > 0 &&
     coversClaims &&
     (humanResolution ||
       (validMetadata(older, now) &&
         !!o?.sourceDate &&
-        Date.parse(n.sourceDate) > Date.parse(o.sourceDate))) &&
+        Date.parse(n.sourceDate) > Date.parse(o.sourceDate) &&
+        (!o.effectiveFrom || Date.parse(n.effectiveFrom ?? "") >= Date.parse(o.effectiveFrom)))) &&
     !!n.effectiveFrom &&
     Date.parse(n.effectiveFrom) <= now &&
     (!n.effectiveTo || Date.parse(n.effectiveTo) > now)
@@ -356,14 +372,13 @@ export function assessManagerEvidence(
   );
   const seen = new Set<string>();
   const evidence = records.filter(e => {
-    const key = JSON.stringify([
-      e.cardId,
-      e.source,
-      e.kind,
-      e.text.trim(),
-      e.metadata ?? null,
-      e.observedAt,
-    ]);
+    const stableSource = e.metadata?.sourceRecordId && e.metadata?.sourceRevision;
+    const key = stableSource ? JSON.stringify([
+      e.cardId, e.source, e.kind, e.metadata?.sourceRecordId, e.metadata?.sourceRevision,
+      e.text.trim(), e.metadata?.sender ?? null, e.metadata?.sourceDate ?? null,
+      e.metadata?.effectiveFrom ?? null, e.metadata?.effectiveTo ?? null,
+      e.metadata?.truthClass ?? null, e.metadata?.authority ?? null,
+    ]) : JSON.stringify([e.cardId, e.source, e.kind, e.text.trim(), e.metadata ?? null, e.observedAt]);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -500,6 +515,8 @@ export function assessManagerEvidence(
         (!structuredTaskFacts(e) &&
           extractManagerFacts(e).some(f => f.support === "unknown"))
     ) || missingTopics.length > 0;
+  const portalNotice = relevant.some(e => e.source === "gmail" && e.kind === "source" &&
+    (e.metadata?.contentScope === "portal_notice" || gmailContentScope("", e.text) === "portal_notice"));
   const unresolved = conflicts.size > 0 || graph.length > 0;
   const reasons = [
     ...(!evidence.length ? ["No source evidence is linked"] : []),
@@ -508,6 +525,7 @@ export function assessManagerEvidence(
       : []),
     ...(stale ? ["Essential source evidence is stale or expired"] : []),
     ...(future ? ["Essential evidence is not yet effective"] : []),
+    ...(portalNotice ? ["Only a portal notice is available; the underlying correspondence has not been checked"] : []),
     ...(unknown
       ? [
           "Essential claims lack explicit support; verify unknown or unsafe statements",

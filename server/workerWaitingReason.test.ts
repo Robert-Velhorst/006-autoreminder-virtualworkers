@@ -1,8 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { interpretWaitingReasonForWorker } from "./workerWaitingReason";
+import { bindWaitingReasonToOwnedCard, interpretWaitingReasonForWorker } from "./workerWaitingReason";
 
 describe("worker waiting reason personalization", () => {
   const nowMs = new Date("2026-07-30T09:00:00.000Z").getTime();
+
+  it("binds stored task identity to the worker-owned card rather than request labels", () => {
+    const bound = bindWaitingReasonToOwnedCard({
+      cardId: "foreign-card",
+      cardName: "Forged task",
+      cardUrl: "https://example.invalid/forged",
+      boardName: "Forged board",
+      listName: "DONE",
+    }, {
+      cardId: "owned-card",
+      cardName: "Assigned task",
+      cardUrl: "https://trello.com/c/owned-card",
+      boardName: "Assigned board",
+      listName: "TO DO",
+    });
+
+    expect(bound).toMatchObject({
+      cardId: "owned-card",
+      cardName: "Assigned task",
+      cardUrl: "https://trello.com/c/owned-card",
+      boardName: "Assigned board",
+      listName: "TO DO",
+    });
+  });
 
   it("treats the current worker name as the internal actor", () => {
     const result = interpretWaitingReasonForWorker(

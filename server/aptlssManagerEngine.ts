@@ -16,7 +16,7 @@ import { assessManagerEvidence, unsafeManagerText } from "./aptlssManagerFacts";
 function id(prefix: string, ...parts: unknown[]) {
   return `${prefix}-${createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 24)}`;
 }
-function external(title: string) {
+export function managerExternalAction(title: string) {
   return /\b(send|email|mail|submit|pay|publish|post|message|move|delete|purchase|transfer|invite|upload|approve|sign)\b|\b(verstuur|mail|betaal|publiceer|plaats|verzend|verwijder|koop|onderteken|dien in)\b/i.test(
     title
   );
@@ -119,7 +119,7 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
     for (const step of unresolved) {
       const kind: ManagerAction["kind"] = step.requiresDecision
         ? "decision"
-        : external(step.title)
+        : managerExternalAction(step.title)
           ? "draft"
           : "work";
       const action: ManagerAction = {
@@ -170,14 +170,25 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
         const dependencyStep = dependencyCard?.steps.find(
           s => s.id === Number(depStep)
         );
-        if (target) action.dependsOn.push(target.id);
+        if (dependencyStep?.decisionRejected) {
+          action.dependsOn.push(`rejected:${depCard}:${dependencyStep.id}`);
+          action.reason = `The founder rejected prerequisite "${dependencyStep.title}". Ask the founder for a new direction before continuing.`;
+        } else if (target) action.dependsOn.push(target.id);
         else if (dependencyStep && !dependencyStep.complete)
           action.dependsOn.push(id("action", depCard, dependencyStep.id));
         else if (!dependencyStep?.complete)
           action.dependsOn.push(`missing:${dep}`);
       }
-      if (!explicit.length && i > 0)
-        action.dependsOn.push(actionByStep.get(unresolved[i - 1].id)!.id);
+      if (!explicit.length) {
+        const currentIndex = card.steps.findIndex(s => s.id === step.id);
+        const previousStep = currentIndex > 0 ? card.steps[currentIndex - 1] : null;
+        if (previousStep?.decisionRejected) {
+          action.dependsOn.push(`rejected:${card.id}:${previousStep.id}`);
+          action.reason = `The founder rejected prerequisite "${previousStep.title}". Ask the founder for a new direction before continuing.`;
+        } else if (i > 0) {
+          action.dependsOn.push(actionByStep.get(unresolved[i - 1].id)!.id);
+        }
+      }
     }
     const cardBlocked = /WAIT|HOLD|BLOCK/.test(
       `${card.state} ${card.list}`.toUpperCase()
@@ -219,6 +230,16 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
       allActions.push(follow);
     }
     if (proof.blocked) {
+      const explicitDisagreement = proof.facts.some(fact =>
+        proof.conflictIds.includes(fact.evidenceId) &&
+        fact.support === "explicit" && fact.topic !== "context" &&
+        proof.facts.some(other =>
+          other.evidenceId !== fact.evidenceId && proof.conflictIds.includes(other.evidenceId) &&
+          other.support === "explicit" && other.subject === fact.subject &&
+          other.topic === fact.topic && other.value !== fact.value
+        )
+      );
+      const issueKind = !proof.unresolved ? "source_check" : explicitDisagreement ? "conflicting_claims" : "reported_difference";
       const evidenceIds = proof.unresolved
         ? proof.conflictIds
         : ev.map(e => e.id);
@@ -254,15 +275,18 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
       interventions.push({
         id: id("intervention", card.id, ...evidenceIds),
         cardId: card.id,
+        issueKind,
         severity: proof.unresolved ? "urgent" : "attention",
-        title: proof.unresolved
-          ? "Resolve conflict before continuing"
-          : "Verify evidence before continuing",
+        title: issueKind === "conflicting_claims" ? "Compare conflicting facts before continuing" : issueKind === "reported_difference" ? "Verify a reported difference before continuing" : "Check the original source before continuing",
         explanation: proof.reliability.reasons.join(". "),
-        question:
-          "Which current fact applies to this task, from which source and sender, and from what effective date?",
-        safeAction:
-          "Open the cited evidence and provide the verified current fact.",
+        question: issueKind === "conflicting_claims"
+          ? "Which of the two cited facts applies now? Identify the authoritative source and effective date."
+          : issueKind === "reported_difference"
+            ? "What does the original record say, and which reported update needs checking?"
+            : "What does the original source ask you to do, and does it give a deadline?",
+        safeAction: issueKind === "source_check"
+          ? "Open the original source, read any referenced document, and report its request and deadline."
+          : "Compare the cited records and report the verified fact before continuing.",
         evidenceIds,
       });
     }
@@ -293,6 +317,7 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
       interventions.push({
         id: id("cycle", a.id),
         cardId: a.cardId,
+        issueKind: "dependency_cycle",
         severity: "urgent",
         title: "Dependency cycle",
         explanation: "A dependency cycle prevents a safe chronological plan.",
@@ -312,6 +337,7 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
         interventions.push({
           id: id("missing", a.id, dep),
           cardId: a.cardId,
+          issueKind: "missing_dependency",
           severity: "urgent",
           title: "Missing dependency",
           explanation: `Dependency ${dep} is not available.`,

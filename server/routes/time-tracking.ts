@@ -1,9 +1,11 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../db';
-import { timeEntries, vaProfiles, type User } from '../../drizzle/schema';
+import { timeEntries, vaProfiles, taskAssignments, atisCards, aptlssPlans, aptlssWaitingReasons, aptlssAssessments, aptlssManagerRuns, users, type User } from '../../drizzle/schema';
 import { eq, and, desc, gte, lte, sql } from 'drizzle-orm';
 import { requireAuthenticated } from '../middleware/auth';
+import { isManagerPilotWorker } from '../aptlssManagerPilot';
+import { managerIntervenesOnCard, timerExecutionBlockReason } from '../timerAccess';
 
 const router = Router();
 router.use('/time-tracking', requireAuthenticated);
@@ -17,6 +19,38 @@ export function timeTrackingOwnership(user: User, workerFounderId?: number | nul
 
 function nonNegativeDurationMinutes(entry: { durationMinutes?: number | null }) {
   return Math.max(0, Number(entry.durationMinutes) || 0);
+}
+
+async function transitionActiveTimer(userId: number, transition: "stop" | "pause", notes?: string | null) {
+  const db = await getDb();
+  if (!db) return { status: 503, body: { error: 'Database not available' } };
+
+  return db.transaction(async tx => {
+    const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).for('update');
+    if (!account) return { status: 401, body: { error: 'Account no longer exists' } };
+
+    const [entry] = await tx.select().from(timeEntries).where(and(
+      eq(timeEntries.vaId, userId), sql`${timeEntries.endTime} IS NULL`
+    )).orderBy(desc(timeEntries.startTime)).limit(1).for('update');
+    if (!entry) return { status: 400, body: { error: 'No active timer found' } };
+
+    const endTime = new Date();
+    const startTime = new Date(entry.startTime);
+    const durationMinutes = Math.max(0, Math.round((endTime.getTime() - startTime.getTime()) / 60000));
+    const finalNotes = transition === 'pause'
+      ? entry.notes ? `${entry.notes} (paused)` : '(paused)'
+      : notes || entry.notes;
+
+    await tx.update(timeEntries).set({ endTime, durationMinutes, notes: finalNotes })
+      .where(and(eq(timeEntries.id, entry.id), eq(timeEntries.vaId, userId), sql`${timeEntries.endTime} IS NULL`));
+    const [updatedEntry] = await tx.select().from(timeEntries).where(
+      and(eq(timeEntries.id, entry.id), eq(timeEntries.vaId, userId))
+    ).limit(1);
+
+    return transition === 'pause'
+      ? { status: 200, body: { success: true, entry: updatedEntry, paused: true, taskId: entry.taskId } }
+      : { status: 200, body: { success: true, entry: updatedEntry } };
+  });
 }
 
 // Get active timer for a task (if any)
@@ -61,9 +95,10 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { taskId, notes } = req.body;
-    if (!taskId) {
-      return res.status(400).json({ error: 'Task ID is required' });
+    const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId.trim() : '';
+    const notes = typeof req.body?.notes === 'string' ? req.body.notes : null;
+    if (!taskId || taskId.length > 128) {
+      return res.status(400).json({ error: 'A valid task ID is required' });
     }
 
     const db = await getDb();
@@ -71,47 +106,57 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    // Check if there's already an active timer
-    const existingActive = await db.select()
-      .from(timeEntries)
-      .where(and(
-        eq(timeEntries.vaId, user.id),
-        sql`${timeEntries.endTime} IS NULL`
-      ))
-      .limit(1);
-
-    if (existingActive.length > 0) {
-      return res.status(400).json({ 
-        error: 'Timer already active', 
-        activeTaskId: existingActive[0].taskId 
-      });
-    }
-
-    const workerProfile = user.role === 'worker'
-      ? await db.select({ founderId: vaProfiles.founderId })
-        .from(vaProfiles)
-        .where(eq(vaProfiles.userId, user.id))
-        .limit(1)
-      : [];
-    const ownership = timeTrackingOwnership(user, workerProfile[0]?.founderId);
-
-    // Create new time entry. `vaId` is always the signed-in account, matching
-    // the operator timer and preventing workers from reading another worker's time.
-    const result = await db.insert(timeEntries).values({
-      taskId,
-      ...ownership,
-      startTime: new Date(),
-      notes: notes || null,
+    const outcome = await db.transaction(async tx => {
+      const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, user.id)).for('update');
+      if (!account) return { status: 401, body: { error: 'Account no longer exists' } };
+      const [profile] = user.role === 'worker'
+        ? await tx.select({ id: vaProfiles.id, founderId: vaProfiles.founderId, trelloMemberId: vaProfiles.trelloMemberId })
+          .from(vaProfiles).where(eq(vaProfiles.userId, user.id)).limit(1)
+        : [];
+      if (user.role === 'worker' && isManagerPilotWorker(user.id)) {
+        if (!profile) return { status: 403, body: { error: 'Worker profile is required for this task' } };
+        const cardId = taskId.split(':')[0];
+        const [assignment] = await tx.select({ status: taskAssignments.status }).from(taskAssignments)
+          .where(and(eq(taskAssignments.vaId, profile.id), eq(taskAssignments.taskId, taskId))).limit(1);
+        const [card] = await tx.select({ listName: atisCards.listName, memberIds: atisCards.memberIds, isArchived: atisCards.isArchived })
+          .from(atisCards).where(eq(atisCards.trelloId, cardId)).limit(1);
+        let isCardMember = false;
+        if (profile.trelloMemberId && card?.memberIds && !card.isArchived) {
+          try {
+            const members: unknown = JSON.parse(card.memberIds);
+            isCardMember = Array.isArray(members) && members.includes(profile.trelloMemberId);
+          } catch { /* Malformed membership cannot grant timer access. */ }
+        }
+        if (!assignment && !isCardMember) return { status: 403, body: { error: 'This task is not assigned to your worker account' } };
+        if (assignment?.status === 'completed') return { status: 409, body: { error: 'This task is already complete' } };
+        const [plan] = await tx.select({ listName: aptlssPlans.listName }).from(aptlssPlans)
+          .where(and(eq(aptlssPlans.vaId, user.id), eq(aptlssPlans.cardId, cardId))).limit(1);
+        const [waiting] = await tx.select({ id: aptlssWaitingReasons.id }).from(aptlssWaitingReasons)
+          .where(and(eq(aptlssWaitingReasons.vaId, user.id), eq(aptlssWaitingReasons.cardId, cardId), eq(aptlssWaitingReasons.status, 'active'))).limit(1);
+        const [assessment] = await tx.select({ actionability: aptlssAssessments.actionability }).from(aptlssAssessments)
+          .where(eq(aptlssAssessments.cardId, cardId)).orderBy(desc(aptlssAssessments.assessedAt), desc(aptlssAssessments.id)).limit(1);
+        const [run] = await tx.select({ snapshotJson: aptlssManagerRuns.snapshotJson }).from(aptlssManagerRuns)
+          .where(eq(aptlssManagerRuns.vaId, user.id)).orderBy(desc(aptlssManagerRuns.id)).limit(1);
+        let intervention = false;
+        if (run) {
+          try { intervention = managerIntervenesOnCard(run.snapshotJson, cardId); }
+          catch { return { status: 409, body: { error: 'The latest APTLSS review cannot be verified; reassess before starting work' } }; }
+        }
+        const reason = timerExecutionBlockReason({ listName: plan?.listName ?? card?.listName ?? '',
+          hasActiveWaitingReason: Boolean(waiting) || assignment?.status === 'blocked',
+          actionability: assessment?.actionability ?? null, hasManagerIntervention: intervention });
+        if (reason) return { status: 409, body: { error: reason } };
+      }
+      const [active] = await tx.select().from(timeEntries).where(and(
+        eq(timeEntries.vaId, user.id), sql`${timeEntries.endTime} IS NULL`
+      )).limit(1);
+      if (active) return { status: 400, body: { error: 'Timer already active', activeTaskId: active.taskId } };
+      const ownership = timeTrackingOwnership(user, profile?.founderId);
+      const [result] = await tx.insert(timeEntries).values({ taskId, ...ownership, startTime: new Date(), notes });
+      const [entry] = await tx.select().from(timeEntries).where(eq(timeEntries.id, result.insertId)).limit(1);
+      return { status: 200, body: { success: true, entry } };
     });
-
-    // Fetch the created entry
-    const newEntry = await db.select()
-      .from(timeEntries)
-      .where(eq(timeEntries.vaId, user.id))
-      .orderBy(desc(timeEntries.id))
-      .limit(1);
-
-    res.json({ success: true, entry: newEntry[0] });
+    res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error('Error starting timer:', error);
     res.status(500).json({ error: 'Failed to start timer' });
@@ -126,48 +171,9 @@ router.post('/time-tracking/stop', async (req: any, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { notes } = req.body;
-
-    const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-
-    // Find active timer
-    const activeTimer = await db.select()
-      .from(timeEntries)
-      .where(and(
-        eq(timeEntries.vaId, user.id),
-        sql`${timeEntries.endTime} IS NULL`
-      ))
-      .limit(1);
-
-    if (activeTimer.length === 0) {
-      return res.status(400).json({ error: 'No active timer found' });
-    }
-
-    const entry = activeTimer[0];
-    const endTime = new Date();
-    const startTime = new Date(entry.startTime);
-    // Clock drift or a repaired entry must never create negative tracked time.
-    const durationMinutes = Math.max(0, Math.round((endTime.getTime() - startTime.getTime()) / 60000));
-
-    // Update the entry with end time and duration
-    await db.update(timeEntries)
-      .set({
-        endTime,
-        durationMinutes,
-        notes: notes || entry.notes,
-      })
-      .where(eq(timeEntries.id, entry.id));
-
-    // Fetch updated entry
-    const updatedEntry = await db.select()
-      .from(timeEntries)
-      .where(eq(timeEntries.id, entry.id))
-      .limit(1);
-
-    res.json({ success: true, entry: updatedEntry[0] });
+    const notes = typeof req.body?.notes === 'string' ? req.body.notes : null;
+    const outcome = await transitionActiveTimer(user.id, 'stop', notes);
+    res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error('Error stopping timer:', error);
     res.status(500).json({ error: 'Failed to stop timer' });
@@ -176,54 +182,14 @@ router.post('/time-tracking/stop', async (req: any, res: Response) => {
 
 // Pause timer (stop and allow resume)
 router.post('/time-tracking/pause', async (req: any, res: Response) => {
-  // Pause is essentially the same as stop - we just record the time
-  // Resume will create a new entry for the same task
   try {
     const user = req.user;
     if (!user) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-
-    // Find active timer
-    const activeTimer = await db.select()
-      .from(timeEntries)
-      .where(and(
-        eq(timeEntries.vaId, user.id),
-        sql`${timeEntries.endTime} IS NULL`
-      ))
-      .limit(1);
-
-    if (activeTimer.length === 0) {
-      return res.status(400).json({ error: 'No active timer found' });
-    }
-
-    const entry = activeTimer[0];
-    const endTime = new Date();
-    const startTime = new Date(entry.startTime);
-    // Clock drift or a repaired entry must never create negative tracked time.
-    const durationMinutes = Math.max(0, Math.round((endTime.getTime() - startTime.getTime()) / 60000));
-
-    // Update the entry with end time and duration
-    await db.update(timeEntries)
-      .set({
-        endTime,
-        durationMinutes,
-        notes: entry.notes ? `${entry.notes} (paused)` : '(paused)',
-      })
-      .where(eq(timeEntries.id, entry.id));
-
-    // Fetch updated entry
-    const updatedEntry = await db.select()
-      .from(timeEntries)
-      .where(eq(timeEntries.id, entry.id))
-      .limit(1);
-
-    res.json({ success: true, entry: updatedEntry[0], paused: true, taskId: entry.taskId });
+    const outcome = await transitionActiveTimer(user.id, 'pause');
+    res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error('Error pausing timer:', error);
     res.status(500).json({ error: 'Failed to pause timer' });

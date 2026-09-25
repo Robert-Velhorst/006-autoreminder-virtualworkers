@@ -36,6 +36,58 @@ describe("pilot API enforcement without weakening canonical authorization", () =
     }
     expect(db.getDb).not.toHaveBeenCalled();
   });
+  it("rejects every worker-only operator surface for a generic authenticated account", async () => {
+    const ordinary = caller(3, "user");
+    const plan = {
+      version: 2 as const,
+      dateKey: "2026-09-25",
+      generatedAt: new Date().toISOString(),
+      blocks: [],
+      robertItems: [],
+      unscheduledCards: [],
+      planHealth: { confidence: 0, scheduledMinutes: 0, availableMinutes: 0, overlaps: 0, gaps: 0 },
+      constraints: { startTime: "09:00", endTime: "18:00", breaks: [] },
+      auditTrail: [],
+    };
+    const requests = [
+      ordinary.getContext(),
+      ordinary.getWorkQueueContext(),
+      ordinary.getManagerStatus(),
+      ordinary.runManager(),
+      ordinary.updateManagerPolicy({ enabled: true, intervalMinutes: 5 }),
+      ordinary.submitManagerUpdate({ cardId: "card", detail: "Worker report" }),
+      ordinary.getCardEvidence({ cardId: "card" }),
+      ordinary.getVerificationFollowups(),
+      ordinary.recordEvidenceAssertion({ title: "A title", detail: "A report" }),
+      ordinary.createEvidenceConflict({ sourceEvidenceId: 1, assertedEvidenceId: 2, question: "Check this conflict" }),
+      ordinary.resolveVerificationFollowup({ followupId: 1, resolution: "Reviewed" }),
+      ordinary.interpretWaitingReason({ reason: "Waiting for access" }),
+      ordinary.recordWaitingReason({ reason: "Waiting for access", cardId: "card", cardName: "Task", cardUrl: "", boardName: "Board", listName: "TO DO" }),
+      ordinary.getWaitingReasons(),
+      ordinary.getWaitingReason({ cardId: "card" }),
+      ordinary.getWaitingReasonHistory({ cardId: "card" }),
+      ordinary.resolveWaitingReason({ cardId: "card" }),
+      ordinary.getDecisionHistory(),
+      ordinary.getDailyPlan(),
+      ordinary.generateDailyPlan({ force: true }),
+      ordinary.updateDailyPlan(plan),
+      ordinary.getBrowserTabStatus(),
+      ordinary.getBrowserTabPolicy(),
+      ordinary.setBrowserTabPolicy({ enabled: true }),
+      ordinary.getBrowserCollectorToken(),
+      ordinary.getBrowserTabEvidenceHistory(),
+      ordinary.getGoogleEvidenceStatus(),
+      ordinary.updateGoogleEvidenceSettings({ gmail: { enabled: false } }),
+      ordinary.syncGoogleEvidence({ gmail: true }),
+      ordinary.disconnectGoogleEvidence(),
+    ];
+
+    for (const result of await Promise.allSettled(requests)) {
+      expect(result.status).toBe("rejected");
+      if (result.status === "rejected") expect(result.reason).toMatchObject({ code: "FORBIDDEN" });
+    }
+    expect(db.getDb).not.toHaveBeenCalled();
+  });
   it.each(["worker", "user", null] as const)("retains admin-only review controls for %s", async role => {
     await expect(caller(2, role).getManagerReviewInbox({ vaId: 2 })).rejects.toMatchObject({ code: role ? "FORBIDDEN" : "UNAUTHORIZED" });
     expect(db.getDb).not.toHaveBeenCalled();

@@ -14,6 +14,7 @@ interface Notification {
   title: string;
   content: string;
   notificationType: string;
+  taskId: string | null;
   taskName: string | null;
   dueDate: string | null;
   channel: string;
@@ -152,7 +153,7 @@ export function NotificationBell() {
   return (
     <Popover open={isOpen} onOpenChange={setIsOpen}>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="icon" className="relative">
+        <Button variant="ghost" size="icon" className="relative" aria-label="Notifications">
           <Bell className="h-5 w-5" />
           {unreadCount > 0 && (
             <span className="absolute -top-1 -right-1 h-5 w-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center font-medium">
@@ -161,7 +162,7 @@ export function NotificationBell() {
           )}
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-96 p-0" align="end">
+      <PopoverContent className="w-[min(24rem,calc(100vw-1rem))] p-0" align="end">
         <div className="flex items-center justify-between px-4 py-3 border-b">
           <h3 className="font-semibold">Notifications</h3>
           {unreadCount > 0 && (
@@ -194,16 +195,18 @@ export function NotificationBell() {
                 <div
                   key={notification.id}
                   className={cn(
-                    'px-4 py-3 hover:bg-muted/50 transition-colors cursor-pointer relative group',
+                    'px-4 py-3 hover:bg-muted/50 transition-colors relative group',
                     notification.isRead === 0 && 'bg-primary/5'
                   )}
-                  onClick={() => {
-                    if (notification.isRead === 0) {
-                      markAsRead(notification.id);
-                    }
-                  }}
                 >
-                  <div className="flex gap-3">
+                  <button type="button" className="flex w-full gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onClick={() => void (async () => {
+                      if (notification.isRead === 0) await markAsRead(notification.id);
+                      if (notification.taskId?.startsWith('founder-decision:')) {
+                        setIsOpen(false);
+                        window.location.href = '/founder?tab=founder-decisions';
+                      }
+                    })()}>
                     <div className="mt-0.5">
                       {notificationIcons[notification.notificationType] || notificationIcons.general}
                     </div>
@@ -233,18 +236,18 @@ export function NotificationBell() {
                         )}
                       </div>
                     </div>
-                  </div>
+                  </button>
 
                   {/* Action buttons on hover */}
-                  <div className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                  <div className="absolute right-2 top-2 flex gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
                     {notification.isRead === 0 && (
                       <Button
                         variant="ghost"
                         size="icon"
                         className="h-6 w-6"
+                        aria-label="Mark notification as read"
                         onClick={(e) => {
-                          e.stopPropagation();
-                          markAsRead(notification.id);
+                          void markAsRead(notification.id);
                         }}
                       >
                         <Check className="h-3 w-3" />
@@ -254,9 +257,9 @@ export function NotificationBell() {
                       variant="ghost"
                       size="icon"
                       className="h-6 w-6 text-destructive hover:text-destructive"
+                      aria-label="Delete notification"
                       onClick={(e) => {
-                        e.stopPropagation();
-                        deleteNotification(notification.id);
+                        void deleteNotification(notification.id);
                       }}
                     >
                       <Trash2 className="h-3 w-3" />

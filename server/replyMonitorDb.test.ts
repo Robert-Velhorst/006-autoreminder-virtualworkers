@@ -21,6 +21,7 @@ import {
   resolveVagueReplyFlag,
   upsertReplyThread,
 } from "./replyMonitorDb";
+import { MySqlDialect } from "drizzle-orm/mysql-core";
 
 describe("reply monitor data access", () => {
   beforeEach(() => {
@@ -45,13 +46,43 @@ describe("reply monitor data access", () => {
   it("scopes manual flag resolution to the authenticated worker", async () => {
     execute.mockResolvedValue([{ affectedRows: 1 }]);
 
-    await resolveVagueReplyFlag(7, 41);
-    await resolveUnsignedFlag(7, 42, "Checked with the client");
+    await expect(resolveVagueReplyFlag(7, 41)).resolves.toBe(true);
+    await expect(resolveUnsignedFlag(7, 42, "Checked with the client")).resolves.toBe(true);
 
     for (const call of execute.mock.calls) {
       expect(call).toHaveLength(1);
       expect(call[0]).not.toBeTypeOf("string");
     }
+
+    const dialect = new MySqlDialect();
+    const vagueQuery = dialect.sqlToQuery(execute.mock.calls[0][0]);
+    expect(vagueQuery.sql).toContain("WHERE id = ? AND vaId = ? AND resolvedAt IS NULL");
+    expect(vagueQuery.params).toEqual([41, 7]);
+    const unsignedQuery = dialect.sqlToQuery(execute.mock.calls[1][0]);
+    expect(unsignedQuery.sql).toContain("WHERE id = ? AND vaId = ? AND resolvedAt IS NULL");
+    expect(unsignedQuery.params).toEqual(["Checked with the client", 42, 7]);
+  });
+
+  it("treats already-resolved owned flags as idempotent and rejects missing or foreign flags", async () => {
+    execute
+      .mockResolvedValueOnce([{ affectedRows: 0 }])
+      .mockResolvedValueOnce([[{ id: 41 }]])
+      .mockResolvedValueOnce([{ affectedRows: 0 }])
+      .mockResolvedValueOnce([[]]);
+
+    await expect(resolveVagueReplyFlag(7, 41)).resolves.toBe(true);
+    await expect(resolveUnsignedFlag(7, 42, "Checked with the client")).resolves.toBe(false);
+
+    const dialect = new MySqlDialect();
+    expect(dialect.sqlToQuery(execute.mock.calls[1][0]).params).toEqual([41, 7]);
+    expect(dialect.sqlToQuery(execute.mock.calls[3][0]).params).toEqual([42, 7]);
+  });
+
+  it("propagates storage failures instead of reporting a successful resolution", async () => {
+    execute.mockRejectedValue(new Error("database unavailable"));
+
+    await expect(resolveVagueReplyFlag(7, 41)).rejects.toThrow("database unavailable");
+    await expect(resolveUnsignedFlag(7, 42)).rejects.toThrow("database unavailable");
   });
 
   it("normalizes invalid values without allowing an unbounded query", () => {

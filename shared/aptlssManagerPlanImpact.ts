@@ -7,6 +7,16 @@ export type ManagerPlanImpact = {
   baseline: "same_day_plan" | "different_day_plan" | "no_plan";
   scheduleChanged: boolean;
   requiresReview: boolean;
+  planChanges?: Array<{
+    kind: "added" | "moved" | "updated" | "removed";
+    blockId: string;
+    cardName: string;
+    before: { startTime: string; endTime: string } | null;
+    after: { startTime: string; endTime: string } | null;
+    reason: string;
+    assumptionIds: string[];
+  }>;
+  availabilityChanged?: boolean;
   assumptions: Array<{
     id: string;
     inputPath: string;

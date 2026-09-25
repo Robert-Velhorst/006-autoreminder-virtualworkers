@@ -8,6 +8,7 @@ import {
 } from "../drizzle/schema";
 import type { ManagerAction, ManagerCard, ManagerEvidence, ManagerInput, ManagerPolicy, ManagerSnapshot } from "../shared/aptlssManager";
 import { dateKeyInTimeZone } from "../shared/workerTime";
+import { gmailContentScope } from "../shared/gmailContentScope";
 import { getDb } from "./db";
 import { assessManagerContext } from "./aptlssManagerEngine";
 import { normalizeManagerDependencies } from "./aptlssManagerDependencies";
@@ -19,6 +20,7 @@ import { reconcileManagerPlan } from "./aptlssManagerPlan";
 import type { OperatorDailyPlanPayload } from "./operatorDailyPlan";
 import { resolveWorkerOperatorContextById } from "./workerOperatorContext";
 import { recordWorkerEvidenceAssertion } from "./aptlssEvidenceGraphDb";
+import { assertManagerUpdateSource, managerUpdateEvidenceText, normalizeManagerUpdateFields, type ManagerUpdateFields, type ManagerWorkerOutcome } from "./aptlssManagerUpdates";
 import { assertManagerExecutionAllowed, ManagerExecutionPausedError, managerPlanVersion, managerReviewProposalIdentity, selectApplicableManagerCorrections } from "./aptlssManagerReviewService";
 import { managerSafetyDigest } from "./aptlssManagerSafety";
 import { websocketService } from "./services/websocket";
@@ -82,6 +84,12 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
   if (plans.length > LIMIT || states.length > LIMIT || scores.length > LIMIT || steps.length > 5000 || waiting.length > LIMIT || times.length > 5000 || mails.length > 500 || updates.length > 500 || outcomes.length > 500 || cached.length > 1000) {
     gaps.push("Work context exceeds this cycle's bounded capacity; some records are not assessed. Narrow assignments before trusting full coverage.");
   }
+  const relevantStepIds = steps.slice(0, 5000).map(step => step.id);
+  const rejectedStepIds = new Set(relevantStepIds.length
+    ? (await db.select({ stepId: decisionOutcomes.stepId }).from(decisionOutcomes)
+      .where(and(eq(decisionOutcomes.vaId, vaId), eq(decisionOutcomes.disposition, "rejected"), inArray(decisionOutcomes.stepId, relevantStepIds))))
+      .map(outcome => outcome.stepId)
+    : []);
   const ids = plans.slice(0, LIMIT).map(p => p.cardId);
   const [linked, graph, messages] = ids.length ? await Promise.all([
     db.select({ cardId: workspaceEvidenceLinks.cardId, item: workspaceEvidenceItems }).from(workspaceEvidenceLinks)
@@ -121,7 +129,7 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
       dueAt: iso(typeof context.due === "string" ? context.due : typeof plan.due === "string" ? plan.due : null),
       overdue: state?.isOverdue ?? false, priority: scoreMap.get(p.cardId)?.score ?? 0,
       updatedAt: iso(typeof context.dateLastActivity === "string" ? context.dateLastActivity : p.updatedAt)!,
-      steps: steps.filter(s => s.cardId === p.cardId).map(s => ({ id: s.id, title: managerSafeText(s.title, 1024), category: s.category, minutes: s.estimatedMinutes, complete: s.status === "complete", requiresDecision: s.requiresRobert, dependsOn: normalizeManagerDependencies(p.cardId, [...json<string[]>(s.dependsOnCards, []).filter(x => typeof x === "string"), ...(s.blockedBy ? [s.blockedBy] : [])], steps), completionCriteria: s.completionCriteria ? managerSafeText(s.completionCriteria) : null })),
+      steps: steps.filter(s => s.cardId === p.cardId).map(s => ({ id: s.id, title: managerSafeText(s.title, 1024), category: s.category, minutes: s.estimatedMinutes, complete: s.status === "complete", requiresDecision: s.requiresRobert, decisionRejected: rejectedStepIds.has(s.id), dependsOn: normalizeManagerDependencies(p.cardId, [...json<string[]>(s.dependsOnCards, []).filter(x => typeof x === "string"), ...(s.blockedBy ? [s.blockedBy] : [])], steps), completionCriteria: s.completionCriteria ? managerSafeText(s.completionCriteria) : null })),
       waiting: wait ? { reason: managerSafeText(wait.rawReason), action: managerSafeText(wait.nextAction), followUpAt: iso(wait.followUpAt), category: wait.category, confidence: wait.confidenceScore } : null,
     };
   });
@@ -141,13 +149,16 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
     seen.add(key);
     const revision = revisions.find(r => r.evidenceId === item.id);
     const metadata = json<Record<string, unknown>>(revision?.metadataJson ?? item.metadataJson, {});
+    const sourceContent = revision?.content ?? revision?.summary ?? item.content ?? item.summary ?? "";
     // Only the scoped, proof-validated resolution path may establish a human decision.
     const verifiedDecision = item.kind === "verified_conflict_resolution" && metadata.origin === "verified_conflict_resolution"
       && revision?.truthClass === "source_record" && graph.some(g => g.cardId === cardId && g.item.id === item.id);
-    evidence.push({ id: `evidence:${item.id}:${cardId}`, cardId, source: item.source, text: managerSafeText(`${item.title}\n${revision?.content ?? revision?.summary ?? item.content ?? item.summary ?? ""}`, 6000), observedAt: iso(revision?.observedAt ?? item.modifiedAt ?? item.observedAt)!, url: safeUrl(item.sourceUrl), kind: verifiedDecision ? "decision" : item.kind === "worker_assertion" ? "worker" : "source", metadata: {
+    evidence.push({ id: `evidence:${item.id}:${cardId}`, cardId, source: item.source, text: managerSafeText(`${item.title}\n${sourceContent}`, 6000), observedAt: iso(revision?.observedAt ?? item.modifiedAt ?? item.observedAt)!, url: safeUrl(item.sourceUrl), kind: verifiedDecision ? "decision" : item.kind === "worker_assertion" ? "worker" : "source", metadata: {
       sender: typeof metadata.sender === "string" ? managerSafeText(metadata.sender,512) : null,
       sourceDate: verifiedDecision && typeof metadata.sourceDate === "string" ? metadata.sourceDate : iso(item.modifiedAt),
       sourceRevision: revision?.contentHash ?? item.contentHash,
+      sourceRecordId: item.sourceId,
+      ...(item.source === "gmail" ? { contentScope: gmailContentScope(item.title, sourceContent) } : {}),
       truthClass: verifiedDecision ? "human_decision" : revision?.truthClass === "worker_assertion" || item.kind === "worker_assertion" ? "worker_report" : revision?.truthClass === "system_inference" ? "model_proposal" : "source_record",
       ...(verifiedDecision ? { authority: "authoritative" as const, effectiveFrom: typeof metadata.effectiveFrom === "string" ? metadata.effectiveFrom : null,
         supersedesEvidenceIds: Array.isArray(metadata.supersedesEvidenceIds) ? metadata.supersedesEvidenceIds.filter((id): id is string => typeof id === "string") : [] } : {}),
@@ -155,15 +166,32 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
   }
   for (const mail of mails.slice(0, 500)) {
     const cardId = mail.trelloCardId && ids.includes(mail.trelloCardId) ? mail.trelloCardId : `email:${mail.id}`;
-    if (cardId.startsWith("email:") && mail.status === "pending") cards.push({ id: cardId, name: managerSafeText(mail.subject, 512), url: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(mail.gmailThreadId)}`, board: "Email inbox", list: "TO DO", state: "READY_TO_START", stateReason: "Incoming email needs review and processing.", dueAt: iso(mail.deadlineAt), overdue: !!mail.deadlineAt && mail.deadlineAt < now, priority: mail.category === "financial" ? 60 : 40, updatedAt: iso(mail.updatedAt)!, steps: [{ id: -mail.id, title: managerSafeText(mail.suggestedNextAction || `Review email: ${mail.subject}`), category: "communication", minutes: 15, complete: false, requiresDecision: false, dependsOn: [], completionCriteria: "Review the message, prepare any reply, and verify processing in the source inbox." }], waiting: null });
-    if (cards.some(c => c.id === cardId)) evidence.push({ id: `email:${mail.id}`, cardId, source: "gmail", kind: "source", text: managerSafeText(`From: ${mail.fromAddress}\nStatus: ${mail.status}\n${mail.subject}\n${mail.snippet ?? ""}`), observedAt: iso(mail.receivedAt)!, url: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(mail.gmailThreadId)}`, metadata: { sender: mail.fromAddress, sourceDate: iso(mail.receivedAt), truthClass: "source_record" } });
+    const contentScope = gmailContentScope(mail.subject, mail.snippet ?? "");
+    const portalNotice = contentScope === "portal_notice";
+    if (cardId.startsWith("email:") && mail.status === "pending") cards.push({ id: cardId, name: managerSafeText(mail.subject, 512), url: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(mail.gmailThreadId)}`, board: "Email inbox", list: "TO DO", state: "READY_TO_START", stateReason: portalNotice ? "A portal notice needs the underlying correspondence checked." : "Incoming email needs review and processing.", dueAt: portalNotice ? null : iso(mail.deadlineAt), overdue: !portalNotice && !!mail.deadlineAt && mail.deadlineAt < now, priority: mail.category === "financial" ? 60 : 40, updatedAt: iso(mail.updatedAt)!, steps: [{ id: -mail.id, title: managerSafeText(portalNotice ? "Read the linked portal correspondence and record its request and deadline" : mail.suggestedNextAction || `Review email: ${mail.subject}`), category: "communication", minutes: 15, complete: false, requiresDecision: false, dependsOn: [], completionCriteria: portalNotice ? "The underlying correspondence was opened and its request, any deadline and source were recorded; the notice alone is insufficient." : "Review the message, prepare any reply, and verify processing in the source inbox." }], waiting: null });
+    if (cards.some(c => c.id === cardId)) evidence.push({ id: `email:${mail.id}`, cardId, source: "gmail", kind: "source", text: managerSafeText(`From: ${mail.fromAddress}\nStatus: ${mail.status}\n${mail.subject}\n${mail.snippet ?? ""}`), observedAt: iso(mail.receivedAt)!, url: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(mail.gmailThreadId)}`, metadata: { sender: mail.fromAddress, sourceDate: iso(mail.receivedAt), truthClass: "source_record", contentScope } });
   }
   for (const message of messages.slice(0, EVIDENCE_LIMIT)) {
     // Outbound messages are observations, never instructions to send another message.
     evidence.push({ id: `message:${message.id}`, cardId: message.linkedCardId!, source: message.channel, kind: "source", text: managerSafeText(`${message.direction}: ${message.subject ?? ""}\n${message.summary ?? ""}\nResponse required: ${message.responseRequired}; responded: ${iso(message.respondedAt) ?? "not verified"}`), observedAt: iso(message.occurredAt)! });
   }
-  for (const update of updates.slice(0, 500)) if (cards.some(c => c.id === update.cardId) && !evidence.some(e => e.cardId === update.cardId && e.kind === "worker" && e.text.includes(update.detail))) evidence.push({ id: `update:${update.id}`, cardId: update.cardId, source: "worker_update", kind: "worker", text: managerSafeText(update.detail), observedAt: iso(update.createdAt)!, metadata: { truthClass: "worker_report", sender: String(vaId) } });
-  for (const outcome of outcomes.slice(0, 500)) if (ids.includes(outcome.cardId)) evidence.push({ id: `decision:${outcome.id}`, cardId: outcome.cardId, source: "decision_outcome", kind: "decision", text: managerSafeText(`${outcome.decisionPrompt}\nRecorded outcome: ${outcome.outcome}`), observedAt: iso(outcome.resolvedAt)! });
+  for (const update of updates.slice(0, 500)) if (cards.some(c => c.id === update.cardId) && !evidence.some(e => e.cardId === update.cardId && e.kind === "worker" && e.text.includes(update.detail))) {
+    const text = managerUpdateEvidenceText(update.detail, {
+      outcome: (update.outcome ?? "Update") as ManagerWorkerOutcome,
+      deadlineDate: update.deadlineDate,
+      sourceEvidenceId: update.sourceEvidenceId,
+      sourceDescription: update.sourceDescription,
+    });
+    evidence.push({ id: `update:${update.id}`, cardId: update.cardId, source: "worker_update", kind: "worker", text: managerSafeText(text, 8000), observedAt: iso(update.createdAt)!, metadata: { truthClass: "worker_report", sender: String(vaId), outcome: update.outcome, deadlineDate: update.deadlineDate, sourceEvidenceId: update.sourceEvidenceId } });
+  }
+  for (const outcome of outcomes.slice(0, 500)) if (ids.includes(outcome.cardId)) evidence.push({
+    id: `decision:${outcome.id}`, cardId: outcome.cardId, source: "decision_outcome", kind: "decision",
+    text: managerSafeText(outcome.disposition === "approved" ? "Founder decision: approved"
+      : outcome.disposition === "rejected" ? "Founder decision: rejected" : outcome.outcome),
+    observedAt: iso(outcome.resolvedAt)!,
+    metadata: { truthClass: "human_decision", authority: "authoritative", sender: outcome.resolvedBy,
+      sourceDate: iso(outcome.resolvedAt) },
+  });
   for (const source of ["trello", "gmail", "google_drive"]) if (!evidence.some(e => e.source === source)) gaps.push(`No linked ${source} evidence is available in this worker scope; source completeness is unknown.`);
   if (!cards.length) gaps.push("No assigned APTLSS plans or pending emails are available. Synchronize assigned work first.");
   // Sum sessions only for a verified completed step. A stopped timer alone is not a completed task.
@@ -207,8 +235,9 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
     for (const correction of selected.corrections) guidance.push({ id: correction.id, reviewId: correction.reviewId,
       cardId: card.id, scope: correction.scope, topic: correction.topic, correction: managerSafeText(correction.correction, 8000),
       evidenceIds: correction.evidence.map(pin => pin.id), validUntil: correction.validUntil, actionKind,
+      ...(correction.nextStep ? { nextStep: correction.nextStep } : {}),
     });
-    for (const topic of selected.withheldTopics) withheld.push({ cardId: card.id, topic, actionKind });
+    for (const target of selected.withheldTargets) withheld.push({ cardId: card.id, ...target, actionKind });
   }
   return { now: now.toISOString(), cards, evidence, timeSamples: [...samples.values()], sourceGaps: gaps, graphConflicts, timeSummary, executionCoverageComplete,
     learning: { stateHash: hash(learningHashes), guidance, withheld } };
@@ -252,23 +281,27 @@ export async function updateManagerPolicy(vaId: number, policy: Pick<ManagerPoli
   });
 }
 
-export async function submitManagerUpdate(vaId: number, cardId: string, detail: string, interventionId?: string) {
+export async function submitManagerUpdate(vaId: number, cardId: string, detail: string, interventionId?: string, fields: ManagerUpdateFields = {}) {
   assertManagerPilotWorker(vaId);
   const db = await requireDb();
   await assertManagerExecutionAllowed(db, vaId);
   const text = managerSafeText(detail.trim(), 8000);
   if (text.length < 3 || detail.length > 8000) throw new Error("Provide an update between 3 and 8000 characters.");
-  const input = await collectManagerInput(db, vaId, new Date());
-  if (!input.cards.some(c => c.id === cardId)) throw new Error("This work item is outside your assigned scope.");
-  if (interventionId) {
-    const current = await stateAndSnapshot(db, vaId);
-    if (!current.snapshot?.interventions.some(i => i.id === interventionId && i.cardId === cardId)) throw new Error("This question has changed. Refresh and review the current context.");
-  }
+  const normalized = normalizeManagerUpdateFields(fields);
+  if (normalized.sourceDescription) normalized.sourceDescription = managerSafeText(normalized.sourceDescription, 512);
   await db.transaction(async tx => {
     await tx.select().from(users).where(eq(users.id, vaId)).for("update");
     await assertManagerExecutionAllowed(tx as unknown as Db, vaId);
-    if (!cardId.startsWith("email:")) await recordWorkerEvidenceAssertion({ vaId, cardId, title: "Worker reality update", detail: text, recordedBy: String(vaId), database: tx as unknown as Db });
-    const [update] = await tx.insert(aptlssManagerUpdates).values({ vaId, cardId, detail: text, interventionId: interventionId ?? null }).$returningId();
+    const freshInput = await collectManagerInput(tx as unknown as Db, vaId, new Date());
+    if (!freshInput.cards.some(c => c.id === cardId)) throw new Error("This work item is outside your assigned scope.");
+    assertManagerUpdateSource(freshInput.evidence, cardId, normalized.sourceEvidenceId);
+    if (interventionId) {
+      const current = await stateAndSnapshot(tx as unknown as Db, vaId);
+      if (!current.snapshot?.interventions.some(i => i.id === interventionId && i.cardId === cardId)) throw new Error("This question has changed. Refresh and review the current context.");
+    }
+    const evidenceText = managerSafeText(managerUpdateEvidenceText(text, normalized), 8000);
+    if (!cardId.startsWith("email:")) await recordWorkerEvidenceAssertion({ vaId, cardId, title: "Worker reality update", detail: evidenceText, recordedBy: String(vaId), database: tx as unknown as Db });
+    const [update] = await tx.insert(aptlssManagerUpdates).values({ vaId, cardId, detail: text, interventionId: interventionId ?? null, ...normalized }).$returningId();
     await enqueueManagerTask(tx, { vaId, eventKey: `worker-update:${update.id}`, trigger: "worker_update", urgent: !!interventionId });
   });
   return runManager(vaId, "worker_update");

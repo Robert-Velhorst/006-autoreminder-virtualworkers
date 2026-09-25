@@ -1,15 +1,10 @@
 /**
- * FollowUpDrafts — Review, approve, and dismiss AI-generated follow-up message drafts.
+ * FollowUpDrafts — Review and track follow-up message drafts.
  *
  * The maintenance job generates follow-up drafts for WAITING_FOR_EXTERNAL_PARTY cards
  * that have been idle for longer than the configured follow_up_hours_routine threshold.
  *
- * Actions available for each pending draft:
- *   - Copy: copies the draft text to clipboard
- *   - Post to Trello: posts the draft as a comment on the Trello card (requires autopilot ≥ 3)
- *     and marks it as sent in the DB
- *   - Mark as Sent: marks the draft as sent in the DB (manual send assumed)
- *   - Dismiss: dismisses the draft without sending
+ * Workers copy and send drafts directly in Trello, then record that they sent them here.
  */
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
@@ -25,7 +20,6 @@ import {
   MessageSquarePlus,
   ExternalLink,
   Inbox,
-  Send,
 } from "lucide-react";
 
 function urgencyColor(urgencyType: string) {
@@ -68,19 +62,6 @@ export default function FollowUpDrafts() {
     onError: (e) => toast.error("Failed to mark as sent", { description: e.message }),
   });
 
-  const postToTrello = trpc.aptlss.postFollowUpToTrello.useMutation({
-    onSuccess: (data) => {
-      if (data.postedToTrello) {
-        toast.success("Posted to Trello as a comment and marked as sent");
-      } else {
-        toast.success("Marked as sent (autopilot < 3 — post to Trello manually)");
-      }
-      utils.aptlss.getPendingFollowUps.invalidate();
-      utils.aptlss.getAllFollowUps.invalidate();
-    },
-    onError: (e) => toast.error("Failed to post to Trello", { description: e.message }),
-  });
-
   const dismiss = trpc.aptlss.dismissFollowUp.useMutation({
     onSuccess: () => {
       toast.success("Draft dismissed");
@@ -102,7 +83,7 @@ export default function FollowUpDrafts() {
             Follow-Up Drafts
           </h2>
           <p className="text-xs text-muted-foreground mt-0.5">
-            AI-generated follow-up messages for cards waiting on external parties. Review, post to Trello, or mark as sent.
+            Copy a draft, review and send it directly in Trello, then mark it as sent here.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -141,7 +122,7 @@ export default function FollowUpDrafts() {
             {showAll ? "No follow-up drafts found." : "No pending follow-up drafts."}
           </p>
           <p className="text-xs text-muted-foreground/70 mt-1">
-            The maintenance job generates drafts for WAITING_FOR_EXTERNAL_PARTY cards idle past the configured threshold.
+            No follow-up drafts are waiting for review.
           </p>
         </div>
       )}
@@ -200,28 +181,16 @@ export default function FollowUpDrafts() {
                   <Copy className="w-3 h-3" />
                   Copy
                 </Button>
-                {/* Primary action: Post to Trello (posts as comment + marks sent) */}
-                <Button
-                  size="sm"
-                  className="h-7 text-xs gap-1.5 bg-blue-600 hover:bg-blue-700 text-white"
-                  onClick={() => postToTrello.mutate({ id: draft.id })}
-                  disabled={postToTrello.isPending}
-                  title="Post this draft as a Trello comment on the card and mark as sent (requires autopilot ≥ 3)"
-                >
-                  <Send className="w-3 h-3" />
-                  Post to Trello
-                </Button>
-                {/* Secondary: manual send (mark as sent without posting) */}
                 <Button
                   size="sm"
                   variant="outline"
                   className="h-7 text-xs gap-1.5"
                   onClick={() => markSent.mutate({ id: draft.id })}
                   disabled={markSent.isPending}
-                  title="Mark as sent without posting to Trello (use after manually sending the message)"
+                  title="Use only after you have sent the message directly in Trello"
                 >
                   <CheckCircle2 className="w-3 h-3" />
-                  Mark Sent
+                  Mark manually sent
                 </Button>
                 <Button
                   size="sm"

@@ -359,6 +359,41 @@ describe("reconcileManagerPlan", () => {
     expect(moved.plan.blocks[0].startTime).toBe("10:30");
   });
 
+  it("records added, moved and removed blocks against the same-day plan without treating removed work as done", () => {
+    const existing = saved([
+      block("old", { startTime: "10:30", endTime: "11:00" }),
+      block("a", { startTime: "11:00", endTime: "11:30" }),
+    ]);
+    const { plan, changes } = run([action("a"), action("new")], {
+      existing,
+      worker: { ...worker, breaks: [{ name: "Break", startTime: "11:00", durationMinutes: 30 }] },
+    });
+    expect(plan.planningImpact?.planChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "moved", blockId: "a", before: { startTime: "11:00", endTime: "11:30" } }),
+      expect.objectContaining({ kind: "added", blockId: "new", before: null }),
+      expect.objectContaining({ kind: "removed", blockId: "old", after: null }),
+    ]));
+    expect(plan.planningImpact?.availabilityChanged).toBe(true);
+    expect(plan.planningImpact?.planChanges?.find(change => change.blockId === "old")?.reason).toMatch(/needs review/i);
+    expect(plan.blocks.some(item => item.id === "old")).toBe(false);
+    expect(changes.join(" ")).toContain("No longer scheduled: Card old");
+    expect(changes.join(" ")).toContain("does not mark the work complete");
+  });
+
+  it("records updated content without inventing a slot movement and keeps protected work out of the change list", () => {
+    const { plan } = run([action("a")], { existing: saved([
+      block("a", { startTime: "10:00", endTime: "10:30" }),
+      block("done", { startTime: "09:00", endTime: "09:30", status: "done" }),
+    ]) });
+    expect(plan.planningImpact?.planChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "updated", blockId: "a", before: { startTime: "10:00", endTime: "10:30" }, after: { startTime: "10:00", endTime: "10:30" } }),
+    ]));
+    expect(plan.planningImpact?.planChanges?.some(change => change.blockId === "done")).toBe(false);
+    expect(plan.planningImpact?.protectedBlocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ blockId: "done", preservedExactly: true }),
+    ]));
+  });
+
   it("does not mutate any input", () => {
     const actions = [action("a")];
     const existing = saved([block("past")]);

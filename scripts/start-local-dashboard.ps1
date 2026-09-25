@@ -1,6 +1,7 @@
 param(
   [int]$Port = 3026,
-  [string]$InfraRoot = ""
+  [string]$InfraRoot = "",
+  [int]$AptlssPilotWorkerId = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +24,9 @@ function Import-DotEnv([string]$Path) {
 
 if ($Port -lt 1 -or $Port -gt 65535) {
   throw "Port must be between 1 and 65535"
+}
+if ($AptlssPilotWorkerId -lt 0) {
+  throw "AptlssPilotWorkerId must be a positive worker ID when provided"
 }
 
 if (-not $InfraRoot) {
@@ -79,6 +83,11 @@ $env:BRIEFING_SCHEDULER_ENABLED = "false"
 $env:REMINDER_WORKER_ENABLED = "false"
 $env:NOTIFICATIONS_ENABLED = "false"
 $env:APTLSS_MANAGER_SCHEDULER = "false"
+if ($AptlssPilotWorkerId -gt 0) {
+  $env:APTLSS_MANAGER_PILOT_WORKER_IDS = [string]$AptlssPilotWorkerId
+  $env:APTLSS_MANAGER_SHADOW_ONLY = "true"
+  Write-Output "APTLSS shadow pilot enabled for worker ID ${AptlssPilotWorkerId}; active plan mutations remain disabled."
+}
 
 Set-Location $repoRoot
 $tsx = Join-Path $repoRoot "node_modules\tsx\dist\cli.mjs"

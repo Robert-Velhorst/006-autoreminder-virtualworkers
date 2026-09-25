@@ -20,6 +20,10 @@ import {
   cardSnoozes,
   vaProfiles,
   aptlssPlans,
+  aptlssWaitingReasons,
+  aptlssAssessments,
+  aptlssManagerRuns,
+  users,
 } from "../../drizzle/schema";
 import { eq, and, desc, asc, gte, lte, sql, isNull, isNotNull } from "drizzle-orm";
 import { collectComplianceSnapshot } from "../services/manus-scheduler";
@@ -27,7 +31,8 @@ import { parseDateKey } from "../utils/date-only";
 import { calculateCompliancePercentage } from "../complianceMetrics";
 import { dateKeyInTimeZone, dateWindowInTimeZone } from "../../shared/workerTime";
 import { resolveWorkerOperatorContext } from "../workerOperatorContext";
-import { canStartTimerForCard } from "../timerAccess";
+import { canStartTimerForCard, managerIntervenesOnCard, timerExecutionBlockReason } from "../timerAccess";
+import { isManagerPilotWorker } from "../aptlssManagerPilot";
 
 // ─── Payment Cycles Router ──────────────────────────────────────────────────
 export const paymentRouter = router({
@@ -501,51 +506,66 @@ export const timerRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const vaId = Number(ctx.user.id);
-      const workerPlan = ctx.user.role === "worker"
-        ? await db.select({ cardId: aptlssPlans.cardId }).from(aptlssPlans)
-          .where(and(eq(aptlssPlans.vaId, vaId), eq(aptlssPlans.cardId, input.cardId)))
-          .limit(1)
-        : [];
-      if (!canStartTimerForCard(ctx.user.role, Boolean(workerPlan[0]))) {
-        throw new TRPCError({
-          code: "FORBIDDEN",
-          message: "You can only start a timer for a card in your work queue",
+      return db.transaction(async tx => {
+        // Serialize all timer transitions for this account before checking mutable work state.
+        const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, vaId)).for("update");
+        if (!account) throw new TRPCError({ code: "UNAUTHORIZED", message: "Account no longer exists" });
+        const [workerPlan] = ctx.user.role === "worker"
+          ? await tx.select().from(aptlssPlans)
+            .where(and(eq(aptlssPlans.vaId, vaId), eq(aptlssPlans.cardId, input.cardId)))
+            .limit(1)
+          : [];
+        if (!canStartTimerForCard(ctx.user.role, Boolean(workerPlan))) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "You can only start a timer for a card in your work queue" });
+        }
+        if (workerPlan) {
+          const [waiting] = await tx.select({ id: aptlssWaitingReasons.id }).from(aptlssWaitingReasons)
+            .where(and(eq(aptlssWaitingReasons.vaId, vaId), eq(aptlssWaitingReasons.cardId, input.cardId), eq(aptlssWaitingReasons.status, "active")))
+            .limit(1);
+          const [assessment] = await tx.select({ actionability: aptlssAssessments.actionability }).from(aptlssAssessments)
+            .where(eq(aptlssAssessments.cardId, input.cardId)).orderBy(desc(aptlssAssessments.assessedAt), desc(aptlssAssessments.id)).limit(1);
+          let hasManagerIntervention = false;
+          if (isManagerPilotWorker(vaId)) {
+            const [run] = await tx.select({ snapshotJson: aptlssManagerRuns.snapshotJson }).from(aptlssManagerRuns)
+              .where(eq(aptlssManagerRuns.vaId, vaId)).orderBy(desc(aptlssManagerRuns.id)).limit(1);
+            if (run) {
+              try {
+                hasManagerIntervention = managerIntervenesOnCard(run.snapshotJson, input.cardId);
+              } catch {
+                throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The latest APTLSS review cannot be verified; reassess before starting work" });
+              }
+            }
+          }
+          const reason = timerExecutionBlockReason({ listName: workerPlan.listName,
+            hasActiveWaitingReason: Boolean(waiting), actionability: assessment?.actionability ?? null, hasManagerIntervention });
+          if (reason) throw new TRPCError({ code: "PRECONDITION_FAILED", message: reason });
+        }
+        const [profile] = await tx.select({ founderId: vaProfiles.founderId }).from(vaProfiles)
+          .where(eq(vaProfiles.userId, vaId)).limit(1);
+        const founderId = profile?.founderId ?? vaId;
+        const running = await tx.select().from(timeEntries).where(
+          and(eq(timeEntries.vaId, vaId), isNull(timeEntries.endTime))
+        ).orderBy(desc(timeEntries.startTime));
+        const sameCard = running.find(entry => entry.cardId === input.cardId);
+        if (sameCard && running.length === 1) {
+          return { id: sameCard.id, cardId: input.cardId, cardName: sameCard.cardName ?? input.cardName, startedAt: sameCard.startTime };
+        }
+        const startTime = new Date();
+        for (const entry of running) {
+          const durationSeconds = Math.max(0, Math.round((startTime.getTime() - entry.startTime.getTime()) / 1000));
+          await tx.update(timeEntries).set({ endTime: startTime, durationSeconds,
+            durationMinutes: Math.round(durationSeconds / 60) }).where(eq(timeEntries.id, entry.id));
+        }
+        const cardName = workerPlan?.cardName ?? input.cardName;
+        const [result] = await tx.insert(timeEntries).values({
+          taskId: input.cardId, vaId, founderId, cardId: input.cardId, cardName,
+          cardUrl: workerPlan?.cardUrl ?? input.cardUrl,
+          boardName: workerPlan?.boardName ?? input.boardName,
+          listName: workerPlan?.listName ?? input.listName,
+          startTime,
         });
-      }
-      const profiles = await db.select({ founderId: vaProfiles.founderId })
-        .from(vaProfiles)
-        .where(eq(vaProfiles.userId, vaId))
-        .limit(1);
-      const founderId = profiles[0]?.founderId ?? vaId;
-
-      const running = await db.select().from(timeEntries).where(
-        and(eq(timeEntries.vaId, vaId), isNull(timeEntries.endTime))
-      ).limit(1);
-      if (running[0]) {
-        const now = new Date();
-        const durationSeconds = Math.round((now.getTime() - running[0].startTime.getTime()) / 1000);
-        const durationMinutes = Math.round(durationSeconds / 60);
-        await db.update(timeEntries).set({
-          endTime: now,
-          durationSeconds,
-          durationMinutes,
-        }).where(eq(timeEntries.id, running[0].id));
-      }
-
-      const startTime = new Date();
-      const [result] = await db.insert(timeEntries).values({
-        taskId: input.cardId,
-        vaId,
-        founderId,
-        cardId: input.cardId,
-        cardName: input.cardName,
-        cardUrl: input.cardUrl,
-        boardName: input.boardName,
-        listName: input.listName,
-        startTime,
+        return { id: (result as { insertId: number }).insertId, cardId: input.cardId, cardName, startedAt: startTime };
       });
-
-      return { id: (result as any).insertId, cardId: input.cardId, cardName: input.cardName, startedAt: startTime };
     }),
 
   stop: operatorAccountProcedure
@@ -554,24 +574,20 @@ export const timerRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const vaId = Number(ctx.user.id);
-
-      const running = await db.select().from(timeEntries).where(
-        and(eq(timeEntries.cardId, input.cardId), eq(timeEntries.vaId, vaId), isNull(timeEntries.endTime))
-      ).limit(1);
-
-      if (!running[0]) return null;
-
-      const now = new Date();
-      const durationSeconds = Math.round((now.getTime() - running[0].startTime.getTime()) / 1000);
-      const durationMinutes = Math.round(durationSeconds / 60);
-
-      await db.update(timeEntries).set({
-        endTime: now,
-        durationSeconds,
-        durationMinutes,
-      }).where(eq(timeEntries.id, running[0].id));
-
-      return { ...running[0], stoppedAt: now, durationSeconds };
+      return db.transaction(async tx => {
+        const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, vaId)).for("update");
+        if (!account) throw new TRPCError({ code: "UNAUTHORIZED", message: "Account no longer exists" });
+        const [running] = await tx.select().from(timeEntries).where(
+          and(eq(timeEntries.cardId, input.cardId), eq(timeEntries.vaId, vaId), isNull(timeEntries.endTime))
+        ).limit(1);
+        if (!running) return null;
+        const now = new Date();
+        const durationSeconds = Math.max(0, Math.round((now.getTime() - running.startTime.getTime()) / 1000));
+        const durationMinutes = Math.round(durationSeconds / 60);
+        await tx.update(timeEntries).set({ endTime: now, durationSeconds, durationMinutes })
+          .where(and(eq(timeEntries.id, running.id), isNull(timeEntries.endTime)));
+        return { ...running, stoppedAt: now, durationSeconds };
+      });
     }),
 
   getActive: operatorAccountProcedure.query(async ({ ctx }) => {

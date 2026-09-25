@@ -12,10 +12,15 @@ export type ManagerEvidenceMetadata = {
   effectiveFrom?: string | null;
   effectiveTo?: string | null;
   sourceRevision?: string | null;
+  sourceRecordId?: string | null;
+  contentScope?: "portal_notice" | "message_preview";
   supersedesEvidenceIds?: string[];
   truthClass?: ManagerTruthClass;
   essential?: boolean;
   authority?: "authoritative" | "reported" | "unverified";
+  outcome?: string | null;
+  deadlineDate?: string | null;
+  sourceEvidenceId?: string | null;
 };
 export type ManagerGraphConflict = {
   id: string;

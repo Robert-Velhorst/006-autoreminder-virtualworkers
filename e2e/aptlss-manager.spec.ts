@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import superjson from "superjson";
+import type { ManagerPlanImpact } from "../shared/aptlssManagerPlanImpact";
 
 test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
   const browserErrors = new WeakMap<Page, string[]>();
@@ -17,13 +18,25 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       proof?: boolean;
       waiting?: boolean;
       calibration?: boolean;
+      sourceCheck?: boolean;
       mode?: "shadow" | "active";
       queued?: boolean;
       assessmentDelayMs?: number;
+      reassessWorkerUpdate?: boolean;
+      queueCards?: Array<Record<string, unknown>>;
+      planningImpact?: ManagerPlanImpact;
+      savedPlan?: Record<string, unknown> | null;
+      savedPlanVersion?: string;
+        founderDecisions?: boolean;
+        founderNotification?: boolean;
     } = {}
   ) {
     const calls: Array<{ method: string; input: any }> = [];
     let proofResolved = false;
+    let founderDecisionRecorded = false;
+    let founderDecisionDeferred = false;
+    let founderDecisionDueAt: string | null = null;
+    let founderDeadlineSource: string | null = null;
     const at = new Date(Date.now() - 120_000).toISOString();
     const proposal = {
       version: 2,
@@ -60,6 +73,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
           detail: "Shadow proposal",
         },
       ],
+      planningImpact: options.planningImpact,
     };
     const snapshot = {
       version: 1,
@@ -153,6 +167,18 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await page.route("**/api/**", async route => {
       const url = new URL(route.request().url());
       if (!url.pathname.startsWith("/api/trpc/")) {
+        if (options.founderNotification && url.pathname === "/api/notifications/unread-count") {
+          await route.fulfill({ json: { unreadCount: 1 } });
+          return;
+        }
+        if (options.founderNotification && url.pathname === "/api/notifications") {
+          await route.fulfill({ json: { notifications: [{
+            id: 91, title: "Founder decision due soon", content: "A decision is needed: approve the delivery follow-up.",
+            notificationType: "task_due_soon", taskId: "founder-decision:51:71:due_soon", taskName: null,
+            dueDate: at, channel: "in_app", deliveryStatus: "sent", isRead: 0, createdAt: at,
+          }] } });
+          return;
+        }
         await route.fulfill({ json: [] });
         return;
       }
@@ -197,36 +223,43 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
           value = { onHoldCards: [], doingCards: [], overdueCards: [] };
         if (method === "operator.getWorkQueueContext")
           value = {
-            cards: options.proof
+            cards: options.queueCards ?? (options.proof
               ? [
                   {
                     cardId: "card-1",
                     cardName: "Verify delivery",
                     cardUrl: "https://example.invalid/source",
+                    trelloCache: options.sourceCheck ? {
+                      cachedAt: at,
+                      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+                    } : null,
                     boardName: "Work",
                     listName: options.waiting ? "ON-HOLD" : "Doing",
                     nextBestAction: "Verify retained facts",
-                    planSummary: "Check source",
+                    planSummary: "PRIVATE_PLAN_SUMMARY_SENTINEL",
                     primaryState: "DOING",
-                    stateReason: "Check source",
+                    stateReason: "PRIVATE_STATE_REASON_SENTINEL",
                     actionability: "actionable",
                     priorityScore: 50,
                     priorityTier: "HIGH",
-                    confidenceScore: null,
-                    confidenceReason: null,
-                    recommendations: [],
-                    uncertainties: [],
+                    confidenceScore: 98,
+                    confidenceReason: "PRIVATE_CONFIDENCE_REASON_SENTINEL",
+                    recommendations: ["PRIVATE_RECOMMENDATION_SENTINEL"],
+                    uncertainties: ["PRIVATE_UNCERTAINTY_SENTINEL"],
                     steps: [],
                     waitingReason: null,
                     evidenceSummary: {
-                      sources: [],
-                      issues: options.calibration ? [{ id: "forecast-calibration", title: "The remaining-time forecast needs calibration", detail: "P50 8h P90 14h", resolution: "Plan against P90", severity: "high" }] : [],
+                      sources: options.sourceCheck ? [{ key: "gmail", label: "Gmail", count: 1, status: "linked", detail: "1 linked email" }] : [],
+                      issues: options.calibration ? [
+                        { id: "forecast-calibration", title: "The remaining-time forecast needs calibration", detail: "P50 8h P90 14h", resolution: "Plan against P90", severity: "high" },
+                        { id: "private-assessment", title: "PRIVATE_ISSUE_TITLE_SENTINEL", detail: "PRIVATE_ISSUE_DETAIL_SENTINEL", resolution: "PRIVATE_ISSUE_RESOLUTION_SENTINEL", severity: "high" },
+                      ] : [],
                       forecast: null,
-                      confidenceProfile: null,
+                      confidenceProfile: { targetScore: 90, ceiling: 80, gapToTarget: 10, dimensions: {}, blockers: ["PRIVATE_CONFIDENCE_BLOCKER_SENTINEL"] },
                     },
                   },
                 ]
-              : [],
+              : []),
           };
         if (method === "operator.getCardEvidence")
           value = options.proof
@@ -266,6 +299,12 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
                   },
                 ]
               : [];
+        if (method === "operator.getGoogleEvidenceStatus")
+          value = options.sourceCheck ? {
+            credentialsReady: true,
+            gmail: { enabled: true, lastSyncedAt: new Date(Date.now() - 120 * 60_000).toISOString(), intervalMinutes: 30 },
+            drive: { enabled: true, lastSyncedAt: null, intervalMinutes: 30 },
+          } : null;
         if (method === "operator.resolveVerificationFollowup") {
           const proof = input as {
             sourceEvidenceId?: number;
@@ -280,7 +319,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
             resolvedAt: proofResolved ? at : null,
           };
         }
-        if (method === "operator.getDailyPlan") value = { schedule: proposal };
+        if (method === "operator.getDailyPlan") value = options.savedPlan === null ? null : { schedule: options.savedPlan ?? proposal, planVersion: options.savedPlanVersion ?? "v-review-1" };
         if (method === "operator.getBrowserTabPolicy")
           value = {
             enabled: true,
@@ -304,6 +343,30 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
           method === "operator.submitManagerUpdate" ||
           method === "operator.runManagerForReview"
         ) {
+          if (method === "operator.submitManagerUpdate" && options.reassessWorkerUpdate) {
+            snapshot.runId = 102;
+            (snapshot.interventions as unknown[]).splice(0, snapshot.interventions.length);
+            (snapshot.interventions as unknown[]).push({
+              id: "reassessed-source-check",
+              cardId: "card-1",
+              issueKind: "reported_difference",
+              severity: "attention",
+              title: "The receipt is still unverified",
+              explanation: "The worker could not open the original receipt; delivery must remain unconfirmed.",
+              question: "Can Robert provide an accessible copy of the receipt?",
+              safeAction: "Keep the delivery status unchanged and request access to the original receipt.",
+              evidenceIds: ["worker-update-1"],
+            });
+            snapshot.evidence.push({
+              id: "worker-update-1",
+              cardId: "card-1",
+              source: "worker_update",
+              kind: "worker",
+              text: "Cannot access the original receipt; it is in the vendor portal.",
+              observedAt: new Date().toISOString(),
+              metadata: { truthClass: "worker_report" },
+            });
+          }
           value = snapshot;
         }
         if (method === "operator.getManagerReviewInbox") {
@@ -336,6 +399,51 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
             gate,
           };
         }
+        if (method === "operator.getFounderDecisionInbox")
+          value = { items: options.founderDecisions && !founderDecisionRecorded ? [{
+            stepId: 51,
+            vaId: 2,
+            cardId: "card-1",
+            cardName: "Verify delivery",
+            cardUrl: "https://trello.com/c/example",
+            boardName: "Work",
+            stepTitle: "Approve the delivery follow-up",
+            workerName: "Worker One",
+            tier: "HIGH",
+            taskDueAt: null,
+            decisionDueAt: founderDecisionDueAt,
+            deadlineSource: founderDeadlineSource,
+            isDeferred: founderDecisionDeferred,
+            deferralReason: founderDecisionDeferred ? founderDeadlineSource?.replace(/^Deferred:\s*/i, "") ?? null : null,
+            escalation: founderDecisionDueAt ? "decision_due_soon" : "high_priority_no_deadline",
+            owner: "founder",
+            riskIfSkipped: "The customer may not receive an answer.",
+            completionCriteria: "Founder records the approved follow-up.",
+            createdAt: at,
+          }] : [] };
+        if (method === "operator.recordFounderDecisionOutcome") {
+          founderDecisionRecorded = true;
+          value = { id: 61, cardId: "card-1", resolvedAt: at, reassessmentQueued: true };
+        }
+        if (method === "operator.setFounderDecisionDeadline") {
+          founderDecisionDueAt = (input as { dueAt: string | null }).dueAt;
+          founderDeadlineSource = (input as { source: string }).source;
+          founderDecisionDeferred = false;
+          value = { revisionId: 71, changed: true };
+        }
+        if (method === "operator.deferFounderDecision") {
+          const deferInput = input as { dueAt: string; reason: string };
+          founderDecisionDueAt = deferInput.dueAt;
+          founderDeadlineSource = `Deferred: ${deferInput.reason}`;
+          founderDecisionDeferred = true;
+          value = { revisionId: 72, changed: true };
+        }
+        if (method === "aptlss.getDecisionQueue") value = { items: options.founderDecisions ? [{
+          stepId: 51, cardId: "card-1", cardName: "Verify delivery",
+          cardUrl: "https://trello.com/c/example", stepIndex: 1,
+          stepTitle: "Approve the delivery follow-up", tier: "HIGH",
+        }] : [] };
+        if (method === "operator.getDecisionHistory") value = [];
         if (
           method === "operator.recordManagerReview" ||
           method === "operator.setManagerMode"
@@ -383,19 +491,108 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   });
 
+  for (const width of [1280, 390]) test(`founder records a decision in the dedicated inbox at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { calls } = await managerFixture(page, "admin", { founderDecisions: true });
+    await page.goto("/founder");
+    await page.getByRole("tab", { name: "Decisions" }).click();
+    const inbox = page.getByRole("region", { name: "Founder decision inbox" });
+    await expect(inbox.getByText("Worker One · Work", { exact: true })).toBeVisible();
+    await expect(inbox.getByText("No task deadline recorded", { exact: false })).toBeVisible();
+    await expect(inbox.getByRole("link", { name: "Open source card" })).toHaveAttribute("href", "https://trello.com/c/example");
+    await page.screenshot({ path: testInfo.outputPath(`founder-decisions-open-${width}.png`), fullPage: true });
+    const localDue = await page.evaluate(() => {
+      const date = new Date(Date.now() + 60 * 60_000);
+      return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+    });
+    await inbox.getByLabel("Decision deadline").fill(localDue);
+    await inbox.getByLabel("Source or reason").fill("Linked card deadline confirmed by founder");
+    await inbox.getByRole("button", { name: "Save deadline" }).click();
+    await expect(inbox.getByText("Decision due:", { exact: false })).toBeVisible();
+    await expect(inbox.getByText("Decision due soon", { exact: true })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /Decisions 1/ })).toBeVisible();
+    await page.getByRole("tab", { name: "Overview" }).click();
+    await page.getByRole("button", { name: /founder decision or task deadline needs attention/ }).click();
+    await expect(inbox.getByText("Decision due:", { exact: false })).toBeVisible();
+    await expect(inbox.getByRole("button", { name: "Clear deadline" })).toBeDisabled();
+    await inbox.getByLabel("Reason for withdrawing this deadline").fill("Source date was corrected by the founder");
+    await expect(inbox.getByRole("button", { name: "Clear deadline" })).toBeEnabled();
+    expect(calls.some(call => call.method === "operator.setFounderDecisionDeadline" && call.input.vaId === 2 && call.input.stepId === 51 && call.input.source === "Linked card deadline confirmed by founder")).toBe(true);
+    const finalDecision = inbox.getByRole("button", { name: "Choose approve or reject" });
+    await expect(finalDecision).toBeDisabled();
+    await inbox.getByRole("button", { name: "Approve", exact: true }).click();
+    await inbox.getByLabel("Reason and source checked").fill("Approved after checking the linked delivery record.");
+    await inbox.getByRole("button", { name: "Record approval" }).click();
+    await expect(inbox.getByText("No founder decisions are waiting.")).toBeVisible();
+    expect(calls.some(call => call.method === "operator.recordFounderDecisionOutcome" && call.input.vaId === 2 && call.input.stepId === 51 && call.input.disposition === "approved")).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`founder-decisions-${width}.png`), fullPage: true });
+  });
+
+  for (const width of [1280, 390]) test(`founder can defer without closing a decision at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { calls } = await managerFixture(page, "admin", { founderDecisions: true });
+    await page.goto("/founder");
+    await page.getByRole("tab", { name: "Decisions" }).click();
+    const inbox = page.getByRole("region", { name: "Founder decision inbox" });
+    const localDue = await page.evaluate(() => {
+      const date = new Date(Date.now() + 2 * 60 * 60_000);
+      return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+    });
+    await inbox.getByLabel("Decision deadline").fill(localDue);
+    await inbox.getByLabel("Source or reason").fill("Waiting for the source record");
+    await inbox.getByRole("button", { name: "Defer decision to this date" }).click();
+    await expect(inbox.getByText("Decision deferred", { exact: false })).toBeVisible();
+    await expect(inbox.getByText(/Deferred · review/)).toBeVisible();
+    await expect(inbox.getByRole("button", { name: "Record approval" })).toHaveCount(0);
+    await expect(inbox.getByRole("button", { name: "Choose approve or reject" })).toBeDisabled();
+    expect(calls.some(call => call.method === "operator.deferFounderDecision"
+      && call.input.vaId === 2 && call.input.stepId === 51
+      && call.input.reason === "Waiting for the source record"
+      && call.input.dueAt === new Date(localDue).toISOString())).toBe(true);
+    expect(calls.some(call => call.method === "operator.recordFounderDecisionOutcome")).toBe(false);
+  });
+
+  for (const width of [1280, 390]) test(`founder notification opens the decision inbox at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await managerFixture(page, "admin", { founderDecisions: true, founderNotification: true });
+    await page.goto("/founder");
+    await page.getByRole("button", { name: "Notifications" }).click();
+    await page.getByRole("button", { name: /A decision is needed: approve the delivery follow-up/ }).click();
+    await expect(page).toHaveURL(/\/founder\?tab=founder-decisions$/);
+    await expect(page.getByRole("region", { name: "Founder decision inbox" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Decisions" })).toHaveAttribute("data-state", "active");
+  });
+
+  test("worker sees a founder-owned hold without a decision control or model recommendation", async ({ page }) => {
+    await managerFixture(page, "worker", { founderDecisions: true });
+    await page.goto("/worker/decisions");
+    await expect(page.getByText("This step remains on hold.", { exact: false })).toBeVisible();
+    await expect(page.getByText("Decision owner: Robert")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Record decision" })).toHaveCount(0);
+    await expect(page.getByText("AI recommendation", { exact: false })).toHaveCount(0);
+  });
+
   for (const width of [1280, 390]) test(`focused questions preserve source comparison at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
     const { snapshot } = await managerFixture(page, "worker");
     (snapshot.interventions as unknown[]).push({ id: "conflict", cardId: "card-1", severity: "urgent", title: "Verify deadline", explanation: "Sources disagree", question: "Which deadline applies now?", safeAction: "Verify before continuing", evidenceIds: ["e-1"], verification: {
       issues: [{ id: "conflict", severity: "urgent", title: "Verify deadline", question: "Which deadline applies now?", explanation: "Sources disagree", evidenceIds: ["e-1"] }, { id: "approval", severity: "attention", title: "Approval", question: "Who approved the change?", explanation: "Approval is missing", evidenceIds: ["e-1"] }],
       passages: [{ evidenceId: "e-1", source: "gmail", kind: "source", quote: "Delivery due on September 7", sender: "Client", sourceDate: snapshot.assessedAt, effectiveFrom: null }, { evidenceId: "e-2", source: "worker_update", kind: "worker", quote: "Delivery moved to September 9", sender: "Worker", sourceDate: snapshot.assessedAt, effectiveFrom: null }],
+      comparisons: [{ subject: "card-1", topic: "deadline",
+        left: { evidenceId: "e-1", value: "September 7", quote: "Delivery due on September 7", source: "gmail", kind: "source", sender: "Client", sourceDate: snapshot.assessedAt, url: "https://mail.google.com/mail/u/0/#all/example" },
+        right: { evidenceId: "e-2", value: "September 9", quote: "Delivery moved to September 9", source: "worker_update", kind: "worker", sender: "Worker", sourceDate: snapshot.assessedAt, url: null } }],
     } });
     await page.goto("/worker");
     const manager = page.getByRole("region", { name: "APTLSS work manager" });
     await manager.getByRole("button", { name: "Show evidence and answer" }).click();
-    await expect(manager.getByText("Delivery due on September 7")).toBeVisible();
-    await expect(manager.getByText("Delivery moved to September 9")).toBeVisible();
-    await expect(manager.getByText("Worker statement", { exact: true })).toBeVisible();
+    const comparison = manager.getByRole("region", { name: "Conflicting statements" });
+    await expect(comparison.getByRole("heading", { name: "What differs" })).toBeVisible();
+    await expect(comparison.getByText("Delivery due on September 7")).toBeVisible();
+    await expect(comparison.getByText("Delivery moved to September 9")).toBeVisible();
+    await expect(comparison.getByText("Worker report", { exact: true })).toBeVisible();
+    await expect(comparison.getByRole("link", { name: "Open source" })).toBeVisible();
+    await expect(manager.getByText("Original passages (2)")).toBeVisible();
     await expect(manager.getByText("Who approved the change?", { exact: true })).not.toBeVisible();
     await manager.getByText("Other questions to resolve (1)", { exact: true }).click();
     await expect(manager.getByText("Who approved the change?", { exact: true })).toBeVisible();
@@ -412,7 +609,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     ] } });
     await page.goto("/worker");
     const manager = page.getByRole("region", { name: "APTLSS work manager" });
-    await expect(manager.getByRole("heading", { name: "Check the original message" })).toBeVisible();
+    await expect(manager.getByRole("heading", { name: "Read the full correspondence" })).toBeVisible();
     await expect(manager.getByText("What does the message ask you to do, is there a deadline, and what follow-up is needed?", { exact: true })).toBeVisible();
     await expect(manager.getByText("Resolve conflict before continuing", { exact: true })).not.toBeVisible();
     await manager.getByRole("button", { name: "Show evidence and answer" }).click();
@@ -421,6 +618,43 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect(manager.getByText("Message metadata (2)", { exact: true })).toHaveCount(0);
     await expect(manager.getByLabel("Source preview", { exact: true })).toHaveCount(1);
     expect(calls.some(call => call.method === "operator.submitManagerUpdate")).toBe(false);
+  });
+
+  test("the manager's urgent task is not repeated as another primary task", async ({ page }) => {
+    const queueCard = (cardId: string, cardName: string, listName: string) => ({
+      cardId, cardName, cardUrl: `https://trello.com/c/${cardId}`, boardName: "Work", listName,
+      nextBestAction: "Review the source", planSummary: null, primaryState: listName,
+      stateReason: null, actionability: "actionable", priorityScore: 50,
+      priorityTier: "HIGH", confidenceScore: null, confidenceReason: null,
+      recommendations: [], uncertainties: [], steps: [], waitingReason: null,
+      evidenceSummary: { sources: [], issues: [], forecast: null, confidenceProfile: null },
+    });
+    const { snapshot } = await managerFixture(page, "worker", { queueCards: [queueCard("card-1", "Verify delivery", "DOING"), queueCard("card-2", "Prepare report", "DOING")] });
+    (snapshot.interventions as unknown[]).push({ id: "check-source", cardId: "card-1", issueKind: "source_check", severity: "attention", title: "Check the original source before continuing", explanation: "Source is incomplete", question: "What does the source request?", safeAction: "Read the full source", evidenceIds: ["e-1"] });
+    await page.goto("/worker");
+    await expect(page.getByRole("heading", { name: "Check the original source" })).toBeVisible();
+    await expect(page.getByText("Other work you can continue", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Prepare report" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Verify delivery" })).toHaveCount(0);
+    await page.getByRole("button", { name: /Doing second/ }).click();
+    await page.getByRole("button", { name: /Verify delivery/ }).click();
+    await expect(page.getByRole("button", { name: "Start timer", exact: true })).toBeDisabled();
+  });
+
+  test("the next task shows a source, completion condition and evidence-based time range", async ({ page }) => {
+    await managerFixture(page, "worker", { queueCards: [{
+      cardId: "card-1", cardName: "Verify delivery", cardUrl: "https://trello.com/c/example",
+      boardName: "Work", listName: "DOING", nextBestAction: "Check the receipt",
+      planSummary: null, primaryState: "DOING", stateReason: null, actionability: "actionable",
+      priorityScore: 50, priorityTier: "HIGH", confidenceScore: null, confidenceReason: null,
+      recommendations: [], uncertainties: [], waitingReason: null,
+      steps: [{ id: 1, stepNumber: 1, title: "Check receipt", status: "pending", category: "review", requiresRobert: false, completionCriteria: "Receipt linked to the card", riskIfSkipped: null }],
+      evidenceSummary: { sources: [], issues: [], forecast: { p50Minutes: 20, p90Minutes: 35, sampleSize: 4, uncertainty: null }, confidenceProfile: null },
+    }] });
+    await page.goto("/worker");
+    await expect(page.getByText(/Done when: Receipt linked to the card/)).toBeVisible();
+    await expect(page.getByText(/Working estimate:.*20 min to 35 min/)).toBeVisible();
+    await expect(page.getByRole("link", { name: "Open source card" })).toHaveAttribute("href", "https://trello.com/c/example");
   });
 
   test("selected context card and pending processing remain explicit", async ({ page }) => {
@@ -439,16 +673,76 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect.poll(() => calls.some(c => c.method === "operator.submitManagerUpdate" && c.input.cardId === "card-2" && c.input.interventionId === "second-question")).toBe(true);
   });
 
-  test("worker can disclose evidence and submit context without an intervention", async ({
+  test("worker answer triggers reassessment without treating a report as proof", async ({ page }) => {
+    const { snapshot, calls } = await managerFixture(page, "worker", { reassessWorkerUpdate: true });
+    (snapshot.interventions as unknown[]).push({
+      id: "initial-receipt-check",
+      cardId: "card-1",
+      issueKind: "reported_difference",
+      severity: "attention",
+      title: "The delivery date needs checking",
+      explanation: "The task reports delivery, but the receipt has not been verified.",
+      question: "Can you open the receipt and confirm its date?",
+      safeAction: "Open the original receipt before confirming delivery.",
+      evidenceIds: ["e-1"],
+    });
+    await page.goto("/worker");
+    const manager = page.getByRole("region", { name: "APTLSS work manager" });
+    await expect(manager.getByText("Can you open the receipt and confirm its date?", { exact: true })).toBeVisible();
+    await manager.getByRole("button", { name: "Show evidence and answer" }).click();
+    await manager.getByLabel("Result", { exact: true }).selectOption("Cannot access source");
+    await manager.getByLabel("Document or location checked (optional)").fill("Vendor portal receipt");
+    await manager.getByLabel("What did you confirm?").fill("Cannot access the original receipt; it is in the vendor portal.");
+    await manager.getByRole("button", { name: "Send answer to APTLSS" }).click();
+
+    await expect.poll(() => calls.find(call => call.method === "operator.submitManagerUpdate")?.input.interventionId).toBe("initial-receipt-check");
+    await expect(manager.getByText("Your update was saved for review.", { exact: false })).toBeVisible();
+    await expect(manager.getByText("Can Robert provide an accessible copy of the receipt?", { exact: true })).toBeVisible();
+    await expect(manager.getByText("Keep the delivery status unchanged and request access to the original receipt.", { exact: true })).toBeVisible();
+    await expect(manager.getByText("Can you open the receipt and confirm its date?", { exact: true })).toHaveCount(0);
+    await expect(manager.getByText("Full technical assessment", { exact: true })).toHaveCount(0);
+  });
+
+  test("worker can inspect linked source excerpts and submit context without an intervention", async ({
     page,
   }, testInfo) => {
-    const { calls } = await managerFixture(page, "worker");
+    const { calls, snapshot } = await managerFixture(page, "worker");
+    snapshot.evidence.push(
+      {
+        id: "email-preview-1",
+        cardId: "card-1",
+        source: "gmail",
+        text: "The message points to a delivery receipt.",
+        observedAt: new Date().toISOString(),
+        url: "https://mail.google.com/mail/u/0/#all/example",
+        kind: "source",
+        metadata: { sourceRecordId: "thread-7", contentScope: "message_preview" },
+      },
+      {
+        id: "email-preview-2",
+        cardId: "card-1",
+        source: "gmail",
+        text: "Open the linked portal correspondence for the full request.",
+        observedAt: new Date().toISOString(),
+        url: "javascript:alert(1)",
+        kind: "source",
+        metadata: { sourceRecordId: "thread-7", contentScope: "message_preview" },
+      },
+    );
     await page.goto("/worker");
     const manager = page.getByRole("region", { name: "APTLSS work manager" });
     await expect(manager.getByRole("heading", { name: "Work guidance" })).toBeVisible();
     await expect(manager.getByText(/Fallback polling/)).not.toBeVisible();
     await expect(manager.getByText("System status", { exact: true })).toHaveCount(0);
     await manager.getByRole("button", { name: "Show task details" }).click();
+    const evidence = manager.getByRole("region", { name: "Evidence for this task" });
+    await expect(evidence.getByText("Gmail", { exact: true })).toBeVisible();
+    await expect(evidence.getByText("Preview only", { exact: true })).toBeVisible();
+    await expect(evidence.locator("a[href='https://mail.google.com/mail/u/0/#all/example']")).toHaveCount(1);
+    await expect(evidence.getByText("Other excerpts (1)", { exact: true })).toBeVisible();
+    await evidence.getByText("Other excerpts (1)", { exact: true }).click();
+    await expect(evidence.getByText("Open the linked portal correspondence for the full request.", { exact: true })).toBeVisible();
+    await expect(evidence.locator("a[href^='javascript:']")).toHaveCount(0);
     await expect(manager.getByText("Full technical assessment", { exact: true })).toHaveCount(0);
     await manager
       .getByLabel("What changed in reality?")
@@ -477,12 +771,74 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     });
   });
 
+  for (const width of [1440, 390]) test(`worker guidance uses a readable ${width}px layout`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { snapshot } = await managerFixture(page, "worker");
+    (snapshot.interventions as unknown[]).push({
+      id: "guidance-layout",
+      cardId: "card-1",
+      severity: "urgent",
+      title: "The deadline needs verification",
+      explanation: "The source record and the reported update contain different dates.",
+      question: "Which date is confirmed by the current source?",
+      safeAction: "Open the cited record and check the date before continuing.",
+      evidenceIds: [],
+    });
+
+    await page.goto("/worker");
+    const manager = page.getByRole("region", { name: "APTLSS work manager" });
+    const fields = manager.getByTestId("manager-guidance-fields");
+    const problem = await fields.getByTestId("manager-guidance-problem").boundingBox();
+    const question = await fields.getByTestId("manager-guidance-question").boundingBox();
+    const action = await fields.getByTestId("manager-guidance-action").boundingBox();
+    expect(problem).not.toBeNull();
+    expect(question).not.toBeNull();
+    expect(action).not.toBeNull();
+
+    if (width >= 1280) {
+      expect(Math.abs(problem!.y - question!.y)).toBeLessThan(2);
+      expect(Math.abs(question!.y - action!.y)).toBeLessThan(2);
+      expect(problem!.x).toBeLessThan(question!.x);
+      expect(question!.x).toBeLessThan(action!.x);
+    } else {
+      expect(problem!.y).toBeLessThan(question!.y);
+      expect(question!.y).toBeLessThan(action!.y);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  });
+
   test("worker task checks do not expose forecast calibration", async ({ page }) => {
     await managerFixture(page, "worker", { proof: true, calibration: true });
     await page.goto("/worker");
     await page.getByRole("button", { name: "Open details", exact: true }).click();
     await expect(page.getByText("The remaining-time forecast needs calibration", { exact: true })).toHaveCount(0);
     await expect(page.getByText(/No material uncertainty remains/)).toHaveCount(0);
+    for (const internalDetail of [
+      "PRIVATE_PLAN_SUMMARY_SENTINEL",
+      "PRIVATE_STATE_REASON_SENTINEL",
+      "PRIVATE_CONFIDENCE_REASON_SENTINEL",
+      "PRIVATE_RECOMMENDATION_SENTINEL",
+      "PRIVATE_UNCERTAINTY_SENTINEL",
+      "PRIVATE_ISSUE_TITLE_SENTINEL",
+      "PRIVATE_ISSUE_DETAIL_SENTINEL",
+      "PRIVATE_ISSUE_RESOLUTION_SENTINEL",
+      "PRIVATE_CONFIDENCE_BLOCKER_SENTINEL",
+    ]) await expect(page.getByText(internalDetail, { exact: true })).toHaveCount(0);
+  });
+
+  for (const width of [1280, 390]) test(`worker sees source-check times and safe next actions at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await managerFixture(page, "worker", { proof: true, sourceCheck: true });
+    await page.goto("/worker");
+    await page.getByRole("button", { name: "Open details", exact: true }).click();
+    await expect(page.getByText("Source checks", { exact: true })).toBeVisible();
+    await expect(page.getByText("Check overdue", { exact: true })).toHaveCount(2);
+    await expect(page.getByText("Cached copy saved:", { exact: false })).toBeVisible();
+    await expect(page.getByText("Worker account last synced:", { exact: false })).toBeVisible();
+    await expect(page.getByText("Next: Open the original email and verify it before replying or filing.")).toBeVisible();
+    await expect(page.getByText("No additional checks are listed.", { exact: false })).toHaveCount(0);
+    await expect.poll(async () => (await page.getByRole("dialog").boundingBox())?.x ?? width).toBeLessThan(width === 390 ? 10 : 800);
+    await page.screenshot({ path: testInfo.outputPath(`source-check-${width}.png`) });
   });
 
   test("typing retains the urgent question for the selected task", async ({ page }) => {
@@ -518,9 +874,11 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await manager.getByRole("button", { name: "Show task details" }).click();
     await manager.getByLabel("Result", { exact: true }).selectOption("No action needed");
     await manager.getByLabel("Deadline stated in the source (optional)").fill("2026-09-25");
+    await manager.getByLabel("Document or location checked (optional)").fill("Portal correspondence");
     await manager.getByLabel("Related task").selectOption("card-2");
     await expect(manager.getByLabel("Result", { exact: true })).toHaveValue("Update");
     await expect(manager.getByLabel("Deadline stated in the source (optional)")).toHaveValue("");
+    await expect(manager.getByLabel("Document or location checked (optional)")).toHaveValue("");
   });
 
   test("successful submission resets result type for the next update", async ({ page }) => {
@@ -542,11 +900,15 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await manager.getByRole("button", { name: "Show task details" }).click();
     await manager.getByLabel("Result", { exact: true }).selectOption("Action needed");
     await manager.getByLabel("Deadline stated in the source (optional)").fill("2026-09-25");
+    await manager.getByLabel("Source you checked (optional)").selectOption("e-1");
+    await manager.getByLabel("Document or location checked (optional)").fill("Client correspondence");
     await manager.getByLabel("What changed in reality?").fill("The client's email requests the revised document.");
     await manager.getByRole("button", { name: "Send answer to APTLSS" }).click();
     await expect(manager.getByText(/Your update was saved for review/)).toBeVisible();
-    expect(calls.find(call => call.method === "operator.submitManagerUpdate")?.input.detail).toContain("Reported deadline: 2026-09-25");
-    expect(calls.find(call => call.method === "operator.submitManagerUpdate")?.input.detail).toContain("Result: Action needed");
+    expect(calls.find(call => call.method === "operator.submitManagerUpdate")?.input).toMatchObject({
+      detail: "The client's email requests the revised document.", outcome: "Action needed",
+      deadlineDate: "2026-09-25", sourceEvidenceId: "e-1", sourceDescription: "Client correspondence",
+    });
   });
 
   test("retains last successful assessment and context when the latest check fails", async ({
@@ -555,9 +917,13 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await managerFixture(page, "worker", { unavailable: true });
     await page.goto("/worker");
     const manager = page.getByRole("region", { name: "APTLSS work manager" });
-    await expect(manager.getByText("Source refresh failed")).toBeVisible();
+    await expect(manager.getByText("Work guidance could not be refreshed")).toBeVisible();
+    await expect(manager.getByText(/Try again shortly\. You can continue with unrelated work\./)).toBeVisible();
+    await expect(manager.getByText("Source refresh failed", { exact: true })).toHaveCount(0);
+    await expect(manager.getByText("No action is waiting for you", { exact: true })).toBeVisible();
     await manager.getByRole("button", { name: "Show task details" }).click();
     await expect(manager.getByText("Full technical assessment", { exact: true })).toHaveCount(0);
+    await expect(manager.getByText("Delivery reported in card comment", { exact: true })).toBeVisible();
     await expect(manager.getByLabel("What changed in reality?")).toBeVisible();
     await expect(manager.getByLabel("Related task")).toHaveValue("card-1");
   });
@@ -619,6 +985,102 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
             .at(-1)?.input.vaId
       )
       .toBe(3);
+  });
+
+  for (const width of [1280, 390]) test(`founder sees a compact plan change comparison at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const impact: ManagerPlanImpact = {
+      version: 1, assessedAt: "2026-09-04T08:00:00Z", dateKey: "2026-09-04", timezone: "Europe/Amsterdam",
+      baseline: "same_day_plan", scheduleChanged: true, requiresReview: false,
+      planChanges: [
+        { kind: "moved", blockId: "block-1", cardName: "Verify delivery", before: { startTime: "09:00", endTime: "09:20" }, after: { startTime: "10:00", endTime: "10:20" }, reason: "Source verification takes priority.", assumptionIds: [] },
+        { kind: "removed", blockId: "old-block", cardName: "Prepare reply", before: { startTime: "11:00", endTime: "11:30" }, after: null, reason: "The source has not been checked.", assumptionIds: [] },
+      ],
+      availabilityChanged: false, assumptions: [], deadlines: [], dependencies: [], risks: [], limitations: [],
+      buffer: { before: null, after: { unallocatedMinutes: 30, largestWindowMinutes: 30, additionalHighEstimateMinutes: null, afterHighEstimatesMinutes: null, minimumKnownDeficitMinutes: 0, unknownEstimateBlockIds: [] }, unallocatedDeltaMinutes: null, reservations: [], assumptionIds: [] },
+      protectedBlocks: [{ blockId: "active-block", reasons: ["active_timer"], preservedExactly: true, assumptionIds: [] }],
+      alternative: { kind: "keep_current_plan", available: true, blockIds: ["old-block"], deadlineRiskCardIds: [], dependencyRiskActionIds: [], buffer: null, limitation: "Retained plan has not been revalidated." },
+    };
+    const { snapshot } = await managerFixture(page, "admin", { planningImpact: impact });
+    snapshot.proposal!.unscheduledCards = Array.from({ length: 12 }, (_, index) => ({
+      cardId: `protected-task-${index + 1}`,
+      cardName: `Protected open task ${index + 1}`,
+      reason: "This is a protected non-working day.",
+    }));
+    await page.goto("/founder");
+    await page.getByRole("tab", { name: "Manager review" }).click();
+    await page.getByLabel("Review worker").selectOption("2");
+    await page.getByText("Review run 101", { exact: true }).click();
+    await page.getByText("Proposed plan", { exact: true }).click();
+    await expect(page.getByText(/Today is a protected non-working day\. 12 tasks remain open/)).toBeVisible();
+    await page.getByText("Show affected tasks (12)", { exact: true }).click();
+    await expect(page.getByText("Protected open task 1", { exact: true })).toBeVisible();
+    await expect(page.getByText("Protected open task 5", { exact: true })).toBeVisible();
+    await expect(page.getByText("Protected open task 6", { exact: true })).not.toBeVisible();
+    await page.getByText("Show 7 more tasks", { exact: true }).click();
+    await expect(page.getByText("Protected open task 12", { exact: true })).toBeVisible();
+    await expect(page.getByText("This is a protected non-working day.", { exact: true })).toHaveCount(0);
+    const plan = page.getByLabel("Planning impact");
+    await expect(plan.locator("summary").first()).toContainText("2 block changes proposed");
+    await plan.locator("summary").first().click();
+    await expect(plan.getByText("Moved: Verify delivery")).toBeVisible();
+    await expect(plan.getByText("Not scheduled: Prepare reply")).toBeVisible();
+    await expect(plan.getByText("The active day plan has not changed.")).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    await plan.screenshot({ path: testInfo.outputPath(`plan-diff-${width}.png`) });
+  });
+
+  for (const width of [1280, 390]) test(`worker sees suggested changes without replacing the saved agenda at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const dateKey = new Date().toISOString().slice(0, 10);
+    const impact: ManagerPlanImpact = {
+      version: 1, assessedAt: new Date().toISOString(), dateKey, timezone: "UTC",
+      baseline: "same_day_plan", scheduleChanged: true, requiresReview: true,
+      planChanges: [
+        { kind: "moved", blockId: "block-1", cardName: "Verify delivery", before: { startTime: "09:00", endTime: "09:20" }, after: { startTime: "10:00", endTime: "10:20" }, reason: "Source verification takes priority.", assumptionIds: [] },
+        { kind: "removed", blockId: "old-block", cardName: "Prepare reply", before: { startTime: "11:00", endTime: "11:30" }, after: null, reason: "The source has not been checked.", assumptionIds: [] },
+      ],
+      availabilityChanged: false, assumptions: [], deadlines: [], dependencies: [], risks: [], limitations: [],
+      buffer: { before: null, after: { unallocatedMinutes: 30, largestWindowMinutes: 30, additionalHighEstimateMinutes: null, afterHighEstimatesMinutes: null, minimumKnownDeficitMinutes: 0, unknownEstimateBlockIds: [] }, unallocatedDeltaMinutes: null, reservations: [], assumptionIds: [] },
+      protectedBlocks: [{ blockId: "active-block", reasons: ["active_timer"], preservedExactly: true, assumptionIds: [] }],
+      alternative: { kind: "keep_current_plan", available: true, blockIds: ["old-block"], deadlineRiskCardIds: [], dependencyRiskActionIds: [], buffer: null, limitation: "Retained plan has not been revalidated." },
+    };
+    await managerFixture(page, "worker", { planningImpact: impact, savedPlan: {
+      version: 2, dateKey, generatedAt: new Date().toISOString(),
+      blocks: [{ id: "old-block", startTime: "11:00", endTime: "11:30", cardId: "saved-card", cardName: "Existing agenda task", action: "Continue recorded work", status: "planned", priority: "HIGH" }],
+      constraints: { startTime: "09:00", endTime: "18:00", breaks: [] },
+      planHealth: { confidence: 0, scheduledMinutes: 30, availableMinutes: 480, overlaps: 0, gaps: 450 },
+      robertItems: [], unscheduledCards: [], auditTrail: [],
+    } });
+    await page.goto("/worker");
+    await expect(page.getByText("2 suggested changes to review")).toBeVisible();
+    await page.goto("/worker/plan");
+    const suggestion = page.getByRole("region", { name: "Suggested changes to your day" });
+    await expect(suggestion.getByText("Your agenda below is still the plan to follow.", { exact: false })).toBeVisible();
+    await expect(suggestion.getByText("Verify delivery")).toBeVisible();
+    await expect(suggestion.getByText("Prepare reply")).toBeVisible();
+    await expect(suggestion.getByText("Not applied")).toBeVisible();
+    await expect(page.getByText("Existing agenda task")).toBeVisible();
+    await expect(page.getByText("Full technical assessment")).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    await page.screenshot({ path: testInfo.outputPath(`worker-plan-suggestion-${width}.png`), fullPage: true });
+  });
+
+  test("worker does not act on a suggestion for an older plan version", async ({ page }) => {
+    const dateKey = new Date().toISOString().slice(0, 10);
+    const impact: ManagerPlanImpact = {
+      version: 1, assessedAt: new Date().toISOString(), dateKey, timezone: "UTC",
+      baseline: "same_day_plan", scheduleChanged: true, requiresReview: false,
+      planChanges: [{ kind: "moved", blockId: "old-block", cardName: "Outdated proposal task", before: { startTime: "09:00", endTime: "09:30" }, after: { startTime: "10:00", endTime: "10:30" }, reason: "Earlier reason.", assumptionIds: [] }],
+      assumptions: [], deadlines: [], dependencies: [], risks: [], limitations: [],
+      buffer: { before: null, after: { unallocatedMinutes: null, largestWindowMinutes: null, additionalHighEstimateMinutes: null, afterHighEstimatesMinutes: null, minimumKnownDeficitMinutes: 0, unknownEstimateBlockIds: [] }, unallocatedDeltaMinutes: null, reservations: [], assumptionIds: [] },
+      protectedBlocks: [], alternative: { kind: "keep_current_plan", available: true, blockIds: [], deadlineRiskCardIds: [], dependencyRiskActionIds: [], buffer: null, limitation: "" },
+    };
+    await managerFixture(page, "worker", { planningImpact: impact, savedPlanVersion: "newer-plan-version" });
+    await page.goto("/worker/plan");
+    const suggestion = page.getByRole("region", { name: "Suggested changes to your day" });
+    await expect(suggestion.getByText("no longer matches", { exact: false })).toBeVisible();
+    await expect(suggestion.getByText("Outdated proposal task")).toHaveCount(0);
   });
 
   test("worker cannot enter admin manager review", async ({ page }) => {
@@ -767,15 +1229,17 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect(page.getByText("0%", { exact: true })).toHaveCount(0);
   });
 
-  test("review limitations stay visible while provider diagnostics are opt-in", async ({ page }) => {
+  test("worker sees task guidance without semantic-review diagnostics", async ({ page }) => {
     const { snapshot } = await managerFixture(page, "worker");
     Object.assign(snapshot, { semanticReview: { success: false, failureKind: "quota", attemptedAt: new Date().toISOString(), retryAfter: new Date().toISOString(), failures: 1, sourceHash: "test" } });
     await page.goto("/worker");
-    await expect(page.getByText("This advice has not been fully checked. Verify the source before acting.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("status", { name: "Current manager instruction" })).toBeVisible();
+    await expect(page.getByText("This advice has not been fully checked. Verify the source before acting.", { exact: true })).not.toBeVisible();
     await expect(page.getByText("AI API credit exhausted", { exact: true })).not.toBeVisible();
     await expect(page.getByText(/Automatic retry:/)).not.toBeVisible();
     await expect(page.getByText("System status", { exact: true })).toHaveCount(0);
-    await expect(page.getByText("AI API credit exhausted", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Full technical assessment", { exact: true })).toHaveCount(0);
+    await expect(page.getByText(/technical assessment|semantic review|AI review/i)).toHaveCount(0);
   });
 
   test("subscription connection identifies adaptive Luna and the actual used levels", async ({ page }) => {
@@ -816,6 +1280,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
   });
 
   test("a manager assessment can finish after the ordinary 30-second API deadline", async ({ page }) => {
+    test.setTimeout(50_000);
     await managerFixture(page, "worker", { assessmentDelayMs: 31_000 });
     await page.goto("/worker");
     const run = page.getByRole("button", { name: "Reassess now" });

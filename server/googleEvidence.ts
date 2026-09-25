@@ -12,6 +12,7 @@ import { getDb } from "./db";
 import { upsertSourceCommitment } from "./sourceCommitments";
 import { resolveWorkerOperatorContextById } from "./workerOperatorContext";
 import { zonedDateTimeToUtc } from "../shared/workerTime";
+import { gmailContentScope } from "../shared/gmailContentScope";
 import { mapWithConcurrency } from "./utils/concurrency";
 
 const SETTINGS_KEY = "googleEvidence";
@@ -538,10 +539,13 @@ export function extractExplicitDeadline(text: string, timezone = "UTC"): Explici
 
 export function classifyGoogleEmail(subject: string, snippet: string) {
   const haystack = `${subject} ${snippet}`.toLocaleLowerCase();
+  const scope = gmailContentScope(subject, snippet);
   const financial = /\b(invoice|factuur|payment|betaling|receipt|bon|statement|afschrift|balance|saldo|credit|debit|bank|tax|belasting|btw|subscription|abonnement)\b/i.test(haystack);
   const deliveryFailure = /delivery status notification|address not found|undeliverable|niet bezorgd/i.test(haystack);
   const requiresReview = /identity|verification|verify|document|proof of address|actie vereist|action required|deadline|urgent/i.test(haystack);
-  const suggestedNextAction = deliveryFailure
+  const suggestedNextAction = scope === "portal_notice"
+    ? "Open the notice and the linked portal correspondence. Record what the underlying document asks, any deadline, and the source before deciding a follow-up."
+    : deliveryFailure
     ? "Correct the recipient details, then resend or record the delivery failure on the related card."
     : requiresReview
       ? "Review the request, identify the required document or response, then link it to the related card."
@@ -549,10 +553,16 @@ export function classifyGoogleEmail(subject: string, snippet: string) {
         ? "Review the financial record, file it against the related work, and act only if a follow-up is required."
         : "Review the message, decide whether a reply or filing action is required, and link it to the related card.";
   return {
+    scope,
     category: financial ? "financial" as const : "non_financial" as const,
     suggestedNextAction,
     summary: snippet.trim().slice(0, 2_000) || "No message preview was provided by Gmail.",
   };
+}
+
+export function candidateGmailDeadline(subject: string, snippet: string, timezone: string) {
+  if (gmailContentScope(subject, snippet) === "portal_notice") return null;
+  return extractExplicitDeadline(`${subject}\n${snippet}`, timezone);
 }
 
 export function findExactCardMatch(text: string, cards: WorkerCard[]) {
@@ -643,7 +653,7 @@ async function syncGmailEvidence(vaId: number, settings: GoogleEvidenceSettings[
   for (const message of messages) {
     const classification = classifyGoogleEmail(message.subject, message.snippet);
     const match = findExactCardMatch(`${message.subject}\n${message.snippet}`, cards);
-    const deadline = extractExplicitDeadline(`${message.subject}\n${message.snippet}`, worker.timezone);
+    const deadline = candidateGmailDeadline(message.subject, message.snippet, worker.timezone);
     const deadlineIsPlausible = deadline
       && deadline.dueAt.getTime() >= message.receivedAt.getTime() - 24 * 60 * 60_000
       && deadline.dueAt.getTime() <= message.receivedAt.getTime() + 5 * 365 * 24 * 60 * 60_000;

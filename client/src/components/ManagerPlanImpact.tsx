@@ -70,6 +70,13 @@ export default function ManagerPlanImpact({
         Planning impact unavailable for this proposal.
       </p>
     );
+  const planChanges = impact.planChanges ?? [];
+  const changeCounts = { added: 0, moved: 0, updated: 0, removed: 0 };
+  for (const change of planChanges) changeCounts[change.kind]++;
+  const changeLabel = (kind: typeof planChanges[number]["kind"]) => ({
+    added: "Added", moved: "Moved", updated: "Updated", removed: "Not scheduled",
+  })[kind];
+  const slotLabel = (slot: typeof planChanges[number]["before"]) => slot ? `${slot.startTime}-${slot.endTime}` : "Not scheduled";
   const sourceId = (ref: string) => `${instanceId}-${ref}`;
   const refs = (ids: string[]) => (
     <p className="mt-1 break-words text-xs text-muted-foreground">
@@ -128,7 +135,9 @@ export default function ManagerPlanImpact({
           Planning impact
           <span className="text-xs font-normal text-muted-foreground">
             {impact.scheduleChanged
-              ? "Schedule changes proposed"
+              ? impact.baseline !== "same_day_plan" ? "New day proposal"
+                : !impact.planChanges ? "Block comparison unavailable"
+                  : planChanges.length ? `${planChanges.length} block changes proposed` : "Availability changes proposed"
               : "Schedule unchanged"}
           </span>
         </span>
@@ -142,6 +151,24 @@ export default function ManagerPlanImpact({
             ? "Compared with the retained same-day plan."
             : "No same-day plan was supplied for comparison."}
         </p>
+        <section className="space-y-2 border-b pb-4 text-sm" aria-label="Changes from active plan">
+          <h4 className="font-semibold">Changes from active plan</h4>
+          {impact.baseline !== "same_day_plan" && <p className="text-muted-foreground">There is no active plan for this day to compare. These are proposed slots, not moved work.</p>}
+          {impact.availabilityChanged && <p>Working hours or breaks differ from the active plan.</p>}
+          {!impact.planChanges ? <p className="text-muted-foreground">A block-by-block comparison was not recorded for this older proposal.</p> : planChanges.length ? <>
+            <p className="text-xs text-muted-foreground">{changeCounts.added} added · {changeCounts.moved} moved · {changeCounts.updated} updated · {changeCounts.removed} no longer scheduled</p>
+            <ol className="divide-y border-y">
+              {planChanges.slice(0, 8).map((change, index) => <li key={`${change.blockId}-${index}`} className="py-2">
+                <p className="font-medium">{changeLabel(change.kind)}: {change.cardName}</p>
+                <p className="text-muted-foreground">{slotLabel(change.before)} → {slotLabel(change.after)}</p>
+                <p>{change.reason}</p>
+                {refs(change.assumptionIds)}
+              </li>)}
+            </ol>
+            {planChanges.length > 8 && <details><summary className="cursor-pointer font-medium">Show {planChanges.length - 8} more changes</summary><ol className="mt-2 divide-y border-y">{planChanges.slice(8).map((change, index) => <li key={`${change.blockId}-${index + 8}`} className="py-2"><p className="font-medium">{changeLabel(change.kind)}: {change.cardName}</p><p className="text-muted-foreground">{slotLabel(change.before)} → {slotLabel(change.after)}</p><p>{change.reason}</p>{refs(change.assumptionIds)}</li>)}</ol></details>}
+          </> : <p className="text-muted-foreground">{impact.scheduleChanged ? "No block changed; check the availability change below." : "No changes to scheduled blocks."}</p>}
+          <p className="text-xs text-muted-foreground">This is a shadow proposal. The active day plan has not changed.</p>
+        </section>
         <p className="flex items-center gap-2">
           {impact.requiresReview && (
             <AlertTriangle

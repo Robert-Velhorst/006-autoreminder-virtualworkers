@@ -10,6 +10,24 @@ type WorkerNames = {
   timeZone?: string;
 };
 
+export type OwnedWaitingReasonCard = {
+  cardId: string;
+  cardName: string;
+  cardUrl: string;
+  boardName: string;
+  listName: string;
+};
+
+export function bindWaitingReasonToOwnedCard<T extends {
+  cardId?: string;
+  cardName?: string;
+  cardUrl?: string;
+  boardName?: string;
+  listName?: string;
+}>(input: T, card: OwnedWaitingReasonCard) {
+  return { ...input, ...card };
+}
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

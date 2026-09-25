@@ -174,7 +174,7 @@ export const trelloCachedCards = mysqlTable('trello_cached_cards', {
   cardData: text('cardData').notNull(), // JSON serialized card data
   cachedAt: timestamp('cachedAt').defaultNow().notNull(),
   expiresAt: timestamp('expiresAt').notNull(),
-});
+}, (table) => [index('trello_cached_cards_user_card_cached_idx').on(table.userId, table.cardId, table.cachedAt)]);
 
 export type TrelloCacheMetadata = typeof trelloCacheMetadata.$inferSelect;
 export type InsertTrelloCacheMetadata = typeof trelloCacheMetadata.$inferInsert;
@@ -2264,12 +2264,25 @@ export const decisionOutcomes = mysqlTable("decision_outcomes", {
   listName: varchar("listName", { length: 256 }).notNull().default(""),
   decisionPrompt: text("decisionPrompt").notNull(),
   recommendedDecision: text("recommendedDecision"),
+  disposition: mysqlEnum("disposition", ["recorded", "approved", "rejected"]).notNull().default("recorded"),
   outcome: text("outcome").notNull(),
   resolvedBy: varchar("resolvedBy", { length: 64 }).notNull(),
   resolvedAt: timestamp("resolvedAt").defaultNow().notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => [
   index("decision_outcomes_va_resolved_idx").on(table.vaId, table.resolvedAt),
+]);
+
+export const founderDecisionDeadlines = mysqlTable("founder_decision_deadlines", {
+  id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId").notNull(),
+  stepId: int("stepId").notNull(),
+  dueAt: timestamp("dueAt"),
+  source: varchar("source", { length: 1024 }).notNull(),
+  recordedBy: varchar("recordedBy", { length: 64 }).notNull(),
+  recordedAt: timestamp("recordedAt").defaultNow().notNull(),
+}, (table) => [
+  index("founder_decision_deadlines_step_idx").on(table.stepId, table.id),
 ]);
 
 export const workspaceEvidenceItems = mysqlTable("workspace_evidence_items", {
@@ -2630,6 +2643,10 @@ export const aptlssManagerUpdates = mysqlTable("aptlss_manager_updates", {
   cardId: varchar("cardId", { length: 64 }).notNull(),
   detail: text("detail").notNull(),
   interventionId: varchar("interventionId", { length: 256 }),
+  outcome: varchar("outcome", { length: 32 }),
+  deadlineDate: varchar("deadlineDate", { length: 10 }),
+  sourceEvidenceId: varchar("sourceEvidenceId", { length: 256 }),
+  sourceDescription: varchar("sourceDescription", { length: 512 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => [index("aptlss_manager_updates_worker_card_idx").on(table.vaId, table.cardId, table.createdAt)]);
 

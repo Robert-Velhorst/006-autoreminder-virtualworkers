@@ -38,6 +38,20 @@ function executeStatement(db: any, statement: string, values: unknown[] = []) {
   return db.execute(parameterizedSql(statement, values));
 }
 
+function affectedRows(result: unknown): number {
+  const value = Array.isArray(result) ? result[0] : result;
+  return Number((value as { affectedRows?: unknown } | undefined)?.affectedRows ?? 0);
+}
+
+async function workerOwnsFlag(db: any, table: "vague_reply_flags" | "unsigned_message_flags", vaId: number, id: number) {
+  const rows = await executeStatement(db,
+    `SELECT id FROM ${table} WHERE id = ? AND vaId = ? LIMIT 1`,
+    [id, vaId]
+  );
+  const data = Array.isArray(rows) ? rows[0] : rows;
+  return Array.isArray(data) && data.length > 0;
+}
+
 // ─── Reply Threads ────────────────────────────────────────────────────────────
 
 export interface ReplyThreadRow {
@@ -300,19 +314,17 @@ export async function getActiveVagueReplyFlags(vaId: number): Promise<VagueFlagR
   }
 }
 
-export async function resolveVagueReplyFlag(vaId: number, id: number): Promise<void> {
+export async function resolveVagueReplyFlag(vaId: number, id: number): Promise<boolean> {
   const db = await getDb();
-  if (!db) return;
-  try {
-    await executeStatement(db,
-      `UPDATE vague_reply_flags
-       SET resolvedAt = NOW(), resolvedBy = 'manual', updatedAt = NOW()
-       WHERE id = ? AND vaId = ?`,
-      [id, vaId]
-    );
-  } catch (e) {
-    console.error("[DB] resolveVagueReplyFlag failed:", e);
-  }
+  if (!db) throw new Error("Database not available");
+  const result = await executeStatement(db,
+    `UPDATE vague_reply_flags
+     SET resolvedAt = NOW(), resolvedBy = 'manual', updatedAt = NOW()
+     WHERE id = ? AND vaId = ? AND resolvedAt IS NULL`,
+    [id, vaId]
+  );
+  if (affectedRows(result) === 1) return true;
+  return workerOwnsFlag(db, "vague_reply_flags", vaId, id);
 }
 
 export async function autoDemeritVagueReplyFlag(id: number): Promise<void> {
@@ -470,20 +482,18 @@ export async function getActiveUnsignedFlags(vaId: number): Promise<UnsignedFlag
   }
 }
 
-export async function resolveUnsignedFlag(vaId: number, id: number, note?: string): Promise<void> {
+export async function resolveUnsignedFlag(vaId: number, id: number, note?: string): Promise<boolean> {
   const db = await getDb();
-  if (!db) return;
-  try {
-    await executeStatement(db,
-      `UPDATE unsigned_message_flags
-       SET resolvedAt = NOW(), resolvedBy = 'manual',
-           resolutionNote = ?, updatedAt = NOW()
-       WHERE id = ? AND vaId = ?`,
-      [note ?? null, id, vaId]
-    );
-  } catch (e) {
-    console.error("[DB] resolveUnsignedFlag failed:", e);
-  }
+  if (!db) throw new Error("Database not available");
+  const result = await executeStatement(db,
+    `UPDATE unsigned_message_flags
+     SET resolvedAt = NOW(), resolvedBy = 'manual',
+         resolutionNote = ?, updatedAt = NOW()
+     WHERE id = ? AND vaId = ? AND resolvedAt IS NULL`,
+    [note ?? null, id, vaId]
+  );
+  if (affectedRows(result) === 1) return true;
+  return workerOwnsFlag(db, "unsigned_message_flags", vaId, id);
 }
 
 export async function autoDemeritUnsignedFlag(id: number): Promise<void> {

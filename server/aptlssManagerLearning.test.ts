@@ -7,6 +7,57 @@ const guidance = { id: 1, reviewId: 2, cardId: "a", topic: "source_selection", c
 const input = (): ManagerInput => ({ now: original.assessedAt, cards: [], evidence: [{ id: "e", cardId: "a", kind: "source", source: "trello", text: "Signed contract", observedAt: original.assessedAt }], timeSamples: [], sourceGaps: [], learning: { stateHash: "state", guidance: [guidance], withheld: [] } });
 
 describe("controlled manager correction reuse", () => {
+  it("changes the next recommendation for the reviewed step without changing execution rights", () => {
+    const base = structuredClone(original);
+    base.actions[0].blocked = true;
+    const ctx = input();
+    ctx.learning!.guidance = [{ ...guidance, nextStep: { actionId: "a1", title: "Compare signed requirements", completionCriteria: "Record the verified requirement differences." } }];
+    const output = applyManagerLearning(ctx, base);
+    expect(output.actions[0]).toMatchObject({
+      title: "Compare signed requirements",
+      completionCriteria: "Record the verified requirement differences.",
+      blocked: true, kind: "work", dependsOn: [], stepIds: [1], draft: null,
+    });
+    expect(output.assessments[0].actions[0].title).toBe("Compare signed requirements");
+    expect(base.actions[0].title).toBe("Prepare report");
+  });
+  it("does not apply a reviewed step to another action ID", () => {
+    const ctx = input();
+    ctx.learning!.guidance = [{ ...guidance, nextStep: { actionId: "different", title: "Compare signed requirements", completionCriteria: "Record the verified differences." } }];
+    expect(applyManagerLearning(ctx, original).actions[0]).toEqual(original.actions[0]);
+  });
+  it("blocks incompatible reviewed next steps across topics", () => {
+    const ctx = input();
+    ctx.learning!.guidance = [
+      { ...guidance, nextStep: { actionId: "a1", title: "Check signed contract", completionCriteria: "Record contract terms." } },
+      { ...guidance, id: 2, topic: "other_topic", nextStep: { actionId: "a1", title: "Check invoice details", completionCriteria: "Record invoice terms." } },
+    ];
+    const output = applyManagerLearning(ctx, original);
+    expect(output.actions.find(a => a.id === "a1")).toMatchObject({ blocked: true, title: "Prepare report" });
+    expect(output.interventions.some(i => i.title === "Verify reviewed guidance")).toBe(true);
+  });
+  it("keeps two independent corrected steps and targets a conflict to its step", () => {
+    const base = structuredClone(original);
+    base.actions.push({ ...base.actions[0], id: "a2", title: "Other work" });
+    const ctx = input();
+    ctx.learning!.guidance = [
+      { ...guidance, nextStep: { actionId: "a1", title: "Check signed contract", completionCriteria: "Record contract terms." } },
+      { ...guidance, id: 2, nextStep: { actionId: "a2", title: "Check source details", completionCriteria: "Record source terms." } },
+    ];
+    const learned = applyManagerLearning(ctx, base);
+    expect(learned.actions.find(a => a.id === "a1")?.title).toBe("Check signed contract");
+    expect(learned.actions.find(a => a.id === "a2")?.title).toBe("Check source details");
+    ctx.learning!.withheld = [{ cardId: "a", topic: "source_selection", actionKind: "work", actionId: "a1" }];
+    const disputed = applyManagerLearning(ctx, base);
+    expect(disputed.actions.find(a => a.id === "a1")?.blocked).toBe(true);
+    expect(disputed.actions.find(a => a.id === "a2")?.blocked).toBe(false);
+  });
+  it("rejects a stored amendment that introduces an external action", () => {
+    const ctx = input();
+    ctx.learning!.guidance = [{ ...guidance, nextStep: { actionId: "a1", title: "Send the report", completionCriteria: "Record confirmation" } }];
+    const output = applyManagerLearning(ctx, original);
+    expect(output.actions.find(a => a.id === "a1")).toMatchObject({ blocked: true, title: "Prepare report" });
+  });
   it("adds source-backed reviewed guidance to the next assessment, not to canonical facts", () => {
     const output = applyManagerLearning(input(), original);
     expect(output.actions[0].reason).toContain(guidance.correction);

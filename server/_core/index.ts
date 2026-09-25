@@ -62,6 +62,7 @@ import { startReminderWorker, stopReminderWorker } from "../reminderOrchestratio
 import { initializeWebhookAutoRegister, stopWebhookAutoRegister } from "../services/webhook-auto-register.js";
 import { startMaintenanceCenter, stopMaintenanceCenter } from "../maintenanceCenter.js";
 import { startManagerScheduler, stopManagerScheduler } from "../aptlssManagerService.js";
+import { startFounderDecisionAlertWorker, stopFounderDecisionAlertWorker } from "../founderDecisionAlerts.js";
 import { closeDb } from "../db.js";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -93,6 +94,28 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 function positiveInteger(value: string | undefined, fallback: number, maximum: number) {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, maximum) : fallback;
+}
+
+function isAptlssBrowserTestRuntime() {
+  if (process.env.APTLSS_TEST_DISABLE_BACKGROUND_JOBS !== "true") return false;
+  const raw = process.env.APTLSS_TEST_DATABASE_URL?.trim();
+  let database: URL;
+  try {
+    database = new URL(raw ?? "");
+  } catch {
+    throw new Error("APTLSS browser-test mode requires its explicit loopback test database URL.");
+  }
+  if (
+    process.env.NODE_ENV === "production" ||
+    database.protocol !== "mysql:" ||
+    database.search ||
+    database.hash ||
+    !["127.0.0.1", "localhost", "[::1]"].includes(database.hostname) ||
+    !/^\/(?:aptlss_test|recovery_test)$/.test(database.pathname)
+  ) {
+    throw new Error("APTLSS browser-test mode is restricted to non-production loopback test databases.");
+  }
+  return true;
 }
 
 const MAX_CONCURRENT = positiveInteger(process.env.MAX_CONCURRENT_REQUESTS, 100, 10_000);
@@ -319,10 +342,11 @@ async function startServer() {
   // Initialize WebSocket server
   websocketService.initialize(server);
 
-  // A local bypass server is an operator UI for the existing runtime. Do not
-  // start a second set of schedulers against the same production database.
-  if (isLocalAuthBypassEnabled()) {
-    console.warn("[Server] Local auth bypass enabled; background workers are disabled for this development process");
+  // A local bypass server and an isolated browser-test server must not run
+  // schedulers against a shared or disposable database.
+  const aptlssBrowserTestRuntime = isAptlssBrowserTestRuntime();
+  if (isLocalAuthBypassEnabled() || aptlssBrowserTestRuntime) {
+    console.warn(`[Server] ${aptlssBrowserTestRuntime ? "Isolated APTLSS browser-test mode" : "Local auth bypass enabled"}; background workers are disabled for this process`);
   } else {
     // Schedulers are independent from cache warming. External email briefings
     // remain disabled unless explicitly enabled by configuration.
@@ -331,6 +355,7 @@ async function startServer() {
     startReminderWorker();
     startMaintenanceCenter();
     startManagerScheduler();
+    startFounderDecisionAlertWorker();
   }
 
   const host = process.env.HOST ?? "127.0.0.1";
@@ -372,6 +397,7 @@ async function startServer() {
     stopBriefingScheduler();
     stopManusScheduler();
     stopReminderWorker();
+    stopFounderDecisionAlertWorker();
     stopMaintenanceCenter();
     stopWebhookAutoRegister();
     // Drain manager leases before ending its database pool.

@@ -222,16 +222,26 @@ export async function createEvidenceConflict({
   });
 
   return db.transaction(async (tx) => {
-    const scopedEvidence = await tx.select({ evidenceId: aptlssEvidenceSubjectLinks.evidenceId })
+    const scopedEvidence = await tx.select({
+      evidenceId: aptlssEvidenceSubjectLinks.evidenceId,
+      cardId: aptlssEvidenceSubjectLinks.subjectId,
+    })
       .from(aptlssEvidenceSubjectLinks)
       .innerJoin(workspaceEvidenceItems, eq(workspaceEvidenceItems.id, aptlssEvidenceSubjectLinks.evidenceId))
       .where(and(
         eq(workspaceEvidenceItems.vaId, vaId),
         eq(aptlssEvidenceSubjectLinks.vaId, vaId),
+        eq(aptlssEvidenceSubjectLinks.subjectType, "card"),
         inArray(aptlssEvidenceSubjectLinks.evidenceId, [sourceEvidenceId, assertedEvidenceId]),
       ));
     if (new Set(scopedEvidence.map((item) => item.evidenceId)).size !== 2) {
       throw new AptlssEvidenceGraphError("Evidence conflict is outside this worker scope");
+    }
+    const sourceCards = new Set(scopedEvidence.filter(item => item.evidenceId === sourceEvidenceId).map(item => item.cardId));
+    const sharedCards = new Set(scopedEvidence.filter(item => item.evidenceId === assertedEvidenceId && sourceCards.has(item.cardId)).map(item => item.cardId));
+    const conflictCardId = cardId ?? (sharedCards.size === 1 ? [...sharedCards][0] : null);
+    if (!conflictCardId || !sharedCards.has(conflictCardId)) {
+      throw new AptlssEvidenceGraphError("Conflict evidence must be linked to the same worker task");
     }
     const truthClasses = await tx.select({
       evidenceId: aptlssEvidenceRevisions.evidenceId,
@@ -243,14 +253,12 @@ export async function createEvidenceConflict({
     if (!sourceIsRecord || !assertedIsWorker) {
       throw new AptlssEvidenceGraphError("The conflict must compare a source record with a worker assertion");
     }
-    if (cardId) {
-      const ownedCard = await tx.select({ cardId: aptlssPlans.cardId })
-        .from(aptlssPlans)
-        .where(and(eq(aptlssPlans.vaId, vaId), eq(aptlssPlans.cardId, cardId)))
-        .limit(1);
-      if (!ownedCard[0]) {
-        throw new AptlssEvidenceGraphError("Evidence conflict is outside this worker scope");
-      }
+    const ownedCard = await tx.select({ cardId: aptlssPlans.cardId })
+      .from(aptlssPlans)
+      .where(and(eq(aptlssPlans.vaId, vaId), eq(aptlssPlans.cardId, conflictCardId)))
+      .limit(1);
+    if (!ownedCard[0]) {
+      throw new AptlssEvidenceGraphError("Evidence conflict is outside this worker scope");
     }
     const existing = await tx.select({ id: aptlssEvidenceConflicts.id })
       .from(aptlssEvidenceConflicts)
@@ -277,7 +285,7 @@ export async function createEvidenceConflict({
     if (!existingFollowup[0]) {
       await tx.insert(aptlssVerificationFollowups).values({
         vaId,
-        cardId: cardId ?? null,
+        cardId: conflictCardId,
         conflictId,
         title: "Verify conflicting work evidence",
         question: question.trim(),

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { adminProcedure, protectedProcedure, router } from "../_core/trpc";
+import { adminProcedure, operatorAccountProcedure, router } from "../_core/trpc";
 import { getDb, incrementPayLogD1 } from "../db";
 import {
   getPendingReplyThreads,
@@ -58,7 +58,6 @@ import {
   getOpenStepsForCard,
   getAllFounderDecisionSteps,
   setStepCompletionForWorker,
-  resolveFounderStepForWorker,
   getCardStepProgress,
   getCardState,
   getAllCardStates,
@@ -77,7 +76,6 @@ import {
   setPolicyEnabled,
   getPendingFollowUpDrafts,
   getAllFollowUpDrafts,
-  getFollowUpDraftByIdForWorker,
   setFollowUpDraftStatusForWorker,
   getAllWorkerPerformance,
   getLatestWeeklyAnalysis,
@@ -121,8 +119,21 @@ async function assertCardAccess(
   }
 }
 
+async function requireReplyFlagResolution(resolution: Promise<boolean>, missingMessage: string) {
+  let resolved: boolean;
+  try {
+    resolved = await resolution;
+  } catch (error) {
+    console.error("[ReplyMonitor] Flag resolution failed", {
+      errorType: error instanceof Error ? error.name : "unknown",
+    });
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Could not update this item. Please try again." });
+  }
+  if (!resolved) throw new TRPCError({ code: "NOT_FOUND", message: missingMessage });
+}
+
 export const trelloRouter = router({
-  weeklyHours: protectedProcedure.query(async ({ ctx }) => {
+  weeklyHours: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     const apiKey = process.env.TRELLO_API_KEY || process.env.TrelloAPIKey;
     const apiToken = process.env.TRELLO_TOKEN || process.env.TrelloAPIToken;
@@ -169,7 +180,7 @@ export const trelloRouter = router({
     };
   }),
 
-  recentUpdates: protectedProcedure.query(async ({ ctx }) => {
+  recentUpdates: operatorAccountProcedure.query(async ({ ctx }) => {
     const apiKey = process.env.TRELLO_API_KEY || process.env.TrelloAPIKey;
     const apiToken = process.env.TRELLO_TOKEN || process.env.TrelloAPIToken;
     if (!apiKey || !apiToken) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Trello API credentials not configured" });
@@ -199,7 +210,7 @@ export const trelloRouter = router({
     }));
   }),
 
-  actionAlerts: protectedProcedure.query(async ({ ctx }) => {
+  actionAlerts: operatorAccountProcedure.query(async ({ ctx }) => {
     const apiKey = process.env.TRELLO_API_KEY || process.env.TrelloAPIKey;
     const apiToken = process.env.TRELLO_TOKEN || process.env.TrelloAPIToken;
     if (!apiKey || !apiToken) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Trello API credentials not configured" });
@@ -246,14 +257,14 @@ export const trelloRouter = router({
     };
   }),
 
-  webhooks: protectedProcedure.query(async ({ ctx }) => {
+  webhooks: adminProcedure.query(async ({ ctx }) => {
     const apiKey = process.env.TRELLO_API_KEY || process.env.TrelloAPIKey;
     const apiToken = process.env.TRELLO_TOKEN || process.env.TrelloAPIToken;
     if (!apiKey || !apiToken) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Trello API credentials not configured" });
     return await getRegisteredWebhooks(apiKey, apiToken);
   }),
 
-  postComment: protectedProcedure
+  postComment: operatorAccountProcedure
     .input(z.object({ cardId: z.string().min(1), text: z.string().trim().min(1).max(16_000) }))
     .mutation(async ({ input, ctx }) => {
       const apiKey = process.env.TRELLO_API_KEY || process.env.TrelloAPIKey;
@@ -276,7 +287,7 @@ export const trelloRouter = router({
 });
 
 export const aptlssRouter = router({
-  upsertAptlssPlan: protectedProcedure
+  upsertAptlssPlan: operatorAccountProcedure
     .input(z.object({ cardId: z.string(), planJson: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
@@ -390,7 +401,7 @@ export const aptlssRouter = router({
       };
     }),
 
-  getCached: protectedProcedure
+  getCached: operatorAccountProcedure
     .input(z.object({ cardId: z.string() }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
@@ -415,41 +426,31 @@ export const aptlssRouter = router({
       };
     }),
 
-  getAll: protectedProcedure.query(async ({ ctx }) => {
+  getAll: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return await getAllAptlssPlans(vaId);
   }),
 
-  getFounderDecisionQueue: protectedProcedure.query(async ({ ctx }) => {
+  getFounderDecisionQueue: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return await getAllFounderDecisionSteps(vaId);
   }),
 
-  resolveFounderStep: protectedProcedure
-    .input(z.object({ stepId: z.number() }))
-    .mutation(async ({ input, ctx }) => {
-      const updated = await resolveFounderStepForWorker(Number(ctx.user.id), input.stepId);
-      if (!updated) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Open decision step not found" });
-      }
-      return { success: true };
-    }),
-
-  getProgress: protectedProcedure
+  getProgress: operatorAccountProcedure
     .input(z.object({ cardId: z.string() }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
       return await getCardStepProgress(vaId, input.cardId);
     }),
 
-  getCardState: protectedProcedure
+  getCardState: operatorAccountProcedure
     .input(z.object({ cardId: z.string() }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
       return await getCardState(vaId, input.cardId);
     }),
 
-  getAllCardStates: protectedProcedure.query(async ({ ctx }) => {
+  getAllCardStates: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     const [states, plans] = await Promise.all([getAllCardStates(vaId), getAllAptlssPlans(vaId)]);
     const planMap = new Map(plans.map(p => {
@@ -463,19 +464,19 @@ export const aptlssRouter = router({
     return states.map((s: any) => ({ ...s, confidenceScore: planMap.get(s.cardId) ?? null }));
   }),
 
-  getPriorityScore: protectedProcedure
+  getPriorityScore: operatorAccountProcedure
     .input(z.object({ cardId: z.string() }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
       return await getPriorityScore(vaId, input.cardId);
     }),
 
-  getAllPriorityScores: protectedProcedure.query(async ({ ctx }) => {
+  getAllPriorityScores: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return await getAllPriorityScores(vaId);
   }),
 
-  getDecisionQueue: protectedProcedure.query(async ({ ctx }) => {
+  getDecisionQueue: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     const [allPlans, allSteps, allScores] = await Promise.all([
       getAllAptlssPlans(vaId),
@@ -489,13 +490,6 @@ export const aptlssRouter = router({
       .map((s: any) => {
         const plan = planMap.get(s.cardId);
         const score = scoreMap.get(s.cardId);
-        let recommendedDecision: string | null = null;
-        try {
-          const planData = JSON.parse(plan?.planJson ?? '{}') as Record<string, unknown>;
-          const steps = (planData.steps as Array<{ title?: string; recommendedDecision?: string }> | undefined) ?? [];
-          const matchingStep = steps.find((st: any) => st.title === s.title);
-          recommendedDecision = matchingStep?.recommendedDecision ?? null;
-        } catch { /* ignore */ }
         return {
           cardId: s.cardId,
           cardName: plan?.cardName ?? s.cardId,
@@ -504,7 +498,6 @@ export const aptlssRouter = router({
           stepIndex: s.stepNumber,
           stepTitle: s.title,
           tier: score?.tier ?? 'MEDIUM',
-          recommendedDecision,
         };
       })
       .sort((a: any, b: any) => {
@@ -514,7 +507,7 @@ export const aptlssRouter = router({
     return { items };
   }),
 
-  syncCheckItem: protectedProcedure
+  syncCheckItem: operatorAccountProcedure
     .input(z.object({
       trelloCheckItemId: z.string(),
       state: z.enum(["complete", "incomplete"]),
@@ -531,7 +524,7 @@ export const aptlssRouter = router({
       return { success: true };
     }),
 
-  planMyDay: protectedProcedure.mutation(async ({ ctx }) => {
+  planMyDay: operatorAccountProcedure.mutation(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     const autopilotLvl = await getAutopilotLevel(vaId);
     if (autopilotLvl < 2) throw new TRPCError({ code: "PRECONDITION_FAILED", message: `Autopilot level ${autopilotLvl} is too low to generate daily plans. Set level ≥ 2 in Settings → Operational Policies.` });
@@ -659,7 +652,7 @@ export const aptlssRouter = router({
     return { ...parsed, robertItems: parsed.founderItems };
   }),
 
-  doneGateCheck: protectedProcedure
+  doneGateCheck: operatorAccountProcedure
     .input(z.object({ cardId: z.string() }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
@@ -701,17 +694,17 @@ export const aptlssRouter = router({
       };
     }),
 
-  getRepairQueue: protectedProcedure.query(async ({ ctx }) => {
+  getRepairQueue: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return await getNeedsRepairCards(vaId);
   }),
 
-  getReadyForDone: protectedProcedure.query(async ({ ctx }) => {
+  getReadyForDone: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return await getReadyForDoneCards(vaId);
   }),
 
-  getRisksAndExceptions: protectedProcedure.query(async ({ ctx }) => {
+  getRisksAndExceptions: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     const [allPlans, allSteps, allScores, allStates] = await Promise.all([
       getAllAptlssPlans(vaId),
@@ -853,12 +846,12 @@ export const aptlssRouter = router({
     };
   }),
 
-  getPolicies: protectedProcedure.query(async ({ ctx }) => {
+  getPolicies: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return getAllPolicies(vaId);
   }),
 
-  updatePolicy: protectedProcedure
+  updatePolicy: operatorAccountProcedure
     .input(z.object({ ruleKey: z.string(), value: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
@@ -866,7 +859,7 @@ export const aptlssRouter = router({
       return { success: true };
     }),
 
-  togglePolicy: protectedProcedure
+  togglePolicy: operatorAccountProcedure
     .input(z.object({ ruleKey: z.string(), enabled: z.boolean() }))
     .mutation(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
@@ -874,17 +867,17 @@ export const aptlssRouter = router({
       return { success: true };
     }),
 
-  getPendingFollowUps: protectedProcedure.query(async ({ ctx }) => {
+  getPendingFollowUps: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return getPendingFollowUpDrafts(vaId);
   }),
 
-  getAllFollowUps: protectedProcedure.query(async ({ ctx }) => {
+  getAllFollowUps: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return getAllFollowUpDrafts(vaId);
   }),
 
-  markFollowUpSent: protectedProcedure
+  markFollowUpSent: operatorAccountProcedure
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ input, ctx }) => {
       const updated = await setFollowUpDraftStatusForWorker(Number(ctx.user.id), input.id, "sent");
@@ -892,7 +885,7 @@ export const aptlssRouter = router({
       return { success: true };
     }),
 
-  dismissFollowUp: protectedProcedure
+  dismissFollowUp: operatorAccountProcedure
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ input, ctx }) => {
       const updated = await setFollowUpDraftStatusForWorker(Number(ctx.user.id), input.id, "dismissed");
@@ -900,39 +893,13 @@ export const aptlssRouter = router({
       return { success: true };
     }),
 
-  postFollowUpToTrello: protectedProcedure
+  postFollowUpToTrello: operatorAccountProcedure
     .input(z.object({ id: z.number().int().positive() }))
-    .mutation(async ({ input, ctx }) => {
-      const vaId = Number(ctx.user.id);
-      const draft = await getFollowUpDraftByIdForWorker(vaId, input.id);
-      if (!draft) throw new TRPCError({ code: "NOT_FOUND", message: "Follow-up draft not found" });
-      if (draft.status !== "pending") throw new TRPCError({ code: "BAD_REQUEST", message: "Draft is not pending" });
-
-      const apiKey = process.env.TRELLO_API_KEY || process.env.TrelloAPIKey;
-      const apiToken = process.env.TRELLO_TOKEN || process.env.TrelloAPIToken;
-      const autopilotLevel = await getAutopilotLevel(vaId);
-
-      if (autopilotLevel < 3) {
-        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "External follow-ups require autopilot level 3 or higher" });
-      }
-      if (!apiKey || !apiToken) {
-        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Trello credentials not configured" });
-      }
-
-      await assertCardAccess(ctx.user, draft.cardId);
-      const commentText = `[APTLSS Auto Follow-Up]\n\n${draft.draftMessage}\n\n_Reason: ${draft.reason}_`;
-      await postCardComment(draft.cardId, commentText, apiKey, apiToken);
-      await setFollowUpDraftStatusForWorker(vaId, input.id, "sent");
-      await logAuditAction({
-        vaId,
-        cardId: draft.cardId,
-        cardName: draft.cardName,
-        action: "follow_up_posted",
-        description: "Approved follow-up posted to Trello",
-        source: "manual",
-        approved: true,
+    .mutation(() => {
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: "Dashboard posting is disabled. The worker must review and send the follow-up directly in Trello.",
       });
-      return { success: true, postedToTrello: true };
     }),
 
   getWorkerPerformance: adminProcedure.query(async () => {
@@ -964,7 +931,7 @@ export const aptlssRouter = router({
       return { success: true };
     }),
 
-  getDefaultActionForState: protectedProcedure
+  getDefaultActionForState: operatorAccountProcedure
     .input(z.object({ state: z.string() }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
@@ -975,7 +942,7 @@ export const aptlssRouter = router({
         in_progress: "Continue the current open step. Update checklist when done.",
         waiting_for_worker: "Answer the pending question in the card comments.",
         WAITING_FOR_FOUNDER: "Notify the Founder that a decision is needed on this card.",
-        waiting_for_external_party: "Check if the follow-up deadline has passed. If yes, send a follow-up message.",
+        waiting_for_external_party: "Prepare a follow-up draft for the worker to review and send directly in Trello.",
         blocked_by_other_card: "Check the blocking card. If resolved, unblock and resume.",
         stalled: "Leave a comment explaining why progress has stalled. Escalate if needed.",
         overdue: "Immediately prioritise this card. Notify the Founder if it cannot be completed today.",
@@ -990,22 +957,22 @@ export const aptlssRouter = router({
       return { state: input.state, action, isCustom: !!customValue.trim() };
     }),
 
-  getAllDefaultActions: protectedProcedure.query(async ({ ctx }) => {
+  getAllDefaultActions: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     const allPolicies = await getAllPolicies(vaId);
     return allPolicies.filter((p) => p.ruleKey.startsWith("default_action_"));
   }),
 
-  getLatestWeeklyAnalysis: protectedProcedure.query(async ({ ctx }) => {
+  getLatestWeeklyAnalysis: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return getLatestWeeklyAnalysis(vaId);
   }),
-  getWeeklyAnalysisHistory: protectedProcedure.query(async ({ ctx }) => {
+  getWeeklyAnalysisHistory: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return getRecentWeeklyAnalyses(vaId, 8);
   }),
 
-  getCommandCenter: protectedProcedure.query(async ({ ctx }) => {
+  getCommandCenter: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     const [allPlans, allScores, allStates, allSteps] = await Promise.all([
       getAllAptlssPlans(vaId),
@@ -1234,11 +1201,9 @@ export const aptlssRouter = router({
     }),
 
   batchDraftDailyUpdates: adminProcedure
-    .input(z.object({ cardIds: z.array(z.string()), autoPost: z.boolean().default(false) }))
+    .input(z.object({ cardIds: z.array(z.string()) }).strict())
     .mutation(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
-      const apiKey = process.env.TRELLO_API_KEY || process.env.TrelloAPIKey;
-      const apiToken = process.env.TRELLO_TOKEN || process.env.TrelloAPIToken;
       const [allPlans, allScores, allStates] = await Promise.all([
         getAllAptlssPlans(vaId),
         getAllPriorityScores(vaId),
@@ -1250,12 +1215,8 @@ export const aptlssRouter = router({
 
       const drafts: Array<{
         cardId: string; cardName: string; cardUrl: string;
-        draft: string; confidenceScore: number; autoPosted: boolean;
+        draft: string; confidenceScore: number;
       }> = [];
-
-      if (input.autoPost && (!apiKey || !apiToken)) {
-        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Trello credentials not configured for posting daily updates" });
-      }
 
       for (const cardId of input.cardIds) {
         const plan = planMap2.get(cardId);
@@ -1313,32 +1274,16 @@ export const aptlssRouter = router({
           ].join('\n');
         }
 
-        let autoPosted = false;
-        if (input.autoPost && confidenceScore >= 80 && apiKey && apiToken) {
-          await assertCardAccess(ctx.user, cardId);
-          await postCardComment(cardId, draft, apiKey, apiToken);
-          await logAuditAction({
-            vaId,
-            cardId,
-            cardName: plan.cardName,
-            action: 'daily_update_drafted',
-            description: 'Auto-posted daily update (confidence >= 80, autoPost=true)',
-            confidenceScore,
-            source: 'manual',
-          });
-          autoPosted = true;
-        } else {
-          await logAuditAction({
-            vaId,
-            cardId,
-            cardName: plan.cardName,
-            action: 'daily_update_drafted',
-            description: 'Daily update draft generated (awaiting approval)',
-            confidenceScore,
-            requiresApproval: true,
-            source: 'manual',
-          });
-        }
+        await logAuditAction({
+          vaId,
+          cardId,
+          cardName: plan.cardName,
+          action: 'daily_update_drafted',
+          description: 'Daily update draft generated for worker review and manual sending',
+          confidenceScore,
+          requiresApproval: true,
+          source: 'manual',
+        });
 
         drafts.push({
           cardId,
@@ -1346,7 +1291,6 @@ export const aptlssRouter = router({
           cardUrl: plan.cardUrl,
           draft,
           confidenceScore,
-          autoPosted,
         });
       }
 
@@ -1355,54 +1299,20 @@ export const aptlssRouter = router({
 
   postDailyUpdateDraft: adminProcedure
     .input(z.object({ cardId: z.string(), cardName: z.string(), draft: z.string() }))
-    .mutation(async ({ input, ctx }) => {
-      const vaId = Number(ctx.user.id);
-      const apiKey = process.env.TRELLO_API_KEY || process.env.TrelloAPIKey;
-      const apiToken = process.env.TRELLO_TOKEN || process.env.TrelloAPIToken;
-      if (!apiKey || !apiToken) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Trello credentials not configured' });
-      await assertCardAccess(ctx.user, input.cardId);
-      await postCardComment(input.cardId, input.draft, apiKey, apiToken);
-      await logAuditAction({
-        vaId,
-        cardId: input.cardId,
-        cardName: input.cardName,
-        action: 'comment_posted',
-        description: 'Daily update posted to Trello after manual approval',
-        source: 'manual',
-        approved: true,
+    .mutation(() => {
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: "Dashboard posting is disabled. The worker must review and send the update directly in Trello.",
       });
-      return { success: true };
     }),
 
   batchFollowUp: adminProcedure
     .input(z.object({ cardIds: z.array(z.string()) }))
-    .mutation(async ({ input, ctx }) => {
-      const vaId = Number(ctx.user.id);
-      const apiKey = process.env.TRELLO_API_KEY || process.env.TrelloAPIKey;
-      const apiToken = process.env.TRELLO_TOKEN || process.env.TrelloAPIToken;
-      if (!apiKey || !apiToken) {
-        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Trello credentials not configured' });
-      }
-      const allPlans = await getAllAptlssPlans(vaId);
-      const planMap3 = new Map(allPlans.map(p => [p.cardId, p]));
-      let count = 0;
-      for (const cardId of input.cardIds) {
-        const plan = planMap3.get(cardId);
-        const comment = '[APTLSS Auto Follow-Up] This card has been waiting for an external reply. Please follow up with the relevant party.';
-        await assertCardAccess(ctx.user, cardId);
-        await postCardComment(cardId, comment, apiKey, apiToken);
-        await logAuditAction({
-          vaId,
-          cardId,
-          cardName: plan?.cardName ?? cardId,
-          action: 'follow_up_posted',
-          description: 'Batch follow-up comment posted after an explicit operator action',
-          source: 'manual',
-          approved: true,
-        });
-        count++;
-      }
-      return { success: true, count };
+    .mutation(() => {
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: "Dashboard posting is disabled. Prepare a draft for the worker to review and send directly in Trello.",
+      });
     }),
 
   batchSnooze: adminProcedure
@@ -1427,14 +1337,14 @@ export const aptlssRouter = router({
       return { success: true, count };
     }),
 
-  getCardAuditLog: protectedProcedure
+  getCardAuditLog: operatorAccountProcedure
     .input(z.object({ cardId: z.string(), limit: z.number().min(1).max(100).default(20) }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
       return getCardAuditLog(vaId, input.cardId, input.limit);
     }),
 
-  getRecentAuditLog: protectedProcedure
+  getRecentAuditLog: operatorAccountProcedure
     .input(z.object({ limit: z.number().min(1).max(200).default(100) }))
     .query(async ({ ctx, input }) => {
       const vaId = Number(ctx.user.id);
@@ -1480,7 +1390,7 @@ export const aptlssRouter = router({
     };
   }),
 
-  getEscalationRules: protectedProcedure.query(async ({ ctx }) => {
+  getEscalationRules: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     const [allPlans, allScores, allStates] = await Promise.all([
       getAllAptlssPlans(vaId),
@@ -1524,7 +1434,7 @@ export const aptlssRouter = router({
           cardId: state.cardId, cardName: state.cardName, cardUrl, boardName, tier,
           rule: 'on_hold_idle_7_days',
           ruleDescription: `ON-HOLD card idle for ${daysSince} days`,
-          recommendedAction: 'Ask VA to follow up with external party',
+          recommendedAction: 'Prepare a follow-up draft for the VA to review and send directly',
           daysSinceActivity: daysSince,
         });
       }
@@ -1554,7 +1464,7 @@ export const aptlssRouter = router({
           cardId: state.cardId, cardName: state.cardName, cardUrl, boardName, tier,
           rule: 'external_silent_5_days',
           ruleDescription: `External party has not replied for ${daysSince} days`,
-          recommendedAction: 'Send reminder email or follow-up message',
+          recommendedAction: 'Prepare a reminder draft for the VA to review and send manually',
           daysSinceActivity: daysSince,
         });
       }
@@ -1579,89 +1489,92 @@ export const aptlssRouter = router({
 
 // Reply Monitor tRPC router
 export const replyMonitorRouter = router({
-  getPendingReplyThreads: protectedProcedure.query(async ({ ctx }) => {
+  getPendingReplyThreads: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return await getPendingReplyThreads(vaId);
   }),
-  getPendingThreads: protectedProcedure.query(async ({ ctx }) => {
+  getPendingThreads: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return await getPendingReplyThreads(vaId);
   }),
-  getAllReplyThreads: protectedProcedure
+  getAllReplyThreads: operatorAccountProcedure
     .input(z.object({ limit: z.number().int().min(1).max(MAX_REPLY_MONITOR_PAGE_SIZE).optional() }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
       return await getAllReplyThreads(vaId, input.limit ?? 100);
     }),
-  getAllThreads: protectedProcedure
+  getAllThreads: operatorAccountProcedure
     .input(z.object({ limit: z.number().int().min(1).max(MAX_REPLY_MONITOR_PAGE_SIZE).optional() }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
       return await getAllReplyThreads(vaId, input.limit ?? 100);
     }),
-  markReplyThreadReplied: protectedProcedure
+  markReplyThreadReplied: operatorAccountProcedure
     .input(z.object({ cardId: z.string(), source: z.enum(["trello", "upwork"]) }))
     .mutation(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
       await markReplyThreadReplied(vaId, input.cardId, input.source);
       return { success: true };
     }),
-  markReplyThreadDemerited: protectedProcedure
+  markReplyThreadDemerited: operatorAccountProcedure
     .input(z.object({ cardId: z.string(), source: z.enum(["trello", "upwork"]) }))
     .mutation(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
       await markReplyThreadDemerited(vaId, input.cardId, input.source);
       return { success: true };
     }),
-  getActiveVagueReplyFlags: protectedProcedure.query(async ({ ctx }) => {
+  getActiveVagueReplyFlags: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return await getActiveVagueReplyFlags(vaId);
   }),
-  getActiveVagueFlags: protectedProcedure.query(async ({ ctx }) => {
+  getActiveVagueFlags: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return await getActiveVagueReplyFlags(vaId);
   }),
-  getAllVagueReplyFlags: protectedProcedure
+  getAllVagueReplyFlags: operatorAccountProcedure
     .input(z.object({ limit: z.number().int().min(1).max(MAX_REPLY_MONITOR_PAGE_SIZE).optional() }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
       return await getAllVagueReplyFlags(vaId, input.limit ?? 50);
     }),
-  getAllVagueFlags: protectedProcedure
+  getAllVagueFlags: operatorAccountProcedure
     .input(z.object({ limit: z.number().int().min(1).max(MAX_REPLY_MONITOR_PAGE_SIZE).optional() }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
       return await getAllVagueReplyFlags(vaId, input.limit ?? 50);
     }),
-  resolveVagueReplyFlag: protectedProcedure
+  resolveVagueReplyFlag: operatorAccountProcedure
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ input, ctx }) => {
-      await resolveVagueReplyFlag(Number(ctx.user.id), input.id);
+      await requireReplyFlagResolution(resolveVagueReplyFlag(Number(ctx.user.id), input.id), "Reply flag not found");
       return { success: true };
     }),
-  resolveVagueFlag: protectedProcedure
+  resolveVagueFlag: operatorAccountProcedure
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ input, ctx }) => {
-      await resolveVagueReplyFlag(Number(ctx.user.id), input.id);
+      await requireReplyFlagResolution(resolveVagueReplyFlag(Number(ctx.user.id), input.id), "Reply flag not found");
       return { success: true };
     }),
-  getActiveUnsignedFlags: protectedProcedure.query(async ({ ctx }) => {
+  getActiveUnsignedFlags: operatorAccountProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return await getActiveUnsignedFlags(vaId);
   }),
-  getAllUnsignedFlags: protectedProcedure
+  getAllUnsignedFlags: operatorAccountProcedure
     .input(z.object({ limit: z.number().int().min(1).max(MAX_REPLY_MONITOR_PAGE_SIZE).optional() }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
       return await getAllUnsignedFlags(vaId, input.limit ?? 50);
     }),
-  resolveUnsignedFlag: protectedProcedure
+  resolveUnsignedFlag: operatorAccountProcedure
     .input(z.object({ id: z.number().int().positive(), note: z.string().trim().max(2_000).optional() }))
     .mutation(async ({ input, ctx }) => {
-      await resolveUnsignedFlag(Number(ctx.user.id), input.id, input.note);
+      await requireReplyFlagResolution(
+        resolveUnsignedFlag(Number(ctx.user.id), input.id, input.note),
+        "Unsigned message flag not found",
+      );
       return { success: true };
     }),
-  triggerScan: protectedProcedure.mutation(async ({ ctx }) => {
+  triggerScan: operatorAccountProcedure.mutation(async ({ ctx }) => {
     if (ctx.user.role !== "worker") {
       throw new TRPCError({ code: "FORBIDDEN", message: "Reply evidence is scoped to a worker account" });
     }

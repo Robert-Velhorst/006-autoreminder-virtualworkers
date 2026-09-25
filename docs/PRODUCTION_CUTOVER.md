@@ -60,6 +60,10 @@ indefinitely.
 - `TRELLO_WEBHOOK_CALLBACK_URL` and `TRELLO_WEBHOOK_SECRET` enable verified
   Trello push updates after a public HTTPS domain exists.
 - `SCHEDULED_TASK_SECRET` protects explicitly exposed scheduled-task routes.
+- Founder decision deadline alerts require migration `0049` before starting the
+  updated server. They persist only in the admin's in-app notification history;
+  `FOUNDER_DECISION_ALERTS_ENABLED=false` disables the periodic scan. They do
+  not send email or perform Trello actions.
 
 Do not migrate the legacy MongoDB URL, Twilio credentials, React frontend URL,
 or old reminder timing variables. They belong to the retired split

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   classifyGoogleEmail,
+  candidateGmailDeadline,
   decryptGoogleRefreshToken,
   defaultGoogleEvidenceSettings,
   developmentGoogleRefreshTokenFallback,
@@ -10,6 +11,7 @@ import {
   googleEvidenceSetupMessage,
   normalizeGoogleEvidenceSettings,
 } from "./googleEvidence";
+import { gmailContentScope } from "../shared/gmailContentScope";
 
 const previousJwtSecret = process.env.JWT_SECRET;
 
@@ -86,5 +88,18 @@ describe("Google evidence classification", () => {
     });
     expect(extractExplicitDeadline("We should finish sometime next month", "Europe/Amsterdam")).toBeNull();
     expect(extractExplicitDeadline("Due 08/09/2026", "Europe/Amsterdam")).toBeNull();
+  });
+
+  it("treats a portal notification as a pointer to unread correspondence, not its deadline", () => {
+    const subject = "Er staat een bericht voor u klaar in klacht 202600250";
+    const snippet = "Er staat een bericht voor u klaar in uw persoonlijke mijn-omgeving. U vindt het onder correspondentie. Inloggen Uiterlijk 15/08/2026.";
+    expect(gmailContentScope(subject, snippet)).toBe("portal_notice");
+    expect(classifyGoogleEmail(subject, snippet)).toMatchObject({
+      scope: "portal_notice",
+      suggestedNextAction: expect.stringContaining("linked portal correspondence"),
+    });
+    expect(candidateGmailDeadline(subject, snippet, "Europe/Amsterdam")).toBeNull();
+    expect(candidateGmailDeadline("Please respond by 2026-08-15 at 14:30", "Direct email body preview", "Europe/Amsterdam")?.dueAt.toISOString())
+      .toBe("2026-08-15T12:30:00.000Z");
   });
 });

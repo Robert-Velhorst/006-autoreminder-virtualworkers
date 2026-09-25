@@ -33,7 +33,9 @@ import type {
   ManagerSnapshot,
 } from "../shared/aptlssManager";
 import type { ManagerPlanBuffer } from "../shared/aptlssManagerPlanImpact";
-import { validManagerTimestamp } from "../shared/aptlssManagerEvidence";
+import { validManagerDate, validManagerTimestamp } from "../shared/aptlssManagerEvidence";
+import { gmailContentScope } from "../shared/gmailContentScope";
+import { safeManagerReviewedStep } from "./aptlssManagerLearning";
 import { getDb } from "./db";
 import { assertManagerPilotWorker, assertManagerPlanMutationAllowed, managerPilotWorkerIds } from "./aptlssManagerPilot";
 import { evaluateManagerGate } from "./aptlssManagerGate";
@@ -219,6 +221,25 @@ export function summarizeManagerAcceptance(input: {
   };
 }
 
+const managerCorrectionConditionsSchema = z
+  .object({
+    boardName: z.string().trim().min(1).max(256).optional(),
+    listName: z.string().trim().min(1).max(256).optional(),
+    state: z.string().trim().min(1).max(128).optional(),
+    actionKind: z.enum(["work", "verify", "draft", "decision", "follow_up"]).optional(),
+  })
+  .strict();
+const managerReviewedStepSchema = z.object({
+  actionId: z.string().trim().min(1).max(128),
+  title: z.string().trim().min(3).max(300),
+  completionCriteria: z.string().trim().min(3).max(1000),
+}).strict();
+const storedCorrectionPolicySchema = z.object({
+  version: z.literal(2),
+  conditions: managerCorrectionConditionsSchema,
+  nextStep: managerReviewedStepSchema,
+}).strict();
+
 export const managerCorrectionInputSchema = z
   .object({
     scope: z.enum(["card", "worker"]),
@@ -230,16 +251,8 @@ export const managerCorrectionInputSchema = z
       .max(64)
       .regex(/^[a-z0-9][a-z0-9_-]*$/),
     evidenceIds: z.array(z.string().min(1).max(256)).min(1).max(20),
-    conditions: z
-      .object({
-        boardName: z.string().trim().min(1).max(256).optional(),
-        listName: z.string().trim().min(1).max(256).optional(),
-        state: z.string().trim().min(1).max(128).optional(),
-        actionKind: z
-          .enum(["work", "verify", "draft", "decision", "follow_up"])
-          .optional(),
-      })
-      .strict(),
+    conditions: managerCorrectionConditionsSchema,
+    nextStep: managerReviewedStepSchema.optional(),
     validUntil: z
       .string()
       .refine(
@@ -268,6 +281,8 @@ export const managerCorrectionInputSchema = z
         message: "Wildcard correction conditions are not allowed",
         path: ["conditions"],
       });
+    if (v.nextStep && (v.scope !== "card" || !["work", "verify", "follow_up"].includes(v.conditions.actionKind ?? "")))
+      ctx.addIssue({ code: "custom", message: "A corrected next step requires a card and a matching non-external action kind", path: ["nextStep"] });
   });
 export type ManagerCorrectionInput = z.infer<
   typeof managerCorrectionInputSchema
@@ -300,15 +315,21 @@ function correctionSourceSupported(
   e: ManagerEvidence | undefined,
   now: number
 ): e is ManagerEvidence {
+  const metadata = e?.metadata;
   return (
     !!e &&
     ["source", "decision"].includes(e.kind) &&
     !!e.text.trim() &&
-    (e.metadata?.truthClass === undefined ||
-      ["source_record", "human_decision"].includes(e.metadata.truthClass)) &&
+    (e.kind === "decision"
+      ? metadata?.truthClass === "human_decision" && metadata.authority === "authoritative"
+      : metadata?.truthClass === undefined || metadata.truthClass === "source_record") &&
+    !(e.source === "gmail" && (metadata?.contentScope === "portal_notice" || gmailContentScope("", e.text) === "portal_notice")) &&
     validManagerTimestamp(e.observedAt) &&
     Number.isFinite(now) &&
-    Date.parse(e.observedAt) <= now
+    Date.parse(e.observedAt) <= now &&
+    (metadata?.sourceDate == null || (validManagerDate(metadata.sourceDate) && Date.parse(metadata.sourceDate) <= now)) &&
+    (metadata?.effectiveFrom == null || (validManagerDate(metadata.effectiveFrom) && Date.parse(metadata.effectiveFrom) <= now)) &&
+    (metadata?.effectiveTo == null || (validManagerDate(metadata.effectiveTo) && Date.parse(metadata.effectiveTo) > now))
   );
 }
 export function prepareManagerCorrection(args: {
@@ -335,6 +356,13 @@ export function prepareManagerCorrection(args: {
     !args.snapshot.cards.some(c => c.id === rule.cardId)
   )
     throw new Error("Correction card is outside the reviewed proposal.");
+  if (rule.nextStep) {
+    const actions = args.snapshot.actions.filter(a => a.id === rule.nextStep!.actionId);
+    if (actions.length !== 1 || actions[0].cardId !== rule.cardId || actions[0].kind !== rule.conditions.actionKind)
+      throw new Error("Corrected next step must match one reviewed action in the selected card.");
+    if (!safeManagerReviewedStep(rule.nextStep))
+      throw new Error("Corrected next step cannot authorize an external or unsafe action.");
+  }
   const evidence = [...new Set(rule.evidenceIds)].map(id => {
     const records = args.snapshot.evidence.filter(e => e.id === id);
     const e = records[0];
@@ -358,7 +386,9 @@ export function prepareManagerCorrection(args: {
     cardId: rule.scope === "card" ? rule.cardId! : null,
     topic: rule.topic,
     correction,
-    conditionsJson: JSON.stringify(rule.conditions),
+    conditionsJson: JSON.stringify(rule.nextStep
+      ? { version: 2, conditions: rule.conditions, nextStep: rule.nextStep }
+      : rule.conditions),
     evidenceJson: JSON.stringify(evidence),
     validFrom: new Date(args.now),
     validUntil: expiry,
@@ -392,9 +422,13 @@ function applicableCorrection(
   )
     return null;
   try {
-    const conditions = JSON.parse(
-      row.conditionsJson
-    ) as ManagerCorrectionInput["conditions"];
+    const stored: unknown = JSON.parse(row.conditionsJson);
+    const policy = stored && typeof stored === "object" && "version" in stored
+      ? storedCorrectionPolicySchema.parse(stored)
+      : null;
+    const conditions = policy?.conditions ?? managerCorrectionConditionsSchema.parse(stored);
+    const nextStep = policy?.nextStep;
+    if (nextStep && (row.scope !== "card" || !["work", "verify", "follow_up"].includes(conditions.actionKind ?? "") || !safeManagerReviewedStep(nextStep))) return null;
     const pins = z
       .array(
         z.object({
@@ -412,6 +446,7 @@ function applicableCorrection(
       topic: row.topic,
       evidenceIds: pins.map(e => e.id),
       conditions,
+      ...(nextStep ? { nextStep } : {}),
       validUntil: row.validUntil.toISOString(),
     });
     if (
@@ -446,6 +481,7 @@ function applicableCorrection(
       topic: row.topic,
       correction: row.correction,
       conditions,
+      ...(nextStep ? { nextStep } : {}),
       evidence: pins,
       validUntil: row.validUntil.toISOString(),
       knowledgeClass: "scoped_guidance" as const,
@@ -462,6 +498,7 @@ export type ManagerCorrectionReadResult = {
   corrections: ScopedManagerCorrection[];
   learningStateHash: string;
   withheldTopics: string[];
+  withheldTargets: Array<{ topic: string; actionId?: string }>;
 };
 export function selectApplicableManagerCorrections(
   rows: CorrectionRow[],
@@ -471,17 +508,24 @@ export function selectApplicableManagerCorrections(
     const value = applicableCorrection(row, context);
     return value ? [value] : [];
   });
-  const topics = new Map<string, typeof matches>();
-  for (const item of matches)
-    topics.set(item.topic, [...(topics.get(item.topic) ?? []), item]);
-  const withheldTopics = [...topics]
+  const groups = new Map<string, typeof matches>();
+  for (const item of matches) {
+    const key = JSON.stringify([item.topic, item.nextStep?.actionId ?? null]);
+    groups.set(key, [...(groups.get(key) ?? []), item]);
+  }
+  const withheldKeys = [...groups]
     .filter(
-      ([, items]) => new Set(items.map(i => i.correction.trim())).size > 1
+      ([, items]) => new Set(items.map(i => digestValue({ correction: i.correction.trim(), nextStep: i.nextStep ?? null }))).size > 1
     )
-    .map(([topic]) => topic)
+    .map(([key]) => key)
     .sort();
-  const corrections = [...topics]
-    .filter(([topic]) => !withheldTopics.includes(topic))
+  const withheldTargets = withheldKeys.map(key => {
+    const [topic, actionId] = JSON.parse(key) as [string, string | null];
+    return { topic, ...(actionId ? { actionId } : {}) };
+  });
+  const withheldTopics = [...new Set(withheldTargets.map(item => item.topic))].sort();
+  const corrections = [...groups]
+    .filter(([key]) => !withheldKeys.includes(key))
     .map(([, items]) => items.sort((a, b) => b.id - a.id)[0])
     .sort((a, b) => a.id - b.id);
   const dateValue = (value: Date | null) =>
@@ -502,7 +546,7 @@ export function selectApplicableManagerCorrections(
       }))
       .sort((a, b) => a.id - b.id)
   );
-  return { corrections, learningStateHash, withheldTopics };
+  return { corrections, learningStateHash, withheldTopics, withheldTargets };
 }
 export const filterApplicableManagerCorrections = (
   rows: CorrectionRow[],

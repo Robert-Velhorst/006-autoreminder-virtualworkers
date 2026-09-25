@@ -6,7 +6,8 @@ const client = (path: string) => readFileSync(new URL(`../client/src/${path}`, i
 describe("additive shadow manager UI integration", () => {
   it("adds worker guidance without removing reminders, Google intake or the inspector", () => {
     const worker = client("pages/worker/WorkerOperator.tsx");
-    expect(worker).toContain("<ManagerCoach onPrimaryChange={setHasPrimary} />");
+    expect(worker).toContain("<ManagerCoach />");
+    expect(worker).toContain("selectTodayQueue(cards, primary?.cardId ?? null)");
     for (const retained of ["<WorkerReminders />", "Google connection", "getGoogleEvidenceStatus", "INSPECTOR_WIDTH_KEY", "getWorkLaneRank", "describeBrowserConnection"])
       expect(worker).toContain(retained);
   });

@@ -12,6 +12,7 @@ import { isManagerPilotWorker, managerPilotEnabled, managerPilotWorkerIds } from
 export type ManagerQueueTrigger =
   | "source_ingested"
   | "worker_update"
+  | "decision_outcome"
   | "conflict"
   | "conflict_resolved"
   | "periodic"

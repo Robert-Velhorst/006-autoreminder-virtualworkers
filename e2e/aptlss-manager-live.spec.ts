@@ -1,4 +1,5 @@
-import { expect, test, type ConsoleMessage, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type ConsoleMessage, type Locator, type Page, type TestInfo } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 import { createHash, randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import {
@@ -173,6 +174,42 @@ async function login(page: Page, username: string, role: "worker" | "admin") {
     } else await page.getByTitle("VA Management", { exact: true }).click();
     await expect(page).toHaveURL(/\/founder$/);
   }
+}
+
+async function focusByTab(page: Page, control: Locator) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (await control.evaluate(element => element === document.activeElement)) return;
+    await page.keyboard.press("Tab");
+  }
+  throw new Error("Control could not be reached with sequential Tab navigation");
+}
+
+async function activateByKeyboard(page: Page, control: Locator) {
+  await focusByTab(page, control);
+  await expect(control).toBeFocused();
+  await page.keyboard.press("Enter");
+}
+
+async function assertAccessibility(page: Page, testInfo: TestInfo, label: string) {
+  const results = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+    .analyze();
+  const violations = results.violations.map(violation => ({
+    id: violation.id,
+    impact: violation.impact,
+    description: violation.description,
+    nodes: violation.nodes.map(node => ({
+      target: node.target,
+      html: node.html,
+      failureSummary: node.failureSummary,
+      checks: node.any.map(check => ({ id: check.id, data: check.data })),
+    })),
+  }));
+  await testInfo.attach(`${label}-accessibility.json`, {
+    body: JSON.stringify(violations, null, 2),
+    contentType: "application/json",
+  });
+  expect(violations, `${label} WCAG 2.2 AA violations`).toEqual([]);
 }
 
 async function capture(page: Page, testInfo: TestInfo, name: string) {
@@ -587,11 +624,11 @@ for (const scenario of [
     }, testInfo) => {
       await login(page, `${prefix}-worker`, "worker");
       const manager = page.getByRole("region", { name: "APTLSS work manager" });
-      await expect(manager.getByText("Shadow", { exact: true })).toBeVisible();
+      await expect(manager.getByText("No assessment has been recorded yet.", { exact: true })).toBeVisible();
       const initialResponse = await mutateThroughUi<ManagerSnapshot>(
         page,
         "operator.runManager",
-        () => manager.getByRole("button", { name: "Reassess now" }).click()
+        () => activateByKeyboard(page, manager.getByRole("button", { name: "Reassess now" }))
       );
       const initial = (await latest())!;
       expect(initial.runId).toBeGreaterThan(0);
@@ -654,7 +691,7 @@ for (const scenario of [
       const sourcedResponse = await mutateThroughUi<ManagerSnapshot>(
         page,
         "operator.runManager",
-        () => manager.getByRole("button", { name: "Reassess now" }).click()
+        () => activateByKeyboard(page, manager.getByRole("button", { name: "Reassess now" }))
       );
       const sourced = (await latest())!;
       expect(sourced.runId).toBeGreaterThan(initial.runId);
@@ -675,39 +712,29 @@ for (const scenario of [
         .first();
       await expect(contextToggle).toBeVisible();
       if ((await contextToggle.getAttribute("aria-expanded")) !== "true") {
-        await contextToggle.click();
+        await activateByKeyboard(page, contextToggle);
       }
       const citedSources = manager.getByRole("region", {
-        name: "Cited sources",
+        name: "Evidence for this task",
       });
-      if ((await citedSources.count()) === 0) {
-        await manager
-          .getByText("Full technical assessment", { exact: true })
-          .click();
-      }
       await expect(
         citedSources.getByText(sourceText, { exact: false }).first()
       ).toBeVisible();
+      await expect(
+        citedSources.getByRole("link", { name: "Open full source" })
+      ).toHaveAttribute("href", "https://example.invalid/retained-source");
+      await expect(
+        manager.getByText(/Full technical assessment|AI review|semantic review/i)
+      ).toHaveCount(0);
       await expect(manager.locator("time").first()).toHaveAttribute("datetime");
-      await expect(
-        manager.getByRole("heading", { name: "Coverage limits", exact: true })
-      ).toBeVisible();
-      await expect(
-        manager.getByText(semanticGap)
-      ).toBeVisible();
       const update = `Review delivery report against the source record. Checked by ${prefix}.`;
-      await manager
-        .getByLabel(/What (?:changed in reality|did you confirm)\?/, {
-          exact: true,
-        })
-        .fill(update);
+      const updateField = manager.getByLabel(/What (?:changed in reality|did you confirm)\?/, { exact: true });
+      await focusByTab(page, updateField);
+      await updateField.pressSequentially(update);
       const updatedResponse = await mutateThroughUi<ManagerSnapshot>(
         page,
         "operator.submitManagerUpdate",
-        () =>
-          manager
-            .getByRole("button", { name: "Send answer to APTLSS" })
-            .click()
+        () => activateByKeyboard(page, manager.getByRole("button", { name: "Send answer to APTLSS" }))
       );
       await expect(
         page.getByText("Proposal assessed; active plan unchanged").last()
@@ -719,13 +746,14 @@ for (const scenario of [
       expect(updated.semanticReview?.success).toBe(false);
       expect(updated.sourceGaps).toContainEqual(expect.stringMatching(semanticGap));
       await expect(
-        manager.getByRole("heading", { name: "Coverage limits", exact: true })
-      ).toBeVisible();
-      await expect(manager.getByText(semanticGap)).toBeVisible();
+        manager.getByText(/Full technical assessment|AI review|semantic review/i)
+      ).toHaveCount(0);
       latestRunId = updated.runId;
       expect(updated.policy.mode).toBe("shadow");
       expect(updated.applied).toBe(false);
       expect(updated.proposal?.version).toBe(2);
+      expect(updated.proposal?.planningImpact?.baseline).toBe("same_day_plan");
+      expect(updated.proposal?.planningImpact?.scheduleChanged).toBe(true);
       expect(
         updated.proposal?.blocks.some(
           block => block.id === `${prefix}-protected` && block.status === "done"
@@ -750,18 +778,24 @@ for (const scenario of [
         ).some(row => row.detail === update)
       ).toBe(true);
       await assertUnchanged();
-      await manager.getByText("Proposed plan", { exact: true }).click();
-      await expect(
-        manager.getByText(/Not applied to the active plan/)
-      ).toBeVisible();
+      await expect(manager.getByText(/technical assessment|AI review|semantic review/i)).toHaveCount(0);
       await expect(manager.getByText(/\d+%/)).toHaveCount(0);
-      await expect(manager.getByText(/Manager data:/)).toBeVisible();
-      await expect(
-        manager.getByText(
-          /Realtime connected|Fallback polling every 60 seconds/
-        )
-      ).toBeVisible();
-      await capture(page, testInfo, `${scenario.name}-worker-shadow`);
+      await assertAccessibility(page, testInfo, `${scenario.name}-worker-today`);
+      if (page.viewportSize()!.width < 768) {
+        await activateByKeyboard(page, page.getByRole("button", { name: "Open navigation" }));
+      }
+      await activateByKeyboard(page, page.getByRole("button", { name: /Plan My Day/ }).first());
+      await expect(page).toHaveURL(/\/worker\/plan$/);
+      await expect(page.getByRole("heading", { name: "Plan My Day", exact: true })).toBeVisible();
+      const suggestion = page.getByRole("region", { name: "Suggested changes to your day" });
+      await expect(suggestion).toBeVisible();
+      await expect(suggestion.getByText("Not applied", { exact: true })).toBeVisible();
+      await expect(suggestion.getByText(/These changes are suggestions only/)).toBeVisible();
+      await expect(suggestion.getByText(/Review delivery report/, { exact: false }).first()).toBeVisible();
+      await assertUnchanged();
+      await expect(page.getByText(/technical assessment|AI review|semantic review/i)).toHaveCount(0);
+      await assertAccessibility(page, testInfo, `${scenario.name}-worker-plan`);
+      await capture(page, testInfo, `${scenario.name}-worker-plan-suggestion`);
 
       const forbidden = await page.request.get(
         "/api/trpc/operator.getManagerReviewInbox",
@@ -777,7 +811,13 @@ for (const scenario of [
       await expect(page).toHaveURL(/\/worker$/);
       await page.waitForLoadState("networkidle");
       await page.goto("/worker/settings");
-      await expect(page.getByText("Shadow", { exact: true })).toBeVisible();
+      const managerSchedule = page.getByRole("region", {
+        name: "Manager schedule",
+      });
+      await expect(managerSchedule).toBeVisible();
+      await expect(
+        managerSchedule.getByText("Suggestions only", { exact: true })
+      ).toBeVisible();
       await page.getByLabel("Assessment interval").fill("9");
       await mutateThroughUi(page, "operator.updateManagerPolicy", () =>
         page.getByRole("button", { name: "Save manager schedule" }).click()

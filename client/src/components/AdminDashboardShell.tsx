@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
+import { NotificationBell } from "@/components/NotificationBell";
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
 const DEFAULT_WIDTH = 280;
@@ -149,6 +150,7 @@ function AdminDashboardShellContent({
                   <span className="font-semibold tracking-tight truncate">Navigation</span>
                 </div>
               ) : null}
+              {!isMobile && location !== "/" && user?.role === "admin" && <div className="ml-auto"><NotificationBell /></div>}
             </div>
           </SidebarHeader>
 
@@ -220,6 +222,7 @@ function AdminDashboardShellContent({
                 </div>
               </div>
             </div>
+            {user?.role === "admin" && <NotificationBell />}
           </div>
         )}
         <main className="flex-1 p-4">{children}</main>

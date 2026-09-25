@@ -7,6 +7,7 @@
 import { getDb } from "./db";
 import {
   aptlssSteps,
+  decisionOutcomes,
   cardStates,
   priorityScores,
   AptlssStep,
@@ -16,11 +17,11 @@ import {
   PriorityScore,
   InsertPriorityScore,
 } from "../drizzle/schema";
-import { eq, and, inArray, desc, sql } from "drizzle-orm";
+import { eq, and, inArray, notInArray, desc, sql } from "drizzle-orm";
 
 // ─── aptlss_steps ─────────────────────────────────────────────────────────────
 
-/** Upsert a batch of steps for a card (replaces all non-manual, non-completed steps). */
+/** Upsert a batch of steps for a card without replacing pending founder decisions. */
 export async function upsertAptlssSteps(
   vaId: number,
   cardId: string,
@@ -29,22 +30,25 @@ export async function upsertAptlssSteps(
   const db = await getDb();
   if (!db) return;
 
-  // Load existing steps to preserve manual and completed ones
+  // Pending founder decisions remain actionable across plan regeneration.
   const existing: AptlssStep[] = await db
     .select()
     .from(aptlssSteps)
     .where(and(eq(aptlssSteps.cardId, cardId), eq(aptlssSteps.vaId, vaId)));
 
-  const manualOrDone = existing.filter(
-    (s) => s.isManual || s.status === "complete"
+  const protectedSteps = existing.filter(
+    (s) => s.isManual || s.status === "complete" || (s.requiresRobert && s.status === "open")
   );
-  const manualOrDoneCheckItemIds = new Set(
-    manualOrDone.map((s) => s.trelloCheckItemId).filter(Boolean)
+  const protectedCheckItemIds = new Set(
+    protectedSteps.map((s) => s.trelloCheckItemId).filter(Boolean)
+  );
+  const pendingFounderTitles = new Set(
+    protectedSteps.filter((s) => s.requiresRobert && s.status === "open").map((s) => s.title.trim().toLocaleLowerCase())
   );
 
   // Mark existing AI-generated open steps as obsolete
   const aiOpenIds = existing
-    .filter((s) => !s.isManual && s.status === "open")
+    .filter((s) => !s.isManual && s.status === "open" && !s.requiresRobert)
     .map((s) => s.id);
   if (aiOpenIds.length > 0) {
     await db
@@ -59,11 +63,11 @@ export async function upsertAptlssSteps(
       );
   }
 
-  // Insert new steps (skip if trelloCheckItemId already exists as manual/done)
+  // A regenerated plan must not duplicate or overwrite an unresolved decision.
   const toInsert = newSteps.filter(
     (s) =>
-      !s.trelloCheckItemId ||
-      !manualOrDoneCheckItemIds.has(s.trelloCheckItemId)
+      (!s.trelloCheckItemId || !protectedCheckItemIds.has(s.trelloCheckItemId)) &&
+      (!s.requiresRobert || !pendingFounderTitles.has(s.title.trim().toLocaleLowerCase()))
   );
   if (toInsert.length > 0) {
     await db.insert(aptlssSteps).values(toInsert);
@@ -136,30 +140,6 @@ export async function getAllFounderDecisionSteps(vaId?: number): Promise<AptlssS
     .orderBy(desc(aptlssSteps.createdAt));
 }
 
-/** Mark a step as complete by its Trello check-item ID. */
-export async function completeStepByCheckItemId(
-  trelloCheckItemId: string
-): Promise<void> {
-  const db = await getDb();
-  if (!db) return;
-  await db
-    .update(aptlssSteps)
-    .set({ status: "complete", completedAt: new Date() })
-    .where(eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId));
-}
-
-/** Mark a step as open (unchecked) by its Trello check-item ID. */
-export async function uncompleteStepByCheckItemId(
-  trelloCheckItemId: string
-): Promise<void> {
-  const db = await getDb();
-  if (!db) return;
-  await db
-    .update(aptlssSteps)
-    .set({ status: "open", completedAt: null })
-    .where(eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId));
-}
-
 function affectedRows(result: unknown): number {
   const value = Array.isArray(result) ? result[0] : result;
   return Number((value as { affectedRows?: unknown } | undefined)?.affectedRows ?? 0);
@@ -182,35 +162,8 @@ export async function setStepCompletionForWorker(
     .where(and(
       eq(aptlssSteps.vaId, vaId),
       eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId),
-    ));
-  return affectedRows(result) === 1;
-}
-
-/** Mark a Founder-required step as resolved (removes from Decision Queue). */
-export async function resolveFounderStep(stepId: number): Promise<void> {
-  const db = await getDb();
-  if (!db) return;
-  await db
-    .update(aptlssSteps)
-    .set({ requiresRobert: false, status: "complete", completedAt: new Date() })
-    .where(eq(aptlssSteps.id, stepId));
-}
-
-/** Resolve a Founder-required step only when it belongs to the active worker. */
-export async function resolveFounderStepForWorker(
-  vaId: number,
-  stepId: number,
-): Promise<boolean> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-  const result = await db
-    .update(aptlssSteps)
-    .set({ requiresRobert: false, status: "complete", completedAt: new Date() })
-    .where(and(
-      eq(aptlssSteps.id, stepId),
-      eq(aptlssSteps.vaId, vaId),
-      eq(aptlssSteps.requiresRobert, true),
-      eq(aptlssSteps.status, "open"),
+      eq(aptlssSteps.requiresRobert, false),
+      notInArray(aptlssSteps.id, db.select({ stepId: decisionOutcomes.stepId }).from(decisionOutcomes)),
     ));
   return affectedRows(result) === 1;
 }

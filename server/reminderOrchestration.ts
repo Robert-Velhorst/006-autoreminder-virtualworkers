@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, lte, sql } from "drizzle-orm";
 import {
   commitments,
+  emailTasks,
   notificationHistory,
   reminderAuditEvents,
   reminderPolicies,
@@ -15,6 +16,7 @@ import {
 import { getDb } from "./db";
 import { createNonOverlappingRunner } from "./services/non-overlapping-runner";
 import { sendEmail } from "./services/email";
+import { gmailContentScope } from "../shared/gmailContentScope";
 
 export const REMINDER_TERMINAL_STATES = ["sent", "skipped", "cancelled"] as const;
 const ACTIVE_REMINDER_STATES = ["scheduled", "preparing", "draft_ready", "sending", "failed", "needs_review", "escalated"] as const;
@@ -302,6 +304,27 @@ async function deliveryStats(recipientUserId: number, now: Date) {
   return { sentToday: Number(stats?.sentToday ?? 0), lastSentAt: stats?.lastSentAt ? new Date(stats.lastSentAt) : null };
 }
 
+async function unverifiedGmailReminderReason(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  commitment: typeof commitments.$inferSelect,
+): Promise<string | null> {
+  if (commitment.sourceType !== "gmail") return null;
+  if (!commitment.assignedUserId || !commitment.sourceId) {
+    return "Gmail deadline cannot be traced to a worker and source thread; verify it before sending a reminder.";
+  }
+  const messages = await db.select({ subject: emailTasks.subject, snippet: emailTasks.snippet })
+    .from(emailTasks)
+    .where(and(eq(emailTasks.vaId, commitment.assignedUserId), eq(emailTasks.gmailThreadId, commitment.sourceId)))
+    .limit(101);
+  if (!messages.length || messages.length > 100) {
+    return "Gmail deadline source cannot be verified from retained messages; review it before sending a reminder.";
+  }
+  if (messages.some(message => gmailContentScope(message.subject, message.snippet ?? "") === "portal_notice")) {
+    return "This Gmail item only announces portal correspondence; verify the underlying document and its deadline before sending a reminder.";
+  }
+  return null;
+}
+
 async function deliverClaimedSchedule(scheduleId: number, actorUserId: number | null, now: Date) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
@@ -316,6 +339,14 @@ async function deliverClaimedSchedule(scheduleId: number, actorUserId: number | 
     .innerJoin(users, eq(users.id, reminderSchedules.recipientUserId))
     .where(eq(reminderSchedules.id, scheduleId)).limit(1);
   if (!row) throw new Error("Reminder occurrence not found");
+
+  const sourceHold = await unverifiedGmailReminderReason(db, row.commitment);
+  if (sourceHold) {
+    await db.update(reminderSchedules).set({ state: "needs_review", error: sourceHold, policyReason: sourceHold })
+      .where(eq(reminderSchedules.id, scheduleId));
+    await audit({ workspaceOwnerId: row.commitment.workspaceOwnerId, commitmentId: row.commitment.id, scheduleId, actorUserId, eventType: "reminder_source_needs_review", details: { reason: sourceHold } });
+    return "needs_review" as const;
+  }
 
   const draft = draftForCommitment(row.commitment.title, row.commitment.context, row.commitment.dueAt);
   const policy = await recipientPolicy(row.schedule.recipientUserId);
@@ -374,12 +405,12 @@ async function deliverClaimedSchedule(scheduleId: number, actorUserId: number | 
 
 export async function processDueReminders(now = new Date(), limit = 50) {
   const db = await getDb();
-  if (!db) return { claimed: 0, sent: 0, drafted: 0, deferred: 0, skipped: 0, failed: 0 };
+  if (!db) return { claimed: 0, sent: 0, drafted: 0, deferred: 0, skipped: 0, needsReview: 0, failed: 0 };
   const due = await db.select({ id: reminderSchedules.id }).from(reminderSchedules)
     .innerJoin(commitments, eq(commitments.id, reminderSchedules.commitmentId))
     .where(and(eq(reminderSchedules.state, "scheduled"), lte(reminderSchedules.scheduledFor, now), eq(commitments.status, "open")))
     .orderBy(reminderSchedules.scheduledFor).limit(Math.min(Math.max(limit, 1), 200));
-  const result = { claimed: 0, sent: 0, drafted: 0, deferred: 0, skipped: 0, failed: 0 };
+  const result = { claimed: 0, sent: 0, drafted: 0, deferred: 0, skipped: 0, needsReview: 0, failed: 0 };
 
   for (const item of due) {
     const claim = await db.update(reminderSchedules).set({ state: "preparing", lastAttemptAt: now, attemptCount: sql`${reminderSchedules.attemptCount} + 1` })
@@ -392,6 +423,7 @@ export async function processDueReminders(now = new Date(), limit = 50) {
       else if (state === "draft_ready") result.drafted++;
       else if (state === "scheduled") result.deferred++;
       else if (state === "skipped") result.skipped++;
+      else if (state === "needs_review") result.needsReview++;
     } catch (error) {
       result.failed++;
       const message = error instanceof Error ? error.message : String(error);
@@ -492,6 +524,13 @@ export async function approveAndSendReminder(actor: ReminderActor, scheduleId: n
   if (actor.id !== row.schedule.recipientUserId && actor.id !== row.commitment.workspaceOwnerId) throw new Error("You cannot approve this reminder");
   if (row.schedule.state !== "draft_ready" && row.schedule.state !== "failed") {
     throw new Error(`Reminder cannot be sent from state ${row.schedule.state}`);
+  }
+  const sourceHold = await unverifiedGmailReminderReason(db, row.commitment);
+  if (sourceHold) {
+    await db.update(reminderSchedules).set({ state: "needs_review", error: sourceHold, policyReason: sourceHold })
+      .where(and(eq(reminderSchedules.id, scheduleId), inArray(reminderSchedules.state, ["draft_ready", "failed"])));
+    await audit({ workspaceOwnerId: row.commitment.workspaceOwnerId, commitmentId: row.commitment.id, scheduleId, actorUserId: actor.id, eventType: "reminder_source_needs_review", details: { reason: sourceHold } });
+    throw new Error(sourceHold);
   }
   const policy = await recipientPolicy(row.schedule.recipientUserId);
   const stats = await deliveryStats(row.schedule.recipientUserId, new Date());

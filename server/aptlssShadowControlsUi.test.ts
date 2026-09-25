@@ -37,8 +37,8 @@ describe("shadow pilot controls", () => {
   it("enables assessment only for a loaded shadow policy", () => {
     const html = render(ManagerCoach);
     expect(button(html, "Reassess now")).not.toContain('disabled=""');
-    expect(html).toContain("Proposal");
-    expect(html).toContain("Fallback polling every 60 seconds");
+    expect(html).not.toContain("System status");
+    expect(html).not.toContain("Fallback polling");
   });
   it.each(["active", undefined])("blocks assessment and settings for %s mode", mode => {
     fixture.mode = mode;
@@ -93,8 +93,12 @@ describe("shadow pilot controls", () => {
     ["INTERNAL_SERVER_ERROR", "Manager status storage is unavailable"],
   ])("does not hide %s errors outside the explicit pilot boundary", (code, message) => {
     fixture.error = queryError(code, message);
-    expect(render(ManagerCoach)).toContain("Manager data unavailable");
-    expect(render(ManagerShadowSettings)).toContain('role="alert"');
+    const coach = render(ManagerCoach);
+    expect(coach).toContain("Work guidance could not be refreshed");
+    expect(coach).not.toContain(message);
+    const settings = render(ManagerShadowSettings);
+    expect(settings).toContain('role="alert"');
+    expect(settings).not.toContain(message);
     const query = { state: { error: fixture.error } };
     expect(fixture.statusOptions[0].refetchInterval?.(query)).toBe(60_000);
     for (const options of fixture.statusOptions) expect(options.enabled?.(query)).toBe(true);

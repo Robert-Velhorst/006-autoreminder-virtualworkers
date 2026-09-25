@@ -1,14 +1,11 @@
 /**
  * RobertDecisionQueue — shows all APTLSS steps that require Robert's decision,
  * grouped by card, with urgency tier, a direct link to the Trello card,
- * and a "Mark Resolved" button (GAP G — resolveRobertStep wired to UI).
+ * without allowing a worker to close a founder-owned decision.
  */
-import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { ExternalLink, AlertCircle, CheckCircle2, Loader2, Check } from "lucide-react";
-import { toast } from "sonner";
+import { ExternalLink, AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
 
 const URGENCY_STYLES: Record<string, { bg: string; text: string; border: string }> = {
   CRITICAL: { bg: "bg-red-500/10", text: "text-red-600 dark:text-red-400", border: "border-red-500/30" },
@@ -19,26 +16,11 @@ const URGENCY_STYLES: Record<string, { bg: string; text: string; border: string 
 };
 
 export default function RobertDecisionQueue() {
-  const utils = trpc.useUtils();
   const { data, isLoading } = trpc.aptlss.getDecisionQueue.useQuery(undefined, {
     staleTime: 5 * 60_000,
   });
-  const resolveMutation = trpc.aptlss.resolveFounderStep.useMutation({
-    onSuccess: () => {
-      utils.aptlss.getDecisionQueue.invalidate();
-      utils.aptlss.getRisksAndExceptions.invalidate();
-      toast.success("Decision marked as resolved");
-    },
-    onError: (e: any) => toast.error(`Failed to resolve: ${e.message}`),
-  });
-  const [resolving, setResolving] = useState<number | null>(null);
 
   const items = data?.items ?? [];
-
-  function handleResolve(stepId: number) {
-    setResolving(stepId);
-    resolveMutation.mutate({ stepId }, { onSettled: () => setResolving(null) });
-  }
 
   return (
     <Card className="border-border/60">
@@ -82,7 +64,6 @@ export default function RobertDecisionQueue() {
           <div className="space-y-2">
             {items.map((item) => {
               const style = URGENCY_STYLES[item.tier ?? "MEDIUM"] ?? URGENCY_STYLES.MEDIUM;
-              const isResolvingThis = resolving === item.stepId;
               return (
                 <div
                   key={`${item.cardId}-${item.stepIndex}`}
@@ -97,33 +78,11 @@ export default function RobertDecisionQueue() {
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-semibold text-foreground truncate">{item.cardName}</p>
                     <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">{item.stepTitle}</p>
-                    {item.recommendedDecision && (
-                      <p className="text-[10px] text-muted-foreground/70 mt-1 italic">
-                        Suggested: {item.recommendedDecision}
-                      </p>
-                    )}
+                    <p className="text-[10px] text-muted-foreground mt-1">Awaiting the founder's recorded decision.</p>
                   </div>
 
                   {/* Actions */}
                   <div className="flex items-center gap-1 flex-shrink-0">
-                    {/* Mark Resolved button — only shown when stepId is available */}
-                    {item.stepId != null && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-6 px-2 text-[10px] text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 hover:text-emerald-600"
-                        disabled={isResolvingThis}
-                        onClick={() => handleResolve(item.stepId!)}
-                        title="Mark this decision as resolved — the worker can now proceed"
-                      >
-                        {isResolvingThis ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <Check className="w-3 h-3 mr-0.5" />
-                        )}
-                        {isResolvingThis ? "" : "Resolve"}
-                      </Button>
-                    )}
                     {/* Link to card */}
                     <a
                       href={item.cardUrl}

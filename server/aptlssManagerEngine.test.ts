@@ -115,6 +115,35 @@ describe("assessManagerContext", () => {
     expect(result.interventions).toEqual([]);
   });
 
+  it("keeps work blocked when a completed founder decision was rejected", () => {
+    const result = assessManagerContext(input({
+      cards: [card("a", { steps: [
+        step(1, { complete: true, requiresDecision: true, decisionRejected: true }),
+        step(2, { dependsOn: ["1"] }),
+      ] })],
+    }));
+    const followUp = result.actions.find(action => action.stepIds.includes(2));
+    expect(result.actions.some(action => action.stepIds.includes(1))).toBe(false);
+    expect(followUp).toMatchObject({
+      blocked: true,
+      reason: 'The founder rejected prerequisite "Prepare report 1". Ask the founder for a new direction before continuing.',
+    });
+    expect(followUp?.dependsOn).toContain("rejected:a:1");
+  });
+
+  it("keeps sequential work blocked after a rejected decision when no explicit edge exists", () => {
+    const result = assessManagerContext(input({
+      cards: [card("a", { steps: [
+        step(1, { complete: true, requiresDecision: true, decisionRejected: true }),
+        step(2),
+      ] })],
+    }));
+    expect(result.actions.find(action => action.stepIds.includes(2))).toMatchObject({
+      blocked: true,
+      dependsOn: ["rejected:a:1"],
+    });
+  });
+
   it("honors cross-card dependencies even when the dependent card is urgent", () => {
     const result = assessManagerContext(
       input({
@@ -207,6 +236,7 @@ describe("assessManagerContext", () => {
         i => i.severity === "urgent"
       );
       expect(intervention).toBeDefined();
+      expect(intervention!.issueKind).toBe("conflicting_claims");
       expect(intervention!.evidenceIds).toEqual(
         expect.arrayContaining(["s", "w"])
       );
@@ -218,6 +248,15 @@ describe("assessManagerContext", () => {
       expect(result.assessments[0].confidence).toBeLessThan(60);
     }
   );
+
+  it("labels a notification with unknown contents as a source check, not a proved contradiction", () => {
+    const result = assessManagerContext(input({
+      evidence: [evidence("notice", "A message is waiting in your portal.", "source", { source: "gmail" })],
+    }));
+    expect(result.interventions[0]).toMatchObject({ issueKind: "source_check", severity: "attention" });
+    expect(result.interventions[0].title).not.toMatch(/conflict/i);
+    expect(result.actions.filter(action => action.kind === "work").every(action => action.blocked)).toBe(true);
+  });
 
   it.each([
     ["Invoice is unpaid.", "The invoice has not been paid yet."],

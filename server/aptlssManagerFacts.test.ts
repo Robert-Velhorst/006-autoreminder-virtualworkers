@@ -142,6 +142,22 @@ describe("fixed language and claim regressions", () => {
 });
 
 describe("provenance, scope, revisions and reliability", () => {
+  it("never promotes a portal notice into proof of the unseen document's request or deadline", () => {
+    const notice = evidence(
+      "From: noreply@skgz.nl\nEr staat een bericht voor u klaar in uw persoonlijke mijn-omgeving. Inloggen. Deadline: 2026-09-09.",
+      { source: "gmail", metadata: { contentScope: "portal_notice", sourceDate: now, essential: true } }
+    );
+    const proof = assess([notice]);
+    expect(proof.blocked).toBe(true);
+    expect(proof.reliability.reasons).toContain("Only a portal notice is available; the underlying correspondence has not been checked");
+    expect(proof.facts.some(f => f.topic === "deadline" && f.support === "explicit")).toBe(false);
+    const result = assessManagerContext({ now, cards: [card()], evidence: [notice], timeSamples: [], sourceGaps: [] });
+    expect(result.interventions).toEqual(expect.arrayContaining([expect.objectContaining({ cardId: "a", issueKind: "source_check" })]));
+    expect(result.actions.filter(action => action.cardId === "a" && action.kind === "work").every(action => action.blocked)).toBe(true);
+    const legacy = { ...notice, metadata: { sourceDate: now, essential: true } };
+    expect(assess([legacy]).facts.some(f => f.topic === "deadline" && f.support === "explicit")).toBe(false);
+  });
+
   const jsonContext = (patch: Record<string, unknown> = {}) =>
     evidence(
       JSON.stringify({
@@ -367,6 +383,13 @@ describe("provenance, scope, revisions and reliability", () => {
     expect(many.reliability).toEqual(one.reliability);
     expect(many.evidence).toHaveLength(1);
   });
+  it("collapses a repeated observation of the same source revision but keeps independent records", () => {
+    const first = evidence("Report ready.", { metadata: { sourceRecordId: "message-one", sourceRevision: "hash-one", sourceDate: now, sender: "Client" } });
+    const repeated = { ...first, id: "e-copy", observedAt: "2026-09-04T10:10:00Z" };
+    expect(assess([first, repeated]).evidence).toHaveLength(1);
+    const independent = { ...repeated, id: "e-other", metadata: { ...first.metadata, sourceRecordId: "message-two" } };
+    expect(assess([first, independent]).evidence).toHaveLength(2);
+  });
   it("flags a colliding evidence identifier without discarding its contradiction", () => {
     expect(
       assess([evidence("Invoice paid."), evidence("Invoice unpaid.")])
@@ -422,7 +445,8 @@ describe("provenance, scope, revisions and reliability", () => {
   const old = () =>
     evidence("Invoice unpaid.", {
       id: "old",
-      metadata: { sourceDate: "2026-09-01", effectiveFrom: "2026-09-01" },
+      metadata: { sourceDate: "2026-09-01", effectiveFrom: "2026-09-01",
+        sourceRecordId: "invoice-record-a", sourceRevision: "revision-1", sender: "Accounts" },
     });
   const revision = () =>
     evidence("Invoice paid.", {
@@ -430,6 +454,9 @@ describe("provenance, scope, revisions and reliability", () => {
       metadata: {
         sourceDate: "2026-09-03",
         effectiveFrom: "2026-09-03",
+        sourceRecordId: "invoice-record-a",
+        sourceRevision: "revision-2",
+        sender: "Accounts",
         supersedesEvidenceIds: ["old"],
       },
     });
@@ -438,20 +465,34 @@ describe("provenance, scope, revisions and reliability", () => {
     expect(proof.unresolved).toBe(false);
     expect(proof.facts).toHaveLength(2);
   });
-  it.each(["worker", "other_source", "undated", "older", "future", "proposal"])(
+  it.each(["worker", "other_source", "other_record", "other_sender", "same_revision", "weaker_authority", "backdated", "undated", "older", "future", "proposal", "no_claim"])(
     "does not supersede on an invalid revision: %s",
     mode => {
       const next = revision();
       if (mode === "worker") next.kind = "worker";
       if (mode === "other_source") next.source = "email";
+      if (mode === "other_record") next.metadata!.sourceRecordId = "another-invoice-record";
+      if (mode === "other_sender") next.metadata!.sender = "Unrelated sender";
+      if (mode === "same_revision") next.metadata!.sourceRevision = "revision-1";
+      if (mode === "weaker_authority") next.metadata!.authority = "reported";
+      if (mode === "backdated") next.metadata!.effectiveFrom = "2026-08-31";
       if (mode === "undated") next.metadata!.sourceDate = null;
       if (mode === "older") next.metadata!.sourceDate = "2026-08-31";
       if (mode === "future") next.metadata!.effectiveFrom = "2026-09-05";
       if (mode === "proposal") next.metadata!.truthClass = "model_proposal";
+      if (mode === "no_claim") next.text = "Please review the record.";
       const proof = assess([old(), next]);
       expect(proof.blocked).toBe(true);
     }
   );
+  it("does not equate two separate messages from the same provider with a revision", () => {
+    const original = old();
+    const unrelated = revision();
+    unrelated.id = "different-message";
+    unrelated.metadata!.sourceRecordId = "other-message";
+    unrelated.metadata!.sender = "Accounts";
+    expect(assess([original, unrelated]).conflictIds).toEqual(["different-message", "old"]);
+  });
   it("blocks every action on a graph conflict even when the graph has no local quote IDs", () => {
     const result = assessManagerContext({
       now,

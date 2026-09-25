@@ -30,7 +30,7 @@ export type ManagerCard = {
   overdue: boolean;
   priority: number;
   updatedAt: string;
-  steps: Array<{ id: number; title: string; category: string; minutes: number; complete: boolean; requiresDecision: boolean; dependsOn: string[]; completionCriteria: string | null }>;
+  steps: Array<{ id: number; title: string; category: string; minutes: number; complete: boolean; requiresDecision: boolean; decisionRejected?: boolean; dependsOn: string[]; completionCriteria: string | null }>;
   waiting: { reason: string; action: string; followUpAt: string | null; category: string; confidence: number } | null;
 };
 
@@ -55,13 +55,14 @@ export type ManagerInput = {
   sourceGaps: string[];
   graphConflicts?: ManagerGraphConflict[];
   timeSummary?: { waitingMinutes: number; interruptedMinutes: number };
-  learning?: { stateHash: string; guidance: ManagerReviewedGuidance[]; withheld: Array<{ cardId: string; topic: string; actionKind: ManagerAction["kind"] }> };
+  learning?: { stateHash: string; guidance: ManagerReviewedGuidance[]; withheld: Array<{ cardId: string; topic: string; actionKind: ManagerAction["kind"]; actionId?: string }> };
 };
 
 export type ManagerReviewedGuidance = {
   id: number; reviewId: number; cardId: string; scope?: "card" | "worker";
   topic: string; correction: string; evidenceIds: string[]; validUntil: string;
   actionKind: ManagerAction["kind"];
+  nextStep?: { actionId: string; title: string; completionCriteria: string };
 };
 
 export type ManagerAction = {
@@ -86,6 +87,7 @@ export type ManagerAction = {
 export type ManagerIntervention = {
   id: string;
   cardId: string;
+  issueKind?: "source_check" | "reported_difference" | "conflicting_claims" | "missing_dependency" | "dependency_cycle";
   severity: "urgent" | "attention";
   title: string;
   explanation: string;
@@ -94,7 +96,8 @@ export type ManagerIntervention = {
   evidenceIds: string[];
   verification?: {
     issues: Array<{ id: string; severity: "urgent" | "attention"; title: string; question: string; explanation: string; evidenceIds: string[] }>;
-    passages: Array<{ evidenceId: string; source: string; kind: ManagerEvidence["kind"]; quote: string; sender: string | null; sourceDate: string | null; observedAt?: string; effectiveFrom: string | null }>;
+    passages: Array<{ evidenceId: string; source: string; kind: ManagerEvidence["kind"]; quote: string; sender: string | null; sourceDate: string | null; sourceRevision?: string | null; sourceRecordId?: string | null; observedAt?: string; effectiveFrom: string | null }>;
+    comparisons?: Array<{ subject: string; topic: string; left: { evidenceId: string; value: string; quote: string; source: string; kind: ManagerEvidence["kind"]; sender: string | null; sourceDate: string | null; url: string | null }; right: { evidenceId: string; value: string; quote: string; source: string; kind: ManagerEvidence["kind"]; sender: string | null; sourceDate: string | null; url: string | null } }>;
   };
 };
 
