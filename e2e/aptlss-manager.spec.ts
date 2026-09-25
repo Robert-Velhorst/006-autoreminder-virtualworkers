@@ -82,6 +82,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       runId: 101,
       trigger: "manual",
       assessedAt: at,
+      executionReady: true,
       policy: { enabled: true, intervalMinutes: 5, mode: "shadow" },
       nextCheckAt: null,
       cards: [
@@ -953,6 +954,23 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await page.getByRole("button", { name: "Open details", exact: true }).click();
     await expect(page.getByRole("button", { name: "Start timer", exact: true })).toBeDisabled();
     expect(calls.some(call => call.method === "timer.start")).toBe(false);
+  });
+
+  test("incomplete work coverage pauses task execution with a clear instruction", async ({ page }) => {
+    const { snapshot, calls } = await managerFixture(page, "worker", { proof: true });
+    snapshot.executionReady = false;
+    await page.goto("/worker");
+    const manager = page.getByRole("region", { name: "APTLSS work manager" });
+    await expect(manager.getByText("Wait before starting a task", { exact: true })).toBeVisible();
+    await expect(manager.getByText(/The full work list has not been checked\. Do not start a task yet\./)).toBeVisible();
+    await expect(manager.getByText("Ready for next step", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "No task is recommended yet" })).toBeVisible();
+    await expect(page.getByText("These tasks are not ranked until the full work list is checked.", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: /Doing second/ }).click();
+    await page.getByRole("button", { name: "Verify delivery", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Start timer", exact: true })).toBeDisabled();
+    expect(calls.some(call => call.method === "timer.start")).toBe(false);
+    await expect(page.getByText(/technical assessment|semantic review|AI review/i)).toHaveCount(0);
   });
 
   test("switching tasks clears the entire result draft", async ({ page }) => {

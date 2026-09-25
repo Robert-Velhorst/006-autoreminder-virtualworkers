@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ManagerTimestamp } from "./AptlssManagerReview";
 import { ManagerVerificationDetails } from "./ManagerVerificationDetails";
-import { workerFacingManagerQuestion } from "@shared/aptlssManager";
+import { WORKER_EXECUTION_HOLD_MESSAGE, workerFacingManagerQuestion } from "@shared/aptlssManager";
 import { selectManagerPrimary } from "@shared/workerTodayGuidance";
 import { toast } from "sonner";
 import type { ManagerEvidence } from "@shared/aptlssManager";
@@ -134,9 +134,10 @@ export default function ManagerCoach() {
   });
   const snapshot = query.data?.snapshot;
   const policy = query.data?.policy;
-  const primary = selectManagerPrimary(snapshot);
+  const executionReady = snapshot?.executionReady === true;
+  const primary = executionReady ? selectManagerPrimary(snapshot) : null;
   const firstIntervention = primary?.intervention;
-  const firstNext = primary?.action ?? snapshot?.actions.find(item => !item.blocked);
+  const firstNext = primary?.action ?? (executionReady ? snapshot?.actions.find(item => !item.blocked) : undefined);
   const availableCards = snapshot?.cards.length ? snapshot.cards : (queue.data?.cards ?? []).map(card => ({ id: card.cardId, name: card.cardName }));
   const cardId = selectedCardId ? (availableCards.some(card => card.id === selectedCardId) ? selectedCardId : "") : (availableCards.find(card => card.id === (firstIntervention?.cardId ?? firstNext?.cardId))?.id ?? availableCards[0]?.id ?? "");
   const cardInterventions = snapshot?.interventions.filter(item => item.cardId === cardId);
@@ -180,7 +181,8 @@ export default function ManagerCoach() {
       <div className={open ? "grid min-w-0 items-start gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] 2xl:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]" : "min-w-0"}>
       <div className="min-w-0 space-y-3">
       {(query.error || query.data?.error) && <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Work guidance could not be refreshed</AlertTitle><AlertDescription>Try again shortly. You can continue with unrelated work. Contact your supervisor if the problem continues.</AlertDescription></Alert>}
-      {query.isLoading ? <p role="status" className="text-sm text-muted-foreground">Loading manager status...</p> : !snapshot ? <p className="text-sm text-muted-foreground">No assessment has been recorded yet.</p> : (
+      {!query.isLoading && !executionReady && <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Wait before starting a task</AlertTitle><AlertDescription>{WORKER_EXECUTION_HOLD_MESSAGE}</AlertDescription></Alert>}
+      {query.isLoading ? <p role="status" className="text-sm text-muted-foreground">Loading manager status...</p> : !snapshot ? null : !executionReady ? null : (
         <div aria-label="Current manager instruction" role={urgent ? "alert" : "status"} className={"min-w-0 space-y-4 border-l-2 px-3 py-4 sm:px-4 " + (intervention ? urgent ? "border-red-500 bg-red-500/5" : "border-amber-500 bg-amber-500/5" : "border-border bg-muted/30")}>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 flex-wrap items-center gap-2">

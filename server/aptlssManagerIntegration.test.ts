@@ -15,6 +15,7 @@ import type { TrpcContext } from "./_core/context";
 import { aptlssManagerQueue as queueJobs, aptlssManagerQueueEvents as queueEvents, aptlssManagerQueueSlots as queueSlots } from "../drizzle/aptlssManagerQueueSchema";
 import { claimManagerTask, enqueueManagerTask, type ManagerQueueLease } from "./aptlssManagerQueue";
 import { assessManagerContext } from "./aptlssManagerEngine";
+import { readManagerAssignmentState } from "./aptlssManagerAssignments";
 
 // Opt-in only. Never import db.ts (it may read .env) or fall back to DATABASE_URL.
 const controls = vi.hoisted(() => ({
@@ -65,7 +66,7 @@ vi.mock("./services/websocket", () => ({ websocketService: { emitToUser: control
 const NOW = new Date("2026-09-04T10:00:15.000Z");
 const DATE_KEY = "2026-09-04";
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
-type Worker = { id: number; openId: string; cardId: string; stepId: number };
+type Worker = { id: number; openId: string; cardId: string; stepId: number; profileId: number };
 type Service = typeof import("./aptlssManagerService");
 type Reviews = typeof import("./aptlssManagerReviewService");
 
@@ -137,6 +138,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     pilotWorkers.push(user.id);
     vi.stubEnv("APTLSS_MANAGER_PILOT_WORKER_IDS", pilotWorkers.join(","));
     const cardId = `manager-it-${randomUUID()}`;
+    const [profile] = await db.insert(schema.vaProfiles).values({ userId: user.id, founderId: adminId, name: "Integration worker" }).$returningId();
     await db.insert(schema.userWorkingHours).values({ userId: user.id, userOpenId: user.openId,
       timezone: "UTC", workStartHour: 9, workEndHour: 18, enableBreaks: 0, workingDays: "1,2,3,4,5" });
     await db.insert(schema.aptlssPlans).values({ vaId: user.id, cardId, cardName: "Review local requirements",
@@ -147,7 +149,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       cardId, cardData: JSON.stringify({ id: cardId, name: "Review local requirements", desc: "Compare the local requirements document.",
         dateLastActivity: NOW.toISOString(), due: null }), cachedAt: NOW, expiresAt: new Date("2026-09-05T10:00:00Z") });
     await db.insert(schema.aptlssManagerState).values({ vaId: user.id, mode: "shadow", shadowStartedAt: new Date("2026-08-01T00:00:00Z") });
-    return { ...user, cardId, stepId: step.id };
+    return { ...user, cardId, stepId: step.id, profileId: profile.id };
   }
 
   it.each([
@@ -168,6 +170,38 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const after = assessManagerContext(await service.collectManagerInput(db, worker.id, NOW));
     expect(after.interventions.some(i => i.title === "Missing dependency")).toBe(false);
     expect(after.actions.find(a => a.stepIds.includes(dependent.id))!.blocked).toBe(false);
+  });
+
+  it("holds execution when an active assignment has no worker-scoped APTLSS plan", async () => {
+    const priorPlan = await seedPlan();
+    await db.insert(schema.taskAssignments).values({ taskId: `missing-${randomUUID()}`, vaId: worker.profileId,
+      founderId: adminId, assignedBy: adminId, status: "assigned" });
+    const input = await service.collectManagerInput(db, worker.id, NOW);
+    expect(input.executionCoverageComplete).toBe(false);
+    expect(input.sourceGaps).toContain("1 active assignment(s) do not have a matching APTLSS work plan.");
+    const result = await service.runManager(worker.id);
+    expect(result.executionCoverageComplete).toBe(false);
+    expect(result.actions.every(action => action.blocked)).toBe(true);
+    expect(result.proposal).toBeUndefined();
+    expect(JSON.parse((await plans())[0].scheduleJson)).toEqual(priorPlan);
+    expect(JSON.parse((await runs())[0].snapshotJson).assignmentFingerprint).toBe(input.assignmentFingerprint);
+  });
+
+  it("maps checklist assignment blockers to their exact APTLSS step", async () => {
+    const [blockedStep] = await db.insert(schema.aptlssSteps).values({ vaId: worker.id, cardId: worker.cardId,
+      trelloChecklistId: "checklist-manager-it", trelloCheckItemId: "item-manager-it", stepNumber: 2,
+      title: "Prepare dependent local work", estimatedMinutes: 20 }).$returningId();
+    await db.insert(schema.taskAssignments).values({ taskId: `${worker.cardId}:checklist-manager-it:item-manager-it`,
+      vaId: worker.profileId, founderId: adminId, assignedBy: adminId, status: "blocked" });
+    const input = await service.collectManagerInput(db, worker.id, NOW);
+    expect(input.executionCoverageComplete).toBe(true);
+    expect(input.cards[0].steps.find(step => step.id === blockedStep.id)).toMatchObject({
+      blocked: true,
+      blockReason: expect.stringMatching(/assignment before continuing/i),
+    });
+    const result = assessManagerContext(input);
+    expect(result.actions.find(action => action.stepIds.includes(blockedStep.id))).toMatchObject({ blocked: true });
+    expect(result.actions.find(action => action.stepIds.includes(worker.stepId))).toMatchObject({ blocked: false });
   });
 
   beforeEach(async () => {
@@ -285,6 +319,13 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
   const runs = (id = worker.id) => db.select().from(schema.aptlssManagerRuns).where(eq(schema.aptlssManagerRuns.vaId, id));
   const state = async (id = worker.id) => (await db.select().from(schema.aptlssManagerState).where(eq(schema.aptlssManagerState.vaId, id)))[0];
   const lease = async () => (await db.select().from(schema.aptlssManagerControl).where(eq(schema.aptlssManagerControl.id, 1)))[0];
+  const reviewedManagerSnapshot = async (vaId = worker.id, details: Record<string, unknown> = {}) => JSON.stringify({
+    executionCoverageComplete: true,
+    assignmentFingerprint: (await readManagerAssignmentState(db, vaId)).fingerprint,
+    actions: [],
+    interventions: [],
+    ...details,
+  });
   const seedGlobalBlockedAssessment = (cardId: string) => db.insert(schema.aptlssAssessments).values({
     cardId,
     cardName: "Shared card assessment",
@@ -1585,6 +1626,9 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     await db.delete(schema.aptlssPlans).where(eq(schema.aptlssPlans.vaId, worker.id));
     const result = await service.runManager(worker.id);
     expect(result.applied).toBe(false);
+    expect(result.executionCoverageComplete).toBe(false);
+    expect(result.proposal).toBeUndefined();
+    expect(result.actions.every(action => action.blocked)).toBe(true);
     expect(result.policy.mode).toBe("shadow");
     expect(JSON.parse((await plans())[0].scheduleJson)).toEqual(prior);
     expect(result.sourceGaps).toContain("Automatic plan changes are paused because execution context coverage is incomplete.");
@@ -1712,6 +1756,9 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     })]));
     const result = await service.runManager(worker.id);
     expect(result.applied).toBe(false);
+    expect(result.executionCoverageComplete).toBe(false);
+    expect(result.proposal).toBeUndefined();
+    expect(result.actions.every(action => action.blocked)).toBe(true);
     expect(result.policy.mode).toBe("shadow");
     expect(result.assessments.find(item => item.cardId === worker.cardId)).toMatchObject({
       state: "NEEDS_VERIFICATION", reliability: { conflicts: "unresolved" },
@@ -2430,6 +2477,12 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       boardName: "Integration fixture", listName: "DOING", state: "DOING", calculatedAt: NOW,
     });
     await expect(otherCaller.start(input)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
+      trigger: "coverage_test", mode: "shadow", snapshotJson: JSON.stringify({ executionCoverageComplete: false, interventions: [] }) });
+    await expect(caller.start(input)).rejects.toMatchObject({ code: "PRECONDITION_FAILED", message: expect.stringMatching(/full work list has not been checked/i) });
+    expect(await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id))).toHaveLength(0);
+    await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
+      trigger: "coverage_test", mode: "shadow", snapshotJson: await reviewedManagerSnapshot() });
     const first = await caller.start(input);
     const repeated = await caller.start(input);
     expect(repeated.id).toBe(first.id);
@@ -2440,13 +2493,21 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ cardName: "Review local requirements", boardName: "Integration fixture", listName: "TO DO" });
 
+    await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: worker.profileId,
+      founderId: adminId, assignedBy: adminId, status: "assigned" });
+    await expect(caller.start(input)).rejects.toMatchObject({ code: "PRECONDITION_FAILED", message: expect.stringMatching(/full work list has not been checked/i) });
+    const current = await reviewedManagerSnapshot();
+    await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
+      trigger: "assignment_refresh", mode: "shadow", snapshotJson: current });
+    expect((await caller.start(input)).id).toBe(first.id);
+
     await db.update(schema.aptlssPlans).set({ listName: "ON-HOLD" }).where(eq(schema.aptlssPlans.vaId, worker.id));
     await expect(caller.start(input)).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
     expect((await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.id, first.id)))[0].endTime).toBeNull();
 
     await db.update(schema.aptlssPlans).set({ listName: "TO DO" }).where(eq(schema.aptlssPlans.vaId, worker.id));
     await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
-      trigger: "timer_test", mode: "shadow", snapshotJson: JSON.stringify({ interventions: [{ cardId: worker.cardId }] }) });
+      trigger: "timer_test", mode: "shadow", snapshotJson: await reviewedManagerSnapshot(worker.id, { interventions: [{ cardId: worker.cardId }] }) });
     await expect(caller.start(input)).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
     expect((await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.id, first.id)))[0].endTime).toBeNull();
     expect((await caller.stop({ cardId: worker.cardId }))?.id).toBe(first.id);
@@ -2456,6 +2517,131 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
     expect(await caller.stop({ cardId: worker.cardId })).toBeNull();
     expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
+  });
+
+  it("uses the sole active profile for both worker timer routes when an older profile is inactive", async () => {
+    const nextFounder = await insertUser("admin");
+    await db.update(schema.vaProfiles).set({ status: "inactive" }).where(eq(schema.vaProfiles.id, worker.profileId));
+    const [currentProfile] = await db.insert(schema.vaProfiles).values({ userId: worker.id, founderId: nextFounder.id,
+      name: "Current integration profile", status: "active" }).$returningId();
+    await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: currentProfile.id,
+      founderId: nextFounder.id, assignedBy: nextFounder.id, status: "assigned" });
+    await db.insert(schema.cardStates).values({ vaId: worker.id, cardId: worker.cardId,
+      cardName: "Review local requirements", boardName: "Integration fixture", listName: "TO DO",
+      state: "DOING", calculatedAt: NOW });
+    await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
+      trigger: "profile_selection", mode: "shadow", snapshotJson: await reviewedManagerSnapshot() });
+
+    const { default: express } = await import("express");
+    const { default: request } = await import("supertest");
+    const { default: timeTrackingRoutes } = await import("./routes/time-tracking");
+    const { default: vaManagementRoutes } = await import("./routes/va-management");
+    const ownUser = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { (req as typeof req & { user: schema.User }).user = ownUser; next(); });
+    app.use("/api", timeTrackingRoutes);
+
+    const workerApp = express();
+    workerApp.use(express.json());
+    workerApp.use((req, _res, next) => { (req as typeof req & { user: schema.User }).user = ownUser; next(); });
+    workerApp.use("/api/va", vaManagementRoutes);
+    const profileResponse = await request(workerApp).get("/api/va/worker/profile").expect(200);
+    expect(profileResponse.body.id).toBe(currentProfile.id);
+
+    const httpStarted = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
+    expect(httpStarted.status).toBe(200);
+    expect(httpStarted.body.entry.founderId).toBe(nextFounder.id);
+    await request(app).post("/api/time-tracking/stop").send({ notes: "Profile resolution test" }).expect(200);
+
+    const { timerRouter } = await import("./routes/manus");
+    const caller = timerRouter.createCaller({ user: ownUser, req: {}, res: {} } as TrpcContext);
+    const trpcStarted = await caller.start({ cardId: worker.cardId, cardName: "Review local requirements",
+      cardUrl: `https://trello.com/c/${worker.cardId}`, boardName: "Integration fixture", listName: "TO DO" });
+    expect((await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.id, trpcStarted.id)))[0].founderId)
+      .toBe(nextFounder.id);
+    await caller.stop({ cardId: worker.cardId });
+  });
+
+  it("refuses timer starts when multiple active profiles make worker identity ambiguous", async () => {
+    await db.insert(schema.vaProfiles).values({ userId: worker.id, founderId: adminId,
+      name: "Second active integration profile", status: "active" });
+    const ownUser = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
+    const { default: express } = await import("express");
+    const { default: request } = await import("supertest");
+    const { default: timeTrackingRoutes } = await import("./routes/time-tracking");
+    const { default: vaManagementRoutes } = await import("./routes/va-management");
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { (req as typeof req & { user: schema.User }).user = ownUser; next(); });
+    app.use("/api", timeTrackingRoutes);
+    const response = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
+    expect(response.status).toBe(403);
+    expect(response.body.error).toMatch(/worker profile is ambiguous/i);
+    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toHaveLength(0);
+
+    const workerApp = express();
+    workerApp.use(express.json());
+    workerApp.use((req, _res, next) => { (req as typeof req & { user: schema.User }).user = ownUser; next(); });
+    workerApp.use("/api/va", vaManagementRoutes);
+    await request(workerApp).get("/api/va/worker/profile").expect(409);
+    await request(workerApp).post(`/api/va/worker/tasks/${encodeURIComponent(worker.cardId)}/complete`)
+      .send({ completed: true }).expect(409);
+    expect(await db.select().from(schema.taskAssignments).where(eq(schema.taskAssignments.founderId, adminId))).toHaveLength(0);
+
+    const { timerRouter } = await import("./routes/manus");
+    const caller = timerRouter.createCaller({ user: ownUser, req: {}, res: {} } as TrpcContext);
+    await expect(caller.start({ cardId: worker.cardId, cardName: "Review local requirements",
+      cardUrl: `https://trello.com/c/${worker.cardId}`, boardName: "Integration fixture", listName: "TO DO" }))
+      .rejects.toMatchObject({ code: "PRECONDITION_FAILED", message: expect.stringMatching(/worker profile is ambiguous/i) });
+    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toHaveLength(0);
+  });
+
+  it("denies Trello token login when one member maps to multiple active worker profiles", async () => {
+    const trelloMemberId = `shared-member-${randomUUID()}`;
+    await db.update(schema.vaProfiles).set({ trelloMemberId }).where(eq(schema.vaProfiles.id, worker.profileId));
+    const otherUser = await insertUser("worker");
+    await db.insert(schema.vaProfiles).values({ userId: otherUser.id, founderId: adminId,
+      name: "Other Trello-linked worker", trelloMemberId, status: "active" });
+    vi.stubEnv("TRELLO_API_KEY", "integration-test-key");
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: trelloMemberId, username: "shared-member", fullName: "Shared Member",
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { default: express } = await import("express");
+    const { default: request } = await import("supertest");
+    const { default: localAuthRoutes } = await import("./routes/local-auth");
+    const app = express();
+    app.use(express.json());
+    app.use("/api/auth", localAuthRoutes);
+    const response = await request(app).post("/api/auth/trello/login-token").send({ token: "provider-token" }).expect(401);
+    expect(response.body.error).toMatch(/not uniquely linked to an active worker profile/i);
+    expect(response.headers["set-cookie"]).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let legacy worker task endpoints close an APTLSS pilot assignment", async () => {
+    await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: worker.profileId,
+      founderId: adminId, assignedBy: adminId, status: "assigned" });
+    const ownUser = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
+    const { default: express } = await import("express");
+    const { default: request } = await import("supertest");
+    const { default: vaManagementRoutes } = await import("./routes/va-management");
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { (req as typeof req & { user: schema.User }).user = ownUser; next(); });
+    app.use("/api/va", vaManagementRoutes);
+
+    const completion = await request(app).post(`/api/va/worker/tasks/${encodeURIComponent(worker.cardId)}/complete`)
+      .send({ completed: true }).expect(409);
+    expect(completion.body.error).toMatch(/older task action cannot close APTLSS pilot work/i);
+    const review = await request(app).post(`/api/va/worker/tasks/${encodeURIComponent(worker.cardId)}/review`).expect(409);
+    expect(review.body.error).toMatch(/task remains open/i);
+    expect(await db.select().from(schema.taskAssignments)
+      .where(and(eq(schema.taskAssignments.taskId, worker.cardId), eq(schema.taskAssignments.vaId, worker.profileId))))
+      .toMatchObject([{ status: "assigned" }]);
+    expect(controls.emit).not.toHaveBeenCalled();
   });
 
   it("ignores delayed browser inventories and treats an identical sequence as idempotent", async () => {
@@ -2582,15 +2768,24 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       vaId: worker.id, cardId: worker.cardId, cardName: "Review local requirements",
       boardName: "Integration fixture", listName: "DOING", state: "DOING", calculatedAt: NOW,
     });
-    const [profile] = await db.insert(schema.vaProfiles).values({ userId: worker.id, founderId: adminId, name: "Timer worker" }).$returningId();
-    await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: profile.id,
+    await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: worker.profileId,
       founderId: adminId, assignedBy: adminId });
+    await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
+      trigger: "coverage_test", mode: "shadow", snapshotJson: await reviewedManagerSnapshot() });
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => { (req as typeof req & { user: schema.User }).user = ownUser; next(); });
     app.use("/api", timeTrackingRoutes);
     const forbidden = await request(app).post("/api/time-tracking/start").send({ taskId: "another-worker-card" });
     expect(forbidden.status).toBe(403);
+    await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
+      trigger: "coverage_test", mode: "shadow", snapshotJson: JSON.stringify({ executionCoverageComplete: false, interventions: [] }) });
+    const incomplete = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
+    expect(incomplete.status).toBe(409);
+    expect(incomplete.body.error).toMatch(/full work list has not been checked/i);
+    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toHaveLength(0);
+    await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
+      trigger: "coverage_test", mode: "shadow", snapshotJson: await reviewedManagerSnapshot() });
     const accepted = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
     expect(accepted.status).toBe(200);
     expect(accepted.body.entry.vaId).toBe(worker.id);
@@ -2605,7 +2800,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       .toMatchObject({ generation: 2, trigger: "timer_changed" });
     expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
     await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
-      trigger: "legacy_timer_test", mode: "shadow", snapshotJson: JSON.stringify({ interventions: [{ cardId: worker.cardId }] }) });
+      trigger: "legacy_timer_test", mode: "shadow", snapshotJson: await reviewedManagerSnapshot(worker.id, { interventions: [{ cardId: worker.cardId }] }) });
     const blocked = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
     expect(blocked.status).toBe(409);
     expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toHaveLength(1);
@@ -2616,9 +2811,10 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const { default: request } = await import("supertest");
     const { default: timeTrackingRoutes } = await import("./routes/time-tracking");
     const ownUser = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
-    const [profile] = await db.insert(schema.vaProfiles).values({ userId: worker.id, founderId: adminId, name: "Timer worker" }).$returningId();
-    await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: profile.id,
+    await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: worker.profileId,
       founderId: adminId, assignedBy: adminId });
+    await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
+      trigger: "coverage_test", mode: "shadow", snapshotJson: await reviewedManagerSnapshot() });
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => { (req as typeof req & { user: schema.User }).user = ownUser; next(); });

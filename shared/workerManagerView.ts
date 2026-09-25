@@ -13,6 +13,7 @@ export type WorkerManagerPlanImpact = Pick<ManagerPlanImpact, "dateKey" | "basel
 };
 
 export type WorkerManagerSnapshot = {
+  executionReady: boolean;
   actions: WorkerAction[];
   interventions: ManagerIntervention[];
   cards: Array<Pick<ManagerCard, "id" | "name" | "url" | "board" | "list">>;

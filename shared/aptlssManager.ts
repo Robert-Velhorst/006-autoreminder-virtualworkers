@@ -1,5 +1,7 @@
 import type { ManagerEvidenceMetadata, ManagerGraphConflict, ManagerReliability, ManagerFact } from "./aptlssManagerEvidence";
 
+export const WORKER_EXECUTION_HOLD_MESSAGE = "The full work list has not been checked. Do not start a task yet. Ask your supervisor to restore the missing work information, then check again.";
+
 export function workerFacingManagerQuestion(question: string) {
   if (/which unknown applies now/i.test(question)) {
     return "Open the linked source and confirm the current fact needed for this task: what changed, who confirmed it, and from what date does it apply?";
@@ -30,7 +32,7 @@ export type ManagerCard = {
   overdue: boolean;
   priority: number;
   updatedAt: string;
-  steps: Array<{ id: number; title: string; category: string; minutes: number; complete: boolean; requiresDecision: boolean; decisionRejected?: boolean; dependsOn: string[]; completionCriteria: string | null }>;
+  steps: Array<{ id: number; title: string; category: string; minutes: number; complete: boolean; requiresDecision: boolean; decisionRejected?: boolean; blocked?: boolean; blockReason?: string; dependsOn: string[]; completionCriteria: string | null }>;
   waiting: { reason: string; action: string; followUpAt: string | null; category: string; confidence: number } | null;
 };
 
@@ -48,6 +50,7 @@ export type ManagerTimeSample = {
 
 export type ManagerInput = {
   executionCoverageComplete?: boolean;
+  assignmentFingerprint?: string;
   now: string;
   cards: ManagerCard[];
   evidence: ManagerEvidence[];
@@ -116,6 +119,7 @@ export type ManagerAssessment = {
 export type ManagerResult = {
   version: 1;
   assessedAt: string;
+  executionCoverageComplete?: boolean;
   assessments: ManagerAssessment[];
   actions: ManagerAction[];
   interventions: ManagerIntervention[];
@@ -144,6 +148,7 @@ export type ManagerSnapshot = ManagerResult & {
   nextCheckAt: string | null;
   proposal?: import("../server/operatorDailyPlan").OperatorDailyPlanPayload;
   planVersion?: string;
+  assignmentFingerprint?: string;
   proposalHash?: string;
   applied?: boolean;
   implementationDigest?: string;

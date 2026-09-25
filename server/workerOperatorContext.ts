@@ -88,6 +88,12 @@ function missingTable(error: unknown) {
     && (error as { code?: string }).code === "ER_NO_SUCH_TABLE";
 }
 
+export function selectWorkerProfile<T extends { status: string }>(profiles: readonly T[]): T | null {
+  const activeProfiles = profiles.filter((profile) => profile.status === "active");
+  if (activeProfiles.length === 1) return activeProfiles[0];
+  return activeProfiles.length === 0 && profiles.length === 1 ? profiles[0] : null;
+}
+
 export async function resolveWorkerOperatorContext(user: User, database?: NonNullable<Awaited<ReturnType<typeof getDb>>>): Promise<WorkerOperatorContext> {
   const db = database ?? await getDb();
   const fallbackName = user.name?.trim() || "Worker";
@@ -109,7 +115,7 @@ export async function resolveWorkerOperatorContext(user: User, database?: NonNul
   }
 
   const [profileRows, hoursRows] = await Promise.all([
-    db.select().from(vaProfiles).where(eq(vaProfiles.userId, user.id)).limit(1)
+    db.select().from(vaProfiles).where(eq(vaProfiles.userId, user.id)).orderBy(vaProfiles.id)
       .catch((error) => {
         if (missingTable(error)) return [];
         throw error;
@@ -118,9 +124,9 @@ export async function resolveWorkerOperatorContext(user: User, database?: NonNul
       .catch((error) => {
         if (missingTable(error)) return [];
         throw error;
-      }),
+    }),
   ]);
-  const profile = profileRows[0] ?? null;
+  const profile = selectWorkerProfile(profileRows);
   const hours = hoursRows[0] ?? null;
   const founderHours = profile && !hours
     ? (await db.select().from(userWorkingHours).where(eq(userWorkingHours.userId, profile.founderId)).limit(1))[0] ?? null

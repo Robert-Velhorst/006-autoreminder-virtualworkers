@@ -7,12 +7,13 @@ import bcrypt from 'bcryptjs';
 import { createHash, timingSafeEqual } from 'crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import { COOKIE_NAME, ONE_YEAR_MS } from '@shared/const';
-import { users } from '../../drizzle/schema';
+import { users, vaProfiles } from '../../drizzle/schema';
 import { sdk } from '../_core/sdk';
 import { getSessionCookieOptions } from '../_core/cookies';
 import * as db from '../db';
 import { isLocalRegistrationAllowed } from '../_core/localRegistration';
 import { PASSWORD_MIN_LENGTH, validatePassword } from '../passwordPolicy';
+import { selectWorkerProfile } from '../workerOperatorContext';
 
 const router = express.Router();
 const TRELLO_LOGIN_REQUEST_TIMEOUT_MS = 15_000;
@@ -301,18 +302,19 @@ router.post('/trello/login-token', async (req: Request, res: Response) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    const { vaProfiles, users } = await import('../../drizzle/schema.js');
-    const { eq } = await import('drizzle-orm');
-
     // Look up VA profile by trelloMemberId
-    const matchingProfiles = await dbInstance.select().from(vaProfiles).where(eq(vaProfiles.trelloMemberId, trelloId)).limit(1);
+    const matchingProfiles = await dbInstance.select().from(vaProfiles).where(eq(vaProfiles.trelloMemberId, trelloId))
+      .orderBy(vaProfiles.id);
     if (matchingProfiles.length === 0) {
       return res.status(401).json({ 
         error: `Access Denied: Trello account @${member.username} (${member.fullName}) is not registered in this system.` 
       });
     }
 
-    const vaProfile = matchingProfiles[0];
+    const vaProfile = selectWorkerProfile(matchingProfiles);
+    if (!vaProfile || vaProfile.status !== 'active') {
+      return res.status(401).json({ error: 'Access Denied: This Trello account is not uniquely linked to an active worker profile.' });
+    }
     
     // Find the corresponding system user
     const matchingUsers = await dbInstance.select().from(users).where(eq(users.id, vaProfile.userId)).limit(1);

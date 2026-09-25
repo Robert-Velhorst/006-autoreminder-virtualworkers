@@ -85,6 +85,7 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
   const assessments: ManagerAssessment[] = [];
   const interventions: ManagerIntervention[] = [];
   const sourceGaps = [...input.sourceGaps];
+  const executionCoverageComplete = input.executionCoverageComplete !== false;
   if (input.evidence.length > 1500)
     sourceGaps.push(
       "Evidence limit reached; source context was truncated for this assessment."
@@ -137,7 +138,7 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
           Math.max(5, step.minutes || 30),
           input
         ),
-        reason: card.stateReason || "This is the next open step.",
+        reason: step.blockReason || card.stateReason || "This is the next open step.",
         completionCriteria:
           kind === "draft"
             ? `A worker has reviewed the draft and explicitly sends or submits it.`
@@ -145,7 +146,7 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
               "Completion evidence is recorded in the linked work item.",
         evidenceIds: ev.map(e => e.id),
         notBefore: null,
-        blocked: false,
+        blocked: step.blocked === true,
         priority: card.priority,
         draft:
           kind === "draft"
@@ -195,7 +196,8 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
     );
     for (const action of actionByStep.values())
       action.blocked =
-        action.dependsOn.length > 0 || cardBlocked || !!card.waiting;
+        action.dependsOn.length > 0 || cardBlocked || !!card.waiting
+        || action.stepIds.some(stepId => card.steps.find(step => step.id === stepId)?.blocked === true);
 
     if (card.waiting) {
       const due =
@@ -363,6 +365,9 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
         now
       ) || Number(b.kind === "verify") - Number(a.kind === "verify")
   );
+  if (!executionCoverageComplete) {
+    for (const action of ordered) action.blocked = true;
+  }
   for (const assessment of assessments)
     assessment.actions = ordered.filter(a => a.cardId === assessment.cardId);
   const uniqueInterventions = [
@@ -371,6 +376,7 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
   return {
     version: 1,
     assessedAt: input.now,
+    executionCoverageComplete,
     assessments,
     actions: ordered,
     interventions: uniqueInterventions,

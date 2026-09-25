@@ -42,7 +42,7 @@ describe("worker manager response", () => {
 
     const result = toWorkerManagerSnapshot(snapshot);
 
-    expect(result).toMatchObject({ applied: false, planVersion: "active-plan-version", actions: [{ title: "Read source", minutes: { low: 5, likely: 10, high: 20 } }] });
+    expect(result).toMatchObject({ applied: false, planVersion: "active-plan-version", executionReady: false, actions: [{ title: "Read source", minutes: { low: 5, likely: 10, high: 20 } }] });
     expect(result).not.toHaveProperty("semanticReview");
     expect(result).not.toHaveProperty("assessments");
     expect(JSON.stringify(result)).not.toContain("runId");
@@ -59,6 +59,17 @@ describe("worker manager response", () => {
     expect(JSON.stringify(result)).not.toContain("private-source-fingerprint");
     expect(JSON.stringify(result)).not.toContain("chronology");
     expect(JSON.stringify(result)).not.toContain("calibrated");
+  });
+
+  it("projects complete coverage as a single worker-safe ready state", () => {
+    const snapshot = {
+      version: 1 as const,
+      assessedAt: "2026-09-25T09:00:00.000Z",
+      executionCoverageComplete: true,
+      assessments: [], actions: [], interventions: [], sourceGaps: [], runId: 1, trigger: "manual",
+      cards: [], evidence: [], changes: [], policy: { enabled: true, intervalMinutes: 5, mode: "shadow" as const }, nextCheckAt: null,
+    };
+    expect(toWorkerManagerSnapshot(snapshot).executionReady).toBe(true);
   });
 
   it("strips internal queue and error details from the worker status endpoint", () => {

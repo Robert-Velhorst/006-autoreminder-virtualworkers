@@ -17,6 +17,7 @@ function toWorkerPlanImpact(impact: NonNullable<ManagerSnapshot["proposal"]>["pl
 
 export function toWorkerManagerSnapshot(snapshot: ManagerSnapshot): WorkerManagerSnapshot {
   return {
+    executionReady: snapshot.executionCoverageComplete === true,
     actions: snapshot.actions.map(({ id, cardId, title, where, kind, reason, blocked, minutes }) => ({
       id, cardId, title, where, kind, reason, blocked,
       minutes: { low: minutes.low, likely: minutes.likely, high: minutes.high },

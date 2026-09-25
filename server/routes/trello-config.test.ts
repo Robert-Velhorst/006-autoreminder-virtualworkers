@@ -103,7 +103,7 @@ describe('Trello Config Routes', () => {
       const query: any = {
         from: vi.fn(),
         where: vi.fn(),
-        limit: vi.fn().mockResolvedValue([{ trelloMemberId: 'member-2' }]),
+        orderBy: vi.fn().mockResolvedValue([{ trelloMemberId: 'member-2', status: 'active' }]),
       };
       query.from.mockReturnValue(query);
       query.where.mockReturnValue(query);
@@ -129,6 +129,36 @@ describe('Trello Config Routes', () => {
         .expect(403, { error: 'The checklist item does not belong to the selected Trello card' });
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('blocks worker Trello writes when active profile identity is ambiguous', async () => {
+      const query: any = {
+        from: vi.fn(),
+        where: vi.fn(),
+        orderBy: vi.fn().mockResolvedValue([
+          { trelloMemberId: 'member-2', status: 'active' },
+          { trelloMemberId: 'member-3', status: 'active' },
+        ]),
+      };
+      query.from.mockReturnValue(query);
+      query.where.mockReturnValue(query);
+      mocks.getDb.mockResolvedValue({ select: vi.fn(() => query) });
+
+      const workerApp = express();
+      workerApp.use(express.json());
+      workerApp.use((req, _res, next) => {
+        (req as any).user = { id: 2, openId: 'worker-2', role: 'worker' };
+        next();
+      });
+      workerApp.use('/api/trello', trelloConfigRoutes);
+      const fetchMock = vi.fn();
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await request(workerApp)
+        .put('/api/trello/tasks/task-123/complete')
+        .send({ isCompleted: true, cardId: 'assigned-card', checklistId: 'list-123', checkItemId: 'item-123' })
+        .expect(409, { error: 'Your worker profile is ambiguous. Ask an administrator to resolve it before updating Trello.' });
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 

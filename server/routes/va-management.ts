@@ -35,6 +35,8 @@ import {
   saveBriefingSettings,
 } from '../briefingSettings';
 import { mapWithConcurrency } from '../utils/concurrency';
+import { selectWorkerProfile } from '../workerOperatorContext';
+import { isManagerPilotWorker } from '../aptlssManagerPilot';
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -51,6 +53,23 @@ router.use((req, res, next) => {
 });
 
 type Database = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+
+async function getWorkerProfileForAccount(db: Database, userId: number) {
+  const profiles = await db.select().from(vaProfiles).where(eq(vaProfiles.userId, userId)).orderBy(vaProfiles.id);
+  return { profiles, profile: selectWorkerProfile(profiles) };
+}
+
+function ambiguousWorkerProfileResponse(profiles: unknown[]) {
+  return profiles.length > 0
+    ? { status: 409, body: { error: 'Your worker profile is ambiguous. Ask an administrator to resolve it before continuing.' } }
+    : null;
+}
+
+function pilotCompletionResponse(userId: number, res: import('express').Response) {
+  if (!isManagerPilotWorker(userId)) return false;
+  res.status(409).json({ error: 'This older task action cannot close APTLSS pilot work. The task remains open; ask the founder to review the completion.' });
+  return true;
+}
 
 async function getFounderWorker(db: Database, founderId: number, rawVaId: unknown) {
   const vaId = Number(rawVaId);
@@ -1827,14 +1846,14 @@ router.get('/worker/profile', async (req: any, res) => {
       return res.status(503).json({ error: 'Database not available' });
     }
     
-    // Find the VA profile linked to this user
-    const profile = await db.select().from(vaProfiles).where(eq(vaProfiles.userId, user.id)).limit(1);
-    
-    if (profile.length === 0) {
+    const { profiles, profile } = await getWorkerProfileForAccount(db, user.id);
+    if (!profile) {
+      const ambiguous = ambiguousWorkerProfileResponse(profiles);
+      if (ambiguous) return res.status(ambiguous.status).json(ambiguous.body);
       return res.status(404).json({ error: 'Worker profile not found' });
     }
 
-    res.json(profile[0]);
+    res.json(profile);
   } catch (error) {
     console.error('Error fetching worker profile:', error);
     res.status(500).json({ error: 'Failed to fetch profile' });
@@ -1854,16 +1873,16 @@ router.get('/worker/tasks', async (req: any, res) => {
       return res.status(503).json({ error: 'Database not available' });
     }
     
-    // Find the VA profile linked to this user
-    const profile = await db.select().from(vaProfiles).where(eq(vaProfiles.userId, user.id)).limit(1);
-    
-    if (profile.length === 0) {
+    const { profiles, profile } = await getWorkerProfileForAccount(db, user.id);
+    if (!profile) {
+      const ambiguous = ambiguousWorkerProfileResponse(profiles);
+      if (ambiguous) return res.status(ambiguous.status).json(ambiguous.body);
       // User is not a worker, return empty tasks
       return res.json({ tasks: [] });
     }
     
-    const vaId = profile[0].id;
-    const trelloMemberId = profile[0].trelloMemberId;
+    const vaId = profile.id;
+    const trelloMemberId = profile.trelloMemberId;
 
     let tasks: any[] = [];
 
@@ -2049,14 +2068,16 @@ router.post('/worker/tasks/:taskId/complete', async (req: any, res) => {
       return res.status(503).json({ error: 'Database not available' });
     }
     
-    // Find the VA profile linked to this user
-    const profile = await db.select().from(vaProfiles).where(eq(vaProfiles.userId, user.id)).limit(1);
-    
-    if (profile.length === 0) {
+    const { profiles, profile } = await getWorkerProfileForAccount(db, user.id);
+    if (!profile) {
+      const ambiguous = ambiguousWorkerProfileResponse(profiles);
+      if (ambiguous) return res.status(ambiguous.status).json(ambiguous.body);
       return res.status(403).json({ error: 'Not a worker' });
     }
+
+    if (pilotCompletionResponse(user.id, res)) return;
     
-    const vaId = profile[0].id;
+    const vaId = profile.id;
     
     // Update the assignment status
     const updateResult = await db.update(taskAssignments)
@@ -2097,14 +2118,16 @@ router.post('/worker/tasks/:taskId/review', async (req: any, res) => {
       return res.status(503).json({ error: 'Database not available' });
     }
     
-    // Find the VA profile linked to this user
-    const profile = await db.select().from(vaProfiles).where(eq(vaProfiles.userId, user.id)).limit(1);
-    
-    if (profile.length === 0) {
+    const { profiles, profile } = await getWorkerProfileForAccount(db, user.id);
+    if (!profile) {
+      const ambiguous = ambiguousWorkerProfileResponse(profiles);
+      if (ambiguous) return res.status(ambiguous.status).json(ambiguous.body);
       return res.status(403).json({ error: 'Not a worker' });
     }
+
+    if (pilotCompletionResponse(user.id, res)) return;
     
-    const vaId = profile[0].id;
+    const vaId = profile.id;
     
     // Update the assignment status to completed
     const updateResult = await db.update(taskAssignments)

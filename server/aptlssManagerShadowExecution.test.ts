@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getTableName, type SQL } from "drizzle-orm";
 import { MySqlDialect } from "drizzle-orm/mysql-core";
-import { appSettings, aptlssManagerRuns, aptlssManagerState, aptlssManagerTrialEvents, aptlssPlans, dailyPlans } from "../drizzle/schema";
+import { appSettings, aptlssManagerRuns, aptlssManagerState, aptlssManagerTrialEvents, aptlssPlans, aptlssSteps, dailyPlans, taskAssignments, vaProfiles } from "../drizzle/schema";
 import type { WorkerOperatorContext } from "./workerOperatorContext";
 
 const dependencies = vi.hoisted(() => ({ getDb: vi.fn(), model: vi.fn(), worker: vi.fn(), emit: vi.fn() }));
@@ -18,7 +18,7 @@ import { managerSemanticBackoff } from "./aptlssManagerSemanticRuntime";
 
 const now = new Date("2026-09-04T08:00:00Z");
 const worker: WorkerOperatorContext = {
-  userId: 2, profileId: null, founderId: null, trelloMemberId: null,
+  userId: 2, profileId: 23, founderId: 1, trelloMemberId: null,
   displayName: "Joyce", founderName: "Robert", timezone: "Europe/Amsterdam",
   workStartTime: "09:00", workEndTime: "18:00", workingDays: [1, 2, 3, 4, 5], breaks: [],
 };
@@ -52,6 +52,8 @@ function storage() {
             : table === appSettings ? (runtime ? [runtime] : [])
             : table === dailyPlans ? [canonicalPlan]
             : table === aptlssPlans ? [{ vaId: 2, cardId: "owned-card", cardName: "Owned work", updatedAt: now, generatedAt: now }]
+            : table === vaProfiles ? [{ id: 23, founderId: 1, status: "active" }]
+            : table === taskAssignments || table === aptlssSteps ? []
             : [];
           return Promise.resolve(rows).then(resolve, reject);
         },

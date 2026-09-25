@@ -29,6 +29,7 @@ import { aptlssManagerQueue } from "../drizzle/aptlssManagerQueueSchema";
 import { finishManagerSemanticReview, reserveManagerSemanticReview, managerSemanticRetryReady } from "./aptlssManagerSemanticRuntime";
 import { assertManagerPilotWorker, assertManagerPlanMutationAllowed, managerPilotEnabled } from "./aptlssManagerPilot";
 import { aggregateManagerTimeSamples } from "./aptlssManagerTiming";
+import { assessManagerAssignmentCoverage, readManagerAssignmentState } from "./aptlssManagerAssignments";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 export const DEFAULT_MANAGER_POLICY: ManagerPolicy = { enabled: true, intervalMinutes: 5, mode: "shadow" };
@@ -69,7 +70,8 @@ async function requireDb() {
 /** Only explicit source links are joined. Text similarity alone never grants data access. */
 export async function collectManagerInput(db: Db, vaId: number, now: Date): Promise<ManagerInput> {
   assertManagerPilotWorker(vaId);
-  const [plans, states, scores, steps, waiting, times, mails, updates, outcomes, cached] = await Promise.all([
+  const [assignmentState, plans, states, scores, steps, waiting, times, mails, updates, outcomes, cached] = await Promise.all([
+    readManagerAssignmentState(db, vaId),
     db.select().from(aptlssPlans).where(eq(aptlssPlans.vaId, vaId)).orderBy(aptlssPlans.cardId).limit(LIMIT + 1),
     db.select().from(cardStates).where(eq(cardStates.vaId, vaId)).orderBy(cardStates.cardId).limit(LIMIT + 1),
     db.select().from(priorityScores).where(eq(priorityScores.vaId, vaId)).orderBy(priorityScores.cardId).limit(LIMIT + 1),
@@ -82,6 +84,11 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
     db.select().from(trelloCachedCards).where(eq(trelloCachedCards.userId, vaId)).orderBy(desc(trelloCachedCards.cachedAt)).limit(1001),
   ]);
   const gaps: string[] = [];
+  const assignmentCoverage = assessManagerAssignmentCoverage(assignmentState, plans, steps);
+  if (!assignmentState.profile) gaps.push("The worker assignment source is unavailable or ambiguous. Restore one active worker profile before trusting full coverage.");
+  if (assignmentState.truncated) gaps.push("The active assignment list exceeds this cycle's safe capacity; not all assigned work was checked.");
+  if (assignmentCoverage.missingPlanCount) gaps.push(`${assignmentCoverage.missingPlanCount} active assignment(s) do not have a matching APTLSS work plan.`);
+  if (assignmentCoverage.missingStepCount) gaps.push(`${assignmentCoverage.missingStepCount} active checklist assignment(s) do not have a matching APTLSS step.`);
   if (plans.length > LIMIT || states.length > LIMIT || scores.length > LIMIT || steps.length > 5000 || waiting.length > LIMIT || times.length > 5000 || mails.length > 500 || updates.length > 500 || outcomes.length > 500 || cached.length > 1000) {
     gaps.push("Work context exceeds this cycle's bounded capacity; some records are not assessed. Narrow assignments before trusting full coverage.");
   }
@@ -126,11 +133,21 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
     const wait = waiting.find(w => w.cardId === p.cardId);
     return {
       id: p.cardId, name: managerSafeText(p.cardName, 512), url: safeUrl(p.cardUrl), board: managerSafeText(p.boardName, 256), list: managerSafeText(p.listName, 256),
-      state: state?.state ?? "NEW_UNTRIAGED", stateReason: managerSafeText(state?.stateReason),
+      state: assignmentCoverage.blockedCardIds.has(p.cardId) ? "BLOCKED" : state?.state ?? "NEW_UNTRIAGED",
+      stateReason: assignmentCoverage.blockedCardIds.has(p.cardId)
+        ? "This assigned task is marked blocked. Confirm its current status before continuing."
+        : managerSafeText(state?.stateReason),
       dueAt: iso(typeof context.due === "string" ? context.due : typeof plan.due === "string" ? plan.due : null),
       overdue: state?.isOverdue ?? false, priority: scoreMap.get(p.cardId)?.score ?? 0,
       updatedAt: iso(typeof context.dateLastActivity === "string" ? context.dateLastActivity : p.updatedAt)!,
-      steps: steps.filter(s => s.cardId === p.cardId).map(s => ({ id: s.id, title: managerSafeText(s.title, 1024), category: s.category, minutes: s.estimatedMinutes, complete: s.status === "complete", requiresDecision: s.requiresRobert, decisionRejected: rejectedStepIds.has(s.id), dependsOn: normalizeManagerDependencies(p.cardId, [...json<string[]>(s.dependsOnCards, []).filter(x => typeof x === "string"), ...(s.blockedBy ? [s.blockedBy] : [])], steps), completionCriteria: s.completionCriteria ? managerSafeText(s.completionCriteria) : null })),
+      steps: steps.filter(s => s.cardId === p.cardId).map(s => {
+        const blocked = assignmentCoverage.blockedStepIds.has(s.id);
+        return { id: s.id, title: managerSafeText(s.title, 1024), category: s.category, minutes: s.estimatedMinutes,
+          complete: s.status === "complete", requiresDecision: s.requiresRobert, decisionRejected: rejectedStepIds.has(s.id),
+          blocked, ...(blocked ? { blockReason: "This assigned checklist step is marked blocked. Resolve or update the assignment before continuing." } : {}),
+          dependsOn: normalizeManagerDependencies(p.cardId, [...json<string[]>(s.dependsOnCards, []).filter(x => typeof x === "string"), ...(s.blockedBy ? [s.blockedBy] : [])], steps),
+          completionCriteria: s.completionCriteria ? managerSafeText(s.completionCriteria) : null };
+      }),
       waiting: wait ? { reason: managerSafeText(wait.rawReason), action: managerSafeText(wait.nextAction), followUpAt: iso(wait.followUpAt), category: wait.category, confidence: wait.confidenceScore } : null,
     };
   });
@@ -205,10 +222,10 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
   }
   const graphConflicts = [...new Map(openConflictLinks.map(({conflict:c,cardId}) => [`${c.id}:${cardId}`, { id: `graph:${c.id}`, cardId, evidenceIds: [`evidence:${c.sourceEvidenceId}:${cardId}`, `evidence:${c.assertedEvidenceId}:${cardId}`], status: c.status, severity: "urgent", explanation: c.resolution ?? "Source and worker statements disagree; review the retained evidence." }])).values()];
   if (openConflictLinks.length > 1500) for (const cardId of ids) graphConflicts.push({ id: `conflict-capacity:${cardId}`, cardId, evidenceIds: [], status: "needs_verification", severity: "urgent", explanation: "Open conflict coverage is incomplete. Verify this task's unresolved source conflicts before continuing." });
-  const executionCoverageComplete = cards.length > 0 && plans.length <= LIMIT && states.length <= LIMIT && scores.length <= LIMIT
+  const executionCoverageComplete = cards.length > 0 && assignmentCoverage.complete && plans.length <= LIMIT && states.length <= LIMIT && scores.length <= LIMIT
     && steps.length <= 5000 && waiting.length <= LIMIT && mails.length <= 500 && updates.length <= 500
-    && outcomes.length <= 500 && linked.length <= EVIDENCE_LIMIT && graph.length <= EVIDENCE_LIMIT
-    && messages.length <= EVIDENCE_LIMIT && revisions.length <= 5000 && openConflictLinks.length <= 1500;
+    && outcomes.length <= 500 && cached.length <= 1000 && linked.length <= EVIDENCE_LIMIT && graph.length <= EVIDENCE_LIMIT
+    && messages.length <= EVIDENCE_LIMIT && revisions.length <= 5000 && conflicts.length <= 1500 && openConflictLinks.length <= 1500;
   if (!executionCoverageComplete) gaps.push("Automatic plan changes are paused because execution context coverage is incomplete.");
   const correctionRows = await db.select().from(aptlssManagerCorrections).where(eq(aptlssManagerCorrections.vaId, vaId)).orderBy(aptlssManagerCorrections.id);
   const guidance: NonNullable<ManagerInput["learning"]>["guidance"] = [];
@@ -226,6 +243,7 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
     for (const target of selected.withheldTargets) withheld.push({ cardId: card.id, ...target, actionKind });
   }
   return { now: now.toISOString(), cards, evidence, timeSamples: timing.samples, sourceGaps: gaps, graphConflicts, timeSummary: timing.timeSummary, executionCoverageComplete,
+    assignmentFingerprint: assignmentState.fingerprint,
     learning: { stateHash: hash(learningHashes), guidance, withheld } };
 }
 
@@ -301,6 +319,10 @@ export function managerInputFingerprint(input: ManagerInput, scope: unknown) {
   return { sourceHash, inputHash: hash({ sourceHash, timeSignals, scope }) };
 }
 
+export function managerCoverageMatchesSnapshot(snapshot: Pick<ManagerSnapshot, "executionCoverageComplete"> | null | undefined, coverage: boolean | undefined) {
+  return !!snapshot && snapshot.executionCoverageComplete === coverage;
+}
+
 async function executionScope(db: Db, vaId: number, now: Date) {
   const worker = await resolveWorkerOperatorContextById(vaId, db);
   const dateKey = dateKeyInTimeZone(now, worker.timezone);
@@ -328,7 +350,7 @@ async function executeManager(vaId: number, trigger: string, lease?: ManagerQueu
   const manualRefresh = trigger === "manual" || trigger === "founder_review";
   const semanticDue = !semanticReview || (semanticReview.provider ?? "openai-api") !== managerSemanticProvider() || (managerSemanticRetryReady(semanticReview, manualRefresh, now.getTime())
     && (!semanticReview.success || manualRefresh || semanticReview.sourceHash !== fingerprint.sourceHash));
-  if (current.snapshot && current.state?.inputHash === fingerprint.inputHash && !semanticDue) {
+  if (managerCoverageMatchesSnapshot(current.snapshot, input.executionCoverageComplete) && current.state?.inputHash === fingerprint.inputHash && !semanticDue) {
     await db.transaction(async tx => {
       await tx.select({ id: users.id }).from(users).where(eq(users.id, vaId)).for("update");
       await assertManagerExecutionAllowed(tx as unknown as Db, vaId);
@@ -382,16 +404,17 @@ async function executeManager(vaId: number, trigger: string, lease?: ManagerQueu
     const latestState = await stateAndSnapshot(tx as unknown as Db, vaId);
     // An actual retry outcome must replace the cached failure. A concurrent caller
     // without a reservation must not overwrite a completed semantic assessment.
-    if (latestState.state?.inputHash === fingerprint.inputHash && latestState.snapshot && !semanticAttempt) return latestState.snapshot;
+    if (latestState.state?.inputHash === fingerprint.inputHash && managerCoverageMatchesSnapshot(latestState.snapshot, input.executionCoverageComplete) && !semanticAttempt) return latestState.snapshot!;
     if (semanticAttempt) semanticReview = await finishManagerSemanticReview(tx as unknown as Db, vaId, semanticAttempt.runtime, semanticAttempt.success, semanticAttempt.failureKind, semanticAttempt.attempts);
     const [latestPlan] = await tx.select().from(dailyPlans).where(and(eq(dailyPlans.vaId, vaId), eq(dailyPlans.dateKey, dateKey))).for("update");
     if (managerPlanVersion(latestPlan?.scheduleJson) !== scope.fingerprintScope.planVersion) throw new Error("Source context changed during assessment. A fresh cycle is required.");
     const existing = json<OperatorDailyPlanPayload | null>(latestPlan?.scheduleJson, null);
-    const { plan, changes } = reconcileManagerPlan({ result, cards: input.cards, existing: existing?.version === 2 ? existing : null, worker, now, activeTimer: timer ? { cardId: timer.cardId, planBlockId: timer.planBlockId } : null });
+    const reconciled = input.executionCoverageComplete === false ? null : reconcileManagerPlan({ result, cards: input.cards, existing: existing?.version === 2 ? existing : null, worker, now, activeTimer: timer ? { cardId: timer.cardId, planBlockId: timer.planBlockId } : null });
     const activeAllowed = false;
     const policy: ManagerPolicy = { ...latestState.policy, mode: activeAllowed ? "active" : "shadow" };
-    const snapshot: ManagerSnapshot = { ...result, semanticReview, runId: 0, trigger, cards: input.cards.map(({ id, name, url, board, list }) => ({ id, name, url, board, list })), evidence: input.evidence, changes, policy, nextCheckAt: policy.enabled ? new Date(now.getTime() + policy.intervalMinutes * 60_000).toISOString() : null,
-      proposal: plan, planVersion: scope.fingerprintScope.planVersion, applied: activeAllowed && (changes.length > 0 || !latestPlan), implementationDigest: scope.fingerprintScope.implementationDigest };
+    const snapshot: ManagerSnapshot = { ...result, semanticReview, runId: 0, trigger, cards: input.cards.map(({ id, name, url, board, list }) => ({ id, name, url, board, list })), evidence: input.evidence, changes: reconciled?.changes ?? [], policy, nextCheckAt: policy.enabled ? new Date(now.getTime() + policy.intervalMinutes * 60_000).toISOString() : null,
+      proposal: reconciled?.plan, planVersion: scope.fingerprintScope.planVersion, assignmentFingerprint: input.assignmentFingerprint,
+      applied: activeAllowed && !!reconciled && (reconciled.changes.length > 0 || !latestPlan), implementationDigest: scope.fingerprintScope.implementationDigest };
     snapshot.proposalHash = managerReviewProposalIdentity(snapshot);
     const completedSamples = input.timeSamples.filter(s => s.completed && !s.interrupted && s.startedAt);
     // No timing observations means there is nothing to calibrate. Avoid loading
@@ -408,11 +431,13 @@ async function executeManager(vaId: number, trigger: string, lease?: ManagerQueu
     snapshot.timing = { samples: errors.length, withinRange, meanAbsoluteErrorMinutes: errors.length ? errors.reduce((a,b) => a+b,0)/errors.length : null, waitingMinutes: input.timeSummary?.waitingMinutes ?? 0, interruptedMinutes: input.timeSummary?.interruptedMinutes ?? 0 };
     if (Buffer.byteLength(JSON.stringify(snapshot)) > 4 * 1024 * 1024) throw new Error("The manager context exceeds safe storage capacity. Narrow assigned work.");
     if (lease) await assertManagerQueueLease(tx, lease);
-    const [created] = await tx.insert(aptlssManagerRuns).values({ vaId, inputHash: fingerprint.inputHash, trigger, snapshotJson: JSON.stringify(snapshot), createdAt: now, mode: policy.mode, proposalHash: snapshot.proposalHash, previousPlanJson: snapshot.applied ? latestPlan?.scheduleJson ?? null : null, appliedPlanHash: snapshot.applied ? managerPlanVersion(JSON.stringify(plan)) : null }).$returningId();
+    const appliedPlan = snapshot.applied ? reconciled?.plan : undefined;
+    const [created] = await tx.insert(aptlssManagerRuns).values({ vaId, inputHash: fingerprint.inputHash, trigger, snapshotJson: JSON.stringify(snapshot), createdAt: now, mode: policy.mode, proposalHash: snapshot.proposalHash, previousPlanJson: snapshot.applied ? latestPlan?.scheduleJson ?? null : null, appliedPlanHash: appliedPlan ? managerPlanVersion(JSON.stringify(appliedPlan)) : null }).$returningId();
     snapshot.runId = created.id;
-    if (snapshot.applied) {
+    if (snapshot.applied && appliedPlan) {
       assertManagerPlanMutationAllowed(vaId);
-      const values = { vaId, dateKey, scheduleJson: JSON.stringify(plan), dailySummary: changes.join(" ").slice(0, 4000), topPriority: plan.blocks[0]?.cardName ?? null, totalScheduledMinutes: plan.planHealth.scheduledMinutes, robertItemsCount: plan.robertItems.length, autoGenerated: true, generatedAt: now };
+      const planToApply = appliedPlan!;
+      const values = { vaId, dateKey, scheduleJson: JSON.stringify(planToApply), dailySummary: reconciled!.changes.join(" ").slice(0, 4000), topPriority: planToApply.blocks[0]?.cardName ?? null, totalScheduledMinutes: planToApply.planHealth.scheduledMinutes, robertItemsCount: planToApply.robertItems.length, autoGenerated: true, generatedAt: now };
       await tx.insert(dailyPlans).values(values).onDuplicateKeyUpdate({ set: values });
     }
     await tx.insert(aptlssManagerState).values({ vaId, ...policy, ...fingerprint, checkedAt: now, lastSuccessfulAt: now, lastError: null }).onDuplicateKeyUpdate({ set: { ...fingerprint, mode: policy.mode, checkedAt: now, lastSuccessfulAt: now, lastError: null } });

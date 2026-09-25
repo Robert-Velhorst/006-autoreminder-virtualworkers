@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ManagerInput } from "../shared/aptlssManager";
-import { managerInputFingerprint, managerSafeText } from "./aptlssManagerService";
+import { managerCoverageMatchesSnapshot, managerInputFingerprint, managerSafeText } from "./aptlssManagerService";
 
 const input: ManagerInput = {
   now: "2026-09-04T10:00:00Z",
@@ -28,5 +28,12 @@ describe("APTLSS manager service safeguards", () => {
     const first = managerInputFingerprint(input, { worker: 1 });
     expect(managerInputFingerprint({ ...input, evidence:[{...input.evidence[0],text:"Changed"}] }, {worker:1}).sourceHash).not.toBe(first.sourceHash);
     expect(managerInputFingerprint(input, { worker: 2 }).sourceHash).not.toBe(first.sourceHash);
+  });
+
+  it("reassesses legacy snapshots until their coverage is explicitly recorded", () => {
+    expect(managerCoverageMatchesSnapshot({ executionCoverageComplete: undefined }, true)).toBe(false);
+    expect(managerCoverageMatchesSnapshot({ executionCoverageComplete: undefined }, false)).toBe(false);
+    expect(managerCoverageMatchesSnapshot({ executionCoverageComplete: false }, false)).toBe(true);
+    expect(managerCoverageMatchesSnapshot({ executionCoverageComplete: true }, true)).toBe(true);
   });
 });

@@ -31,9 +31,12 @@ import { parseDateKey } from "../utils/date-only";
 import { calculateCompliancePercentage } from "../complianceMetrics";
 import { dateKeyInTimeZone, dateWindowInTimeZone } from "../../shared/workerTime";
 import { resolveWorkerOperatorContext } from "../workerOperatorContext";
-import { canStartTimerForCard, managerIntervenesOnCard, timerExecutionBlockReason } from "../timerAccess";
+import { canStartTimerForCard, managerExecutionCoverageComplete, managerIntervenesOnCard, timerExecutionBlockReason } from "../timerAccess";
 import { isManagerPilotWorker } from "../aptlssManagerPilot";
 import { enqueueManagerTask } from "../aptlssManagerQueue";
+import { WORKER_EXECUTION_HOLD_MESSAGE } from "../../shared/aptlssManager";
+import { readManagerAssignmentState } from "../aptlssManagerAssignments";
+import { selectWorkerProfile } from "../workerOperatorContext";
 
 // ─── Payment Cycles Router ──────────────────────────────────────────────────
 export const paymentRouter = router({
@@ -511,6 +514,16 @@ export const timerRouter = router({
         // Serialize all timer transitions for this account before checking mutable work state.
         const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, vaId)).for("update");
         if (!account) throw new TRPCError({ code: "UNAUTHORIZED", message: "Account no longer exists" });
+        const profiles = ctx.user.role === "worker"
+          ? await tx.select({ founderId: vaProfiles.founderId, status: vaProfiles.status }).from(vaProfiles)
+            .where(eq(vaProfiles.userId, vaId)).orderBy(vaProfiles.id)
+          : [];
+        const profile = selectWorkerProfile(profiles);
+        if (ctx.user.role === "worker" && !profile) {
+          throw new TRPCError({ code: "PRECONDITION_FAILED", message: profiles.length
+            ? "Your worker profile is ambiguous. Ask an administrator to resolve it before tracking time."
+            : "A worker profile is required before tracking time." });
+        }
         const [workerPlan] = ctx.user.role === "worker"
           ? await tx.select().from(aptlssPlans)
             .where(and(eq(aptlssPlans.vaId, vaId), eq(aptlssPlans.cardId, input.cardId)))
@@ -529,21 +542,21 @@ export const timerRouter = router({
           if (isManagerPilotWorker(vaId)) {
             const [run] = await tx.select({ snapshotJson: aptlssManagerRuns.snapshotJson }).from(aptlssManagerRuns)
               .where(eq(aptlssManagerRuns.vaId, vaId)).orderBy(desc(aptlssManagerRuns.id)).limit(1);
-            if (run) {
-              try {
-                hasManagerIntervention = managerIntervenesOnCard(run.snapshotJson, input.cardId);
-              } catch {
-                throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The latest APTLSS review cannot be verified; reassess before starting work" });
+            try {
+              const assignmentState = await readManagerAssignmentState(tx as unknown as NonNullable<Awaited<ReturnType<typeof getDb>>>, vaId);
+              if (!assignmentState.complete || !run || !managerExecutionCoverageComplete(run.snapshotJson, assignmentState.fingerprint)) {
+                throw new Error("Work list coverage is incomplete");
               }
+              hasManagerIntervention = managerIntervenesOnCard(run.snapshotJson, input.cardId);
+            } catch {
+              throw new TRPCError({ code: "PRECONDITION_FAILED", message: WORKER_EXECUTION_HOLD_MESSAGE });
             }
           }
           const reason = timerExecutionBlockReason({ listName: workerPlan.listName,
             hasActiveWaitingReason: Boolean(waiting), actionability: cardState?.state ?? null, hasManagerIntervention });
           if (reason) throw new TRPCError({ code: "PRECONDITION_FAILED", message: reason });
         }
-        const [profile] = await tx.select({ founderId: vaProfiles.founderId }).from(vaProfiles)
-          .where(eq(vaProfiles.userId, vaId)).limit(1);
-        const founderId = profile?.founderId ?? vaId;
+        const founderId = ctx.user.role === "worker" ? profile!.founderId : vaId;
         const running = await tx.select().from(timeEntries).where(
           and(eq(timeEntries.vaId, vaId), isNull(timeEntries.endTime))
         ).orderBy(desc(timeEntries.startTime));

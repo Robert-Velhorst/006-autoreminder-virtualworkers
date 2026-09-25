@@ -5,8 +5,11 @@ import { timeEntries, vaProfiles, taskAssignments, atisCards, aptlssPlans, aptls
 import { eq, and, desc, gte, lte, sql } from 'drizzle-orm';
 import { requireAuthenticated } from '../middleware/auth';
 import { isManagerPilotWorker } from '../aptlssManagerPilot';
-import { managerIntervenesOnCard, timerExecutionBlockReason } from '../timerAccess';
+import { managerExecutionCoverageComplete, managerIntervenesOnCard, timerExecutionBlockReason } from '../timerAccess';
 import { enqueueManagerTask } from '../aptlssManagerQueue';
+import { WORKER_EXECUTION_HOLD_MESSAGE } from '../../shared/aptlssManager';
+import { readManagerAssignmentState } from '../aptlssManagerAssignments';
+import { selectWorkerProfile } from '../workerOperatorContext';
 
 const router = Router();
 router.use('/time-tracking', requireAuthenticated);
@@ -117,10 +120,15 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
     const outcome = await db.transaction(async tx => {
       const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, user.id)).for('update');
       if (!account) return { status: 401, body: { error: 'Account no longer exists' } };
-      const [profile] = user.role === 'worker'
-        ? await tx.select({ id: vaProfiles.id, founderId: vaProfiles.founderId, trelloMemberId: vaProfiles.trelloMemberId })
-          .from(vaProfiles).where(eq(vaProfiles.userId, user.id)).limit(1)
+      const profiles = user.role === 'worker'
+        ? await tx.select({ id: vaProfiles.id, founderId: vaProfiles.founderId,
+          trelloMemberId: vaProfiles.trelloMemberId, status: vaProfiles.status })
+          .from(vaProfiles).where(eq(vaProfiles.userId, user.id)).orderBy(vaProfiles.id)
         : [];
+      const profile = selectWorkerProfile(profiles);
+      if (user.role === 'worker' && profiles.length > 0 && !profile) {
+        return { status: 403, body: { error: 'Your worker profile is ambiguous. Ask an administrator to resolve it before tracking time.' } };
+      }
       if (user.role === 'worker' && isManagerPilotWorker(user.id)) {
         if (!profile) return { status: 403, body: { error: 'Worker profile is required for this task' } };
         const cardId = taskId.split(':')[0];
@@ -146,9 +154,14 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
         const [run] = await tx.select({ snapshotJson: aptlssManagerRuns.snapshotJson }).from(aptlssManagerRuns)
           .where(eq(aptlssManagerRuns.vaId, user.id)).orderBy(desc(aptlssManagerRuns.id)).limit(1);
         let intervention = false;
-        if (run) {
-          try { intervention = managerIntervenesOnCard(run.snapshotJson, cardId); }
-          catch { return { status: 409, body: { error: 'The latest APTLSS review cannot be verified; reassess before starting work' } }; }
+        try {
+          const assignmentState = await readManagerAssignmentState(tx as unknown as NonNullable<Awaited<ReturnType<typeof getDb>>>, user.id);
+          if (!assignmentState.complete || !run || !managerExecutionCoverageComplete(run.snapshotJson, assignmentState.fingerprint)) {
+            return { status: 409, body: { error: WORKER_EXECUTION_HOLD_MESSAGE } };
+          }
+          intervention = managerIntervenesOnCard(run.snapshotJson, cardId);
+        } catch {
+          return { status: 409, body: { error: WORKER_EXECUTION_HOLD_MESSAGE } };
         }
         const reason = timerExecutionBlockReason({ listName: plan?.listName ?? card?.listName ?? '',
           hasActiveWaitingReason: Boolean(waiting) || assignment?.status === 'blocked',

@@ -76,6 +76,14 @@ const sample = (
 });
 
 describe("assessManagerContext", () => {
+  it("withholds every executable action when collection explicitly reports incomplete work coverage", () => {
+    const result = assessManagerContext(input({ executionCoverageComplete: false }));
+
+    expect(result.executionCoverageComplete).toBe(false);
+    expect(result.actions.length).toBeGreaterThan(0);
+    expect(result.actions.every(action => action.blocked)).toBe(true);
+  });
+
   it("returns deterministic chronological open work without mutating the input", () => {
     const data = input({
       cards: [

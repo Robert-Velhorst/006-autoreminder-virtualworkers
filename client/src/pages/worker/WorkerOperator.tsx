@@ -49,7 +49,7 @@ import { Switch } from "@/components/ui/switch";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { getWorkLaneRank } from "@shared/workLanePriority";
 import { orderWorkerCards, selectManagerPrimary, selectTodayQueue, workerCardIsWaiting } from "@shared/workerTodayGuidance";
-import { managerStatusQueryOptions } from "@/lib/managerPilotAvailability";
+import { managerExecutionCoverageReady, managerStatusQueryOptions } from "@/lib/managerPilotAvailability";
 import { dateKeyInTimeZone, formatWorkerDate } from "@shared/workerTime";
 import { assessWorkerSourceChecks } from "@shared/workerSourceChecks";
 import { describeWorkerIntegrationSync } from "@shared/workerIntegrationStatus";
@@ -326,7 +326,9 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
     if (refreshed && refreshed !== selected) setSelected(refreshed);
   }, [cards, selected]);
   const primary = selectManagerPrimary(managerQuery.data?.snapshot);
+  const managerCoverageReady = managerExecutionCoverageReady(managerQuery.error, managerQuery.data?.snapshot?.executionReady);
   const { related, first: now, next } = selectTodayQueue(cards, primary?.cardId ?? null);
+  const visibleNextCards = managerCoverageReady ? next : cards.slice(0, 3);
   const openDecisions = cards.reduce((total, card) => total + card.steps.filter((step) => step.requiresRobert && step.status !== "complete").length, 0);
   const plan = planQuery.data?.schedule;
   const planImpact = managerQuery.data?.snapshot?.proposal?.planningImpact;
@@ -339,7 +341,7 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
     applied: managerQuery.data?.snapshot?.applied,
   });
   const isWaiting = workerCardIsWaiting;
-  const canStart = (card: OperatorCard) => !(primary?.kind === "verification" && primary.cardId === card.cardId) && !isWaiting(card) && !timerQuery.isLoading && !timerQuery.error && !startTimer.isPending && timerQuery.data?.cardId !== card.cardId;
+  const canStart = (card: OperatorCard) => managerCoverageReady && !(primary?.kind === "verification" && primary.cardId === card.cardId) && !isWaiting(card) && !timerQuery.isLoading && !timerQuery.error && !startTimer.isPending && timerQuery.data?.cardId !== card.cardId;
   const sourceChecksFor = (card: OperatorCard) => assessWorkerSourceChecks({
     sources: card.evidenceSummary.sources,
     trelloCache: card.trelloCache ?? null,
@@ -385,10 +387,12 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
         <div className="space-y-4">
           <Card className="gap-0 rounded-lg border-blue-500/30 py-0">
             <CardHeader className="border-b py-4">
-              <div className="text-xs font-semibold uppercase text-muted-foreground">{primary ? "Other work you can continue" : now && isWaiting(now) ? "Waiting for a prerequisite" : "Next task"}</div>
+              <div className="text-xs font-semibold uppercase text-muted-foreground">{!managerCoverageReady ? "Work list needs a full check" : primary ? "Other work you can continue" : now && isWaiting(now) ? "Waiting for a prerequisite" : "Next task"}</div>
             </CardHeader>
             <CardContent className="p-5">
-              {intelligenceQuery.isLoading ? <QueueSkeleton /> : now ? (
+              {intelligenceQuery.isLoading ? <QueueSkeleton /> : !managerCoverageReady ? (
+                <div role="status" className="space-y-2 text-sm"><h2 className="font-semibold">No task is recommended yet</h2><p className="text-muted-foreground">The visible tasks are for reference, not a confirmed order. Do not start a timer until the full work list has been checked.</p></div>
+              ) : now ? (
                 <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_180px]">
                   <button type="button" className="min-w-0 text-left" onClick={() => setSelected(now)}>
                     <div className="mb-2 flex flex-wrap items-center gap-2"><h2 className="text-lg font-semibold">{now.cardName}</h2><Badge variant="outline" className={priorityTone(now.priorityTier)}>{now.priorityTier}</Badge></div>
@@ -404,7 +408,7 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
                   <div className="flex flex-col justify-end gap-2">
                     <Button onClick={() => begin(now)} disabled={!canStart(now)}>
                       {startTimer.isPending ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-                      {timerQuery.data?.cardId === now.cardId ? "Timer running" : isWaiting(now) ? "Waiting - review first" : "Start timer"}
+                      {timerQuery.data?.cardId === now.cardId ? "Timer running" : !managerCoverageReady ? "Waiting for full work check" : isWaiting(now) ? "Waiting - review first" : "Start timer"}
                     </Button>
                     <Button variant="outline" onClick={() => setSelected(now)}>Open details</Button>
                     {/^https?:\/\//i.test(now.cardUrl) && <a href={now.cardUrl} target="_blank" rel="noopener noreferrer" className="text-center text-xs font-medium text-primary underline">Open source card</a>}
@@ -419,9 +423,9 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
           </Card>
 
           <Card className="gap-0 rounded-lg py-0">
-            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Next up</CardTitle></CardHeader>
+            <CardHeader className="border-b py-4"><CardTitle className="text-sm">{managerCoverageReady ? "Next up" : "Tasks to inspect"}</CardTitle><CardDescription>{managerCoverageReady ? "Only the next three cards are shown." : "These tasks are not ranked until the full work list is checked."}</CardDescription></CardHeader>
             <CardContent className="p-0">
-              {intelligenceQuery.isLoading ? <QueueSkeleton /> : intelligenceQuery.error ? <p role="alert" className="p-4">Tasks could not be loaded. Refresh to try again.</p> : next.length ? next.map((card, index) => (
+              {intelligenceQuery.isLoading ? <QueueSkeleton /> : intelligenceQuery.error ? <p role="alert" className="p-4">Tasks could not be loaded. Refresh to try again.</p> : visibleNextCards.length ? visibleNextCards.map((card, index) => (
                 <button key={card.cardId} type="button" onClick={() => setSelected(card)} className="grid w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-3 border-b px-4 py-3 text-left last:border-b-0 hover:bg-accent/40">
                   <span className="flex size-6 items-center justify-center rounded border text-xs text-muted-foreground">{index + 1}</span>
                   <span className="min-w-0"><span className="block truncate text-sm font-medium">{card.cardName}</span><span className="block truncate text-xs text-muted-foreground">{card.listName} · {card.nextBestAction ?? "Review next action"}</span></span>
@@ -431,7 +435,7 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
             </CardContent>
           </Card>
 
-          {!intelligenceQuery.isLoading && !intelligenceQuery.error && <QueueLanes cards={cards} onSelect={setSelected} />}
+          {!intelligenceQuery.isLoading && !intelligenceQuery.error && <QueueLanes cards={cards} complete={managerCoverageReady} onSelect={setSelected} />}
         </div>
 
         <aside className="space-y-3">
@@ -457,7 +461,7 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
   );
 }
 
-function QueueLanes({ cards, onSelect }: { cards: OperatorCard[]; onSelect: (card: OperatorCard) => void }) {
+function QueueLanes({ cards, complete, onSelect }: { cards: OperatorCard[]; complete: boolean; onSelect: (card: OperatorCard) => void }) {
   const lanes = [
     { key: "on-hold", label: "On-hold first", cards: cards.filter((card) => getWorkLaneRank(card.listName) === 0) },
     { key: "doing", label: "Doing second", cards: cards.filter((card) => getWorkLaneRank(card.listName) === 1) },
@@ -465,7 +469,7 @@ function QueueLanes({ cards, onSelect }: { cards: OperatorCard[]; onSelect: (car
   ];
   return (
     <Card className="gap-0 rounded-lg py-0">
-      <CardHeader className="border-b py-4"><CardTitle className="text-sm">All tasks</CardTitle></CardHeader>
+      <CardHeader className="border-b py-4"><CardTitle className="text-sm">{complete ? "All tasks" : "Visible tasks"}</CardTitle></CardHeader>
       <CardContent className="p-0">
         {lanes.map((lane) => <Lane key={lane.key} label={lane.label} cards={lane.cards} onSelect={onSelect} />)}
       </CardContent>

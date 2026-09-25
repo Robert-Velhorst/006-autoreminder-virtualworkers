@@ -345,6 +345,7 @@ for (const scenario of [
     let workerId = 0,
       otherId = 0,
       adminId = 0,
+      profileId = 0,
       latestRunId = 0;
     let prefix = "",
       cardId = "",
@@ -466,6 +467,14 @@ for (const scenario of [
         adminId = await insert(
           "INSERT INTO users (openId,name,role,loginMethod,passwordHash) VALUES (?,?,?,?,?)",
           [`${prefix}-admin`, `${prefix} Admin`, "admin", "local", passwordHash]
+        );
+        profileId = await insert(
+          "INSERT INTO va_profiles (userId,founderId,name,timezone,status) VALUES (?,?,?,?,?)",
+          [workerId, adminId, `${prefix} Worker`, timezone, "active"]
+        );
+        await db.execute(
+          "INSERT INTO task_assignments (taskId,vaId,founderId,assignedBy,status) VALUES (?,?,?,?,?)",
+          [cardId, profileId, adminId, adminId, "assigned"]
         );
         await db.execute(
           "INSERT INTO user_working_hours (userId,userOpenId,timezone,workingDays,workStartHour,workEndHour,enableBreaks) VALUES (?,?,?,?,?,?,?)",
@@ -592,6 +601,8 @@ for (const scenario of [
               workerId,
               otherId,
             ]);
+          await db.execute("DELETE FROM task_assignments WHERE vaId = ?", [profileId]);
+          await db.execute("DELETE FROM va_profiles WHERE id = ?", [profileId]);
           await db.execute("DELETE FROM user_working_hours WHERE userId = ?", [
             workerId,
           ]);
@@ -624,15 +635,16 @@ for (const scenario of [
     }, testInfo) => {
       await login(page, `${prefix}-worker`, "worker");
       const manager = page.getByRole("region", { name: "APTLSS work manager" });
-      await expect(manager.getByText("No assessment has been recorded yet.", { exact: true })).toBeVisible();
-      const initialResponse = await mutateThroughUi<ManagerSnapshot>(
+      await expect(manager.getByRole("alert").getByText("Wait before starting a task", { exact: true })).toBeVisible();
+      await expect(manager.getByText(/The full work list has not been checked\./)).toBeVisible();
+      const initialResponse = await mutateThroughUi<{ applied: boolean }>(
         page,
         "operator.runManager",
         () => activateByKeyboard(page, manager.getByRole("button", { name: "Reassess now" }))
       );
       const initial = (await latest())!;
       expect(initial.runId).toBeGreaterThan(0);
-      expect(initial.runId).toBe(initialResponse.runId);
+      expect(initialResponse.applied).toBe(false);
       expect(initial.applied).toBe(false);
       await assertUnchanged();
 
@@ -688,20 +700,19 @@ for (const scenario of [
         await db!.rollback();
         throw error;
       }
-      const sourcedResponse = await mutateThroughUi<ManagerSnapshot>(
+      const sourcedResponse = await mutateThroughUi<{ applied: boolean }>(
         page,
         "operator.runManager",
         () => activateByKeyboard(page, manager.getByRole("button", { name: "Reassess now" }))
       );
       const sourced = (await latest())!;
       expect(sourced.runId).toBeGreaterThan(initial.runId);
-      expect(sourced.runId).toBe(sourcedResponse.runId);
+      expect(sourcedResponse.applied).toBe(false);
       expect(
         sourced.evidence.some(item => item.text.includes(sourceText))
       ).toBe(true);
       expect(sourced.interventions).toHaveLength(0);
       const semanticGap = /^Semantic review (?:unavailable\b|is waiting for its bounded retry window; changed source context has not been semantically reviewed\.$)/;
-      expect(sourcedResponse.semanticReview?.success).toBe(false);
       expect(sourced.semanticReview?.success).toBe(false);
       expect(sourced.sourceGaps).toContainEqual(expect.stringMatching(semanticGap));
       const contextToggle = manager
@@ -731,7 +742,7 @@ for (const scenario of [
       const updateField = manager.getByLabel(/What (?:changed in reality|did you confirm)\?/, { exact: true });
       await focusByTab(page, updateField);
       await updateField.pressSequentially(update);
-      const updatedResponse = await mutateThroughUi<ManagerSnapshot>(
+      const updatedResponse = await mutateThroughUi<{ applied: boolean }>(
         page,
         "operator.submitManagerUpdate",
         () => activateByKeyboard(page, manager.getByRole("button", { name: "Send answer to APTLSS" }))
@@ -741,8 +752,7 @@ for (const scenario of [
       ).toBeVisible();
       const updated = (await latest())!;
       expect(updated.runId).toBeGreaterThan(sourced.runId);
-      expect(updated.runId).toBe(updatedResponse.runId);
-      expect(updatedResponse.semanticReview?.success).toBe(false);
+      expect(updatedResponse.applied).toBe(false);
       expect(updated.semanticReview?.success).toBe(false);
       expect(updated.sourceGaps).toContainEqual(expect.stringMatching(semanticGap));
       await expect(

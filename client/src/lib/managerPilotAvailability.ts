@@ -7,6 +7,10 @@ export function isManagerPilotDenied(error: unknown): boolean {
   return !!data && typeof data === "object" && "code" in data && data.code === "FORBIDDEN" && error.message === pilotDenialMessage;
 }
 
+export function managerExecutionCoverageReady(error: unknown, executionReady: unknown): boolean {
+  return isManagerPilotDenied(error) || executionReady === true;
+}
+
 type StatusQuery = { state: { error: unknown } };
 
 export const managerStatusQueryOptions = {

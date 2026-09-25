@@ -4,6 +4,7 @@ import { appSettings, vaProfiles } from '../../drizzle/schema';
 import { getDb } from '../db';
 import { requestUser, requireAdmin, requireAuthenticated } from '../middleware/auth';
 import { fetchWithRetry } from '../utils/retry';
+import { selectWorkerProfile } from '../workerOperatorContext';
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -78,9 +79,18 @@ async function requireAssignedCard(
       res.status(503).json({ error: 'Database not available' });
       return false;
     }
-    const [profile] = await db.select({ trelloMemberId: vaProfiles.trelloMemberId }).from(vaProfiles)
-      .where(eq(vaProfiles.userId, user.id)).limit(1);
-    memberId = profile?.trelloMemberId?.trim() || null;
+    const profiles = await db.select({ trelloMemberId: vaProfiles.trelloMemberId, status: vaProfiles.status })
+      .from(vaProfiles).where(eq(vaProfiles.userId, user.id)).orderBy(vaProfiles.id);
+    const profile = selectWorkerProfile(profiles);
+    if (profiles.length > 0 && !profile) {
+      res.status(409).json({ error: 'Your worker profile is ambiguous. Ask an administrator to resolve it before updating Trello.' });
+      return false;
+    }
+    if (profile?.status !== 'active') {
+      res.status(403).json({ error: 'An active worker profile is required to update Trello' });
+      return false;
+    }
+    memberId = profile.trelloMemberId?.trim() || null;
     if (!memberId) {
       res.status(403).json({ error: 'Your worker profile is not linked to a Trello member' });
       return false;

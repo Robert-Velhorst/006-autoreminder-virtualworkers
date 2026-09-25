@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { MANAGER_IMPLEMENTATION_VERSION, managerSafetyDigest } from "../server/aptlssManagerSafety";
 
 const url = process.env.APTLSS_TEST_DATABASE_URL;
@@ -9,7 +9,13 @@ const database = new URL(url);
 if (database.protocol !== "mysql:" || database.search || database.hash || !["127.0.0.1", "localhost", "[::1]"].includes(database.hostname) || !/^\/(?:aptlss_test|recovery_test)$/.test(database.pathname)) throw new Error("An explicit loopback MySQL URL naming aptlss_test or recovery_test is required.");
 mkdirSync(resolve("artifacts"), { recursive: true });
 const digest = managerSafetyDigest();
-const report = resolve("artifacts/aptlss-safety-results.json");
+const report = resolve(process.env.APTLSS_SAFETY_TEST_REPORT || "artifacts/aptlss-safety-results.json");
+const browserReport = resolve(process.env.APTLSS_BROWSER_REPORT_PATH || "test-results/aptlss-browser.json");
+const browserOutputDir = process.env.APTLSS_BROWSER_OUTPUT_DIR ? resolve(process.env.APTLSS_BROWSER_OUTPUT_DIR) : undefined;
+const attestation = resolve(process.env.APTLSS_SAFETY_ATTESTATION_PATH || "artifacts/aptlss-safety.json");
+mkdirSync(dirname(report), { recursive: true });
+mkdirSync(dirname(browserReport), { recursive: true });
+if (browserOutputDir) mkdirSync(browserOutputDir, { recursive: true });
 const vitest = resolve("node_modules/vitest/vitest.mjs");
 const result = spawnSync(process.execPath, [vitest, "run", "server/aptlssManager", "server/aptlssEvidenceGraph", "server/dbLifecycle.test.ts", "server/workerOperatorContextTransaction.test.ts", "--maxWorkers=1", "--minWorkers=1", "--reporter=json", `--outputFile=${report}`], { stdio: "inherit", env: { ...process.env, DATABASE_URL: url, APTLSS_TEST_DATABASE_URL: url, OPENAI_API_KEY: "", APTLSS_MANAGER_MODEL: "" } });
 if (result.status !== 0) throw new Error("Safety checks failed; no acceptance attestation was written.");
@@ -19,9 +25,9 @@ const integration = parsed.testResults.filter((r: { name: string }) => integrati
 const successful = (r: { assertionResults: Array<{status:string}> }) => r.assertionResults.length > 0 && r.assertionResults.every(a => a.status === "passed");
 const regressionTests = parsed.testResults.filter((r: { name: string }) => /aptlssManager(Engine|Plan|Model|Facts|Gate)/.test(r.name)).reduce((n: number, r: { assertionResults: unknown[] }) => n + r.assertionResults.length, 0);
 if (!parsed.success || parsed.numPendingTests || regressionTests < 100 || integration.length !== integrationNames.length || !parsed.testResults.every(successful) || digest !== managerSafetyDigest()) throw new Error("Incomplete or changed safety evidence; no acceptance attestation was written.");
-const browser = spawnSync(process.execPath, [resolve("node_modules/@playwright/test/cli.js"), "test", "--config=playwright.aptlss.config.ts"], { stdio: "inherit", env: { ...process.env, DATABASE_URL: url, APTLSS_TEST_DATABASE_URL: url } });
+const browser = spawnSync(process.execPath, [resolve("node_modules/@playwright/test/cli.js"), "test", "--config=playwright.aptlss.config.ts"], { stdio: "inherit", env: { ...process.env, DATABASE_URL: url, APTLSS_TEST_DATABASE_URL: url, APTLSS_BROWSER_REPORT_PATH: browserReport, ...(browserOutputDir ? { APTLSS_BROWSER_OUTPUT_DIR: browserOutputDir } : {}) } });
 if (browser.status !== 0) throw new Error("Browser safety checks failed; no acceptance attestation was written.");
-const browserReport = JSON.parse(readFileSync(resolve("test-results/aptlss-browser.json"), "utf8"));
-if (browserReport.stats.unexpected || browserReport.stats.skipped || !browserReport.stats.expected || !browserReport.suites.some((suite: {file:string}) => suite.file.endsWith("aptlss-manager-live.spec.ts")) || digest !== managerSafetyDigest()) throw new Error("Incomplete or changed browser safety evidence; no acceptance attestation was written.");
-writeFileSync(resolve("artifacts/aptlss-safety.json"), JSON.stringify({ version: MANAGER_IMPLEMENTATION_VERSION, digest, scope: "shadow-pilot", activeModeVerified: false, success: true, regressionTests, mysqlIntegration: true, browserIntegration: true, verifiedAt: new Date().toISOString() }, null, 2));
+const browserResults = JSON.parse(readFileSync(browserReport, "utf8"));
+if (browserResults.stats.unexpected || browserResults.stats.skipped || !browserResults.stats.expected || !browserResults.suites.some((suite: {file:string}) => suite.file.endsWith("aptlss-manager-live.spec.ts")) || digest !== managerSafetyDigest()) throw new Error("Incomplete or changed browser safety evidence; no acceptance attestation was written.");
+writeFileSync(attestation, JSON.stringify({ version: MANAGER_IMPLEMENTATION_VERSION, digest, scope: "shadow-pilot", activeModeVerified: false, success: true, regressionTests, mysqlIntegration: true, browserIntegration: true, verifiedAt: new Date().toISOString() }, null, 2));
 console.log(`Shadow-pilot safety checks passed: ${regressionTests} regression cases, real MySQL and browser integration. This is not active-mode acceptance; shadow trial reviews are still required.`);
