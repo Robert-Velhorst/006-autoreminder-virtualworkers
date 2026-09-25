@@ -18,7 +18,7 @@ vi.mock("../client/src/lib/trpc", () => {
       getManagerStatus: { useQuery: (_: unknown, options: StatusOptions) => { fixture.statusOptions.push(options); return { data: { policy: { mode: fixture.mode, enabled: fixture.enabled, intervalMinutes: 5 } }, error: fixture.error, isFetching: fixture.fetching }; } },
       getWorkQueueContext: { useQuery: () => ({ data: { cards: [] } }) },
       getManagerReviewInbox: { useQuery: (_: unknown, options: unknown) => { fixture.queries.push(options); return { data: { workers: [] }, isFetching: false }; } },
-      runManager: mutation, submitManagerUpdate: mutation, updateManagerPolicy: mutation,
+      runManager: mutation, submitManagerUpdate: mutation, reportManagerActionCompletion: mutation, updateManagerPolicy: mutation,
       runManagerForReview: mutation, closeManagerTrial: mutation, restartManagerTrial: mutation, revokeManagerCorrection: mutation,
     },
   } };

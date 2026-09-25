@@ -115,6 +115,9 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
       );
     }
     const unresolved = card.steps.filter(s => !s.complete);
+    const pendingCompletionReports = ev.filter(item =>
+      item.kind === "worker" && item.metadata?.reportKind === "completion" && typeof item.metadata.actionId === "string"
+    );
     const actionByStep = new Map<number, ManagerAction>();
 
     for (const step of unresolved) {
@@ -153,6 +156,13 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
             ? `Draft for worker review only - not sent: ${step.title}`
             : null,
       };
+      const completionReport = kind === "work"
+        ? pendingCompletionReports.find(item => item.metadata?.actionId === action.id)
+        : undefined;
+      if (completionReport) {
+        action.blocked = true;
+        action.reason = "Completion was reported; this step remains open until its assigned source confirms it.";
+      }
       actionByStep.set(step.id, action);
       allActions.push(action);
     }
@@ -196,7 +206,7 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
     );
     for (const action of actionByStep.values())
       action.blocked =
-        action.dependsOn.length > 0 || cardBlocked || !!card.waiting
+        action.blocked || action.dependsOn.length > 0 || cardBlocked || !!card.waiting
         || action.stepIds.some(stepId => card.steps.find(step => step.id === stepId)?.blocked === true);
 
     if (card.waiting) {
@@ -290,6 +300,23 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
           ? "Open the original source, read any referenced document, and report its request and deadline."
           : "Compare the cited records and report the verified fact before continuing.",
         evidenceIds,
+      });
+    }
+    const pending = pendingCompletionReports.filter(report =>
+      card.steps.some(step => actionByStep.get(step.id)?.id === report.metadata?.actionId)
+    );
+    if (pending.length) {
+      const report = pending[pending.length - 1];
+      interventions.push({
+        id: id("completion-review", card.id, report.id),
+        cardId: card.id,
+        issueKind: "completion_report_pending",
+        severity: "attention",
+        title: "Completion reported; source confirmation is still needed",
+        explanation: "You reported this step as complete. The task remains open because the assigned source has not confirmed the result yet.",
+        question: "Does the assigned source now show this step as complete?",
+        safeAction: "Check the linked source. Continue with unrelated work while this report is pending; do not repeat or close the step here.",
+        evidenceIds: [report.id],
       });
     }
     const cardActions = allActions.filter(a => a.cardId === card.id);

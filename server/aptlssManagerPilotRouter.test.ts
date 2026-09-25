@@ -25,6 +25,7 @@ describe("pilot API enforcement without weakening canonical authorization", () =
   it("rejects manager and evidence operations for other workers", async () => {
     const other = caller(3, "worker");
     const requests = [other.getManagerStatus(), other.runManager(),
+      other.reportManagerActionCompletion({ cardId: "card", actionId: "action", detail: "Completed the step.", requestKey: "a9de1a02-18b8-4db2-b923-bcfe3ab9ca14", sourceDescription: "Trello card" }),
       other.getCardEvidence({ cardId: "card" }), other.getVerificationFollowups(),
       other.recordEvidenceAssertion({ title: "A title", detail: "Details" }),
       other.createEvidenceConflict({ sourceEvidenceId: 1, assertedEvidenceId: 2, question: "Verify this" }),
@@ -56,6 +57,7 @@ describe("pilot API enforcement without weakening canonical authorization", () =
       ordinary.runManager(),
       ordinary.updateManagerPolicy({ enabled: true, intervalMinutes: 5 }),
       ordinary.submitManagerUpdate({ cardId: "card", detail: "Worker report" }),
+      ordinary.reportManagerActionCompletion({ cardId: "card", actionId: "action", detail: "Completed the step.", requestKey: "a9de1a02-18b8-4db2-b923-bcfe3ab9ca14", sourceDescription: "Trello card" }),
       ordinary.getCardEvidence({ cardId: "card" }),
       ordinary.getVerificationFollowups(),
       ordinary.recordEvidenceAssertion({ title: "A title", detail: "A report" }),

@@ -379,6 +379,8 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
             error: options.unavailable ? "Source refresh failed" : undefined,
             gate,
           };
+        if (method === "operator.reportManagerActionCompletion")
+          value = { reportId: 55, alreadyRecorded: false, reassessed: true, assessmentRunId: 102, applied: false };
         if (
           method === "operator.runManager" ||
           method === "operator.submitManagerUpdate" ||
@@ -886,6 +888,46 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       "PRIVATE_ISSUE_RESOLUTION_SENTINEL",
       "PRIVATE_CONFIDENCE_BLOCKER_SENTINEL",
     ]) await expect(page.getByText(internalDetail, { exact: true })).toHaveCount(0);
+  });
+
+  test("worker completion reports retain evidence and leave the step open", async ({ page }) => {
+    const { snapshot, calls } = await managerFixture(page, "worker");
+    snapshot.actions.push({
+      id: "action-card-1-1",
+      cardId: "card-1",
+      title: "Verify delivery",
+      where: "https://trello.com/c/example",
+      kind: "work",
+      stepIds: [1],
+      dependsOn: [],
+      minutes: { low: 5, likely: 10, high: 20 },
+      reason: "This is the next open step.",
+      completionCriteria: "The receipt is recorded on the card.",
+      evidenceIds: ["e-1"],
+      notBefore: null,
+      blocked: false,
+      priority: 1,
+      draft: null,
+    });
+    await page.goto("/worker");
+    const manager = page.getByRole("region", { name: "APTLSS work manager" });
+    await manager.getByRole("button", { name: "Report step done" }).click();
+    await manager.getByLabel("Source for verification").selectOption("e-1");
+    await manager.getByLabel("What did you complete?").fill("I recorded the receipt reference on the Trello card.");
+    await manager.getByRole("button", { name: "Submit completion report" }).click();
+
+    await expect(page.getByText("Completion report saved. The step remains open until its source confirms the result.", { exact: true })).toBeVisible();
+    await expect(manager.getByRole("heading", { name: "Verify delivery", exact: true })).toBeVisible();
+    await expect(manager.getByRole("button", { name: "Report step done" })).toBeVisible();
+    const call = calls.find(item => item.method === "operator.reportManagerActionCompletion");
+    expect(call?.input).toMatchObject({
+      cardId: "card-1",
+      actionId: "action-card-1-1",
+      detail: "I recorded the receipt reference on the Trello card.",
+      sourceEvidenceId: "e-1",
+    });
+    expect(call?.input.requestKey).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(calls.some(item => item.method === "operator.syncCheckItem")).toBe(false);
   });
 
   for (const width of [1280, 390]) test(`worker case file stays clear and readable at ${width}px`, async ({ page }, testInfo) => {

@@ -107,6 +107,13 @@ describe("APTLSS external message policy", () => {
     expect(calls.logAuditAction).not.toHaveBeenCalled();
   });
 
+  it("requires completion reports before pilot workers can close a legacy checklist step", async () => {
+    vi.stubEnv("APTLSS_MANAGER_PILOT_WORKER_IDS", "9");
+    vi.stubEnv("APTLSS_MANAGER_SHADOW_ONLY", "true");
+    await expect(caller("worker").syncCheckItem({ trelloCheckItemId: "check-1", state: "complete" }))
+      .rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+  });
+
   it("rejects legacy auto-post flags before reading data or generating a draft", async () => {
     await expect(caller("admin").batchDraftDailyUpdates({ cardIds: [], autoPost: true } as never))
       .rejects.toMatchObject({ code: "BAD_REQUEST" });

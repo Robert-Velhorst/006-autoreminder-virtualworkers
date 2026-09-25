@@ -18,9 +18,11 @@ export function workerCardIsWaiting(card: QueueCard) {
 
 export function selectManagerPrimary<
   TAction extends Pick<ManagerAction, "cardId" | "blocked">,
-  TIntervention extends Pick<ManagerIntervention, "cardId" | "severity">,
+  TIntervention extends Pick<ManagerIntervention, "cardId" | "severity"> & Partial<Pick<ManagerIntervention, "issueKind">>,
 >(snapshot: { actions: TAction[]; interventions: TIntervention[] } | null | undefined) {
-  const intervention = snapshot?.interventions.find(item => item.severity === "urgent") ?? snapshot?.interventions[0];
+  const intervention = snapshot?.interventions.find(item => item.severity === "urgent")
+    ?? snapshot?.interventions.find(item => item.issueKind === "completion_report_pending")
+    ?? snapshot?.interventions[0];
   const action = snapshot?.actions.find(item => !item.blocked);
   return intervention
     ? { cardId: intervention.cardId, kind: "verification" as const, intervention, action: null }

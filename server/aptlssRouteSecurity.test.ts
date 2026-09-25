@@ -17,6 +17,7 @@ describe("APTLSS route security boundaries", () => {
 
   it("scopes checklist and follow-up IDs to the authenticated worker without a worker decision resolver", () => {
     expect(source).toMatch(/setStepCompletionForWorker\(\s*Number\(ctx\.user\.id\)/);
+    expect(source).toContain("Report the finished step through Work guidance first.");
     expect(source).not.toContain("resolveFounderStep:");
     expect(source).toContain("setFollowUpDraftStatusForWorker(Number(ctx.user.id), input.id");
   });

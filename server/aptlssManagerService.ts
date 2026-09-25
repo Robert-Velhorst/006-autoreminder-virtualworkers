@@ -193,14 +193,17 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
     // Outbound messages are observations, never instructions to send another message.
     evidence.push({ id: `message:${message.id}`, cardId: message.linkedCardId!, source: message.channel, kind: "source", text: managerSafeText(`${message.direction}: ${message.subject ?? ""}\n${message.summary ?? ""}\nResponse required: ${message.responseRequired}; responded: ${iso(message.respondedAt) ?? "not verified"}`), observedAt: iso(message.occurredAt)! });
   }
-  for (const update of updates.slice(0, 500)) if (cards.some(c => c.id === update.cardId) && !evidence.some(e => e.cardId === update.cardId && e.kind === "worker" && e.text.includes(update.detail))) {
-    const text = managerUpdateEvidenceText(update.detail, {
+  for (const update of updates.slice(0, 500)) if (cards.some(c => c.id === update.cardId) && (update.reportKind === "completion" || !evidence.some(e => e.cardId === update.cardId && e.kind === "worker" && e.text.includes(update.detail)))) {
+    const updateText = managerUpdateEvidenceText(update.detail, {
       outcome: (update.outcome ?? "Update") as ManagerWorkerOutcome,
       deadlineDate: update.deadlineDate,
       sourceEvidenceId: update.sourceEvidenceId,
       sourceDescription: update.sourceDescription,
     });
-    evidence.push({ id: `update:${update.id}`, cardId: update.cardId, source: "worker_update", kind: "worker", text: managerSafeText(text, 8000), observedAt: iso(update.createdAt)!, metadata: { truthClass: "worker_report", sender: String(vaId), outcome: update.outcome, deadlineDate: update.deadlineDate, sourceEvidenceId: update.sourceEvidenceId } });
+    const completionContext = update.reportKind === "completion"
+      ? `Worker-reported completion, not independently verified. Action ${update.actionId ?? "unknown"}; assessment ${update.assessmentRunId ?? "unknown"}. `
+      : "";
+    evidence.push({ id: `update:${update.id}`, cardId: update.cardId, source: "worker_update", kind: "worker", text: managerSafeText(`${completionContext}${updateText}`, 8000), observedAt: iso(update.createdAt)!, metadata: { truthClass: "worker_report", sender: String(vaId), outcome: update.outcome, deadlineDate: update.deadlineDate, reportDetail: update.reportKind === "completion" ? update.detail : undefined, sourceEvidenceId: update.sourceEvidenceId, sourceDescription: update.sourceDescription, reportKind: update.reportKind === "completion" ? "completion" : "update", actionId: update.actionId, assessmentRunId: update.assessmentRunId } });
   }
   for (const outcome of outcomes.slice(0, 500)) if (ids.includes(outcome.cardId)) evidence.push({
     id: `decision:${outcome.id}`, cardId: outcome.cardId, source: "decision_outcome", kind: "decision",
@@ -309,6 +312,124 @@ export async function submitManagerUpdate(vaId: number, cardId: string, detail: 
     await enqueueManagerTask(tx, { vaId, eventKey: `worker-update:${update.id}`, trigger: "worker_update", urgent: !!interventionId });
   });
   return runManager(vaId, "worker_update");
+}
+
+export type ManagerCompletionReport = {
+  cardId: string;
+  actionId: string;
+  detail: string;
+  requestKey: string;
+  sourceEvidenceId?: string;
+  sourceDescription?: string;
+};
+
+export class ManagerCompletionReportError extends Error {
+  constructor(public readonly code: "BAD_REQUEST" | "CONFLICT" | "PRECONDITION_FAILED", message: string) {
+    super(message);
+  }
+}
+
+function completionRequestMatches(row: typeof aptlssManagerUpdates.$inferSelect, input: ManagerCompletionReport, detail: string, sourceDescription: string | null) {
+  return row.reportKind === "completion" && row.cardId === input.cardId && row.actionId === input.actionId
+    && row.requestKey === input.requestKey.toLowerCase()
+    && row.detail === detail && row.sourceEvidenceId === (input.sourceEvidenceId?.trim() || null)
+    && row.sourceDescription === sourceDescription;
+}
+
+export async function reportManagerActionCompletion(vaId: number, input: ManagerCompletionReport) {
+  assertManagerPilotWorker(vaId);
+  const db = await requireDb();
+  await assertManagerExecutionAllowed(db, vaId);
+  const detail = managerSafeText(input.detail.trim(), 8000);
+  if (detail.length < 3 || input.detail.length > 8000) throw new ManagerCompletionReportError("BAD_REQUEST", "Describe what you completed in 3 to 8000 characters.");
+  if (!input.cardId.trim() || input.cardId.length > 64 || !input.actionId.trim() || input.actionId.length > 256) throw new ManagerCompletionReportError("BAD_REQUEST", "Refresh the work guidance and select the current step again.");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.requestKey)) throw new ManagerCompletionReportError("BAD_REQUEST", "Refresh the completion form and try again.");
+  let normalized: ReturnType<typeof normalizeManagerUpdateFields>;
+  try {
+    normalized = normalizeManagerUpdateFields({
+      sourceEvidenceId: input.sourceEvidenceId,
+      sourceDescription: input.sourceDescription,
+    });
+  } catch (error) {
+    throw new ManagerCompletionReportError("BAD_REQUEST", error instanceof Error ? error.message : "Choose a valid source.");
+  }
+  if (normalized.sourceDescription) normalized.sourceDescription = managerSafeText(normalized.sourceDescription, 512);
+  if (!normalized.sourceEvidenceId && !normalized.sourceDescription) throw new ManagerCompletionReportError("BAD_REQUEST", "Identify the source or location where this completion can be checked.");
+  const requestKey = input.requestKey.toLowerCase();
+  const matchingReport = (row: typeof aptlssManagerUpdates.$inferSelect) => {
+    if (!completionRequestMatches(row, input, detail, normalized.sourceDescription)) throw new ManagerCompletionReportError("CONFLICT", "This completion form was already used for different information. Start a new report.");
+    return { reportId: row.id, alreadyRecorded: true as const, reassessed: false, applied: false as const };
+  };
+  const reassessReport = async (report: { reportId: number; alreadyRecorded: boolean }) => {
+    try {
+      const reassessed = await runManager(vaId, "worker_update");
+      return { ...report, reassessed: true as const, assessmentRunId: reassessed.runId, applied: reassessed.applied };
+    } catch {
+      return { ...report, reassessed: false as const, assessmentRunId: null, applied: false as const };
+    }
+  };
+  const [prior] = await db.select().from(aptlssManagerUpdates).where(and(
+    eq(aptlssManagerUpdates.vaId, vaId), eq(aptlssManagerUpdates.requestKey, requestKey),
+  )).limit(1);
+  if (prior) return reassessReport(matchingReport(prior));
+
+  const assessed = await runManager(vaId, "worker_update");
+  if (assessed.applied) throw new ManagerCompletionReportError("PRECONDITION_FAILED", "The active plan changed unexpectedly. Stop and contact your supervisor before reporting completion.");
+  const persisted = await db.transaction(async tx => {
+    await tx.select({ id: users.id }).from(users).where(eq(users.id, vaId)).for("update");
+    await assertManagerExecutionAllowed(tx as unknown as Db, vaId);
+    const [duplicate] = await tx.select().from(aptlssManagerUpdates).where(and(
+      eq(aptlssManagerUpdates.vaId, vaId), eq(aptlssManagerUpdates.requestKey, requestKey),
+    )).limit(1);
+    if (duplicate) return matchingReport(duplicate);
+
+    const now = new Date();
+    const scope = await executionScope(tx as unknown as Db, vaId, now);
+    const freshInput = await collectManagerInput(tx as unknown as Db, vaId, now);
+    const fingerprint = managerInputFingerprint(freshInput, scope.fingerprintScope);
+    const current = scope.state;
+    const snapshot = current.snapshot;
+    if (!snapshot || snapshot.runId !== assessed.runId || current.state?.inputHash !== fingerprint.inputHash
+      || current.state?.sourceHash !== fingerprint.sourceHash || snapshot.planVersion !== scope.fingerprintScope.planVersion
+      || snapshot.assignmentFingerprint !== freshInput.assignmentFingerprint) {
+      throw new ManagerCompletionReportError("CONFLICT", "The task changed while this report was being prepared. Refresh the work guidance and try again.");
+    }
+    if (freshInput.executionCoverageComplete !== true || snapshot.executionCoverageComplete !== true) {
+      throw new ManagerCompletionReportError("PRECONDITION_FAILED", "Work coverage is incomplete. Ask your supervisor to restore the missing work information before reporting completion.");
+    }
+    const action = snapshot.actions.find(item => item.id === input.actionId && item.cardId === input.cardId);
+    if (!action || action.kind !== "work" || action.blocked || action.stepIds.length !== 1) {
+      throw new ManagerCompletionReportError("CONFLICT", "This step is no longer available for completion reporting. Refresh the work guidance.");
+    }
+    const card = freshInput.cards.find(item => item.id === input.cardId);
+    const step = card?.steps.find(item => item.id === action.stepIds[0]);
+    if (!card || !step || step.complete || step.blocked || step.requiresDecision) {
+      throw new ManagerCompletionReportError("PRECONDITION_FAILED", "This step is complete, blocked, or needs a decision. Refresh the work guidance before continuing.");
+    }
+    try {
+      assertManagerUpdateSource(freshInput.evidence, input.cardId, normalized.sourceEvidenceId);
+    } catch (error) {
+      throw new ManagerCompletionReportError("BAD_REQUEST", error instanceof Error ? error.message : "Choose a source linked to this task.");
+    }
+    const selectedSource = normalized.sourceEvidenceId
+      ? freshInput.evidence.find(item => item.id === normalized.sourceEvidenceId)
+      : undefined;
+    if (selectedSource?.metadata?.contentScope === "portal_notice" || selectedSource?.metadata?.contentScope === "message_preview") {
+      throw new ManagerCompletionReportError("BAD_REQUEST", "A message preview is not completion evidence. Open the full source and describe where the completed result can be checked.");
+    }
+    const evidenceText = managerSafeText(`Worker-reported completion, not independently verified. Action ${action.id}; assessment ${snapshot.runId}. ${managerUpdateEvidenceText(detail, normalized)}`, 8000);
+    if (!input.cardId.startsWith("email:")) {
+      await recordWorkerEvidenceAssertion({ vaId, cardId: input.cardId, title: "Worker completion report (unverified)", detail: evidenceText, recordedBy: String(vaId), database: tx as unknown as Db });
+    }
+    const [created] = await tx.insert(aptlssManagerUpdates).values({
+      vaId, cardId: input.cardId, detail, reportKind: "completion", actionId: action.id,
+      assessmentRunId: snapshot.runId, requestKey, outcome: "Update", deadlineDate: null,
+      sourceEvidenceId: normalized.sourceEvidenceId, sourceDescription: normalized.sourceDescription,
+    }).$returningId();
+    await enqueueManagerTask(tx, { vaId, eventKey: `worker-completion-report:${created.id}`, trigger: "worker_update" });
+    return { reportId: created.id, alreadyRecorded: false as const };
+  });
+  return reassessReport(persisted);
 }
 
 export function managerInputFingerprint(input: ManagerInput, scope: unknown) {

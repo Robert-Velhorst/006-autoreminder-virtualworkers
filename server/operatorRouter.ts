@@ -42,8 +42,8 @@ import { indexWorkQueueSteps } from "./operatorWorkQueueIndex";
 import { resolveWorkerOperatorContext } from "./workerOperatorContext";
 import { bindWaitingReasonToOwnedCard, interpretWaitingReasonForWorker } from "./workerWaitingReason";
 import { canRecordWaitingReasonForCard } from "./timerAccess";
-import { getManagerStatus, runManager, submitManagerUpdate, updateManagerPolicy } from "./aptlssManagerService";
-import { closeManagerTrial, getManagerReviewInbox, managerCorrectionRevokeInputSchema, managerPlanVersion, managerReviewInboxInputSchema, managerReviewInputSchema, managerTrialInputSchema, recordManagerReview, restartManagerTrial, restoreManagerPlan, revokeManagerCorrection, setManagerMode } from "./aptlssManagerReviewService";
+import { getManagerStatus, ManagerCompletionReportError, reportManagerActionCompletion, runManager, submitManagerUpdate, updateManagerPolicy } from "./aptlssManagerService";
+import { closeManagerTrial, getManagerReviewInbox, ManagerExecutionPausedError, managerCorrectionRevokeInputSchema, managerPlanVersion, managerReviewInboxInputSchema, managerReviewInputSchema, managerTrialInputSchema, recordManagerReview, restartManagerTrial, restoreManagerPlan, revokeManagerCorrection, setManagerMode } from "./aptlssManagerReviewService";
 import { AptlssEvidenceGraphError, createEvidenceConflict, getCardEvidence, getOpenVerificationFollowups, recordWorkerEvidenceAssertion, resolveVerificationFollowup } from "./aptlssEvidenceGraphDb";
 import { assertManagerPilotWorker } from "./aptlssManagerPilot";
 import { toWorkerManagerSnapshot, toWorkerManagerStatus } from "./workerManagerResponse";
@@ -162,6 +162,24 @@ export const operatorRouter = router({
     deadlineDate: z.string().optional(), sourceEvidenceId: z.string().optional(), sourceDescription: z.string().trim().max(512).optional(),
   }).strict())
     .mutation(async ({ ctx, input }) => ({ applied: (await submitManagerUpdate(Number(ctx.user.id), input.cardId, input.detail, input.interventionId, input)).applied })),
+  reportManagerActionCompletion: workerMutation.input(z.object({
+    cardId: z.string().trim().min(1).max(64), actionId: z.string().trim().min(1).max(256),
+    detail: z.string().trim().min(3).max(8000), requestKey: z.string().uuid(),
+    sourceEvidenceId: z.string().trim().min(1).max(256).optional(),
+    sourceDescription: z.string().trim().max(512).optional(),
+  }).strict()).mutation(async ({ ctx, input }) => {
+    try {
+      return await reportManagerActionCompletion(Number(ctx.user.id), input);
+    } catch (error) {
+      if (error instanceof ManagerCompletionReportError || error instanceof ManagerExecutionPausedError) {
+        throw new TRPCError({
+          code: error instanceof ManagerCompletionReportError ? error.code : "PRECONDITION_FAILED",
+          message: error.message,
+        });
+      }
+      throw error;
+    }
+  }),
   getCardEvidence: operatorProcedure.input(z.object({ cardId: z.string().min(1), limit: z.number().int().min(1).max(100).default(30) }))
     .query(({ ctx, input }) => getCardEvidence(ctx.user.id, input.cardId, input.limit)),
   getVerificationFollowups: operatorProcedure.input(z.object({ cardId: z.string().min(1).optional() }).optional())

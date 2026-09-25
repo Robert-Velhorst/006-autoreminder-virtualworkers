@@ -30,7 +30,7 @@ describe("APTLSS pilot additive migration contract", () => {
   });
 
   it("retains the consolidation and appends only the reviewed additive migrations", () => {
-    expect(journal.entries).toHaveLength(52);
+    expect(journal.entries).toHaveLength(53);
     expect(journal.entries[45]).toMatchObject({
       idx: 45, tag: "0045_aptlss_pilot_consolidation", version: "5", breakpoints: true,
     });
@@ -45,9 +45,11 @@ describe("APTLSS pilot additive migration contract", () => {
       [49, "0049_founder_decision_deadlines"],
       [50, "0050_founder_decision_disposition"],
       [51, "0051_browser_collector_ordering"],
+      [52, "0052_manager_completion_reports"],
     ]);
     expect(migrations[50]?.hash).toBe(hash(read("drizzle/0050_founder_decision_disposition.sql")));
     expect(migrations[51]?.hash).toBe(hash(read("drizzle/0051_browser_collector_ordering.sql")));
+    expect(migrations[52]?.hash).toBe(hash(read("drizzle/0052_manager_completion_reports.sql")));
   });
 
   it("preserves all 117 main table definitions and adds only additive source tables", async () => {
@@ -82,14 +84,16 @@ describe("APTLSS pilot additive migration contract", () => {
     const deadline = JSON.parse(read("drizzle/meta/0049_snapshot.json"));
     const disposition = JSON.parse(read("drizzle/meta/0050_snapshot.json"));
     const latest = JSON.parse(read("drizzle/meta/0051_snapshot.json"));
+    const completion = JSON.parse(read("drizzle/meta/0052_snapshot.json"));
     expect(review.prevId).toBe(snapshot.id);
     expect(queue.prevId).toBe(review.id);
     expect(update.prevId).toBe(queue.id);
     expect(deadline.prevId).toBe(update.id);
     expect(disposition.prevId).toBe(deadline.id);
     expect(latest.prevId).toBe(disposition.id);
-    expect(latest.tables).toEqual(current.tables);
-    expect(latest.views).toEqual(current.views);
+    expect(completion.prevId).toBe(latest.id);
+    expect(completion.tables).toEqual(current.tables);
+    expect(completion.views).toEqual(current.views);
     const beforeCollectorOrdering = structuredClone(latest.tables);
     delete beforeCollectorOrdering.browser_tab_states.columns.captureSequence;
     delete beforeCollectorOrdering.browser_tab_states.columns.sourceCapturedAt;
@@ -106,6 +110,10 @@ describe("APTLSS pilot additive migration contract", () => {
     const beforeUpdate = structuredClone(update.tables);
     for (const column of ["outcome", "deadlineDate", "sourceEvidenceId", "sourceDescription"]) delete beforeUpdate.aptlss_manager_updates.columns[column];
     expect(beforeUpdate).toEqual(queue.tables);
+    const beforeCompletionReports = structuredClone(completion.tables);
+    for (const column of ["reportKind", "actionId", "assessmentRunId", "requestKey"]) delete beforeCompletionReports.aptlss_manager_updates.columns[column];
+    delete beforeCompletionReports.aptlss_manager_updates.indexes.aptlss_manager_updates_request_unique;
+    expect(beforeCompletionReports).toEqual(latest.tables);
     const retained = structuredClone(review.tables);
     delete retained.aptlss_manager_runs.columns.reviewDigest;
     delete retained.aptlss_manager_runs.columns.reviewUrgent;
@@ -176,5 +184,20 @@ describe("APTLSS pilot additive migration contract", () => {
     expect(sql).not.toMatch(/\b(?:DROP TABLE|DROP COLUMN|TRUNCATE|DELETE FROM|RENAME TABLE)\b/i);
     expect(sql.match(/^PREPARE /gm)).toHaveLength(2);
     expect(sql.match(/^EXECUTE /gm)).toHaveLength(2);
+  });
+
+  it("adds completion-report fields and a request key index with guarded additive DDL", () => {
+    const sql = read("drizzle/0052_manager_completion_reports.sql");
+    expect(sql).toMatch(/information_schema\.COLUMNS/);
+    expect(sql).toMatch(/information_schema\.STATISTICS/);
+    expect(sql).toMatch(/aptlss_manager_updates_request_unique/);
+    expect(sql).not.toMatch(/\b(?:DROP TABLE|DROP COLUMN|TRUNCATE|DELETE FROM|RENAME TABLE)\b/i);
+    const statements = sql.split("--> statement-breakpoint").map(s => s.trim()).filter(Boolean);
+    const guarded = statements.filter(s => /^SET @\w+ = IF\(\s*EXISTS\(/s.test(s));
+    expect(guarded).toHaveLength(5);
+    expect(guarded.every(s => s.includes("DATABASE()"))).toBe(true);
+    expect(statements.filter(s => /^PREPARE /.test(s))).toHaveLength(5);
+    expect(statements.filter(s => /^EXECUTE /.test(s))).toHaveLength(5);
+    expect(statements.filter(s => /^DEALLOCATE PREPARE /.test(s))).toHaveLength(5);
   });
 });

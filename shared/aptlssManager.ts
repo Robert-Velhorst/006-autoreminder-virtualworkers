@@ -90,7 +90,7 @@ export type ManagerAction = {
 export type ManagerIntervention = {
   id: string;
   cardId: string;
-  issueKind?: "source_check" | "reported_difference" | "conflicting_claims" | "missing_dependency" | "dependency_cycle";
+  issueKind?: "source_check" | "reported_difference" | "conflicting_claims" | "missing_dependency" | "dependency_cycle" | "completion_report_pending";
   severity: "urgent" | "attention";
   title: string;
   explanation: string;

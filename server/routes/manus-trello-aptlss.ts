@@ -89,6 +89,7 @@ import { resolveWorkerOperatorContext } from "../workerOperatorContext";
 import { fetchAuthorizedTrelloCard, TrelloAccessError } from "../trelloCardAccess";
 import { dateKeyInTimeZone, dateWindowInTimeZone, weekDateKeys } from "../../shared/workerTime";
 import { syncWorkerTrelloReplyEvidence } from "../services/trello-reply-evidence";
+import { isManagerPilotWorker } from "../aptlssManagerPilot";
 
 async function resolveTrelloWorker(ctx: { user: Parameters<typeof resolveWorkerOperatorContext>[0] }) {
   const worker = await resolveWorkerOperatorContext(ctx.user);
@@ -513,6 +514,12 @@ export const aptlssRouter = router({
       state: z.enum(["complete", "incomplete"]),
     }))
     .mutation(async ({ input, ctx }) => {
+      if (input.state === "complete" && isManagerPilotWorker(Number(ctx.user.id))) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Report the finished step through Work guidance first. A worker report does not close the step; the linked source must confirm it.",
+        });
+      }
       const updated = await setStepCompletionForWorker(
         Number(ctx.user.id),
         input.trelloCheckItemId,

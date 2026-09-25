@@ -266,6 +266,40 @@ describe("assessManagerContext", () => {
     expect(result.actions.filter(action => action.kind === "work").every(action => action.blocked)).toBe(true);
   });
 
+  it("keeps only the exactly reported work step open until its source-backed state changes", () => {
+    const baseline = assessManagerContext(input());
+    const actionId = baseline.actions.find(action => action.kind === "work")!.id;
+    const reported = evidence("worker-report", "I recorded the comparison.", "worker", {
+      metadata: { truthClass: "worker_report", reportKind: "completion", actionId },
+    });
+    const result = assessManagerContext(input({ evidence: [evidence("source", "Requirements document."), reported] }));
+
+    expect(result.actions.find(action => action.id === actionId)).toMatchObject({
+      blocked: true,
+      reason: expect.stringMatching(/remains open/i),
+    });
+    expect(result.interventions).toContainEqual(expect.objectContaining({
+      issueKind: "completion_report_pending",
+      evidenceIds: ["worker-report"],
+    }));
+
+    const unrelated = assessManagerContext(input({ evidence: [
+      evidence("source", "Requirements document."),
+      evidence("worker-report", "I recorded the comparison.", "worker", {
+        metadata: { truthClass: "worker_report", reportKind: "completion", actionId: "another-action" },
+      }),
+    ] }));
+    expect(unrelated.actions.find(action => action.kind === "work")?.reason).not.toMatch(/completion was reported/i);
+    expect(unrelated.interventions.some(item => item.issueKind === "completion_report_pending")).toBe(false);
+
+    const sourceConfirmed = assessManagerContext(input({
+      cards: [card("a", { steps: [step(1, { complete: true })] })],
+      evidence: [evidence("source", "Comparison saved on the card."), reported],
+    }));
+    expect(sourceConfirmed.actions.some(action => action.id === actionId)).toBe(false);
+    expect(sourceConfirmed.interventions.some(item => item.issueKind === "completion_report_pending")).toBe(false);
+  });
+
   it.each([
     ["Invoice is unpaid.", "The invoice has not been paid yet."],
     ["De factuur is niet betaald.", "Ik heb de factuur nog niet betaald."],

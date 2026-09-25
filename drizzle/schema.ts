@@ -2645,12 +2645,19 @@ export const aptlssManagerUpdates = mysqlTable("aptlss_manager_updates", {
   cardId: varchar("cardId", { length: 64 }).notNull(),
   detail: text("detail").notNull(),
   interventionId: varchar("interventionId", { length: 256 }),
+  reportKind: varchar("reportKind", { length: 24 }).default("update").notNull(),
+  actionId: varchar("actionId", { length: 256 }),
+  assessmentRunId: int("assessmentRunId"),
+  requestKey: varchar("requestKey", { length: 36 }),
   outcome: varchar("outcome", { length: 32 }),
   deadlineDate: varchar("deadlineDate", { length: 10 }),
   sourceEvidenceId: varchar("sourceEvidenceId", { length: 256 }),
   sourceDescription: varchar("sourceDescription", { length: 512 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-}, (table) => [index("aptlss_manager_updates_worker_card_idx").on(table.vaId, table.cardId, table.createdAt)]);
+}, (table) => [
+  index("aptlss_manager_updates_worker_card_idx").on(table.vaId, table.cardId, table.createdAt),
+  uniqueIndex("aptlss_manager_updates_request_unique").on(table.vaId, table.requestKey),
+]);
 
 export const aptlssManagerRuns = mysqlTable("aptlss_manager_runs", {
   id: int("id").autoincrement().primaryKey(),

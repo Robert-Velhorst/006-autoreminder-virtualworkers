@@ -1,7 +1,7 @@
 import type { ManagerAction, ManagerCard, ManagerEvidence, ManagerIntervention } from "./aptlssManager";
 import type { ManagerPlanImpact } from "./aptlssManagerPlanImpact";
 
-type WorkerAction = Pick<ManagerAction, "id" | "cardId" | "title" | "where" | "kind" | "reason" | "blocked"> & {
+type WorkerAction = Pick<ManagerAction, "id" | "cardId" | "title" | "where" | "kind" | "reason" | "blocked" | "completionCriteria"> & {
   minutes: Pick<ManagerAction["minutes"], "low" | "likely" | "high">;
 };
 

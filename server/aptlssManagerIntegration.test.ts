@@ -1248,6 +1248,51 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect((await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id)))).toHaveLength(1);
   });
 
+  it("stores an idempotent source-linked completion report without closing the step or changing the plan", async () => {
+    const beforePlan = await plans();
+    const initial = await service.runManager(worker.id);
+    const action = initial.actions.find(item => item.cardId === worker.cardId && item.kind === "work" && !item.blocked);
+    const source = initial.evidence.find(item => item.cardId === worker.cardId && item.kind === "source"
+      && item.metadata?.contentScope !== "portal_notice" && item.metadata?.contentScope !== "message_preview");
+    expect(action).toBeDefined();
+    expect(action?.stepIds).toHaveLength(1);
+    expect(source).toBeDefined();
+    const payload = {
+      cardId: worker.cardId,
+      actionId: action!.id,
+      detail: "I recorded the comparison result on the Trello card.",
+      requestKey: randomUUID(),
+      sourceEvidenceId: source!.id,
+    };
+
+    const first = await service.reportManagerActionCompletion(worker.id, payload);
+    expect(first).toMatchObject({ alreadyRecorded: false, reassessed: true, applied: false });
+    const [stored] = await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id));
+    expect(stored).toMatchObject({ reportKind: "completion", actionId: action!.id, assessmentRunId: initial.runId, requestKey: payload.requestKey, sourceEvidenceId: source!.id });
+    expect((await db.select().from(schema.aptlssSteps).where(eq(schema.aptlssSteps.id, worker.stepId)))[0].status).not.toBe("complete");
+    const status = await service.getManagerStatus(worker.id);
+    expect(status.snapshot?.actions.find(item => item.id === action!.id)).toMatchObject({ blocked: true });
+    expect(status.snapshot?.interventions).toContainEqual(expect.objectContaining({
+      issueKind: "completion_report_pending",
+      evidenceIds: [`update:${stored.id}`],
+    }));
+    expect(status.snapshot?.evidence).toContainEqual(expect.objectContaining({
+      id: `update:${stored.id}`,
+      kind: "worker",
+      metadata: expect.objectContaining({ truthClass: "worker_report", reportKind: "completion", sourceEvidenceId: source!.id }),
+    }));
+    expect(await db.select().from(schema.aptlssEvidenceSubjectLinks).where(eq(schema.aptlssEvidenceSubjectLinks.vaId, worker.id))).toHaveLength(1);
+    expect(await plans()).toEqual(beforePlan);
+
+    const repeated = await service.reportManagerActionCompletion(worker.id, payload);
+    expect(repeated).toMatchObject({ reportId: first.reportId, alreadyRecorded: true, reassessed: true, applied: false });
+    expect(await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id))).toHaveLength(1);
+    expect(await db.select().from(schema.aptlssEvidenceSubjectLinks).where(eq(schema.aptlssEvidenceSubjectLinks.vaId, worker.id))).toHaveLength(1);
+    expect(await plans()).toEqual(beforePlan);
+    await expect(service.reportManagerActionCompletion(worker.id, { ...payload, detail: "Different report with the same key." }))
+      .rejects.toThrow(/already used for different information/i);
+  });
+
   it("is idempotent for identical input and coalesces same-process concurrent requests", async () => {
     const pending = service.runManager(worker.id);
     const concurrent = service.runManager(worker.id);

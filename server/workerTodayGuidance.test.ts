@@ -24,6 +24,19 @@ describe("worker today guidance", () => {
     expect(selectManagerPrimary(snapshot)).toMatchObject({ cardId: "urgent", kind: "verification" });
   });
 
+  it("surfaces a pending completion report before ordinary attention items but not urgent conflicts", () => {
+    const snapshot = {
+      interventions: [
+        { id: "ordinary", cardId: "ordinary", severity: "attention", issueKind: "source_check" },
+        { id: "completion", cardId: "reported", severity: "attention", issueKind: "completion_report_pending" },
+      ],
+      actions: [{ id: "work", cardId: "work", blocked: false }],
+    } as ManagerSnapshot;
+    expect(selectManagerPrimary(snapshot)).toMatchObject({ cardId: "reported", kind: "verification" });
+    snapshot.interventions.unshift({ id: "urgent", cardId: "urgent", severity: "urgent", issueKind: "conflicting_claims" });
+    expect(selectManagerPrimary(snapshot)).toMatchObject({ cardId: "urgent", kind: "verification" });
+  });
+
   it("applies the manager's deadline and lane ordering to the worker queue", () => {
     const cards = [
       card("doing", "DOING", { score: 90 }),

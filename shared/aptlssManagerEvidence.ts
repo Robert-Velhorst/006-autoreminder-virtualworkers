@@ -21,6 +21,11 @@ export type ManagerEvidenceMetadata = {
   outcome?: string | null;
   deadlineDate?: string | null;
   sourceEvidenceId?: string | null;
+  sourceDescription?: string | null;
+  reportDetail?: string | null;
+  reportKind?: "update" | "completion";
+  actionId?: string | null;
+  assessmentRunId?: number | null;
 };
 export type ManagerGraphConflict = {
   id: string;
