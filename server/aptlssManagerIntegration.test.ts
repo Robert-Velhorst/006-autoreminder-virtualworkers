@@ -1,4 +1,8 @@
 import { randomUUID, createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq, inArray, like, or, sql } from "drizzle-orm";
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
@@ -17,11 +21,37 @@ const controls = vi.hoisted(() => ({
   url: process.env.APTLSS_TEST_DATABASE_URL,
   db: undefined as MySql2Database<typeof schema> | undefined,
   safety: true,
+  allowPlanMutation: false,
   digest: "aptlss-mysql-integration-controlled-digest",
+  failQueueEnqueue: false,
   model: vi.fn<(input: ManagerInput, base: ManagerResult, outcome?: (success: boolean, failureKind?: "quota", attempts?: CodexManagerAttempt[]) => void) => Promise<ManagerResult>>(),
   emit: vi.fn(),
 }));
 vi.mock("./db", () => ({ getDb: async () => controls.db }));
+// Exercise active-run recovery invariants without enabling plan writes in production.
+vi.mock("./aptlssManagerPilot", async importOriginal => {
+  const actual = await importOriginal<typeof import("./aptlssManagerPilot")>();
+  return {
+    ...actual,
+    assertManagerPlanMutationAllowed: (vaId: number) => {
+      if (!controls.allowPlanMutation) return actual.assertManagerPlanMutationAllowed(vaId);
+      actual.assertManagerPilotWorker(vaId);
+    },
+  };
+});
+vi.mock("./aptlssManagerQueue", async importOriginal => {
+  const actual = await importOriginal<typeof import("./aptlssManagerQueue")>();
+  return {
+    ...actual,
+    enqueueManagerTask: async (...args: Parameters<typeof actual.enqueueManagerTask>) => {
+      if (controls.failQueueEnqueue) {
+        controls.failQueueEnqueue = false;
+        throw new Error("Controlled queue failure");
+      }
+      return actual.enqueueManagerTask(...args);
+    },
+  };
+});
 vi.mock("./aptlssManagerModel", () => ({
   enrichManagerResult: controls.model,
   reuseManagerSemanticReview: (_input: ManagerInput, base: ManagerResult) => base,
@@ -39,7 +69,7 @@ type Worker = { id: number; openId: string; cardId: string; stepId: number };
 type Service = typeof import("./aptlssManagerService");
 type Reviews = typeof import("./aptlssManagerReviewService");
 
-describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeout: 30_000, hookTimeout: 30_000 }, () => {
+describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeout: 30_000, hookTimeout: 125_000 }, () => {
   let pool: Pool;
   let lockConnection: PoolConnection | undefined;
   let db: MySql2Database<typeof schema>;
@@ -79,7 +109,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(identity[0].name).toBe(url.pathname.slice(1));
     expect(identity[0].version).toMatch(/^8\./);
     lockConnection = await pool.getConnection();
-    const [lock] = await lockConnection.query<RowDataPacket[]>("SELECT GET_LOCK('aptlss-manager-integration-fixtures', 30) AS acquired");
+    const [lock] = await lockConnection.query<RowDataPacket[]>("SELECT GET_LOCK('aptlss-manager-integration-fixtures', 120) AS acquired");
     expect(lock[0].acquired).toBe(1);
     if ((await db.select().from(queueJobs).where(inArray(queueJobs.state,["pending","leased"])).limit(1)).length
       || (await db.select().from(queueSlots).where(sql`${queueSlots.vaId} IS NOT NULL`).limit(1)).length) {
@@ -149,7 +179,9 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     vi.stubEnv("APTLSS_MANAGER_PROVIDER", "openai-api");
     controls.db = db;
     controls.safety = true;
+    controls.allowPlanMutation = false;
     controls.digest = "aptlss-mysql-integration-controlled-digest";
+    controls.failQueueEnqueue = false;
     controls.model.mockReset().mockImplementation(async (_input, base, outcome) => { outcome?.(true); return base; });
     controls.emit.mockReset();
     // Only Date is faked: MySQL connection timers and interleavings remain real.
@@ -162,6 +194,10 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
   afterEach(async () => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    controls.failQueueEnqueue = false;
+    controls.allowPlanMutation = false;
     controls.db = db;
     if (!db || !ownedUsers.length) return;
     // Only identities allocated by this test and their newly created dependent rows.
@@ -170,9 +206,13 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
         like(schema.workspaceEvidenceItems.sourceId, `worker-assertion:${id}:%`),
         like(schema.workspaceEvidenceItems.sourceId, `verified-conflict-resolution:${id}:%`),
       ])));
+    const driveEvidence = await db.select({ id: schema.workspaceEvidenceItems.id }).from(schema.workspaceEvidenceItems)
+      .where(and(inArray(schema.workspaceEvidenceItems.vaId, ownedUsers), eq(schema.workspaceEvidenceItems.source, "google_drive")));
     const assessmentCardIds = (await db.select({ cardId: schema.aptlssPlans.cardId }).from(schema.aptlssPlans)
       .where(inArray(schema.aptlssPlans.vaId, ownedUsers))).map(row => row.cardId);
-    const evidenceIds = [...new Set([...ownedEvidenceIds, ...evidence.map(row => row.id)])];
+    const ownedTimeEntryIds = (await db.select({ id: schema.timeEntries.id }).from(schema.timeEntries)
+      .where(inArray(schema.timeEntries.vaId, ownedUsers))).map(row => row.id);
+    const evidenceIds = [...new Set([...ownedEvidenceIds, ...evidence.map(row => row.id), ...driveEvidence.map(row => row.id)])];
     await db.transaction(async tx => {
       await tx.update(queueSlots).set({vaId:null,token:null,leaseUntil:null}).where(inArray(queueSlots.vaId,ownedUsers));
       await tx.delete(queueEvents).where(inArray(queueEvents.vaId,ownedUsers));
@@ -184,7 +224,13 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       await tx.delete(schema.aptlssManagerRuns).where(inArray(schema.aptlssManagerRuns.vaId, ownedUsers));
       await tx.delete(schema.aptlssManagerUpdates).where(inArray(schema.aptlssManagerUpdates.vaId, ownedUsers));
       await tx.delete(schema.aptlssManagerState).where(inArray(schema.aptlssManagerState.vaId, ownedUsers));
-      await tx.delete(schema.appSettings).where(and(inArray(schema.appSettings.vaId, ownedUsers), like(schema.appSettings.key, "aptlss_manager_semantic:%")));
+      await tx.delete(schema.appSettings).where(and(inArray(schema.appSettings.vaId, ownedUsers), or(
+        like(schema.appSettings.key, "aptlss_manager_semantic:%"),
+        like(schema.appSettings.key, "googleEvidence:%"),
+        like(schema.appSettings.key, "googleEvidenceRefreshToken:%"),
+      )));
+      await tx.delete(schema.browserTabDailyEvidence).where(inArray(schema.browserTabDailyEvidence.vaId, ownedUsers));
+      await tx.delete(schema.browserTabStates).where(inArray(schema.browserTabStates.vaId, ownedUsers));
       await tx.delete(schema.aptlssVerificationFollowups).where(inArray(schema.aptlssVerificationFollowups.vaId, ownedUsers));
       await tx.delete(schema.aptlssEvidenceConflicts).where(inArray(schema.aptlssEvidenceConflicts.vaId, ownedUsers));
       await tx.delete(schema.aptlssEvidenceSubjectLinks).where(inArray(schema.aptlssEvidenceSubjectLinks.vaId, ownedUsers));
@@ -194,6 +240,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
         await tx.delete(schema.workspaceEvidenceItems).where(inArray(schema.workspaceEvidenceItems.id, evidenceIds));
       }
       await tx.delete(schema.dailyPlans).where(inArray(schema.dailyPlans.vaId, ownedUsers));
+      if (ownedTimeEntryIds.length) await tx.delete(schema.timeEntryEvents).where(inArray(schema.timeEntryEvents.timeEntryId, ownedTimeEntryIds));
       await tx.delete(schema.timeEntries).where(inArray(schema.timeEntries.vaId, ownedUsers));
       if (assessmentCardIds.length) await tx.delete(schema.aptlssAssessments).where(inArray(schema.aptlssAssessments.cardId, assessmentCardIds));
       await tx.delete(schema.notificationHistory).where(inArray(schema.notificationHistory.userId, ownedUsers));
@@ -206,6 +253,8 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       await tx.delete(schema.decisionOutcomes).where(inArray(schema.decisionOutcomes.vaId, ownedUsers));
       await tx.delete(schema.founderDecisionDeadlines).where(inArray(schema.founderDecisionDeadlines.vaId, ownedUsers));
       await tx.delete(schema.aptlssWaitingReasons).where(inArray(schema.aptlssWaitingReasons.vaId, ownedUsers));
+      await tx.delete(schema.cardStates).where(inArray(schema.cardStates.vaId, ownedUsers));
+      await tx.delete(schema.priorityScores).where(inArray(schema.priorityScores.vaId, ownedUsers));
       await tx.delete(schema.taskAssignments).where(inArray(schema.taskAssignments.founderId, ownedUsers));
       await tx.delete(schema.aptlssSteps).where(inArray(schema.aptlssSteps.vaId, ownedUsers));
       await tx.delete(schema.aptlssPlans).where(inArray(schema.aptlssPlans.vaId, ownedUsers));
@@ -236,6 +285,342 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
   const runs = (id = worker.id) => db.select().from(schema.aptlssManagerRuns).where(eq(schema.aptlssManagerRuns.vaId, id));
   const state = async (id = worker.id) => (await db.select().from(schema.aptlssManagerState).where(eq(schema.aptlssManagerState.vaId, id)))[0];
   const lease = async () => (await db.select().from(schema.aptlssManagerControl).where(eq(schema.aptlssManagerControl.id, 1)))[0];
+  const seedGlobalBlockedAssessment = (cardId: string) => db.insert(schema.aptlssAssessments).values({
+    cardId,
+    cardName: "Shared card assessment",
+    engineVersion: "integration-test",
+    contextHash: hash(randomUUID()),
+    trigger: "manual",
+    primaryState: "TO_DO",
+    stateReason: "Legacy global assessment fixture",
+    secondarySignals: "[]",
+    actionability: "blocked",
+    priorityScore: 99,
+    priorityTier: "HIGH",
+    priorityBreakdown: "{}",
+    confidenceScore: 99,
+    confidenceBand: "high",
+    confidenceReason: "Must not leak into a worker-specific queue",
+    evidenceCoverage: "{}",
+    evidenceJson: "[]",
+    intelligenceJson: "{}",
+    uncertaintiesJson: "[]",
+    recommendationsJson: "[]",
+    nextAssessmentAt: NOW,
+    changeJson: "{}",
+    assessedAt: NOW,
+    lastEvaluatedAt: NOW,
+  });
+  const installGoogleProvider = (fixture: {
+    gmailMessage?: { id: string; threadId: string; subject: string; snippet: string } | null;
+    driveFile?: { id: string; name: string; description: string; modifiedAt?: Date } | null;
+    gmailFailure?: boolean;
+    driveFailure?: boolean;
+  }) => {
+    const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+    const mockedFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("https://oauth2.googleapis.com/token")) return json({ access_token: "isolated-provider-test-token" });
+      if (url.includes("gmail.googleapis.com/gmail/v1/users/me/messages?")) {
+        if (fixture.gmailFailure) return json({ error: "provider unavailable" }, 503);
+        const message = fixture.gmailMessage;
+        return json({ messages: message ? [{ id: message.id, threadId: message.threadId }] : [] });
+      }
+      if (url.includes("gmail.googleapis.com/gmail/v1/users/me/messages/")) {
+        const message = fixture.gmailMessage;
+        if (!message) throw new Error("Unexpected Gmail detail request");
+        return json({
+          id: message.id,
+          threadId: message.threadId,
+          snippet: message.snippet,
+          internalDate: String(NOW.getTime()),
+          payload: { headers: [
+            { name: "From", value: "Source Sender <source@example.test>" },
+            { name: "Subject", value: message.subject },
+          ] },
+        });
+      }
+      if (url.startsWith("https://www.googleapis.com/drive/v3/files?")) {
+        if (fixture.driveFailure) return json({ error: "provider unavailable" }, 503);
+        const file = fixture.driveFile;
+        return json({ files: file ? [{
+          id: file.id,
+          name: file.name,
+          mimeType: "application/pdf",
+          modifiedTime: (file.modifiedAt ?? NOW).toISOString(),
+          webViewLink: `https://drive.google.com/file/d/${file.id}/view`,
+          description: file.description,
+          parents: ["folder-test"],
+          size: "128",
+        }] : [] });
+      }
+      throw new Error(`Unexpected test provider URL: ${url}`);
+    });
+    vi.stubGlobal("fetch", mockedFetch);
+    return mockedFetch;
+  };
+  const connectGoogleForTest = async (vaId: number) => {
+    vi.stubEnv("JWT_SECRET", "isolated-google-evidence-test-secret-long-enough");
+    vi.stubEnv("GOOGLE_CLIENT_ID", "isolated-client-id");
+    vi.stubEnv("GOOGLE_CLIENT_SECRET", "isolated-client-secret");
+    const google = await import("./googleEvidence");
+    await google.saveGoogleRefreshToken(vaId, "isolated-refresh-token");
+    return google;
+  };
+
+  it("builds personal estimates only from completed steps and separates wait and interrupted time", async () => {
+    const otherWorker = await insertWorker();
+    const [secondStep] = await db.insert(schema.aptlssSteps).values({
+      vaId: worker.id, cardId: worker.cardId, stepNumber: 2, title: "Record findings",
+      category: "research", status: "complete", estimatedMinutes: 15,
+    }).$returningId();
+    const [openStep] = await db.insert(schema.aptlssSteps).values({
+      vaId: worker.id, cardId: worker.cardId, stepNumber: 3, title: "Prepare next action",
+      category: "research", status: "open", estimatedMinutes: 30,
+    }).$returningId();
+    await db.update(schema.aptlssSteps).set({ category: "research", status: "complete" })
+      .where(eq(schema.aptlssSteps.id, worker.stepId));
+    await db.update(schema.aptlssSteps).set({ status: "complete" })
+      .where(eq(schema.aptlssSteps.id, otherWorker.stepId));
+
+    const addEntry = async (vaId: number, cardId: string, stepId: number | null, minutes: number, category = "client_work", endOffsetMinutes = 0) => {
+      const endTime = new Date(NOW.getTime() - endOffsetMinutes * 60_000);
+      const [result] = await db.insert(schema.timeEntries).values({
+        vaId, founderId: adminId, taskId: cardId, cardId, aptlssStepId: stepId,
+        category, startTime: new Date(endTime.getTime() - minutes * 60_000), endTime,
+        durationMinutes: minutes, durationSeconds: minutes * 60,
+      });
+      return Number(result.insertId);
+    };
+    const interruptedEntryId = await addEntry(worker.id, worker.cardId, worker.stepId, 15, "client_work", 25);
+    await addEntry(worker.id, worker.cardId, worker.stepId, 25);
+    await addEntry(worker.id, worker.cardId, secondStep.id, 12);
+    await addEntry(worker.id, worker.cardId, openStep.id, 90);
+    await addEntry(otherWorker.id, otherWorker.cardId, otherWorker.stepId, 99);
+    await addEntry(worker.id, worker.cardId, null, 4, "waiting", 3);
+    await addEntry(worker.id, worker.cardId, null, 3, "break");
+    await db.insert(schema.timeEntryEvents).values({ timeEntryId: interruptedEntryId, eventType: "pause" });
+
+    const input = await service.collectManagerInput(db, worker.id, NOW);
+    const samples = new Map(input.timeSamples.map(sample => [sample.stepId, sample]));
+    expect(samples.size).toBe(2);
+    expect(samples.get(worker.stepId)).toMatchObject({
+      cardId: worker.cardId, category: "research", minutes: 40, interrupted: true,
+    });
+    expect(samples.get(secondStep.id)).toMatchObject({
+      cardId: worker.cardId, category: "research", minutes: 12, interrupted: false,
+    });
+    expect(input.timeSamples.some(sample => sample.stepId === openStep.id || sample.cardId === otherWorker.cardId)).toBe(false);
+    expect(input.timeSummary).toEqual({ waitingMinutes: 7, interruptedMinutes: 15 });
+  });
+
+  it("reassesses only changed Gmail evidence and rolls it back when the queue receipt fails", async () => {
+    const google = await connectGoogleForTest(worker.id);
+    const message = {
+      id: `google-it-${randomUUID()}`,
+      threadId: `google-thread-${randomUUID()}`,
+      subject: `Update ${worker.cardId}`,
+      snippet: "Please review the original source.",
+    };
+    installGoogleProvider({ gmailMessage: message });
+    const sync = () => google.syncWorkerGoogleEvidence(worker.id, { gmail: true, drive: false });
+
+    const first = await sync();
+    expect(first).toMatchObject({ configured: true, gmail: { state: "synced", scanned: 1, imported: 1, linked: 1 } });
+    const [retained] = await db.select().from(schema.emailTasks).where(eq(schema.emailTasks.gmailMessageId, message.id));
+    expect(retained).toMatchObject({ vaId: worker.id, snippet: message.snippet, trelloCardId: worker.cardId });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
+      .toMatchObject({ state: "pending", generation: 1, trigger: "source_ingested" });
+
+    await sync();
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0].generation).toBe(1);
+
+    message.snippet = "The source now contains a revised request.";
+    const revised = await sync();
+    expect(revised.gmail.state).toBe("synced");
+    expect((await db.select().from(schema.emailTasks).where(eq(schema.emailTasks.gmailMessageId, message.id)))[0].snippet)
+      .toBe(message.snippet);
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0].generation).toBe(2);
+
+    const failedMessage = {
+      id: `google-it-${randomUUID()}`,
+      threadId: `google-thread-${randomUUID()}`,
+      subject: `New request ${worker.cardId}`,
+      snippet: "This evidence must roll back with its failed queue receipt.",
+    };
+    const provider = installGoogleProvider({ gmailMessage: failedMessage });
+    controls.failQueueEnqueue = true;
+    const failed = await sync();
+    expect(failed.gmail.state).toBe("failed");
+    expect(failed.message).not.toContain("Controlled queue failure");
+    expect(await db.select().from(schema.emailTasks).where(eq(schema.emailTasks.gmailMessageId, failedMessage.id))).toHaveLength(0);
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0].generation).toBe(2);
+    expect(provider).toHaveBeenCalled();
+  });
+
+  it("keeps Drive observation times stable and rolls evidence back with a failed re-assessment receipt", async () => {
+    const google = await connectGoogleForTest(worker.id);
+    const file = {
+      id: `google-drive-it-${randomUUID()}`,
+      name: `Source ${worker.cardId}`,
+      description: "Original Drive metadata.",
+      modifiedAt: NOW,
+    };
+    installGoogleProvider({ driveFile: file });
+    const sync = () => google.syncWorkerGoogleEvidence(worker.id, { gmail: false, drive: true });
+    const sourceId = `${worker.id}:${file.id}`;
+
+    const first = await sync();
+    expect(first.drive).toMatchObject({ state: "synced", scanned: 1, imported: 1, linked: 1 });
+    const [original] = await db.select().from(schema.workspaceEvidenceItems).where(and(
+      eq(schema.workspaceEvidenceItems.vaId, worker.id),
+      eq(schema.workspaceEvidenceItems.source, "google_drive"),
+      eq(schema.workspaceEvidenceItems.sourceId, sourceId),
+    ));
+    expect(original?.content).toBe(file.description);
+    const links = await db.select().from(schema.workspaceEvidenceLinks).where(eq(schema.workspaceEvidenceLinks.evidenceId, original.id));
+    expect(links).toHaveLength(1);
+    expect(links[0].cardId).toBe(worker.cardId);
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
+
+    await sync();
+    const [unchanged] = await db.select().from(schema.workspaceEvidenceItems).where(eq(schema.workspaceEvidenceItems.id, original.id));
+    expect(unchanged.observedAt).toEqual(original.observedAt);
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0].generation).toBe(1);
+
+    vi.setSystemTime(new Date(NOW.getTime() + 60_000));
+    file.description = "Revised Drive metadata.";
+    file.modifiedAt = new Date(NOW.getTime() + 60_000);
+    installGoogleProvider({ driveFile: file });
+    controls.failQueueEnqueue = true;
+    const failed = await sync();
+    expect(failed.drive.state).toBe("failed");
+    const [rolledBack] = await db.select().from(schema.workspaceEvidenceItems).where(eq(schema.workspaceEvidenceItems.id, original.id));
+    expect(rolledBack).toMatchObject({ content: "Original Drive metadata." });
+    expect(rolledBack.observedAt).toEqual(original.observedAt);
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0].generation).toBe(1);
+
+    const retried = await sync();
+    expect(retried.drive.state).toBe("synced");
+    const [updated] = await db.select().from(schema.workspaceEvidenceItems).where(eq(schema.workspaceEvidenceItems.id, original.id));
+    expect(updated.content).toBe("Revised Drive metadata.");
+    expect(updated.observedAt.getTime()).toBeGreaterThan(original.observedAt.getTime());
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0].generation).toBe(2);
+  });
+
+  it("ignores late stale Drive snapshots and rejects changed content with the same source version", async () => {
+    const google = await connectGoogleForTest(worker.id);
+    const file = {
+      id: `google-drive-order-${randomUUID()}`,
+      name: `Source ${worker.cardId}`,
+      description: "Newest retained content.",
+      modifiedAt: new Date(NOW.getTime() + 60_000),
+    };
+    const sync = () => google.syncWorkerGoogleEvidence(worker.id, { gmail: false, drive: true });
+    const sourceId = `${worker.id}:${file.id}`;
+    installGoogleProvider({ driveFile: file });
+    expect((await sync()).drive.state).toBe("synced");
+    const [newest] = await db.select().from(schema.workspaceEvidenceItems).where(and(
+      eq(schema.workspaceEvidenceItems.vaId, worker.id),
+      eq(schema.workspaceEvidenceItems.source, "google_drive"),
+      eq(schema.workspaceEvidenceItems.sourceId, sourceId),
+    ));
+    expect(newest).toMatchObject({ content: "Newest retained content.", modifiedAt: file.modifiedAt });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
+
+    vi.setSystemTime(new Date(NOW.getTime() + 120_000));
+    file.description = "Late older response.";
+    file.modifiedAt = NOW;
+    installGoogleProvider({ driveFile: file });
+    expect((await sync()).drive.state).toBe("synced");
+    const [afterStaleResponse] = await db.select().from(schema.workspaceEvidenceItems).where(eq(schema.workspaceEvidenceItems.id, newest.id));
+    expect(afterStaleResponse).toMatchObject({
+      content: "Newest retained content.",
+      contentHash: newest.contentHash,
+      modifiedAt: newest.modifiedAt,
+      observedAt: newest.observedAt,
+    });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
+
+    file.description = "Conflicting content for the same version.";
+    file.modifiedAt = newest.modifiedAt!;
+    installGoogleProvider({ driveFile: file });
+    expect((await sync()).drive.state).toBe("failed");
+    const [afterVersionConflict] = await db.select().from(schema.workspaceEvidenceItems).where(eq(schema.workspaceEvidenceItems.id, newest.id));
+    expect(afterVersionConflict).toMatchObject({
+      content: "Newest retained content.",
+      contentHash: newest.contentHash,
+      modifiedAt: newest.modifiedAt,
+    });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
+  });
+
+  it("retains separate Gmail and Drive sync failures when only one provider succeeds", async () => {
+    const google = await connectGoogleForTest(worker.id);
+    installGoogleProvider({ gmailFailure: true, driveFile: null });
+    const first = await google.syncWorkerGoogleEvidence(worker.id, { gmail: true, drive: true });
+    expect(first).toMatchObject({ gmail: { state: "failed" }, drive: { state: "synced" } });
+    const firstStatus = await google.getGoogleEvidenceStatus(worker.id);
+    expect(firstStatus.gmail.lastError).toBe("Google evidence sync failed. Check server configuration and Google API access.");
+    expect(firstStatus.drive.lastError).toBeNull();
+    expect(firstStatus.gmail.lastSyncedAt).toBeNull();
+    expect(firstStatus.drive.lastSyncedAt).toBe(NOW.toISOString());
+
+    installGoogleProvider({
+      gmailMessage: {
+        id: `google-recovery-${randomUUID()}`,
+        threadId: `google-recovery-thread-${randomUUID()}`,
+        subject: `Reviewed request ${worker.cardId}`,
+        snippet: "Please review the source record.",
+      },
+      driveFailure: true,
+    });
+    const second = await google.syncWorkerGoogleEvidence(worker.id, { gmail: true, drive: true });
+    expect(second).toMatchObject({ gmail: { state: "synced" }, drive: { state: "failed" } });
+    const secondStatus = await google.getGoogleEvidenceStatus(worker.id);
+    expect(secondStatus.gmail.lastError).toBeNull();
+    expect(secondStatus.drive.lastError).toBe("Google evidence sync failed. Check server configuration and Google API access.");
+  });
+
+  it("does not overwrite a Gmail message already retained for another worker", async () => {
+    const otherWorker = await insertWorker();
+    const messageId = `google-shared-message-${randomUUID()}`;
+    await db.insert(schema.emailTasks).values({
+      vaId: otherWorker.id,
+      gmailMessageId: messageId,
+      gmailThreadId: `google-shared-thread-${randomUUID()}`,
+      subject: "Other worker's retained message",
+      fromAddress: "private@example.test",
+      snippet: "Original worker-owned content.",
+      receivedAt: NOW,
+      status: "pending",
+    });
+    const google = await connectGoogleForTest(worker.id);
+    installGoogleProvider({ gmailMessage: {
+      id: messageId,
+      threadId: `google-reimport-thread-${randomUUID()}`,
+      subject: `Update ${worker.cardId}`,
+      snippet: "Content from a second worker's Google import.",
+    } });
+
+    const result = await google.syncWorkerGoogleEvidence(worker.id, { gmail: true, drive: false });
+    expect(result.gmail).toMatchObject({ state: "synced", scanned: 1, imported: 0 });
+    const [retained] = await db.select().from(schema.emailTasks).where(eq(schema.emailTasks.gmailMessageId, messageId));
+    expect(retained).toMatchObject({
+      vaId: otherWorker.id,
+      subject: "Other worker's retained message",
+      snippet: "Original worker-owned content.",
+    });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(0);
+    expect(await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id))).toHaveLength(0);
+  });
 
   it("treats a stored portal notification deadline as unverified and blocks follow-up", async () => {
     const [mail] = await db.insert(schema.emailTasks).values({
@@ -433,6 +818,42 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId,worker.id)))[0]).toMatchObject({state:"pending",priority:100,trigger:"conflict_resolved"});
       expect((await graphRows()).conflicts[0].status).toBe("resolved");
     });
+    it("coalesces concurrent conflict retries and does not reopen a resolved follow-up", async () => {
+      const graph = await import("./aptlssEvidenceGraphDb");
+      const fixture = await seedGraphConflict();
+      const create = () => graph.createEvidenceConflict({
+        vaId: worker.id,
+        cardId: worker.cardId,
+        sourceEvidenceId: fixture.input.sourceEvidenceId,
+        assertedEvidenceId: fixture.assertedEvidenceId,
+        question: "Verify the source",
+        createdBy: String(adminId),
+      });
+
+      const retries = await Promise.all([create(), create()]);
+      expect(retries.map(result => result.conflictId)).toEqual([
+        fixture.conflictId,
+        fixture.conflictId,
+      ]);
+      expect((await graphRows()).followups).toHaveLength(1);
+      expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
+
+      await graph.resolveVerificationFollowup(fixture.input);
+      const eventCountAfterResolution = await db.select().from(queueEvents)
+        .where(eq(queueEvents.vaId, worker.id));
+      await expect(create()).resolves.toMatchObject({
+        conflictId: fixture.conflictId,
+        status: "resolved",
+      });
+
+      const afterReplay = await graphRows();
+      expect(afterReplay.conflicts).toHaveLength(1);
+      expect(afterReplay.conflicts[0].status).toBe("resolved");
+      expect(afterReplay.followups).toHaveLength(1);
+      expect(afterReplay.followups[0].status).toBe("resolved");
+      expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id)))
+        .toHaveLength(eventCountAfterResolution.length);
+    });
     it("rejects evidence IDs attached to a different task owned by the same worker", async () => {
       const fixture = await seedGraphConflict();
       const otherCardId = `manager-it-${randomUUID()}`;
@@ -462,6 +883,51 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     await db.insert(schema.dailyPlans).values({ vaId: id, dateKey: DATE_KEY, scheduleJson: JSON.stringify(plan),
       generatedAt: NOW, dailySummary: "Original fixture", totalScheduledMinutes: plan.planHealth.scheduledMinutes });
     return plan;
+  }
+  function planWithBlock(
+    startTime: string,
+    status: OperatorDailyPlanPayload["blocks"][number]["status"] = "planned",
+    target = worker,
+  ) {
+    const plan = emptyPlan();
+    plan.blocks = [{
+      id: "restore-fixture-block",
+      startTime,
+      endTime: `${String(Number(startTime.slice(0, 2)) + 1).padStart(2, "0")}:00`,
+      cardId: target.cardId,
+      cardName: "Review local requirements",
+      cardUrl: `https://trello.com/c/${target.cardId}`,
+      boardName: "Integration fixture",
+      listName: "TO DO",
+      action: "Compare the local requirements",
+      stepIds: [target.stepId],
+      priority: "MEDIUM",
+      score: 1,
+      state: "TO DO",
+      status,
+      notes: "",
+      flags: [],
+    }];
+    plan.planHealth.scheduledMinutes = 60;
+    plan.planHealth.gaps = 480;
+    return plan;
+  }
+  async function seedAppliedRun(previousPlan: OperatorDailyPlanPayload, appliedPlan: OperatorDailyPlanPayload, vaId = worker.id) {
+    await seedPlan(appliedPlan, vaId);
+    await db.update(schema.aptlssManagerState).set({ mode: "active" }).where(eq(schema.aptlssManagerState.vaId, vaId));
+    await db.update(schema.aptlssManagerControl).set({ activeVaId: vaId }).where(eq(schema.aptlssManagerControl.id, 1));
+    const [run] = await db.insert(schema.aptlssManagerRuns).values({
+      vaId,
+      inputHash: hash(`restore-fixture:${randomUUID()}`),
+      trigger: "restore_fixture",
+      mode: "active",
+      proposalHash: hash(`restore-proposal:${randomUUID()}`),
+      previousPlanJson: JSON.stringify(previousPlan),
+      appliedPlanHash: reviews.managerPlanVersion(JSON.stringify(appliedPlan)),
+      snapshotJson: JSON.stringify({ implementationDigest: controls.digest }),
+      createdAt: NOW,
+    }).$returningId();
+    return run.id;
   }
 
   // Historical acceptance fixtures, not claims of 100 real-world reviewed proposals.
@@ -1008,35 +1474,109 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect((await lease()).activeVaId).toBeNull();
   });
 
+  it("restores the previous agenda with an audit entry and returns the worker to shadow mode", async () => {
+    const previous = planWithBlock("11:00");
+    const applied = planWithBlock("13:00");
+    const runId = await seedAppliedRun(previous, applied);
+    controls.allowPlanMutation = true;
+
+    await expect(reviews.restoreManagerPlan(adminId, worker.id, runId)).resolves.toEqual({ restored: true });
+
+    const saved = (await plans())[0];
+    const restored = JSON.parse(saved.scheduleJson) as OperatorDailyPlanPayload;
+    expect(restored.blocks).toEqual(previous.blocks);
+    expect(restored.auditTrail).toEqual([
+      ...previous.auditTrail,
+      { at: NOW.toISOString(), action: "restored", detail: "Previous day schedule restored after owner review." },
+    ]);
+    expect(saved.dailySummary).toBe("Restored previous plan after manager review");
+    expect(saved.totalScheduledMinutes).toBe(previous.planHealth.scheduledMinutes);
+    expect((await state()).mode).toBe("shadow");
+    expect((await lease()).activeVaId).toBeNull();
+    await expect(reviews.restoreManagerPlan(adminId, worker.id, runId)).rejects.toThrow(/plan has changed since this run/i);
+  });
+
+  it("rolls back agenda and mode changes if releasing the pilot lease fails", async () => {
+    const runId = await seedAppliedRun(planWithBlock("11:00"), planWithBlock("13:00"));
+    const beforePlan = await plans();
+    const beforeState = await state();
+    const beforeLease = await lease();
+    controls.allowPlanMutation = true;
+    controls.db = new Proxy(db, {
+      get(target, property) {
+        if (property !== "transaction") {
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (callback: (tx: unknown) => unknown, config?: unknown) =>
+          (target.transaction as any)(async (tx: any) => callback(new Proxy(tx, {
+            get(transaction, txProperty) {
+              if (txProperty === "update") return (table: unknown, ...args: unknown[]) => {
+                if (table === schema.aptlssManagerControl) throw new Error("Injected pilot lease release failure");
+                return transaction.update(table, ...args);
+              };
+              const value = Reflect.get(transaction, txProperty, transaction);
+              return typeof value === "function" ? value.bind(transaction) : value;
+            },
+          })), config);
+      },
+    }) as typeof db;
+
+    try {
+      await expect(reviews.restoreManagerPlan(adminId, worker.id, runId)).rejects.toThrow(/injected pilot lease release failure/i);
+    } finally {
+      controls.db = db;
+    }
+    expect(await plans()).toEqual(beforePlan);
+    expect(await state()).toEqual(beforeState);
+    expect(await lease()).toEqual(beforeLease);
+  });
+
   it("refuses rollback over a newer daily plan or a different worker's run", async () => {
-    await rejectActivation();
-    await seedPlan();
-    const applied = await service.runManager(worker.id);
-    const newer = { ...emptyPlan(), auditTrail: [{ at: NOW.toISOString(), action: "Worker correction", detail: "Newer protected plan" }] };
+    const runId = await seedAppliedRun(planWithBlock("11:00"), planWithBlock("13:00"));
+    const newer = { ...planWithBlock("14:00"), auditTrail: [{ at: NOW.toISOString(), action: "Worker correction", detail: "Newer protected plan" }] };
     await db.update(schema.dailyPlans).set({ scheduleJson: JSON.stringify(newer) }).where(eq(schema.dailyPlans.vaId, worker.id));
-    await expect(reviews.restoreManagerPlan(adminId, worker.id, applied.runId)).rejects.toThrow(/shadow-only/i);
     const other = await insertWorker();
-    await expect(reviews.restoreManagerPlan(adminId, other.id, applied.runId)).rejects.toThrow(/shadow-only/i);
+    const otherRunId = await seedAppliedRun(planWithBlock("11:00", "planned", other), planWithBlock("13:00", "planned", other), other.id);
+    controls.allowPlanMutation = true;
+    await expect(reviews.restoreManagerPlan(adminId, worker.id, runId)).rejects.toThrow(/plan has changed since this run/i);
+    const beforeOther = await plans(other.id);
+    await expect(reviews.restoreManagerPlan(adminId, worker.id, otherRunId)).rejects.toThrow(/no prior plan to restore/i);
     expect(JSON.parse((await plans())[0].scheduleJson)).toEqual(newer);
-    expect(await plans(other.id)).toEqual([]);
+    expect(await plans(other.id)).toEqual(beforeOther);
+    expect((await lease()).activeVaId).toBe(other.id);
   });
 
   it("rejects restoring a previous plan while a real active timer exists", async () => {
-    await rejectActivation();
-    await seedPlan();
-    const applied = await service.runManager(worker.id);
-    expect(applied.applied).toBe(false);
-    expect(applied.proposal?.blocks.every(block => block.startTime > "10:00")).toBe(true);
+    const runId = await seedAppliedRun(planWithBlock("11:00"), planWithBlock("13:00"));
     await db.insert(schema.timeEntries).values({ vaId: worker.id, founderId: adminId, taskId: worker.cardId,
-      cardId: worker.cardId, startTime: NOW, planDateKey: DATE_KEY, planBlockId: applied.proposal!.blocks[0].id,
+      cardId: worker.cardId, startTime: NOW, planDateKey: DATE_KEY, planBlockId: "restore-fixture-block",
       aptlssStepId: worker.stepId });
     const before = await plans(), beforeState = await state(), beforeLease = await lease();
     const beforeTimers = await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id));
-    await expect(reviews.restoreManagerPlan(adminId, worker.id, applied.runId)).rejects.toThrow(/shadow-only/i);
+    controls.allowPlanMutation = true;
+    await expect(reviews.restoreManagerPlan(adminId, worker.id, runId)).rejects.toThrow(/stop the active timer/i);
     expect(await plans()).toEqual(before);
     expect(await state()).toEqual(beforeState);
     expect(await lease()).toEqual(beforeLease);
     expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toEqual(beforeTimers);
+  });
+
+  it.each([
+    { label: "completed", startTime: "13:00", status: "done" as const },
+    { label: "active", startTime: "13:00", status: "active" as const },
+    { label: "elapsed", startTime: "09:00", status: "planned" as const },
+  ])("refuses to restore over $label work", async ({ startTime, status }) => {
+    const runId = await seedAppliedRun(planWithBlock("11:00"), planWithBlock(startTime, status));
+    const before = await plans();
+    const beforeState = await state();
+    const beforeLease = await lease();
+    controls.allowPlanMutation = true;
+
+    await expect(reviews.restoreManagerPlan(adminId, worker.id, runId)).rejects.toThrow(/overwrite completed, active or elapsed work/i);
+    expect(await plans()).toEqual(before);
+    expect(await state()).toEqual(beforeState);
+    expect(await lease()).toEqual(beforeLease);
   });
 
   it("does not erase an executing plan when assigned planning input disappears", async () => {
@@ -1226,6 +1766,65 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(JSON.stringify({ status, reassessment, update })).not.toContain("chronology");
   });
 
+  it("builds a worker case file from only that worker's linked human records", async () => {
+    const otherWorker = await insertWorker();
+    const [legacyEvidence] = await db.insert(schema.workspaceEvidenceItems).values({
+      vaId: worker.id, source: "google_drive", sourceId: `manager-it-legacy-${randomUUID()}`,
+      kind: "file", title: "Legacy linked source", content: "Supplier terms saved for this task.",
+      summary: "PRIVATE_AI_SUMMARY_SENTINEL", sourceUrl: "https://drive.google.com/file/d/legacy",
+      observedAt: NOW, contentHash: hash("legacy-linked-source"), reviewStatus: "linked",
+    }).$returningId();
+    ownedEvidenceIds.push(legacyEvidence.id);
+    await db.insert(schema.workspaceEvidenceLinks).values({
+      evidenceId: legacyEvidence.id, cardId: worker.cardId, relevanceScore: 100,
+      matchReason: "Explicit integration fixture link", linkMethod: "manual",
+    });
+    await db.insert(schema.emailTasks).values([
+      {
+        vaId: worker.id,
+        gmailMessageId: `manager-it-${randomUUID()}`,
+        gmailThreadId: `thread-${randomUUID()}`,
+        subject: "A source email",
+        fromAddress: "source@example.test",
+        snippet: "Please review the attached source.",
+        receivedAt: NOW,
+        status: "pending",
+        trelloCardId: worker.cardId,
+        suggestedNextAction: "PRIVATE_AI_ACTION_SENTINEL",
+        llmSummary: "PRIVATE_AI_SUMMARY_SENTINEL",
+      },
+      {
+        vaId: otherWorker.id,
+        gmailMessageId: `manager-it-${randomUUID()}`,
+        gmailThreadId: `thread-${randomUUID()}`,
+        subject: "Another worker's private email",
+        fromAddress: "private@example.test",
+        snippet: "PRIVATE_OTHER_WORKER_SENTINEL",
+        receivedAt: NOW,
+        status: "pending",
+        trelloCardId: worker.cardId,
+      },
+    ]);
+    await db.insert(schema.aptlssManagerUpdates).values({
+      vaId: worker.id, cardId: worker.cardId, detail: "I reviewed the original source.",
+      outcome: "Action needed", sourceDescription: "Original supplier email", createdAt: NOW,
+    });
+    await db.insert(schema.decisionOutcomes).values({
+      vaId: worker.id, stepId: worker.stepId, cardId: worker.cardId, cardName: "Review local requirements",
+      decisionPrompt: "PRIVATE_DECISION_PROMPT_SENTINEL", recommendedDecision: "PRIVATE_AI_RECOMMENDATION_SENTINEL",
+      disposition: "approved", outcome: "Robert approved the documented next step.", resolvedBy: "founder", resolvedAt: NOW,
+    });
+
+    const { getCardEvidence } = await import("./aptlssEvidenceGraphDb");
+    const records = await getCardEvidence(worker.id, worker.cardId);
+    expect(records.map(item => item.role)).toEqual(expect.arrayContaining(["linked_source", "source_preview", "worker_update", "reviewed_resolution"]));
+    expect(records.find(item => item.title === "Legacy linked source")).toMatchObject({ role: "linked_source", evidenceId: null, content: "Supplier terms saved for this task." });
+    expect(records.some(item => item.title === "A source email" && item.statusLabel === "Pending review")).toBe(true);
+    expect(records.some(item => item.content?.includes("I reviewed the original source.") && item.statusLabel === "Action needed")).toBe(true);
+    expect(records.some(item => item.content === "Robert approved the documented next step." && item.statusLabel === "Approved")).toBe(true);
+    expect(JSON.stringify(records)).not.toMatch(/PRIVATE_AI_|PRIVATE_OTHER_WORKER|decisionPrompt|recommendedDecision|suggestedNextAction|llmSummary/);
+  });
+
   it("denies a generic authenticated user across worker and founder controls before writes", async () => {
     const { operatorRouter } = await import("./operatorRouter");
     const ordinary = (await db.select().from(schema.users).where(eq(schema.users.id, (await insertUser("user")).id)))[0];
@@ -1274,7 +1873,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     ];
 
     const results = await Promise.allSettled(requests);
-    expect(results).toHaveLength(35);
+    expect(results).toHaveLength(requests.length);
     for (const result of results) {
       expect(result.status).toBe("rejected");
       if (result.status === "rejected") expect(result.reason).toMatchObject({ code: "FORBIDDEN" });
@@ -1343,6 +1942,90 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       boardName: "Integration fixture",
       listName: "TO DO",
     });
+  });
+
+  it("refuses a waiting reason if the card leaves the worker queue before it is stored", async () => {
+    const { operatorRouter } = await import("./operatorRouter");
+    const otherWorker = await insertWorker();
+    const user = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
+    const caller = operatorRouter.createCaller({ user, req: {}, res: {} } as TrpcContext);
+    const [plan] = await db.select({ id: schema.aptlssPlans.id }).from(schema.aptlssPlans)
+      .where(and(eq(schema.aptlssPlans.vaId, worker.id), eq(schema.aptlssPlans.cardId, worker.cardId)));
+    expect(plan).toBeDefined();
+
+    controls.db = new Proxy(db, {
+      get(target, property) {
+        if (property === "transaction") {
+          return async (...args: Parameters<typeof db.transaction>) => {
+            await db.update(schema.aptlssPlans).set({ vaId: otherWorker.id })
+              .where(eq(schema.aptlssPlans.id, plan.id));
+            return Reflect.apply(target.transaction, target, args);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as MySql2Database<typeof schema>;
+
+    try {
+      await expect(caller.recordWaitingReason({
+        reason: "Waiting for the current source to be checked.",
+        cardId: worker.cardId,
+        cardName: "Review local requirements",
+        cardUrl: `https://trello.com/c/${worker.cardId}`,
+        boardName: "Integration fixture",
+        listName: "TO DO",
+      })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    } finally {
+      controls.db = db;
+      await db.update(schema.aptlssPlans).set({ vaId: worker.id }).where(eq(schema.aptlssPlans.id, plan.id));
+    }
+
+    expect(await db.select().from(schema.aptlssWaitingReasons)
+      .where(and(eq(schema.aptlssWaitingReasons.vaId, worker.id), eq(schema.aptlssWaitingReasons.cardId, worker.cardId))))
+      .toHaveLength(0);
+  });
+
+  it("asks the worker to refresh if card details change before a waiting reason is stored", async () => {
+    const { operatorRouter } = await import("./operatorRouter");
+    const user = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
+    const caller = operatorRouter.createCaller({ user, req: {}, res: {} } as TrpcContext);
+    const [plan] = await db.select({ id: schema.aptlssPlans.id }).from(schema.aptlssPlans)
+      .where(and(eq(schema.aptlssPlans.vaId, worker.id), eq(schema.aptlssPlans.cardId, worker.cardId)));
+    expect(plan).toBeDefined();
+
+    controls.db = new Proxy(db, {
+      get(target, property) {
+        if (property === "transaction") {
+          return async (...args: Parameters<typeof db.transaction>) => {
+            await db.update(schema.aptlssPlans).set({ cardName: "Updated requirements" })
+              .where(eq(schema.aptlssPlans.id, plan.id));
+            return Reflect.apply(target.transaction, target, args);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as MySql2Database<typeof schema>;
+
+    try {
+      await expect(caller.recordWaitingReason({
+        reason: "Waiting for the current source to be checked.",
+        cardId: worker.cardId,
+        cardName: "Review local requirements",
+        cardUrl: `https://trello.com/c/${worker.cardId}`,
+        boardName: "Integration fixture",
+        listName: "TO DO",
+      })).rejects.toMatchObject({ code: "CONFLICT" });
+    } finally {
+      controls.db = db;
+      await db.update(schema.aptlssPlans).set({ cardName: "Review local requirements" })
+        .where(eq(schema.aptlssPlans.id, plan.id));
+    }
+
+    expect(await db.select().from(schema.aptlssWaitingReasons)
+      .where(and(eq(schema.aptlssWaitingReasons.vaId, worker.id), eq(schema.aptlssWaitingReasons.cardId, worker.cardId))))
+      .toHaveLength(0);
   });
 
   it("keeps founder decisions out of worker mutations and queues reassessment only after a recorded outcome", async () => {
@@ -1501,7 +2184,11 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     await expect(ownCaller.setFounderDecisionDeadline(input)).rejects.toMatchObject({ code: "FORBIDDEN" });
     await expect(founderCaller.setFounderDecisionDeadline({ ...input, vaId: otherWorker.id })).rejects.toMatchObject({ code: "BAD_REQUEST" });
     expect(await founderCaller.setFounderDecisionDeadline(input)).toMatchObject({ changed: true });
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
+      .toMatchObject({ state: "pending", generation: 1, trigger: "decision_deadline_changed" });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
     expect(await founderCaller.setFounderDecisionDeadline(input)).toMatchObject({ changed: false });
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0].generation).toBe(1);
     const alertKey = `founder-decision:${worker.stepId}:%`;
     const { processFounderDecisionAlerts } = await import("./founderDecisionAlerts");
     let alerts = await db.select().from(schema.notificationHistory).where(and(
@@ -1528,6 +2215,9 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       .rejects.toMatchObject({ code: "BAD_REQUEST" });
     expect(await founderCaller.setFounderDecisionDeadline({ ...input, dueAt: null, source: "Deadline withdrawn after source review" }))
       .toMatchObject({ changed: true });
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
+      .toMatchObject({ generation: 2, trigger: "decision_deadline_changed" });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
     alerts = await db.select().from(schema.notificationHistory).where(and(
       eq(schema.notificationHistory.userId, adminId), like(schema.notificationHistory.taskId, alertKey)));
     expect(alerts).toHaveLength(2);
@@ -1629,7 +2319,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect((await caller.getDailyPlan())?.planVersion).not.toBe(saved?.planVersion);
   });
 
-  it("returns worker-safe work-queue fields and only the requesting worker's card cache timestamps", async () => {
+  it("returns worker-scoped work-queue state without reusing a global card assessment", async () => {
     const { operatorRouter } = await import("./operatorRouter");
     await db.update(schema.aptlssPlans).set({
       planJson: JSON.stringify({ nextBestAction: "Review local requirements", summary: "Private assessment summary", confidenceReason: "Private confidence explanation" }),
@@ -1665,6 +2355,33 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     });
     const ownUser = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
     const otherWorker = await insertWorker();
+    await db.insert(schema.aptlssPlans).values({
+      vaId: otherWorker.id,
+      cardId: worker.cardId,
+      cardName: "Shared card under review",
+      cardUrl: `https://trello.com/c/${worker.cardId}`,
+      boardName: "Other worker board",
+      listName: "DOING",
+      planJson: "{}",
+      generatedAt: NOW,
+    });
+    await db.insert(schema.cardStates).values({
+      vaId: otherWorker.id,
+      cardId: worker.cardId,
+      cardName: "Shared card under review",
+      boardName: "Other worker board",
+      listName: "DOING",
+      state: "DOING",
+      calculatedAt: NOW,
+    });
+    await db.insert(schema.priorityScores).values({
+      vaId: otherWorker.id,
+      cardId: worker.cardId,
+      cardName: "Shared card under review",
+      score: 12,
+      tier: "LOW",
+      calculatedAt: NOW,
+    });
     const otherUser = (await db.select().from(schema.users).where(eq(schema.users.id, otherWorker.id)))[0];
     const context = (actor: schema.User) => ({ user: actor, req: {}, res: {} }) as TrpcContext;
     const ownQueue = await operatorRouter.createCaller(context(ownUser)).getWorkQueueContext();
@@ -1682,15 +2399,19 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(ownQueue.cards[0]).not.toHaveProperty("planSummary");
     expect(ownQueue.cards[0].evidenceSummary).not.toHaveProperty("issues");
     expect(ownQueue.cards[0].evidenceSummary).not.toHaveProperty("confidenceProfile");
-    expect(ownQueue.cards[0].evidenceSummary.forecast).toEqual({ p50Minutes: 20, p90Minutes: 35 });
+    expect(ownQueue.cards[0].evidenceSummary.forecast).toBeNull();
     expect(JSON.stringify(ownQueue)).not.toContain("Private assessment reasoning");
     expect(JSON.stringify(ownQueue)).not.toContain("Private confidence reasoning");
     expect(JSON.stringify(ownQueue)).not.toContain("Private recommendation");
     expect(JSON.stringify(ownQueue)).not.toContain("Private uncertainty");
     expect(JSON.stringify(ownQueue)).not.toContain("private confidence blocker");
     expect(ownQueue.cards.some(card => card.cardId === otherWorker.cardId)).toBe(false);
-    expect(otherQueue.cards).toHaveLength(1);
-    expect(otherQueue.cards[0].cardId).toBe(otherWorker.cardId);
+    expect(otherQueue.cards).toHaveLength(2);
+    expect(otherQueue.cards.some(card => card.cardId === otherWorker.cardId)).toBe(true);
+    const sharedCard = otherQueue.cards.find(card => card.cardId === worker.cardId)!;
+    expect(sharedCard).toMatchObject({ primaryState: "DOING", priorityScore: 12, priorityTier: "LOW" });
+    expect(sharedCard.evidenceSummary.forecast).toBeNull();
+    expect(JSON.stringify(otherQueue)).not.toContain("private forecast note");
   });
 
   it("guards direct timer starts against cross-worker access and current blockers without replacing a running timer", async () => {
@@ -1703,10 +2424,18 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const otherCaller = timerRouter.createCaller(context(otherUser));
     const input = { cardId: worker.cardId, cardName: "Spoofed name", cardUrl: "https://example.com/spoofed",
       boardName: "Spoofed board", listName: "DOING" };
+    await seedGlobalBlockedAssessment(worker.cardId);
+    await db.insert(schema.cardStates).values({
+      vaId: worker.id, cardId: worker.cardId, cardName: "Review local requirements",
+      boardName: "Integration fixture", listName: "DOING", state: "DOING", calculatedAt: NOW,
+    });
     await expect(otherCaller.start(input)).rejects.toMatchObject({ code: "FORBIDDEN" });
     const first = await caller.start(input);
     const repeated = await caller.start(input);
     expect(repeated.id).toBe(first.id);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
+      .toMatchObject({ generation: 1, trigger: "timer_changed" });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
     const entries = await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id));
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ cardName: "Review local requirements", boardName: "Integration fixture", listName: "TO DO" });
@@ -1722,6 +2451,125 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect((await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.id, first.id)))[0].endTime).toBeNull();
     expect((await caller.stop({ cardId: worker.cardId }))?.id).toBe(first.id);
     expect((await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.id, first.id)))[0].endTime).not.toBeNull();
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
+      .toMatchObject({ generation: 2, trigger: "timer_changed" });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
+    expect(await caller.stop({ cardId: worker.cardId })).toBeNull();
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
+  });
+
+  it("ignores delayed browser inventories and treats an identical sequence as idempotent", async () => {
+    const { ingestBrowserTabInventory } = await import("./browserTabHygiene");
+    const collectorId = `browser-it-${randomUUID()}`;
+    const report = (captureSequence: number, url: string) => ({
+      protocolVersion: 2 as const,
+      collectorId,
+      captureSequence,
+      sourceCapturedAt: new Date(NOW.getTime() + captureSequence * 1_000).toISOString(),
+      collectorLabel: "Integration browser",
+      tabs: [{ id: "1", title: "example.test", url, pinned: false, active: true, windowId: 1 }],
+    });
+    const fresh = report(2, "https://new.example.test/");
+    const freshResult = await ingestBrowserTabInventory(worker.id, fresh, new Date("2026-09-04T10:02:00.000Z"));
+    expect(freshResult.changed).toBe(true);
+    const before = (await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId)))[0];
+    expect(before).toMatchObject({ vaId: worker.id, captureSequence: 2, sourceCapturedAt: new Date(fresh.sourceCapturedAt), tabsJson: expect.stringContaining("new.example.test") });
+
+    const stale = await ingestBrowserTabInventory(worker.id, report(1, "https://old.example.test/"), new Date("2026-09-04T10:03:00.000Z"));
+    expect(stale).toMatchObject({ changed: false, staleIgnored: true });
+    expect((await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId)))[0]).toEqual(before);
+
+    const duplicate = await ingestBrowserTabInventory(worker.id, fresh, new Date("2026-09-04T10:04:00.000Z"));
+    expect(duplicate).toMatchObject({ changed: false, staleIgnored: false });
+    expect((await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId)))[0]).toEqual(before);
+
+    const newer = await ingestBrowserTabInventory(worker.id, report(3, "https://latest.example.test/"), new Date("2026-09-04T10:05:00.000Z"));
+    expect(newer).toMatchObject({ changed: true, staleIgnored: false });
+    expect((await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId)))[0])
+      .toMatchObject({ captureSequence: 3, tabsJson: expect.stringContaining("latest.example.test") });
+
+    const maximum = report(4_294_967_295, "https://maximum.example.test/");
+    maximum.sourceCapturedAt = "2026-09-04T10:06:00.000Z";
+    await ingestBrowserTabInventory(worker.id, maximum, new Date("2026-09-04T10:06:00.000Z"));
+    const recovered = await ingestBrowserTabInventory(worker.id, report(4, "https://recovered.example.test/"), new Date("2026-09-04T10:07:00.000Z"));
+    expect(recovered).toMatchObject({ changed: false, staleIgnored: true, storedCaptureSequence: 4_294_967_295 });
+  });
+
+  it("rejects cross-worker collector reuse and same-sequence content changes without mutating the owner row", async () => {
+    const { BrowserTabCollectorConflictError, ingestBrowserTabInventory } = await import("./browserTabHygiene");
+    const otherWorker = await insertWorker();
+    const collectorId = `browser-it-${randomUUID()}`;
+    const report = (vaSequence: number, url: string) => ({
+      protocolVersion: 2 as const,
+      collectorId,
+      captureSequence: vaSequence,
+      sourceCapturedAt: new Date(NOW.getTime() + vaSequence * 1_000).toISOString(),
+      tabs: [{ id: "1", title: "example.test", url, pinned: false, active: true, windowId: 1 }],
+    });
+    await ingestBrowserTabInventory(worker.id, report(1, "https://owned.example.test/"), NOW);
+    const before = (await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId)))[0];
+
+    await expect(ingestBrowserTabInventory(otherWorker.id, report(2, "https://attacker.example.test/"), NOW))
+      .rejects.toBeInstanceOf(BrowserTabCollectorConflictError);
+    await expect(ingestBrowserTabInventory(worker.id, report(1, "https://changed.example.test/"), NOW))
+      .rejects.toBeInstanceOf(BrowserTabCollectorConflictError);
+
+    expect((await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId)))[0]).toEqual(before);
+  });
+
+  it("keeps the data-transfer command from reassigning an existing browser collector", async () => {
+    const otherWorker = await insertWorker();
+    const collectorId = `browser-import-it-${randomUUID()}`;
+    const initial = {
+      protocolVersion: 2 as const,
+      collectorId,
+      captureSequence: 1,
+      sourceCapturedAt: NOW.toISOString(),
+      collectorLabel: "Import integration browser",
+      tabs: [{ id: "1", title: "example.test", url: "https://example.test/", pinned: false, active: true, windowId: 1 }],
+    };
+    const { ingestBrowserTabInventory } = await import("./browserTabHygiene");
+    await ingestBrowserTabInventory(worker.id, initial, NOW);
+    const [before] = await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId));
+    const sourceRow = {
+      ...before,
+      vaId: otherWorker.id,
+      captureSequence: 2,
+      sourceCapturedAt: "2026-09-04T10:01:00.000Z",
+    };
+    const payload = {
+      format: "joyce-operator-export-v1",
+      createdAt: NOW.toISOString(),
+      tables: { browser_tab_states: [sourceRow] },
+      skipped: [],
+      counts: { browser_tab_states: 1 },
+    };
+    const directory = await mkdtemp(path.join(os.tmpdir(), "aptlss-browser-import-"));
+    try {
+      const input = path.join(directory, "export.json");
+      await writeFile(input, JSON.stringify({ ...payload, digest: hash(JSON.stringify(payload)) }), "utf8");
+      const result = spawnSync(process.execPath, [
+        path.resolve(import.meta.dirname, "../scripts/operator-data-transfer.mjs"),
+        "import", "--in", input, "--target", controls.url!,
+      ], {
+        cwd: path.resolve(import.meta.dirname, ".."),
+        encoding: "utf8",
+        env: { ...process.env, TARGET_DATABASE_URL: controls.url!, OPERATOR_IMPORT_WORKER_ID: String(worker.id) },
+        timeout: 20_000,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      const report = JSON.parse(result.stdout);
+      expect(report.conflicts).toContainEqual({
+        table: "browser_tab_states",
+        collectorId,
+        reason: "collector belongs to a different worker",
+      });
+      const [after] = await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId));
+      expect(after).toEqual(before);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("keeps the legacy HTTP timer usable for assigned work but denies unassigned and manager-blocked pilot work", async () => {
@@ -1729,6 +2577,11 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const { default: request } = await import("supertest");
     const { default: timeTrackingRoutes } = await import("./routes/time-tracking");
     const ownUser = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
+    await seedGlobalBlockedAssessment(worker.cardId);
+    await db.insert(schema.cardStates).values({
+      vaId: worker.id, cardId: worker.cardId, cardName: "Review local requirements",
+      boardName: "Integration fixture", listName: "DOING", state: "DOING", calculatedAt: NOW,
+    });
     const [profile] = await db.insert(schema.vaProfiles).values({ userId: worker.id, founderId: adminId, name: "Timer worker" }).$returningId();
     await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: profile.id,
       founderId: adminId, assignedBy: adminId });
@@ -1741,9 +2594,16 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const accepted = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
     expect(accepted.status).toBe(200);
     expect(accepted.body.entry.vaId).toBe(worker.id);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
+      .toMatchObject({ generation: 1, trigger: "timer_changed" });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
     const repeated = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
     expect(repeated.status).toBe(400);
-    await db.update(schema.timeEntries).set({ endTime: NOW }).where(eq(schema.timeEntries.id, accepted.body.entry.id));
+    const stopped = await request(app).post("/api/time-tracking/stop").send({ notes: "Reviewed" });
+    expect(stopped.status).toBe(200);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
+      .toMatchObject({ generation: 2, trigger: "timer_changed" });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
     await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
       trigger: "legacy_timer_test", mode: "shadow", snapshotJson: JSON.stringify({ interventions: [{ cardId: worker.cardId }] }) });
     const blocked = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
@@ -1797,5 +2657,8 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(finished.body.entry?.durationMinutes).not.toBeNull();
     if (transition === "pause") expect(finished.body.entry?.notes).toContain("(paused)");
     expect((await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id)))).toHaveLength(1);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
+      .toMatchObject({ generation: 2, trigger: "timer_changed" });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
   });
 });

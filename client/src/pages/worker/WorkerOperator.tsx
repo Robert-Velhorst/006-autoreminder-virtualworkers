@@ -52,6 +52,7 @@ import { orderWorkerCards, selectManagerPrimary, selectTodayQueue, workerCardIsW
 import { managerStatusQueryOptions } from "@/lib/managerPilotAvailability";
 import { dateKeyInTimeZone, formatWorkerDate } from "@shared/workerTime";
 import { assessWorkerSourceChecks } from "@shared/workerSourceChecks";
+import { describeWorkerIntegrationSync } from "@shared/workerIntegrationStatus";
 import { toast } from "sonner";
 import WorkerReminders from "./WorkerReminders";
 import ManagerCoach from "@/components/ManagerCoach";
@@ -855,7 +856,7 @@ function WorkerSettingsView() {
   const policy = trpc.operator.getBrowserTabPolicy.useQuery(undefined, { staleTime: 60_000 });
   const browser = trpc.operator.getBrowserTabStatus.useQuery(undefined, { retry: false, staleTime: 30_000 });
   const email = trpc.emailInbox.getPendingCount.useQuery(undefined, { retry: false, staleTime: 60_000 });
-  const google = trpc.operator.getGoogleEvidenceStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
+  const google = trpc.operator.getGoogleEvidenceStatus.useQuery(undefined, { retry: false, staleTime: 60_000, refetchInterval: 60_000 });
   const apiHealth = trpc.system.health.useQuery(
     { timestamp: 0 },
     { retry: 1, staleTime: 30_000, refetchInterval: 60_000 },
@@ -943,6 +944,20 @@ function WorkerSettingsView() {
   });
   const worker = context.data;
   const browserConnection = describeBrowserConnection(browser.data);
+  const googleReady = google.data?.credentialsReady === true;
+  const gmailSync = googleReady ? describeWorkerIntegrationSync({
+    enabled: google.data!.gmail.enabled,
+    intervalMinutes: google.data!.gmail.intervalMinutes,
+    lastSyncedAt: google.data!.gmail.lastSyncedAt,
+    lastError: google.data!.gmail.lastError,
+  }) : null;
+  const driveSync = googleReady ? describeWorkerIntegrationSync({
+    enabled: google.data!.drive.enabled,
+    intervalMinutes: google.data!.drive.intervalMinutes,
+    lastSyncedAt: google.data!.drive.lastSyncedAt,
+    lastError: google.data!.drive.lastError,
+  }) : null;
+  const connectionTime = (value: string | null | undefined) => formatIntegrationTime(value, worker?.timezone ?? "UTC");
   const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
   return (
@@ -960,6 +975,7 @@ function WorkerSettingsView() {
               <summary className="cursor-pointer text-sm font-medium">Connect this work browser</summary>
               <div className="mt-3 space-y-3 text-sm text-muted-foreground">
                 <Button variant="outline" asChild><a href="/downloads/worker-browser-collector.zip" download>Download browser collector</a></Button>
+                <p>If you already installed an earlier version, replace the files in the same unpacked extension folder and click Reload on the browser's Extensions page. Keeping the same installation preserves its saved pairing.</p>
                 <ol className="list-decimal space-y-2 pl-5"><li>Extract the download. In Chrome or Edge Extensions, enable developer mode and choose Load unpacked. Select the extracted folder.</li><li>Create a pairing token below. This replaces any previous token for this worker.</li><li>In the extension settings, enter this dashboard address: <span className="break-all font-mono">{window.location.origin}</span>. Paste the token, enable reporting and choose Save and test.</li></ol>
                 <p>The collector reports tab counts, website domains and pinned state. It does not send page contents, URL paths or tab titles. Closing tabs always requires your selection and confirmation.</p>
               </div>
@@ -1008,22 +1024,47 @@ function WorkerSettingsView() {
             </CardContent>
           </Card>
           <Card className="gap-0 rounded-lg py-0">
-            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Evidence connections</CardTitle></CardHeader>
+            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Connection health</CardTitle><CardDescription>These checks show saved access and sync freshness, not proof that every source contains all task information.</CardDescription></CardHeader>
             <CardContent className="divide-y p-0">
               <ConnectionRow
                 label="Dashboard connection"
-                value={apiHealth.data?.runtime === "unified-node" ? "Connected" : apiHealth.isLoading ? "Checking" : "Unavailable"}
-                healthy={apiHealth.data?.runtime === "unified-node"}
+                status={apiHealth.data?.runtime === "unified-node" ? "Connected" : apiHealth.isLoading ? "Checking" : "Unavailable"}
+                detail={apiHealth.data?.runtime === "unified-node" ? "The dashboard API is responding." : "The dashboard API could not be confirmed. Refresh before relying on saved status."}
+                tone={apiHealth.data?.runtime === "unified-node" ? "healthy" : apiHealth.isLoading ? "muted" : "critical"}
               />
-              <ConnectionRow label="Trello account" value={worker?.trelloMemberId ? "Configured" : "Shared account"} healthy={Boolean(worker?.trelloMemberId)} />
-              <ConnectionRow label="Gmail evidence" value={!google.data?.credentialsReady ? "Setup required" : `${email.data?.count ?? 0} pending`} healthy={Boolean(google.data?.credentialsReady) && !email.error} />
-              <ConnectionRow label="Google Drive" value={!google.data?.credentialsReady ? "Setup required" : google.data.drive.lastSyncedAt ? "Connected" : "Waiting for sync"} healthy={Boolean(google.data?.credentialsReady && google.data.drive.lastSyncedAt)} />
-              <ConnectionRow label="Browser connection" value={browserConnection.label} healthy={browserConnection.healthy} />
+              <ConnectionRow
+                label="Trello"
+                status={worker?.trelloMemberId ? "Member configured" : "Shared account"}
+                detail="This is the saved account mapping; the task's source status shows whether cached Trello data is still usable."
+                tone="muted"
+              />
+              <ConnectionRow
+                label="Gmail"
+                status={!google.data ? google.error ? "Unavailable" : "Checking" : !googleReady ? "Setup required" : email.error ? "Needs attention" : gmailSync!.label}
+                detail={!google.data ? "Gmail status could not be loaded." : !googleReady ? google.data.setupMessage ?? "Connect Google for this worker." : `${gmailSync!.detail}${google.data.gmail.lastSyncedAt ? ` Last successful sync: ${connectionTime(google.data.gmail.lastSyncedAt)}.` : ""} ${email.data?.count ?? 0} pending message${email.data?.count === 1 ? "" : "s"}.`}
+                tone={!google.data ? "critical" : !googleReady || email.error ? "critical" : gmailSync!.tone}
+                href="#google-connection"
+                linkLabel="Review Gmail settings"
+              />
+              <ConnectionRow
+                label="Google Drive"
+                status={!google.data ? google.error ? "Unavailable" : "Checking" : !googleReady ? "Setup required" : driveSync!.label}
+                detail={!google.data ? "Drive status could not be loaded." : !googleReady ? google.data.setupMessage ?? "Connect Google for this worker." : `${driveSync!.detail}${google.data.drive.lastSyncedAt ? ` Last successful sync: ${connectionTime(google.data.drive.lastSyncedAt)}.` : ""} ${google.data.drive.folderScoped ? "Limited to the selected folder." : "Checks accessible file metadata."}`}
+                tone={!google.data ? "critical" : !googleReady ? "critical" : driveSync!.tone}
+                href="#google-connection"
+                linkLabel="Review Drive settings"
+              />
+              <ConnectionRow
+                label="Browser collector"
+                status={browserConnection.label}
+                detail={browserConnection.detail}
+                tone={browserConnection.healthy ? "healthy" : "warning"}
+              />
             </CardContent>
           </Card>
         </div>
       </div>
-      <Card className="gap-0 rounded-lg py-0">
+      <Card id="google-connection" className="gap-0 rounded-lg py-0 scroll-mt-20">
         <CardHeader className="border-b py-4">
           <CardTitle className="text-sm">Google connection</CardTitle>
           <CardDescription>Read-only access. Nothing is sent, archived, labelled, or moved in Google.</CardDescription>
@@ -1033,11 +1074,6 @@ function WorkerSettingsView() {
             <AlertTriangle className="size-4" />
             <AlertTitle>Google connection needs setup</AlertTitle>
             <AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{google.data?.setupMessage ?? "Checking the Google connection."}</span>{google.data?.clientConfigured && <Button size="sm" asChild><a href="/api/google-evidence/connect">Connect Google</a></Button>}</AlertDescription>
-          </Alert>}
-          {google.data?.lastError && <Alert variant="destructive">
-            <AlertTriangle className="size-4" />
-            <AlertTitle>Last Google sync needs attention</AlertTitle>
-            <AlertDescription>{google.data.lastError}</AlertDescription>
           </Alert>}
           <details><summary className="cursor-pointer text-sm font-medium">Google sync preferences</summary>
           <div className="mt-4 grid gap-5 lg:grid-cols-2">
@@ -1080,8 +1116,43 @@ function SettingSummary({ label, value }: { label: string; value: string }) {
   return <div className="flex items-center justify-between gap-4"><span className="text-muted-foreground">{label}</span><span className="text-right font-medium">{value}</span></div>;
 }
 
-function ConnectionRow({ label, value, healthy }: { label: string; value: string; healthy: boolean }) {
-  return <div className="flex items-center justify-between gap-4 p-4"><span className="flex items-center gap-2 text-sm"><Monitor className="size-4 text-muted-foreground" />{label}</span><Badge variant="outline" className={healthy ? "border-emerald-500/30 text-emerald-600 dark:text-emerald-300" : "border-amber-500/30 text-amber-600 dark:text-amber-300"}>{value}</Badge></div>;
+function formatIntegrationTime(value: string | null | undefined, timeZone: string) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "time unknown";
+  try {
+    return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", timeZone }).format(date);
+  } catch {
+    return "time unknown";
+  }
+}
+
+function ConnectionRow({ label, status, detail, tone, href, linkLabel }: {
+  label: string;
+  status: string;
+  detail: string;
+  tone: "healthy" | "warning" | "critical" | "muted";
+  href?: string;
+  linkLabel?: string;
+}) {
+  const toneClass = {
+    healthy: "border-emerald-500/30 text-emerald-700 dark:text-emerald-300",
+    warning: "border-amber-500/30 text-amber-700 dark:text-amber-300",
+    critical: "border-red-500/30 text-red-700 dark:text-red-300",
+    muted: "border-border text-muted-foreground",
+  }[tone];
+  return (
+    <div className="grid gap-2 p-4 sm:grid-cols-[minmax(0,180px)_minmax(0,1fr)] sm:items-start">
+      <div className="flex min-w-0 items-center justify-between gap-3 sm:flex-col sm:items-start">
+        <span className="flex items-center gap-2 text-sm font-medium"><Monitor className="size-4 shrink-0 text-muted-foreground" />{label}</span>
+        <Badge variant="outline" className={toneClass}>{status}</Badge>
+      </div>
+      <div className="min-w-0 text-sm text-muted-foreground">
+        <p>{detail}</p>
+        {href && linkLabel && <a href={href} className="mt-1 inline-block font-medium text-blue-700 underline underline-offset-2 dark:text-blue-300">{linkLabel}</a>}
+      </div>
+    </div>
+  );
 }
 
 function EvidenceRow({ label, status, detail }: { label: string; status: string; detail: string }) {

@@ -1353,15 +1353,15 @@ export default function APTLSSManagement() {
       {/*  Header  */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 md:gap-4">
         <div className="flex items-center gap-2 md:gap-4">
-          <Link href="/">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 md:h-10 md:w-10"
-            >
-              <ArrowLeft className="h-4 w-4 md:h-5 md:w-5" />
-            </Button>
-          </Link>
+          <Button asChild
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 md:h-10 md:w-10"
+          >
+            <Link href="/" aria-label="Back to dashboard">
+              <ArrowLeft aria-hidden="true" className="h-4 w-4 md:h-5 md:w-5" />
+            </Link>
+          </Button>
           <div>
             <h1 className="text-xl md:text-3xl font-bold">APTLSS Management</h1>
             <p className="text-xs md:text-sm text-muted-foreground">

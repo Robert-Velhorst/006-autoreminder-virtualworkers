@@ -41,20 +41,50 @@ async function saveCompletionLabels(userId: number, labels: string[]) {
     .onDuplicateKeyUpdate({ set: { vaId: userId, value: JSON.stringify(labels) } });
 }
 
-async function requireAssignedCard(req: Request, res: Response, cardId: string) {
+type ChecklistItemReference = { checklistId: string; checkItemId: string };
+
+function cardContainsChecklistItem(
+  card: { checklists?: unknown },
+  checklistId: string,
+  checkItemId: string,
+) {
+  if (!Array.isArray(card.checklists)) return false;
+
+  const checklist = card.checklists.find((candidate: unknown) =>
+    typeof candidate === 'object' && candidate !== null
+    && 'id' in candidate && candidate.id === checklistId,
+  );
+  if (!checklist || typeof checklist !== 'object' || !('checkItems' in checklist)
+    || !Array.isArray(checklist.checkItems)) return false;
+
+  return checklist.checkItems.some((item: unknown) =>
+    typeof item === 'object' && item !== null && 'id' in item && item.id === checkItemId,
+  );
+}
+
+async function requireAssignedCard(
+  req: Request,
+  res: Response,
+  cardId: string,
+  checklistItem?: ChecklistItemReference,
+) {
   const user = requestUser(req)!;
-  if (user.role === 'admin') return true;
-  const db = await getDb();
-  if (!db) {
-    res.status(503).json({ error: 'Database not available' });
-    return false;
-  }
-  const [profile] = await db.select({ trelloMemberId: vaProfiles.trelloMemberId }).from(vaProfiles)
-    .where(eq(vaProfiles.userId, user.id)).limit(1);
-  const memberId = profile?.trelloMemberId?.trim();
-  if (!memberId) {
-    res.status(403).json({ error: 'Your worker profile is not linked to a Trello member' });
-    return false;
+  if (user.role === 'admin' && !checklistItem) return true;
+
+  let memberId: string | null = null;
+  if (user.role === 'worker') {
+    const db = await getDb();
+    if (!db) {
+      res.status(503).json({ error: 'Database not available' });
+      return false;
+    }
+    const [profile] = await db.select({ trelloMemberId: vaProfiles.trelloMemberId }).from(vaProfiles)
+      .where(eq(vaProfiles.userId, user.id)).limit(1);
+    memberId = profile?.trelloMemberId?.trim() || null;
+    if (!memberId) {
+      res.status(403).json({ error: 'Your worker profile is not linked to a Trello member' });
+      return false;
+    }
   }
   const apiKey = process.env.TRELLO_API_KEY;
   const apiToken = process.env.TRELLO_TOKEN;
@@ -62,8 +92,10 @@ async function requireAssignedCard(req: Request, res: Response, cardId: string) 
     res.status(503).json({ error: 'Trello credentials not configured' });
     return false;
   }
+  const query = new URLSearchParams({ key: apiKey, token: apiToken, fields: 'idMembers' });
+  if (checklistItem) query.set('checklists', 'all');
   const response = await fetchWithRetry(
-    `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}?key=${apiKey}&token=${apiToken}&fields=idMembers`,
+    `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}?${query.toString()}`,
     undefined,
     { maxRetries: 0 },
   );
@@ -71,9 +103,13 @@ async function requireAssignedCard(req: Request, res: Response, cardId: string) 
     res.status(response.status === 404 ? 404 : 502).json({ error: response.status === 404 ? 'Trello card not found' : 'Could not verify Trello card access' });
     return false;
   }
-  const card = await response.json() as { idMembers?: unknown };
-  if (!Array.isArray(card.idMembers) || !card.idMembers.includes(memberId)) {
+  const card = await response.json() as { idMembers?: unknown; checklists?: unknown };
+  if (memberId && (!Array.isArray(card.idMembers) || !card.idMembers.includes(memberId))) {
     res.status(403).json({ error: 'This Trello card is not assigned to your linked member account' });
+    return false;
+  }
+  if (checklistItem && !cardContainsChecklistItem(card, checklistItem.checklistId, checklistItem.checkItemId)) {
+    res.status(403).json({ error: 'The checklist item does not belong to the selected Trello card' });
     return false;
   }
   return true;
@@ -190,13 +226,13 @@ router.put('/tasks/:taskId/complete', async (req: Request, res: Response) => {
     const { taskId } = req.params;
     const { isCompleted, cardId, checklistId, checkItemId } = req.body;
 
-    if (!cardId || !checklistId || !checkItemId) {
+    if (![cardId, checklistId, checkItemId].every(value => typeof value === 'string' && value.trim())) {
       return res.status(400).json({ error: 'Missing required fields: cardId, checklistId, checkItemId' });
     }
     if (typeof isCompleted !== 'boolean') {
       return res.status(400).json({ error: 'isCompleted must be a boolean' });
     }
-    if (!await requireAssignedCard(req, res, String(cardId))) return;
+    if (!await requireAssignedCard(req, res, cardId, { checklistId, checkItemId })) return;
 
     const apiKey = process.env.TRELLO_API_KEY;
     const apiToken = process.env.TRELLO_TOKEN;

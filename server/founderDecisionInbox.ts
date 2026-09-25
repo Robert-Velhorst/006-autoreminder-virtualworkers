@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, like } from "drizzle-orm";
 import { aptlssPlans, aptlssSteps, founderDecisionDeadlines, notificationHistory, priorityScores, trelloCachedCards, users } from "../drizzle/schema";
 import { getDb } from "./db";
 import { recordFounderDecisionAlertForStep } from "./founderDecisionAlerts";
+import { enqueueManagerTask } from "./aptlssManagerQueue";
 
 function recordedTaskDue(raw: string | null | undefined) {
   if (!raw) return null;
@@ -152,6 +153,11 @@ export async function setFounderDecisionDeadline(input: {
     const [created] = await tx.insert(founderDecisionDeadlines).values({
       vaId: input.vaId, stepId: input.stepId, dueAt: input.dueAt, source, recordedBy: input.recordedBy,
     }).$returningId();
+    await enqueueManagerTask(tx, {
+      vaId: input.vaId,
+      trigger: "decision_deadline_changed",
+      eventKey: `decision-deadline:${input.stepId}:${created.id}`,
+    });
     await tx.update(notificationHistory).set({ isRead: 1, readAt: new Date() })
       .where(and(like(notificationHistory.taskId, `founder-decision:${input.stepId}:%`), eq(notificationHistory.isRead, 0)));
     return { revisionId: created.id, changed: true };

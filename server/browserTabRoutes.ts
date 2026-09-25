@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import {
+  BrowserTabCollectorConflictError,
   ingestBrowserTabInventory,
   resolveBrowserTabCollectorUserOpenId,
   resolveBrowserTabCollectorWorker,
@@ -8,7 +9,10 @@ import {
 import { websocketService } from "./services/websocket";
 
 const inventorySchema = z.object({
+  protocolVersion: z.literal(2),
   collectorId: z.string().trim().min(1).max(128),
+  captureSequence: z.number().int().min(1).max(4_294_967_295),
+  sourceCapturedAt: z.string().datetime(),
   collectorLabel: z.string().trim().min(1).max(128).optional(),
   tabs: z.array(z.object({
     id: z.union([z.string(), z.number()]).transform(String),
@@ -47,14 +51,20 @@ export function registerBrowserTabRoutes(app: Express) {
         res.status(401).json({ success: false, error: "Browser collector authorization failed" });
         return;
       }
+      if (!req.body || typeof req.body !== "object" || Array.isArray(req.body) || req.body.protocolVersion !== 2) {
+        res.status(426).json({ success: false, error: "Browser collector update required. Download the latest collector from worker Settings." });
+        return;
+      }
       const input = inventorySchema.parse(req.body);
       const status = await ingestBrowserTabInventory(vaId, input);
-      const workerOpenId = await resolveBrowserTabCollectorUserOpenId(vaId);
-      if (workerOpenId) {
-        websocketService.emitToUser(workerOpenId, "browser-tabs:invalidate", {
-          vaId,
-          capturedAt: new Date().toISOString(),
-        });
+      if (!status.staleIgnored) {
+        const workerOpenId = await resolveBrowserTabCollectorUserOpenId(vaId);
+        if (workerOpenId) {
+          websocketService.emitToUser(workerOpenId, "browser-tabs:invalidate", {
+            vaId,
+            capturedAt: status.capturedAt?.toISOString() ?? new Date().toISOString(),
+          });
+        }
       }
       res.json({
         success: true,
@@ -62,12 +72,17 @@ export function registerBrowserTabRoutes(app: Express) {
         actionableTabs: status.actionableTabs,
         allowedTabs: status.allowedTabs,
         shouldWarn: status.shouldWarn,
+        staleIgnored: status.staleIgnored,
+        storedCaptureSequence: status.storedCaptureSequence,
       });
     } catch (error) {
       const invalid = error instanceof z.ZodError;
-      res.status(invalid ? 400 : 503).json({
+      const conflict = error instanceof BrowserTabCollectorConflictError;
+      res.status(conflict ? 409 : invalid ? 400 : 503).json({
         success: false,
-        error: invalid ? "Invalid browser inventory" : "Browser inventory could not be recorded. Retry shortly.",
+        error: conflict
+          ? "Collector identity conflict. Re-pair the browser from worker Settings."
+          : invalid ? "Invalid browser inventory" : "Browser inventory could not be recorded. Retry shortly.",
       });
     }
   });

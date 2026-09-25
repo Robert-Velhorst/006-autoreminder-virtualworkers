@@ -20,6 +20,7 @@ import { resolveWorkerOperatorContextById } from "./workerOperatorContext";
 const POLICY_KEY = "browserTabPolicy";
 const COLLECTOR_TOKEN_KEY = "browserTabCollectorToken";
 const MAX_STORED_TABS = 250;
+const MAX_CAPTURE_SEQUENCE = 4_294_967_295;
 const COLLECTOR_TOKEN_HASH_PREFIX = "sha256:";
 const LEGACY_COLLECTOR_TOKEN_HASH_PREFIX = "sha256hex:";
 
@@ -33,9 +34,19 @@ export interface BrowserTabInventoryItem {
 }
 
 export interface BrowserTabInventoryInput {
+  protocolVersion: 2;
   collectorId: string;
+  captureSequence: number;
+  sourceCapturedAt: string;
   collectorLabel?: string;
   tabs: BrowserTabInventoryItem[];
+}
+
+export class BrowserTabCollectorConflictError extends Error {
+  constructor() {
+    super("Browser collector identity conflicts with retained worker data");
+    this.name = "BrowserTabCollectorConflictError";
+  }
 }
 
 function scopedSettingKey(key: string, vaId: number) {
@@ -210,6 +221,12 @@ function actionableTabs(tabs: BrowserTabInventoryItem[], policy: BrowserTabPolic
 export async function ingestBrowserTabInventory(vaId: number, input: BrowserTabInventoryInput, now = new Date()) {
   const db = await getDb();
   if (!db) throw new Error("Database is required to ingest browser-tab state");
+  if (input.protocolVersion !== 2 || !Number.isSafeInteger(input.captureSequence)
+    || input.captureSequence < 1 || input.captureSequence > MAX_CAPTURE_SEQUENCE) {
+    throw new Error("Unsupported browser collector report version");
+  }
+  const sourceCapturedAt = new Date(input.sourceCapturedAt);
+  if (Number.isNaN(sourceCapturedAt.getTime())) throw new Error("Invalid browser collector capture time");
   const tabs = input.tabs.slice(0, MAX_STORED_TABS).map(sanitizeTab);
   const collectorId = input.collectorId.trim().slice(0, 128);
   const worker = await resolveWorkerOperatorContextById(vaId);
@@ -219,6 +236,8 @@ export async function ingestBrowserTabInventory(vaId: number, input: BrowserTabI
   const values = {
     vaId,
     collectorId,
+    captureSequence: input.captureSequence,
+    sourceCapturedAt,
     collectorLabel,
     totalTabs: tabs.length,
     pinnedTabs: tabs.filter((tab) => tab.pinned).length,
@@ -226,11 +245,50 @@ export async function ingestBrowserTabInventory(vaId: number, input: BrowserTabI
     tabsJson: JSON.stringify(tabs),
     capturedAt: now,
   };
-  await db.insert(browserTabStates).values(values).onDuplicateKeyUpdate({ set: values });
+  const disposition = await db.transaction(async (tx) => {
+    const [existing] = await tx.select().from(browserTabStates)
+      .where(eq(browserTabStates.collectorId, collectorId))
+      .limit(1)
+      .for("update");
+
+    if (!existing) {
+      await tx.insert(browserTabStates).values(values);
+      return { changed: true, staleIgnored: false, storedCaptureSequence: input.captureSequence };
+    }
+    if (existing.vaId !== vaId) throw new BrowserTabCollectorConflictError();
+    if (input.captureSequence < existing.captureSequence) {
+      return { changed: false, staleIgnored: true, storedCaptureSequence: existing.captureSequence };
+    }
+
+    const sameInventory = existing.captureSequence === input.captureSequence
+      && existing.collectorLabel === collectorLabel
+      && existing.totalTabs === values.totalTabs
+      && existing.pinnedTabs === values.pinnedTabs
+      && existing.windowCount === values.windowCount
+      && existing.tabsJson === values.tabsJson;
+    if (input.captureSequence === existing.captureSequence) {
+      if (sameInventory) {
+        return { changed: false, staleIgnored: false, storedCaptureSequence: existing.captureSequence };
+      }
+      throw new BrowserTabCollectorConflictError();
+    }
+
+    await tx.update(browserTabStates).set({
+      captureSequence: values.captureSequence,
+      sourceCapturedAt: values.sourceCapturedAt,
+      collectorLabel: values.collectorLabel,
+      totalTabs: values.totalTabs,
+      pinnedTabs: values.pinnedTabs,
+      windowCount: values.windowCount,
+      tabsJson: values.tabsJson,
+      capturedAt: values.capturedAt,
+    }).where(and(eq(browserTabStates.id, existing.id), eq(browserTabStates.vaId, vaId)));
+    return { changed: true, staleIgnored: false, storedCaptureSequence: input.captureSequence };
+  });
 
   const status = await getBrowserTabStatus(vaId, now);
   if (status.warningWindow) await recordBrowserTabEodEvidence(vaId, now, "collector");
-  return status;
+  return { ...status, ...disposition };
 }
 
 function parseTabs(raw: string): BrowserTabInventoryItem[] {

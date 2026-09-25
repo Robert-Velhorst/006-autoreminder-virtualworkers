@@ -30,7 +30,7 @@ describe("APTLSS pilot additive migration contract", () => {
   });
 
   it("retains the consolidation and appends only the reviewed additive migrations", () => {
-    expect(journal.entries).toHaveLength(51);
+    expect(journal.entries).toHaveLength(52);
     expect(journal.entries[45]).toMatchObject({
       idx: 45, tag: "0045_aptlss_pilot_consolidation", version: "5", breakpoints: true,
     });
@@ -44,8 +44,10 @@ describe("APTLSS pilot additive migration contract", () => {
       [48, "0048_structured_manager_worker_updates"],
       [49, "0049_founder_decision_deadlines"],
       [50, "0050_founder_decision_disposition"],
+      [51, "0051_browser_collector_ordering"],
     ]);
     expect(migrations[50]?.hash).toBe(hash(read("drizzle/0050_founder_decision_disposition.sql")));
+    expect(migrations[51]?.hash).toBe(hash(read("drizzle/0051_browser_collector_ordering.sql")));
   });
 
   it("preserves all 117 main table definitions and adds only additive source tables", async () => {
@@ -54,6 +56,10 @@ describe("APTLSS pilot additive migration contract", () => {
       const table = structuredClone(current.tables[name]);
       if (name === "trello_cached_cards") delete table.indexes.trello_cached_cards_user_card_cached_idx;
       if (name === "decision_outcomes") delete table.columns.disposition;
+      if (name === "browser_tab_states") {
+        delete table.columns.captureSequence;
+        delete table.columns.sourceCapturedAt;
+      }
       expect(hash(JSON.stringify(table)), name).toBe(expected);
     }
     expect(Object.keys(current.tables).filter(name => !(name in baseline.tables)).sort()).toEqual([...names, "founder_decision_deadlines"].sort());
@@ -74,15 +80,21 @@ describe("APTLSS pilot additive migration contract", () => {
     const queue = JSON.parse(read("drizzle/meta/0047_snapshot.json"));
     const update = JSON.parse(read("drizzle/meta/0048_snapshot.json"));
     const deadline = JSON.parse(read("drizzle/meta/0049_snapshot.json"));
-    const latest = JSON.parse(read("drizzle/meta/0050_snapshot.json"));
+    const disposition = JSON.parse(read("drizzle/meta/0050_snapshot.json"));
+    const latest = JSON.parse(read("drizzle/meta/0051_snapshot.json"));
     expect(review.prevId).toBe(snapshot.id);
     expect(queue.prevId).toBe(review.id);
     expect(update.prevId).toBe(queue.id);
     expect(deadline.prevId).toBe(update.id);
-    expect(latest.prevId).toBe(deadline.id);
+    expect(disposition.prevId).toBe(deadline.id);
+    expect(latest.prevId).toBe(disposition.id);
     expect(latest.tables).toEqual(current.tables);
     expect(latest.views).toEqual(current.views);
-    const beforeDisposition = structuredClone(latest.tables);
+    const beforeCollectorOrdering = structuredClone(latest.tables);
+    delete beforeCollectorOrdering.browser_tab_states.columns.captureSequence;
+    delete beforeCollectorOrdering.browser_tab_states.columns.sourceCapturedAt;
+    expect(beforeCollectorOrdering).toEqual(disposition.tables);
+    const beforeDisposition = structuredClone(disposition.tables);
     delete beforeDisposition.decision_outcomes.columns.disposition;
     expect(beforeDisposition).toEqual(deadline.tables);
     const beforeDeadline = structuredClone(deadline.tables);
@@ -154,5 +166,15 @@ describe("APTLSS pilot additive migration contract", () => {
     expect(sql).toMatch(/PREPARE founder_decision_disposition_stmt/);
     expect(sql).toMatch(/EXECUTE founder_decision_disposition_stmt/);
     expect([...sql.matchAll(/--> statement-breakpoint/g)]).toHaveLength(3);
+  });
+
+  it("adds collector ordering metadata without changing existing rows or dropping schema", () => {
+    const sql = read("drizzle/0051_browser_collector_ordering.sql");
+    expect(sql).toMatch(/information_schema\.COLUMNS/);
+    expect(sql).toMatch(/captureSequence/);
+    expect(sql).toMatch(/sourceCapturedAt/);
+    expect(sql).not.toMatch(/\b(?:DROP TABLE|DROP COLUMN|TRUNCATE|DELETE FROM|RENAME TABLE)\b/i);
+    expect(sql.match(/^PREPARE /gm)).toHaveLength(2);
+    expect(sql.match(/^EXECUTE /gm)).toHaveLength(2);
   });
 });

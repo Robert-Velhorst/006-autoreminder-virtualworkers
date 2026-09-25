@@ -3,10 +3,14 @@ import express, { Express } from 'express';
 import request from 'supertest';
 import trelloConfigRoutes from './trello-config';
 
+const mocks = vi.hoisted(() => ({ getDb: vi.fn() }));
+vi.mock('../db', () => ({ getDb: mocks.getDb }));
+
 describe('Trello Config Routes', () => {
   let app: Express;
   const originalTrelloApiKey = process.env.TRELLO_API_KEY;
   const originalTrelloToken = process.env.TRELLO_TOKEN;
+  const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
     app = express();
@@ -24,6 +28,7 @@ describe('Trello Config Routes', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    globalThis.fetch = originalFetch;
     if (originalTrelloApiKey === undefined) delete process.env.TRELLO_API_KEY;
     else process.env.TRELLO_API_KEY = originalTrelloApiKey;
     if (originalTrelloToken === undefined) delete process.env.TRELLO_TOKEN;
@@ -43,7 +48,7 @@ describe('Trello Config Routes', () => {
       expect(response.body.error).toContain('Missing required fields');
     });
 
-    it('should return 500 when Trello credentials are missing', async () => {
+    it('should return unavailable when Trello credentials are missing', async () => {
       delete process.env.TRELLO_API_KEY;
 
       const response = await request(app)
@@ -55,8 +60,75 @@ describe('Trello Config Routes', () => {
           checkItemId: 'item-123',
         });
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(503);
       expect(response.body.error).toContain('Trello credentials not configured');
+    });
+
+    it('rejects a checklist item that is not present on the selected card', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        checklists: [{ id: 'list-123', checkItems: [{ id: 'item-123' }] }],
+      }), { status: 200 }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const response = await request(app)
+        .put('/api/trello/tasks/task-123/complete')
+        .send({ isCompleted: true, cardId: 'card-123', checklistId: 'list-123', checkItemId: 'item-from-another-list' })
+        .expect(403);
+
+      expect(response.body.error).toBe('The checklist item does not belong to the selected Trello card');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0][0])).toContain('checklists=all');
+    });
+
+    it('updates only a checklist item verified on the selected card', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          checklists: [{ id: 'list-123', checkItems: [{ id: 'item-123' }] }],
+        }), { status: 200 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'item-123' }), { status: 200 }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const response = await request(app)
+        .put('/api/trello/tasks/task-123/complete')
+        .send({ isCompleted: true, cardId: 'card-123', checklistId: 'list-123', checkItemId: 'item-123' })
+        .expect(200);
+
+      expect(response.body).toMatchObject({ success: true, checkItemId: 'item-123' });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(String(fetchMock.mock.calls[1][0])).toContain('/checklists/list-123/checkItems/item-123');
+    });
+
+    it('rejects a worker pairing an assigned card with checklist identifiers from elsewhere', async () => {
+      const query: any = {
+        from: vi.fn(),
+        where: vi.fn(),
+        limit: vi.fn().mockResolvedValue([{ trelloMemberId: 'member-2' }]),
+      };
+      query.from.mockReturnValue(query);
+      query.where.mockReturnValue(query);
+      mocks.getDb.mockResolvedValue({ select: vi.fn(() => query) });
+
+      const workerApp = express();
+      workerApp.use(express.json());
+      workerApp.use((req, _res, next) => {
+        (req as any).user = { id: 2, openId: 'worker-2', role: 'worker' };
+        next();
+      });
+      workerApp.use('/api/trello', trelloConfigRoutes);
+
+      const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        idMembers: ['member-2'],
+        checklists: [{ id: 'list-on-assigned-card', checkItems: [{ id: 'item-on-assigned-card' }] }],
+      }), { status: 200 }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await request(workerApp)
+        .put('/api/trello/tasks/task-123/complete')
+        .send({ isCompleted: true, cardId: 'assigned-card', checklistId: 'list-on-other-card', checkItemId: 'item-on-other-card' })
+        .expect(403, { error: 'The checklist item does not belong to the selected Trello card' });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 

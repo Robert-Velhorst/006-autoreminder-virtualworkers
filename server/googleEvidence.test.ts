@@ -5,9 +5,14 @@ import {
   decryptGoogleRefreshToken,
   defaultGoogleEvidenceSettings,
   developmentGoogleRefreshTokenFallback,
+  evidenceRevisionChanged,
   encryptGoogleRefreshToken,
   extractExplicitDeadline,
   findExactCardMatch,
+  googleDriveEvidenceRevision,
+  googleDriveRevisionDisposition,
+  googleGmailEvidenceRevision,
+  gmailEvidenceOwnerMatches,
   googleEvidenceSetupMessage,
   normalizeGoogleEvidenceSettings,
 } from "./googleEvidence";
@@ -29,10 +34,22 @@ describe("Google evidence settings", () => {
     expect(normalizeGoogleEvidenceSettings({
       gmail: { intervalMinutes: 1, lookbackDays: 999 },
       drive: { intervalMinutes: 10_000, folderId: "  folder-123  " },
+      lastGmailError: "  Gmail unavailable  ",
+      lastDriveError: "ignored?",
     })).toEqual({
       ...defaultGoogleEvidenceSettings(),
       gmail: { enabled: true, intervalMinutes: 15, lookbackDays: 90 },
       drive: { enabled: true, intervalMinutes: 1_440, lookbackDays: 30, folderId: "folder-123" },
+      lastGmailError: "Gmail unavailable",
+      lastDriveError: "ignored?",
+    });
+  });
+
+  it("reads older settings without provider-specific sync errors", () => {
+    expect(normalizeGoogleEvidenceSettings({ lastError: "Legacy combined error" })).toMatchObject({
+      lastGmailError: null,
+      lastDriveError: null,
+      lastError: "Legacy combined error",
     });
   });
 
@@ -51,6 +68,69 @@ describe("Google evidence settings", () => {
 });
 
 describe("Google evidence classification", () => {
+  it("queues only meaningful retained-source revisions, not repeated Drive observations", () => {
+    const file = {
+      id: "drive-file-1",
+      name: "Case correspondence",
+      mimeType: "application/pdf",
+      modifiedAt: new Date("2026-09-25T10:00:00.000Z"),
+      sourceUrl: "https://drive.google.com/file/d/drive-file-1/view",
+      description: "Current correspondence",
+      parents: ["folder-b", "folder-a"],
+      size: "1024",
+    };
+    const first = googleDriveEvidenceRevision(file);
+    const repeatedPoll = googleDriveEvidenceRevision({ ...file, parents: ["folder-a", "folder-b"] });
+    const updated = googleDriveEvidenceRevision({ ...file, description: "Updated correspondence" });
+
+    expect(repeatedPoll).toBe(first);
+    expect(evidenceRevisionChanged(null, first)).toBe(true);
+    expect(evidenceRevisionChanged(first, repeatedPoll)).toBe(false);
+    expect(evidenceRevisionChanged(first, first, false)).toBe(true);
+    expect(evidenceRevisionChanged(first, updated)).toBe(true);
+  });
+
+  it("accepts only a strictly newer Drive version when retained content changes", () => {
+    const older = new Date("2026-09-25T10:00:00.000Z");
+    const newer = new Date("2026-09-25T10:01:00.000Z");
+    const retained = { modifiedAt: newer, contentHash: "new-content" };
+    expect(googleDriveRevisionDisposition(retained, { modifiedAt: older, contentHash: "old-content" })).toBe("stale");
+    expect(googleDriveRevisionDisposition(retained, { modifiedAt: newer, contentHash: "different-content" })).toBe("ambiguous");
+    expect(googleDriveRevisionDisposition(retained, { modifiedAt: null, contentHash: "unversioned-content" })).toBe("ambiguous");
+    expect(googleDriveRevisionDisposition(retained, { modifiedAt: newer, contentHash: "new-content" })).toBe("accept");
+    expect(googleDriveRevisionDisposition(retained, { modifiedAt: new Date(newer.getTime() + 1), contentHash: "latest-content" })).toBe("accept");
+    expect(googleDriveRevisionDisposition({ modifiedAt: newer, contentHash: null }, { modifiedAt: older, contentHash: "old-content" })).toBe("stale");
+    expect(googleDriveRevisionDisposition({ modifiedAt: null, contentHash: "legacy-content" }, { modifiedAt: newer, contentHash: "versioned-content" })).toBe("accept");
+  });
+
+  it("gives Gmail evidence a stable revision key that changes with its retained content", () => {
+    const message = {
+      gmailMessageId: "message-1",
+      gmailThreadId: "thread-1",
+      subject: "Case update",
+      fromAddress: "sender@example.test",
+      fromName: "Sender",
+      snippet: "A request was received",
+      receivedAt: new Date("2026-09-25T10:00:00.000Z"),
+      category: "non_financial",
+      deadlineAt: null,
+      trelloCardId: "card-1",
+      trelloCardName: "Review case",
+      trelloCardUrl: "https://trello.com/c/card-1",
+      suggestedNextAction: "Review the message",
+      llmSummary: null,
+    };
+    expect(googleGmailEvidenceRevision(message)).toBe(googleGmailEvidenceRevision({ ...message }));
+    expect(googleGmailEvidenceRevision({ ...message, snippet: "A changed request was received" }))
+      .not.toBe(googleGmailEvidenceRevision(message));
+  });
+
+  it("does not let a globally unique Gmail message overwrite another worker's record", () => {
+    expect(gmailEvidenceOwnerMatches(null, 12)).toBe(true);
+    expect(gmailEvidenceOwnerMatches(12, 12)).toBe(true);
+    expect(gmailEvidenceOwnerMatches(13, 12)).toBe(false);
+  });
+
   it("encrypts worker refresh tokens with authenticated encryption", () => {
     const encrypted = encryptGoogleRefreshToken("refresh-token-value");
     expect(encrypted).not.toContain("refresh-token-value");

@@ -15,6 +15,8 @@ export type ManagerQueueTrigger =
   | "decision_outcome"
   | "conflict"
   | "conflict_resolved"
+  | "timer_changed"
+  | "decision_deadline_changed"
   | "periodic"
   | "manual";
 export type ManagerQueueLease = {

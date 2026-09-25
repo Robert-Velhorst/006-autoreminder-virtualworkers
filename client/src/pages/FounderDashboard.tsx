@@ -616,11 +616,11 @@ export default function FounderDashboard() {
       <header className="border-b border-border/40 bg-card/50 backdrop-blur-sm sticky top-0 z-50">
         <div className="container flex min-h-16 flex-wrap items-center justify-between gap-3 py-3">
           <div className="flex items-center gap-4">
-            <Link href="/">
-              <Button variant="ghost" size="icon">
-                <ArrowLeft className="h-5 w-5" />
-              </Button>
-            </Link>
+            <Button asChild variant="ghost" size="icon">
+              <Link href="/" aria-label="Back to dashboard">
+                <ArrowLeft aria-hidden="true" className="h-5 w-5" />
+              </Link>
+            </Button>
             <div>
               <h1 className="text-xl font-semibold flex items-center gap-2">
                 <Users className="h-5 w-5 text-primary" />

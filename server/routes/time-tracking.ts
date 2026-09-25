@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../db';
-import { timeEntries, vaProfiles, taskAssignments, atisCards, aptlssPlans, aptlssWaitingReasons, aptlssAssessments, aptlssManagerRuns, users, type User } from '../../drizzle/schema';
+import { timeEntries, vaProfiles, taskAssignments, atisCards, aptlssPlans, aptlssWaitingReasons, cardStates, aptlssManagerRuns, users, type User } from '../../drizzle/schema';
 import { eq, and, desc, gte, lte, sql } from 'drizzle-orm';
 import { requireAuthenticated } from '../middleware/auth';
 import { isManagerPilotWorker } from '../aptlssManagerPilot';
 import { managerIntervenesOnCard, timerExecutionBlockReason } from '../timerAccess';
+import { enqueueManagerTask } from '../aptlssManagerQueue';
 
 const router = Router();
 router.use('/time-tracking', requireAuthenticated);
@@ -43,6 +44,13 @@ async function transitionActiveTimer(userId: number, transition: "stop" | "pause
 
     await tx.update(timeEntries).set({ endTime, durationMinutes, notes: finalNotes })
       .where(and(eq(timeEntries.id, entry.id), eq(timeEntries.vaId, userId), sql`${timeEntries.endTime} IS NULL`));
+    if (isManagerPilotWorker(userId)) {
+      await enqueueManagerTask(tx, {
+        vaId: userId,
+        trigger: "timer_changed",
+        eventKey: `timer-${transition}:${entry.id}:${endTime.toISOString()}`,
+      });
+    }
     const [updatedEntry] = await tx.select().from(timeEntries).where(
       and(eq(timeEntries.id, entry.id), eq(timeEntries.vaId, userId))
     ).limit(1);
@@ -133,8 +141,8 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
           .where(and(eq(aptlssPlans.vaId, user.id), eq(aptlssPlans.cardId, cardId))).limit(1);
         const [waiting] = await tx.select({ id: aptlssWaitingReasons.id }).from(aptlssWaitingReasons)
           .where(and(eq(aptlssWaitingReasons.vaId, user.id), eq(aptlssWaitingReasons.cardId, cardId), eq(aptlssWaitingReasons.status, 'active'))).limit(1);
-        const [assessment] = await tx.select({ actionability: aptlssAssessments.actionability }).from(aptlssAssessments)
-          .where(eq(aptlssAssessments.cardId, cardId)).orderBy(desc(aptlssAssessments.assessedAt), desc(aptlssAssessments.id)).limit(1);
+        const [cardState] = await tx.select({ state: cardStates.state }).from(cardStates)
+          .where(and(eq(cardStates.vaId, user.id), eq(cardStates.cardId, cardId))).limit(1);
         const [run] = await tx.select({ snapshotJson: aptlssManagerRuns.snapshotJson }).from(aptlssManagerRuns)
           .where(eq(aptlssManagerRuns.vaId, user.id)).orderBy(desc(aptlssManagerRuns.id)).limit(1);
         let intervention = false;
@@ -144,7 +152,7 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
         }
         const reason = timerExecutionBlockReason({ listName: plan?.listName ?? card?.listName ?? '',
           hasActiveWaitingReason: Boolean(waiting) || assignment?.status === 'blocked',
-          actionability: assessment?.actionability ?? null, hasManagerIntervention: intervention });
+          actionability: cardState?.state ?? null, hasManagerIntervention: intervention });
         if (reason) return { status: 409, body: { error: reason } };
       }
       const [active] = await tx.select().from(timeEntries).where(and(
@@ -153,6 +161,13 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
       if (active) return { status: 400, body: { error: 'Timer already active', activeTaskId: active.taskId } };
       const ownership = timeTrackingOwnership(user, profile?.founderId);
       const [result] = await tx.insert(timeEntries).values({ taskId, ...ownership, startTime: new Date(), notes });
+      if (user.role === 'worker' && isManagerPilotWorker(user.id)) {
+        await enqueueManagerTask(tx, {
+          vaId: user.id,
+          trigger: "timer_changed",
+          eventKey: `timer-start:${result.insertId}`,
+        });
+      }
       const [entry] = await tx.select().from(timeEntries).where(eq(timeEntries.id, result.insertId)).limit(1);
       return { status: 200, body: { success: true, entry } };
     });

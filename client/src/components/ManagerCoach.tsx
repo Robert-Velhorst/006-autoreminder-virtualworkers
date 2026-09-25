@@ -173,7 +173,7 @@ export default function ManagerCoach() {
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2"><BrainCircuit className="size-4 shrink-0 text-primary" /><h2 className="text-sm font-semibold">Work guidance</h2></div>
         </div>
-        <Button variant="ghost" size="sm" className="shrink-0 rounded-md" aria-label="Reassess now" onClick={() => { if (canAssess) run.mutate({ trigger: "manual" }); }} disabled={!canAssess}>
+        <Button variant="ghost" size="sm" className="shrink-0 rounded-md disabled:text-muted-foreground disabled:opacity-100" aria-label="Reassess now" onClick={() => { if (canAssess) run.mutate({ trigger: "manual" }); }} disabled={!canAssess}>
           {run.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}Reassess now
         </Button>
       </div>

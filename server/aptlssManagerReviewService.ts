@@ -1301,10 +1301,21 @@ export async function restoreManagerPlan(
         throw new Error(
           "Restoring this plan would overwrite completed, active or elapsed work. Review the remaining day instead."
         );
+      const restoredPlan: OperatorDailyPlanPayload = {
+        ...oldPlan,
+        auditTrail: [
+          ...(Array.isArray(oldPlan.auditTrail) ? oldPlan.auditTrail : []),
+          {
+            at: now.toISOString(),
+            action: "restored",
+            detail: "Previous day schedule restored after owner review.",
+          },
+        ],
+      };
       await tx
         .update(dailyPlans)
         .set({
-          scheduleJson: run.previousPlanJson,
+          scheduleJson: JSON.stringify(restoredPlan),
           totalScheduledMinutes: oldPlan.planHealth.scheduledMinutes,
           generatedAt: new Date(oldPlan.generatedAt),
           dailySummary: "Restored previous plan after manager review",

@@ -21,7 +21,7 @@ import {
   vaProfiles,
   aptlssPlans,
   aptlssWaitingReasons,
-  aptlssAssessments,
+  cardStates,
   aptlssManagerRuns,
   users,
 } from "../../drizzle/schema";
@@ -33,6 +33,7 @@ import { dateKeyInTimeZone, dateWindowInTimeZone } from "../../shared/workerTime
 import { resolveWorkerOperatorContext } from "../workerOperatorContext";
 import { canStartTimerForCard, managerIntervenesOnCard, timerExecutionBlockReason } from "../timerAccess";
 import { isManagerPilotWorker } from "../aptlssManagerPilot";
+import { enqueueManagerTask } from "../aptlssManagerQueue";
 
 // ─── Payment Cycles Router ──────────────────────────────────────────────────
 export const paymentRouter = router({
@@ -522,8 +523,8 @@ export const timerRouter = router({
           const [waiting] = await tx.select({ id: aptlssWaitingReasons.id }).from(aptlssWaitingReasons)
             .where(and(eq(aptlssWaitingReasons.vaId, vaId), eq(aptlssWaitingReasons.cardId, input.cardId), eq(aptlssWaitingReasons.status, "active")))
             .limit(1);
-          const [assessment] = await tx.select({ actionability: aptlssAssessments.actionability }).from(aptlssAssessments)
-            .where(eq(aptlssAssessments.cardId, input.cardId)).orderBy(desc(aptlssAssessments.assessedAt), desc(aptlssAssessments.id)).limit(1);
+          const [cardState] = await tx.select({ state: cardStates.state }).from(cardStates)
+            .where(and(eq(cardStates.vaId, vaId), eq(cardStates.cardId, input.cardId))).limit(1);
           let hasManagerIntervention = false;
           if (isManagerPilotWorker(vaId)) {
             const [run] = await tx.select({ snapshotJson: aptlssManagerRuns.snapshotJson }).from(aptlssManagerRuns)
@@ -537,7 +538,7 @@ export const timerRouter = router({
             }
           }
           const reason = timerExecutionBlockReason({ listName: workerPlan.listName,
-            hasActiveWaitingReason: Boolean(waiting), actionability: assessment?.actionability ?? null, hasManagerIntervention });
+            hasActiveWaitingReason: Boolean(waiting), actionability: cardState?.state ?? null, hasManagerIntervention });
           if (reason) throw new TRPCError({ code: "PRECONDITION_FAILED", message: reason });
         }
         const [profile] = await tx.select({ founderId: vaProfiles.founderId }).from(vaProfiles)
@@ -564,7 +565,11 @@ export const timerRouter = router({
           listName: workerPlan?.listName ?? input.listName,
           startTime,
         });
-        return { id: (result as { insertId: number }).insertId, cardId: input.cardId, cardName, startedAt: startTime };
+        const id = (result as { insertId: number }).insertId;
+        if (isManagerPilotWorker(vaId)) {
+          await enqueueManagerTask(tx, { vaId, trigger: "timer_changed", eventKey: `timer-start:${id}` });
+        }
+        return { id, cardId: input.cardId, cardName, startedAt: startTime };
       });
     }),
 
@@ -586,6 +591,9 @@ export const timerRouter = router({
         const durationMinutes = Math.round(durationSeconds / 60);
         await tx.update(timeEntries).set({ endTime: now, durationSeconds, durationMinutes })
           .where(and(eq(timeEntries.id, running.id), isNull(timeEntries.endTime)));
+        if (isManagerPilotWorker(vaId)) {
+          await enqueueManagerTask(tx, { vaId, trigger: "timer_changed", eventKey: `timer-stop:${running.id}:${now.toISOString()}` });
+        }
         return { ...running, stoppedAt: now, durationSeconds };
       });
     }),

@@ -28,6 +28,7 @@ import { assertManagerQueueLease, createManagerQueueRunner, enqueueManagerTask, 
 import { aptlssManagerQueue } from "../drizzle/aptlssManagerQueueSchema";
 import { finishManagerSemanticReview, reserveManagerSemanticReview, managerSemanticRetryReady } from "./aptlssManagerSemanticRuntime";
 import { assertManagerPilotWorker, assertManagerPlanMutationAllowed, managerPilotEnabled } from "./aptlssManagerPilot";
+import { aggregateManagerTimeSamples } from "./aptlssManagerTiming";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 export const DEFAULT_MANAGER_POLICY: ManagerPolicy = { enabled: true, intervalMinutes: 5, mode: "shadow" };
@@ -194,27 +195,12 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
   });
   for (const source of ["trello", "gmail", "google_drive"]) if (!evidence.some(e => e.source === source)) gaps.push(`No linked ${source} evidence is available in this worker scope; source completeness is unknown.`);
   if (!cards.length) gaps.push("No assigned APTLSS plans or pending emails are available. Synchronize assigned work first.");
-  // Sum sessions only for a verified completed step. A stopped timer alone is not a completed task.
-  const samples = new Map<number, ManagerInput["timeSamples"][number]>();
   const entryIds = times.slice(0,5000).map(t => t.id);
   const events = entryIds.length ? await db.select().from(timeEntryEvents).where(inArray(timeEntryEvents.timeEntryId, entryIds)).orderBy(desc(timeEntryEvents.id)).limit(10001) : [];
-  const timeSummary = { waitingMinutes: 0, interruptedMinutes: 0 };
-  for (const entry of times.slice(0, 5000)) {
-    const step = steps.find(s => s.id === entry.aptlssStepId && s.cardId === entry.cardId && s.status === "complete");
-    const seconds = entry.durationSeconds ?? (entry.durationMinutes ?? 0) * 60;
-    if (entry.endTime && seconds > 0 && /wait|break/i.test(entry.category)) { timeSummary.waitingMinutes += seconds / 60; continue; }
-    if (!step || !entry.endTime || seconds <= 0 || seconds > 12 * 3600) continue;
-    const interrupted = events.some(e => e.timeEntryId === entry.id && /pause|interrupt|auto.stop/i.test(e.eventType));
-    if (interrupted) timeSummary.interruptedMinutes += seconds / 60;
-    const sample = samples.get(step.id) ?? { id: step.id, cardId: step.cardId, stepId: step.id, category: step.category, minutes: 0, completed: true, interrupted: false, startedAt: iso(entry.startTime)!, completedAt: iso(entry.endTime)! };
-    sample.interrupted ||= interrupted;
-    sample.startedAt = new Date(sample.startedAt!) < entry.startTime ? sample.startedAt : iso(entry.startTime)!;
-    sample.completedAt = new Date(sample.completedAt!) > entry.endTime! ? sample.completedAt : iso(entry.endTime)!;
-    sample.minutes += seconds / 60;
-    samples.set(step.id, sample);
-  }
+  // Build one event index so history size cannot multiply scan work per timer row.
+  const timing = aggregateManagerTimeSamples(times.slice(0, 5000), steps, events);
   if (events.length > 10000 || times.length > 5000) {
-    samples.clear();
+    timing.samples.length = 0;
     gaps.push("Time history was truncated; incomplete execution samples are excluded from personal estimates and accuracy measurement.");
   }
   const graphConflicts = [...new Map(openConflictLinks.map(({conflict:c,cardId}) => [`${c.id}:${cardId}`, { id: `graph:${c.id}`, cardId, evidenceIds: [`evidence:${c.sourceEvidenceId}:${cardId}`, `evidence:${c.assertedEvidenceId}:${cardId}`], status: c.status, severity: "urgent", explanation: c.resolution ?? "Source and worker statements disagree; review the retained evidence." }])).values()];
@@ -239,7 +225,7 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
     });
     for (const target of selected.withheldTargets) withheld.push({ cardId: card.id, ...target, actionKind });
   }
-  return { now: now.toISOString(), cards, evidence, timeSamples: [...samples.values()], sourceGaps: gaps, graphConflicts, timeSummary, executionCoverageComplete,
+  return { now: now.toISOString(), cards, evidence, timeSamples: timing.samples, sourceGaps: gaps, graphConflicts, timeSummary: timing.timeSummary, executionCoverageComplete,
     learning: { stateHash: hash(learningHashes), guidance, withheld } };
 }
 

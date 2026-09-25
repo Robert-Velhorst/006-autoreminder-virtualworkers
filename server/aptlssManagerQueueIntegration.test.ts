@@ -33,7 +33,7 @@ import {
 const url = process.env.APTLSS_TEST_DATABASE_URL;
 describe.skipIf(!url)(
   "manager queue real MySQL",
-  { timeout: 30000, hookTimeout: 30000 },
+  { timeout: 30000, hookTimeout: 125000 },
   () => {
     let pool: Pool;
     let db: ReturnType<typeof drizzle<typeof schema>>;
@@ -60,7 +60,7 @@ describe.skipIf(!url)(
       db = drizzle(pool, { schema, mode: "default" });
       lock = await pool.getConnection();
       const [rows] = await lock.query<any[]>(
-        "SELECT GET_LOCK('aptlss-manager-integration-fixtures',30) AS acquired"
+        "SELECT GET_LOCK('aptlss-manager-integration-fixtures',120) AS acquired"
       );
       expect(rows[0].acquired).toBe(1);
       const occupied = await db

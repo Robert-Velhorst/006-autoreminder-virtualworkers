@@ -2526,6 +2526,8 @@ export const browserTabStates = mysqlTable("browser_tab_states", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
   collectorId: varchar("collectorId", { length: 128 }).notNull().unique(),
+  captureSequence: int("captureSequence", { unsigned: true }).notNull().default(0),
+  sourceCapturedAt: timestamp("sourceCapturedAt"),
   collectorLabel: varchar("collectorLabel", { length: 128 }).notNull().default("Worker browser"),
   totalTabs: int("totalTabs").notNull().default(0),
   pinnedTabs: int("pinnedTabs").notNull().default(0),

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 import superjson from "superjson";
 import type { ManagerPlanImpact } from "../shared/aptlssManagerPlanImpact";
 
@@ -27,6 +28,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       planningImpact?: ManagerPlanImpact;
       savedPlan?: Record<string, unknown> | null;
       savedPlanVersion?: string;
+      googleStatus?: Record<string, unknown>;
         founderDecisions?: boolean;
         founderNotification?: boolean;
     } = {}
@@ -265,24 +267,62 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
           value = options.proof
             ? [
                 {
-                  id: 900,
+                  id: "evidence:900",
+                  evidenceId: 900,
                   source: "google_drive",
-                  kind: "record",
+                  role: "source",
                   title: "Retained payment confirmation",
                   content: "Invoice alpha is paid.",
-                  summary: null,
+                  sourceUrl: "https://drive.google.com/file/d/example",
                   observedAt: at,
                   modifiedAt: at,
+                  metadataJson: "PRIVATE_AI_THOUGHT_SENTINEL",
+                  contentHash: "PRIVATE_CONTENT_HASH_SENTINEL",
+                  contentNote: "File details only; open the Drive file to review its contents.",
+                  statusLabel: null,
                 },
                 {
-                  id: 901,
+                  id: "evidence:901",
+                  evidenceId: null,
                   source: "communication",
-                  kind: "worker_assertion",
+                  role: "worker_update",
                   title: "Unverified worker claim",
-                  content: "Invoice alpha is paid.",
-                  summary: null,
+                  content: "I checked the supplier ledger against the receipt.",
+                  sourceUrl: null,
                   observedAt: at,
                   modifiedAt: at,
+                  contentNote: null,
+                  statusLabel: null,
+                },
+                {
+                  id: "email:902",
+                  evidenceId: null,
+                  source: "gmail",
+                  role: "source_preview",
+                  title: "A portal message is ready",
+                  content: "From: clerk@example.test\n\nOpen the portal to read the message.",
+                  sourceUrl: "https://mail.google.com/mail/u/0/#all/thread-902",
+                  observedAt: at,
+                  modifiedAt: null,
+                  contentNote: "Portal notice only; open the email to read the underlying correspondence.",
+                  statusLabel: "Pending review",
+                  suggestedNextAction: "PRIVATE_AI_ACTION_SENTINEL",
+                  llmSummary: "PRIVATE_AI_SUMMARY_SENTINEL",
+                },
+                {
+                  id: "decision:903",
+                  evidenceId: null,
+                  source: "decision_outcome",
+                  role: "reviewed_resolution",
+                  title: "Decision outcome",
+                  content: "Robert approved the documented next step.",
+                  sourceUrl: null,
+                  observedAt: at,
+                  modifiedAt: null,
+                  contentNote: null,
+                  statusLabel: "Approved",
+                  decisionPrompt: "PRIVATE_DECISION_PROMPT_SENTINEL",
+                  recommendedDecision: "PRIVATE_AI_RECOMMENDATION_SENTINEL",
                 },
               ]
             : [];
@@ -300,11 +340,11 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
                 ]
               : [];
         if (method === "operator.getGoogleEvidenceStatus")
-          value = options.sourceCheck ? {
+          value = options.googleStatus ?? (options.sourceCheck ? {
             credentialsReady: true,
             gmail: { enabled: true, lastSyncedAt: new Date(Date.now() - 120 * 60_000).toISOString(), intervalMinutes: 30 },
             drive: { enabled: true, lastSyncedAt: null, intervalMinutes: 30 },
-          } : null;
+          } : null);
         if (method === "operator.resolveVerificationFollowup") {
           const proof = input as {
             sourceEvidenceId?: number;
@@ -464,6 +504,27 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
         ),
       disconnect: () => managerSocket?.close(),
     };
+  }
+
+  async function expectAccessible(page: Page, label: string) {
+    const results = await new AxeBuilder({ page })
+      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+      .analyze();
+    const violations = results.violations.map(violation => ({
+      id: violation.id,
+      impact: violation.impact,
+      description: violation.description,
+      nodes: violation.nodes.map(node => ({
+        target: node.target,
+        html: node.html,
+        failureSummary: node.failureSummary,
+      })),
+    }));
+    await test.info().attach(`${label}-accessibility.json`, {
+      body: JSON.stringify(violations, null, 2),
+      contentType: "application/json",
+    });
+    expect(violations, `${label} WCAG 2.2 AA violations`).toEqual([]);
   }
 
   test.beforeEach(async ({ page }, testInfo) => {
@@ -826,6 +887,34 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     ]) await expect(page.getByText(internalDetail, { exact: true })).toHaveCount(0);
   });
 
+  for (const width of [1280, 390]) test(`worker case file stays clear and readable at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await managerFixture(page, "worker", { proof: true, calibration: true });
+    await page.goto("/worker");
+    await page.getByRole("button", { name: "Open details", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name: "Case file" })).toBeVisible();
+    await expect(dialog.getByText("Original source", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Email preview", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Your update", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Retained payment confirmation", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("A portal message is ready", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Pending review", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Portal notice only; open the email to read the underlying correspondence.", { exact: true })).toBeVisible();
+    const decisionRecord = dialog.locator("article").filter({ hasText: "Decision outcome" });
+    await decisionRecord.getByText("Read saved text", { exact: true }).click();
+    await expect(decisionRecord.getByText("Robert approved the documented next step.", { exact: true })).toBeVisible();
+    await expect(dialog.getByRole("link", { name: "Open original" }).first()).toHaveAttribute("href", "https://drive.google.com/file/d/example");
+    await dialog.getByText("Read saved text", { exact: true }).first().click();
+    await expect(dialog.getByText("Invoice alpha is paid.", { exact: true })).toBeVisible();
+    await expect(dialog.getByText(/PRIVATE_AI_THOUGHT_SENTINEL|PRIVATE_AI_ACTION_SENTINEL|PRIVATE_AI_SUMMARY_SENTINEL|PRIVATE_DECISION_PROMPT_SENTINEL|PRIVATE_AI_RECOMMENDATION_SENTINEL|PRIVATE_CONTENT_HASH_SENTINEL|PRIVATE_ISSUE_DETAIL_SENTINEL/)).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    const dialogBox = await dialog.boundingBox();
+    expect(dialogBox?.x ?? -1).toBeGreaterThanOrEqual(0);
+    expect((dialogBox?.x ?? width) + (dialogBox?.width ?? 0)).toBeLessThanOrEqual(width + 1);
+    await page.screenshot({ path: testInfo.outputPath(`worker-case-file-${width}.png`) });
+  });
+
   for (const width of [1280, 390]) test(`worker sees source-check times and safe next actions at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
     await managerFixture(page, "worker", { proof: true, sourceCheck: true });
@@ -1113,6 +1202,51 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     ).toBeFalsy();
   });
 
+  test("worker connection health identifies a failed provider separately from a healthy one", async ({ page }) => {
+    const recentSync = new Date(Date.now() - 5 * 60_000).toISOString();
+    await managerFixture(page, "worker", {
+      googleStatus: {
+        credentialsReady: true,
+        clientConfigured: true,
+        connectionMode: "worker",
+        setupMessage: null,
+        settings: {
+          gmail: { enabled: true, intervalMinutes: 60, lookbackDays: 30 },
+          drive: { enabled: true, intervalMinutes: 180, lookbackDays: 30, folderId: null },
+          lastGmailSyncAt: recentSync,
+          lastDriveSyncAt: recentSync,
+          lastGmailError: "Google access was rejected. Reconnect the Google credentials.",
+          lastDriveError: null,
+          lastError: "Google access was rejected. Reconnect the Google credentials.",
+        },
+        gmail: {
+          enabled: true,
+          lastSyncedAt: recentSync,
+          lastError: "Google access was rejected. Reconnect the Google credentials.",
+          intervalMinutes: 60,
+          hasRetainedEvidence: true,
+        },
+        drive: {
+          enabled: true,
+          lastSyncedAt: recentSync,
+          lastError: null,
+          intervalMinutes: 180,
+          folderScoped: false,
+          hasRetainedEvidence: true,
+        },
+        lastError: "Google access was rejected. Reconnect the Google credentials.",
+      },
+    });
+    await page.goto("/worker/settings");
+    await expect(page.getByText("Connection health", { exact: true })).toBeVisible();
+    await expect(page.getByText("Gmail", { exact: true })).toBeVisible();
+    await expect(page.getByText("Needs attention", { exact: true })).toBeVisible();
+    await expect(page.getByText("Google Drive", { exact: true })).toBeVisible();
+    await expect(page.getByText("Up to date", { exact: true })).toBeVisible();
+    await expect(page.getByText("Reconnect the Google credentials.", { exact: false })).toBeVisible();
+    await expectAccessible(page, "worker-connection-health");
+  });
+
   test("eligible admin still cannot activate the shadow pilot", async ({
     page,
   }) => {
@@ -1251,6 +1385,26 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect(page.getByText(/OpenAI API credit is exhausted/)).toHaveCount(0);
   });
 
+  for (const role of ["worker", "admin"] as const) {
+    for (const width of [1280, 390]) {
+      for (const theme of ["dark", "light"] as const) {
+        test(`${role} primary screen has no axe WCAG 2.2 AA violations at ${width}px ${theme}`, async ({ page }) => {
+          await page.setViewportSize({ width, height: 900 });
+          await page.addInitScript(value => localStorage.setItem("theme", value), theme);
+          await managerFixture(page, role, { founderDecisions: role === "admin" });
+          await page.goto(role === "worker" ? "/worker" : "/founder");
+          if (role === "admin") {
+            await page.getByRole("tab", { name: "Decisions" }).click();
+            await expect(page.getByRole("region", { name: "Founder decision inbox" })).toBeVisible();
+          } else {
+            await expect(page.getByRole("region", { name: "APTLSS work manager" })).toBeVisible();
+          }
+          await expectAccessible(page, `${role}-${width}-${theme}`);
+        });
+      }
+    }
+  }
+
   for (const width of [1440, 390]) for (const theme of ["dark", "light"]) test(`compact coach separates attention from diagnostics at ${width}px ${theme}`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
     await page.addInitScript(value => localStorage.setItem("theme", value), theme);
@@ -1368,34 +1522,34 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       name: "Verify conflicting work evidence",
     });
     await followup
-      .getByLabel("Verification explanation")
+      .getByLabel("What did you find?")
       .fill("Payment verified against the retained record.");
     await expect(
-      followup.getByRole("button", { name: "Verify source and resolve" })
+      followup.getByRole("button", { name: "Save verification and close" })
     ).toBeDisabled();
     await followup
-      .getByRole("button", { name: "Save note (keep open)" })
+      .getByRole("button", { name: "Save note; keep open" })
       .click();
     await expect(
       page.getByText("Note saved; conflict remains open")
     ).toBeVisible();
     await expect(followup).toBeVisible();
     await followup
-      .getByLabel("Verification explanation")
+      .getByLabel("What did you find?")
       .fill("Payment verified against the retained record.");
     await expect(
-      followup.getByLabel("Proof source").locator('option[value="901"]')
+      followup.getByLabel("Which original source confirms it?").locator('option[value="901"]')
     ).toHaveCount(0);
-    await followup.getByLabel("Proof source").selectOption("900");
-    await followup.getByLabel("Exact source quote").fill("An invented quote");
+    await followup.getByLabel("Which original source confirms it?").selectOption("900");
+    await followup.getByLabel("Exact sentence from the source").fill("An invented quote");
     await expect(
-      followup.getByRole("button", { name: "Verify source and resolve" })
+      followup.getByRole("button", { name: "Save verification and close" })
     ).toBeDisabled();
     await followup
-      .getByLabel("Exact source quote")
+      .getByLabel("Exact sentence from the source")
       .fill("Invoice alpha is paid.");
     await followup
-      .getByRole("button", { name: "Verify source and resolve" })
+      .getByRole("button", { name: "Save verification and close" })
       .click();
     await expect(
       page.getByText("Verification follow-up resolved")

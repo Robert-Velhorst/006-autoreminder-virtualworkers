@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   aptlssPlans,
   aptlssEvidenceConflicts,
+  aptlssManagerUpdates,
   aptlssEvidenceRevisions,
   aptlssEvidenceSubjectLinks,
   aptlssVerificationFollowups,
+  decisionOutcomes,
+  emailTasks,
   workspaceEvidenceItems,
   workspaceEvidenceLinks,
 } from "../drizzle/schema";
@@ -15,6 +18,8 @@ import { assertManagerPilotWorker } from "./aptlssManagerPilot";
 import { enqueueManagerTask } from "./aptlssManagerQueue";
 import { extractManagerFacts } from "./aptlssManagerFacts";
 import { validManagerDate, type ManagerEvidenceMetadata, type ManagerFact } from "../shared/aptlssManagerEvidence";
+import { projectWorkerCaseEvidence } from "./workerCaseEvidence";
+import { gmailContentScope } from "../shared/gmailContentScope";
 
 export class AptlssEvidenceGraphError extends Error {}
 
@@ -260,41 +265,65 @@ export async function createEvidenceConflict({
     if (!ownedCard[0]) {
       throw new AptlssEvidenceGraphError("Evidence conflict is outside this worker scope");
     }
-    const existing = await tx.select({ id: aptlssEvidenceConflicts.id })
+    // The unique source/assertion pair is the replay key. The upsert makes
+    // concurrent retries converge on one row; locking it also serializes the
+    // follow-up check below. Keep the existing resolution status unchanged.
+    await tx.insert(aptlssEvidenceConflicts).values({
+      vaId,
+      sourceEvidenceId,
+      assertedEvidenceId,
+      status: conflict.status,
+    }).onDuplicateKeyUpdate({
+      set: { status: sql`${aptlssEvidenceConflicts.status}` },
+    });
+    const [storedConflict] = await tx.select({
+      id: aptlssEvidenceConflicts.id,
+      vaId: aptlssEvidenceConflicts.vaId,
+      status: aptlssEvidenceConflicts.status,
+    })
       .from(aptlssEvidenceConflicts)
       .where(and(
         eq(aptlssEvidenceConflicts.sourceEvidenceId, sourceEvidenceId),
         eq(aptlssEvidenceConflicts.assertedEvidenceId, assertedEvidenceId),
       ))
-      .limit(1);
-    const conflictId = existing[0]?.id ?? (await tx.insert(aptlssEvidenceConflicts).values({
-      vaId,
-      sourceEvidenceId,
-      assertedEvidenceId,
-      status: conflict.status,
-    }).$returningId())[0]?.id;
-    if (!conflictId) throw new AptlssEvidenceGraphError("Conflict could not be stored");
+      .limit(1)
+      .for("update");
+    if (!storedConflict || storedConflict.vaId !== vaId) {
+      throw new AptlssEvidenceGraphError("Evidence conflict is outside this worker scope");
+    }
 
-    const existingFollowup = await tx.select({ id: aptlssVerificationFollowups.id })
+    const followups = await tx.select({
+      id: aptlssVerificationFollowups.id,
+      vaId: aptlssVerificationFollowups.vaId,
+      cardId: aptlssVerificationFollowups.cardId,
+      status: aptlssVerificationFollowups.status,
+    })
       .from(aptlssVerificationFollowups)
-      .where(and(
-        eq(aptlssVerificationFollowups.conflictId, conflictId),
-        eq(aptlssVerificationFollowups.status, "open"),
-      ))
-      .limit(1);
-    if (!existingFollowup[0]) {
+      .where(eq(aptlssVerificationFollowups.conflictId, storedConflict.id))
+      .orderBy(desc(aptlssVerificationFollowups.createdAt), desc(aptlssVerificationFollowups.id))
+      .for("update");
+    const openFollowup = followups.find(item => item.status === "open");
+    const latestFollowup = openFollowup ?? followups[0];
+    if (latestFollowup && (
+      latestFollowup.vaId !== vaId || latestFollowup.cardId !== conflictCardId
+    )) {
+      throw new AptlssEvidenceGraphError("This evidence conflict is already linked to another worker task");
+    }
+    if (storedConflict.status === "needs_verification" && !openFollowup) {
       await tx.insert(aptlssVerificationFollowups).values({
         vaId,
         cardId: conflictCardId,
-        conflictId,
+        conflictId: storedConflict.id,
         title: "Verify conflicting work evidence",
         question: question.trim(),
         status: "open",
         dueAt: new Date(),
       });
     }
-    await enqueueManagerTask(tx, { vaId, trigger: "conflict", urgent: true, eventKey: `conflict:${conflictId}` });
-    return { conflictId, status: conflict.status, createdBy };
+    if (storedConflict.status === "needs_verification") {
+      await enqueueManagerTask(tx, { vaId, trigger: "conflict", urgent: true, eventKey: `conflict:${storedConflict.id}` });
+    }
+    return { conflictId: storedConflict.id, status: storedConflict.status, createdBy };
   });
 }
 
@@ -313,7 +342,8 @@ export async function getCardEvidence(vaId: number, cardId: string, limit = 30) 
   assertManagerPilotWorker(vaId);
   const db = await getDb();
   if (!db) return [];
-  return db.select({
+  const recordLimit = Math.max(1, Math.min(100, limit));
+  const evidenceSelection = {
     id: workspaceEvidenceItems.id,
     source: workspaceEvidenceItems.source,
     kind: workspaceEvidenceItems.kind,
@@ -321,24 +351,167 @@ export async function getCardEvidence(vaId: number, cardId: string, limit = 30) 
     summary: workspaceEvidenceItems.summary,
     content: workspaceEvidenceItems.content,
     sourceUrl: workspaceEvidenceItems.sourceUrl,
+    metadataJson: workspaceEvidenceItems.metadataJson,
     observedAt: workspaceEvidenceItems.observedAt,
     modifiedAt: workspaceEvidenceItems.modifiedAt,
-    contentHash: workspaceEvidenceItems.contentHash,
-    metadataJson: workspaceEvidenceItems.metadataJson,
-    relevanceScore: aptlssEvidenceSubjectLinks.relevanceScore,
-    linkMethod: aptlssEvidenceSubjectLinks.linkMethod,
-    matchReason: aptlssEvidenceSubjectLinks.matchReason,
-  }).from(aptlssEvidenceSubjectLinks)
-    .innerJoin(workspaceEvidenceItems, eq(workspaceEvidenceItems.id, aptlssEvidenceSubjectLinks.evidenceId))
-    .where(and(
-      eq(workspaceEvidenceItems.vaId, vaId),
-      eq(aptlssEvidenceSubjectLinks.vaId, vaId),
-      eq(aptlssEvidenceSubjectLinks.subjectType, "card"),
-      eq(aptlssEvidenceSubjectLinks.subjectId, cardId),
-      eq(workspaceEvidenceItems.active, true),
-    ))
-    .orderBy(desc(workspaceEvidenceItems.observedAt), desc(workspaceEvidenceItems.id))
-    .limit(Math.max(1, Math.min(100, limit)));
+  };
+  const [graphRows, legacyRows] = await Promise.all([
+    db.select(evidenceSelection).from(aptlssEvidenceSubjectLinks)
+      .innerJoin(workspaceEvidenceItems, eq(workspaceEvidenceItems.id, aptlssEvidenceSubjectLinks.evidenceId))
+      .where(and(
+        eq(workspaceEvidenceItems.vaId, vaId), eq(aptlssEvidenceSubjectLinks.vaId, vaId),
+        eq(aptlssEvidenceSubjectLinks.subjectType, "card"), eq(aptlssEvidenceSubjectLinks.subjectId, cardId),
+        eq(workspaceEvidenceItems.active, true),
+      ))
+      .orderBy(desc(workspaceEvidenceItems.observedAt), desc(workspaceEvidenceItems.id)).limit(recordLimit),
+    db.select(evidenceSelection).from(workspaceEvidenceLinks)
+      .innerJoin(workspaceEvidenceItems, eq(workspaceEvidenceItems.id, workspaceEvidenceLinks.evidenceId))
+      .where(and(
+        eq(workspaceEvidenceItems.vaId, vaId), eq(workspaceEvidenceLinks.cardId, cardId),
+        eq(workspaceEvidenceItems.active, true),
+      ))
+      .orderBy(desc(workspaceEvidenceItems.observedAt), desc(workspaceEvidenceItems.id)).limit(recordLimit),
+  ]);
+  const graphEvidenceIds = new Set(graphRows.map(row => row.id));
+  const rowsById = new Map(legacyRows.map(row => [row.id, row]));
+  for (const row of graphRows) rowsById.set(row.id, row);
+  const rows = [...rowsById.values()]
+    .sort((a, b) => b.observedAt.getTime() - a.observedAt.getTime() || b.id - a.id)
+    .slice(0, recordLimit);
+
+  const revisions = rows.length ? await db.select({
+    id: aptlssEvidenceRevisions.id,
+    evidenceId: aptlssEvidenceRevisions.evidenceId,
+    truthClass: aptlssEvidenceRevisions.truthClass,
+    metadataJson: aptlssEvidenceRevisions.metadataJson,
+    observedAt: aptlssEvidenceRevisions.observedAt,
+  }).from(aptlssEvidenceRevisions)
+    .where(inArray(aptlssEvidenceRevisions.evidenceId, rows.map(row => row.id)))
+    .orderBy(desc(aptlssEvidenceRevisions.observedAt), desc(aptlssEvidenceRevisions.id)) : [];
+  const latestRevision = new Map<number, typeof revisions[number]>();
+  for (const revision of revisions) {
+    if (!latestRevision.has(revision.evidenceId)) latestRevision.set(revision.evidenceId, revision);
+  }
+
+  const graphEvidence = rows.flatMap(row => {
+    const revision = latestRevision.get(row.id);
+    const projected = projectWorkerCaseEvidence({ ...row,
+      proofEvidenceId: graphEvidenceIds.has(row.id) ? row.id : null,
+      metadataJson: revision?.metadataJson ?? row.metadataJson,
+      truthClass: revision?.truthClass ?? null,
+      roleOverride: !graphEvidenceIds.has(row.id) && row.kind !== "worker_assertion"
+        && row.kind !== "system_inference" && row.kind !== "model_proposal"
+        && row.kind !== "verified_conflict_resolution" && revision?.truthClass !== "worker_assertion"
+        ? "linked_source" : undefined,
+    });
+    return projected ? [projected] : [];
+  });
+
+  const emailCard = /^email:(\d+)$/.exec(cardId);
+  const emailId = emailCard ? Number(emailCard[1]) : null;
+  const [mailRows, updates, decisions] = await Promise.all([
+    db.select({
+      id: emailTasks.id,
+      gmailThreadId: emailTasks.gmailThreadId,
+      subject: emailTasks.subject,
+      fromAddress: emailTasks.fromAddress,
+      snippet: emailTasks.snippet,
+      receivedAt: emailTasks.receivedAt,
+      status: emailTasks.status,
+    }).from(emailTasks).where(and(
+      eq(emailTasks.vaId, vaId),
+      emailId !== null && Number.isSafeInteger(emailId) && emailId > 0
+        ? eq(emailTasks.id, emailId)
+        : eq(emailTasks.trelloCardId, cardId),
+    )).orderBy(desc(emailTasks.receivedAt), desc(emailTasks.id)).limit(recordLimit),
+    db.select({
+      id: aptlssManagerUpdates.id,
+      detail: aptlssManagerUpdates.detail,
+      outcome: aptlssManagerUpdates.outcome,
+      deadlineDate: aptlssManagerUpdates.deadlineDate,
+      sourceDescription: aptlssManagerUpdates.sourceDescription,
+      createdAt: aptlssManagerUpdates.createdAt,
+    }).from(aptlssManagerUpdates).where(and(
+      eq(aptlssManagerUpdates.vaId, vaId), eq(aptlssManagerUpdates.cardId, cardId),
+    )).orderBy(desc(aptlssManagerUpdates.createdAt), desc(aptlssManagerUpdates.id)).limit(recordLimit),
+    db.select({
+      id: decisionOutcomes.id,
+      disposition: decisionOutcomes.disposition,
+      outcome: decisionOutcomes.outcome,
+      resolvedAt: decisionOutcomes.resolvedAt,
+    }).from(decisionOutcomes).where(and(
+      eq(decisionOutcomes.vaId, vaId), eq(decisionOutcomes.cardId, cardId),
+    )).orderBy(desc(decisionOutcomes.resolvedAt), desc(decisionOutcomes.id)).limit(recordLimit),
+  ]);
+
+  const graphWorkerUpdates = graphEvidence.filter(item => item.role === "worker_update");
+  const graphEmailUrls = new Set(graphEvidence.filter(item => item.source === "gmail" && item.sourceUrl).map(item => item.sourceUrl));
+  const emailEvidence = mailRows.flatMap(mail => {
+    const sourceUrl = `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(mail.gmailThreadId)}`;
+    if (graphEmailUrls.has(sourceUrl)) return [];
+    const scope = gmailContentScope(mail.subject, mail.snippet ?? "");
+    return [projectWorkerCaseEvidence({
+      id: mail.id,
+      recordKey: `email:${mail.id}`,
+      proofEvidenceId: null,
+      source: "gmail",
+      kind: "email_preview",
+      title: mail.subject,
+      content: [mail.fromAddress ? `From: ${mail.fromAddress}` : null, mail.snippet?.trim() || null].filter(Boolean).join("\n\n") || null,
+      summary: null,
+      sourceUrl,
+      observedAt: mail.receivedAt,
+      modifiedAt: null,
+      roleOverride: "source_preview",
+      contentNote: scope === "portal_notice"
+        ? "Portal notice only; open the email to read the underlying correspondence."
+        : "Email preview only; open the original for the full message.",
+      statusLabel: mail.status === "pending" ? "Pending review" : mail.status === "processed" ? "Processed" : "Archived",
+    })!];
+  });
+  const updateEvidence = updates.flatMap(update => {
+    if (graphWorkerUpdates.some(item => item.content?.includes(update.detail))) return [];
+    const content = [
+      update.detail,
+      update.outcome && update.outcome !== "Update" ? `Reported result: ${update.outcome}` : null,
+      update.deadlineDate ? `Deadline stated: ${update.deadlineDate}` : null,
+      update.sourceDescription ? `Source checked: ${update.sourceDescription}` : null,
+    ].filter((part): part is string => !!part).join("\n\n");
+    return [projectWorkerCaseEvidence({
+      id: update.id,
+      recordKey: `update:${update.id}`,
+      proofEvidenceId: null,
+      source: "worker_update",
+      kind: "worker_update",
+      title: "Worker update",
+      content,
+      summary: null,
+      sourceUrl: null,
+      observedAt: update.createdAt,
+      modifiedAt: null,
+      roleOverride: "worker_update",
+      statusLabel: update.outcome && update.outcome !== "Update" ? update.outcome : null,
+    })!];
+  });
+  const decisionEvidence = decisions.map(decision => projectWorkerCaseEvidence({
+    id: decision.id,
+    recordKey: `decision:${decision.id}`,
+    proofEvidenceId: null,
+    source: "decision_outcome",
+    kind: "human_decision",
+    title: "Decision outcome",
+    content: decision.outcome,
+    summary: null,
+    sourceUrl: null,
+    observedAt: decision.resolvedAt,
+    modifiedAt: null,
+    roleOverride: "reviewed_resolution",
+    statusLabel: decision.disposition === "approved" ? "Approved" : decision.disposition === "rejected" ? "Not approved" : "Recorded",
+  })!);
+
+  return [...graphEvidence, ...emailEvidence, ...updateEvidence, ...decisionEvidence]
+    .sort((a, b) => b.observedAt.getTime() - a.observedAt.getTime())
+    .slice(0, recordLimit);
 }
 
 type ConflictRevision = Pick<typeof aptlssEvidenceRevisions.$inferSelect,

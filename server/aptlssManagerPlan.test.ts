@@ -963,6 +963,30 @@ describe("planning reliability regressions", () => {
     expect(plan.planHealth.availableMinutes).toBe(0);
   });
 
+  it("lists each affected task once on a protected non-working day", () => {
+    const { plan } = run(
+      [
+        action("first-step", { cardId: "case-a" }),
+        action("second-step", { cardId: "case-a" }),
+        action("other-task", { cardId: "case-b" }),
+      ],
+      { worker: { ...worker, workingDays: [] } },
+    );
+
+    expect(plan.unscheduledCards).toEqual([
+      {
+        cardId: "case-a",
+        cardName: "Card case-a",
+        reason: "This is a protected non-working day.",
+      },
+      {
+        cardId: "case-b",
+        cardName: "Card case-b",
+        reason: "This is a protected non-working day.",
+      },
+    ]);
+  });
+
   it("does not create a slot when merged breaks cover the entire shift", () => {
     const { plan } = run([action("a")], {
       worker: {

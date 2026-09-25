@@ -14,6 +14,7 @@ import { resolveWorkerOperatorContextById } from "./workerOperatorContext";
 import { zonedDateTimeToUtc } from "../shared/workerTime";
 import { gmailContentScope } from "../shared/gmailContentScope";
 import { mapWithConcurrency } from "./utils/concurrency";
+import { enqueueManagerTask, type ManagerQueueConnection } from "./aptlssManagerQueue";
 
 const SETTINGS_KEY = "googleEvidence";
 const TOKEN_KEY = "googleEvidenceRefreshToken";
@@ -39,6 +40,8 @@ export type GoogleEvidenceSettings = {
   };
   lastGmailSyncAt: string | null;
   lastDriveSyncAt: string | null;
+  lastGmailError: string | null;
+  lastDriveError: string | null;
   lastError: string | null;
 };
 
@@ -75,6 +78,75 @@ type DriveFile = {
   parents: string[];
   size: string | null;
 };
+
+export function googleGmailEvidenceRevision(value: {
+  gmailMessageId: string;
+  gmailThreadId: string;
+  subject: string;
+  fromAddress: string;
+  fromName: string;
+  snippet: string | null;
+  receivedAt: Date;
+  category: string;
+  deadlineAt: Date | null;
+  trelloCardId: string | null | undefined;
+  trelloCardName: string | null | undefined;
+  trelloCardUrl: string | null | undefined;
+  suggestedNextAction: string | null;
+  llmSummary: string | null;
+}) {
+  return createHash("sha256").update(JSON.stringify([
+    value.gmailMessageId,
+    value.gmailThreadId,
+    value.subject,
+    value.fromAddress,
+    value.fromName,
+    value.snippet,
+    value.receivedAt.toISOString(),
+    value.category,
+    value.deadlineAt?.toISOString() ?? null,
+    value.trelloCardId ?? null,
+    value.trelloCardName ?? null,
+    value.trelloCardUrl ?? null,
+    value.suggestedNextAction,
+    value.llmSummary,
+  ])).digest("hex");
+}
+
+export function googleDriveEvidenceRevision(file: DriveFile) {
+  return createHash("sha256").update(JSON.stringify({
+    name: file.name,
+    mimeType: file.mimeType,
+    modifiedAt: file.modifiedAt?.toISOString() ?? null,
+    sourceUrl: file.sourceUrl,
+    description: file.description,
+    parents: [...file.parents].sort(),
+    size: file.size,
+  })).digest("hex");
+}
+
+export function googleDriveRevisionDisposition(
+  existing: { modifiedAt: Date | null; contentHash: string | null } | null,
+  incoming: { modifiedAt: Date | null; contentHash: string },
+): "accept" | "stale" | "ambiguous" {
+  if (!existing) return "accept";
+  if (existing.modifiedAt && !incoming.modifiedAt) return "ambiguous";
+  if (existing.modifiedAt && incoming.modifiedAt) {
+    if (incoming.modifiedAt.getTime() < existing.modifiedAt.getTime()) return "stale";
+    if (incoming.modifiedAt.getTime() > existing.modifiedAt.getTime()) return "accept";
+    return existing.contentHash === incoming.contentHash ? "accept" : "ambiguous";
+  }
+  if (incoming.modifiedAt) return "accept";
+  return existing.contentHash === incoming.contentHash ? "accept" : "ambiguous";
+}
+
+export function evidenceRevisionChanged(previous: string | null | undefined, next: string, active = true) {
+  return !previous || !active || previous !== next;
+}
+
+export function gmailEvidenceOwnerMatches(existingVaId: number | null, requestedVaId: number) {
+  return existingVaId === null || existingVaId === requestedVaId;
+}
 
 type GoogleMailDeliveryProfile = {
   emailAddress: string;
@@ -114,6 +186,8 @@ export function defaultGoogleEvidenceSettings(): GoogleEvidenceSettings {
     drive: { enabled: true, intervalMinutes: 180, lookbackDays: 30, folderId: null },
     lastGmailSyncAt: null,
     lastDriveSyncAt: null,
+    lastGmailError: null,
+    lastDriveError: null,
     lastError: null,
   };
 }
@@ -138,6 +212,8 @@ export function normalizeGoogleEvidenceSettings(value: unknown): GoogleEvidenceS
     },
     lastGmailSyncAt: nullableString(raw.lastGmailSyncAt, 64),
     lastDriveSyncAt: nullableString(raw.lastDriveSyncAt, 64),
+    lastGmailError: nullableString(raw.lastGmailError, 512),
+    lastDriveError: nullableString(raw.lastDriveError, 512),
     lastError: nullableString(raw.lastError, 512),
   };
 }
@@ -649,6 +725,7 @@ async function syncGmailEvidence(vaId: number, settings: GoogleEvidenceSettings[
     resolveWorkerOperatorContextById(vaId),
   ]);
   let linked = 0;
+  let imported = 0;
   let commitmentsCreated = 0;
   for (const message of messages) {
     const classification = classifyGoogleEmail(message.subject, message.snippet);
@@ -676,28 +753,46 @@ async function syncGmailEvidence(vaId: number, settings: GoogleEvidenceSettings[
       suggestedNextAction: classification.suggestedNextAction,
       llmSummary: classification.summary,
     };
-    await db.insert(emailTasks).values(values).onDuplicateKeyUpdate({
-      set: {
-        gmailThreadId: values.gmailThreadId,
-        subject: values.subject,
-        fromAddress: values.fromAddress,
-        fromName: values.fromName,
-        snippet: values.snippet,
-        receivedAt: values.receivedAt,
-        category: values.category,
-        deadlineAt: values.deadlineAt,
-        trelloCardId: values.trelloCardId,
-        trelloCardName: values.trelloCardName,
-        trelloCardUrl: values.trelloCardUrl,
-        suggestedNextAction: values.suggestedNextAction,
-        llmSummary: values.llmSummary,
-      },
+    const revision = googleGmailEvidenceRevision(values);
+    const retained = await db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(emailTasks)
+        .where(eq(emailTasks.gmailMessageId, message.id)).limit(1).for("update");
+      if (!gmailEvidenceOwnerMatches(existing?.vaId ?? null, vaId)) return false;
+      const changed = !existing || googleGmailEvidenceRevision(existing) !== revision;
+      await tx.insert(emailTasks).values(values).onDuplicateKeyUpdate({
+        set: {
+          gmailThreadId: values.gmailThreadId,
+          subject: values.subject,
+          fromAddress: values.fromAddress,
+          fromName: values.fromName,
+          snippet: values.snippet,
+          receivedAt: values.receivedAt,
+          category: values.category,
+          deadlineAt: values.deadlineAt,
+          trelloCardId: values.trelloCardId,
+          trelloCardName: values.trelloCardName,
+          trelloCardUrl: values.trelloCardUrl,
+          suggestedNextAction: values.suggestedNextAction,
+          llmSummary: values.llmSummary,
+        },
+      });
+      await tx.update(emailTasks).set({ status: "archived", archivedAt: new Date() }).where(and(
+        eq(emailTasks.vaId, vaId),
+        eq(emailTasks.gmailThreadId, message.threadId),
+        lt(emailTasks.receivedAt, message.receivedAt),
+      ));
+      const relevant = existing?.trelloCardId || values.trelloCardId;
+      if (changed && relevant) {
+        await enqueueManagerTask(tx, {
+          vaId,
+          trigger: "source_ingested",
+          eventKey: `google-gmail:${message.id}:${revision}`,
+        });
+      }
+      return true;
     });
-    await db.update(emailTasks).set({ status: "archived", archivedAt: new Date() }).where(and(
-      eq(emailTasks.vaId, vaId),
-      eq(emailTasks.gmailThreadId, message.threadId),
-      lt(emailTasks.receivedAt, message.receivedAt),
-    ));
+    if (!retained) continue;
+    imported++;
     if (deadlineIsPlausible && worker.founderId) {
       const outcome = await upsertSourceCommitment({
         workspaceOwnerId: worker.founderId,
@@ -718,7 +813,7 @@ async function syncGmailEvidence(vaId: number, settings: GoogleEvidenceSettings[
       if (outcome.state === "created" || outcome.state === "updated") commitmentsCreated++;
     }
   }
-  return { scanned: messages.length, imported: messages.length, linked, commitmentsCreated };
+  return { scanned: messages.length, imported, linked, commitmentsCreated };
 }
 
 async function listDriveFiles(token: string, settings: GoogleEvidenceSettings["drive"]): Promise<DriveFile[]> {
@@ -748,28 +843,44 @@ async function listDriveFiles(token: string, settings: GoogleEvidenceSettings["d
   });
 }
 
-async function replaceAutomaticEvidenceLinks(evidenceId: number, match: ReturnType<typeof findExactCardMatch>) {
-  const db = await getDb();
-  if (!db) throw new Error("Database is required to link Google Drive evidence");
-  const current = await db.select({ linkMethod: workspaceEvidenceLinks.linkMethod })
-    .from(workspaceEvidenceLinks)
+async function replaceAutomaticEvidenceLinks(
+  db: ManagerQueueConnection,
+  evidenceId: number,
+  match: ReturnType<typeof findExactCardMatch>,
+) {
+  const current = await db.select({
+    cardId: workspaceEvidenceLinks.cardId,
+    relevanceScore: workspaceEvidenceLinks.relevanceScore,
+    matchReason: workspaceEvidenceLinks.matchReason,
+    linkMethod: workspaceEvidenceLinks.linkMethod,
+  }).from(workspaceEvidenceLinks)
     .where(eq(workspaceEvidenceLinks.evidenceId, evidenceId));
-  if (current.some((link) => link.linkMethod === "manual")) return false;
+  const manual = current.some((link) => link.linkMethod === "manual");
+  if (manual) return { changed: false, relevant: true };
+  const automatic = current.filter((link) => link.linkMethod === "automatic");
+  const unchanged = match
+    ? automatic.length === 1
+      && automatic[0].cardId === match.card.cardId
+      && automatic[0].relevanceScore === match.score
+      && automatic[0].matchReason === match.reason
+    : automatic.length === 0;
+  if (unchanged) return { changed: false, relevant: Boolean(match || automatic.length) };
   await db.delete(workspaceEvidenceLinks).where(and(
     eq(workspaceEvidenceLinks.evidenceId, evidenceId),
     eq(workspaceEvidenceLinks.linkMethod, "automatic"),
   ));
-  if (!match) return false;
-  await db.insert(workspaceEvidenceLinks).values({
-    evidenceId,
-    cardId: match.card.cardId,
-    relevanceScore: match.score,
-    matchReason: match.reason,
-    linkMethod: "automatic",
-  }).onDuplicateKeyUpdate({
-    set: { relevanceScore: match.score, matchReason: match.reason, linkMethod: "automatic" },
-  });
-  return true;
+  if (match) {
+    await db.insert(workspaceEvidenceLinks).values({
+      evidenceId,
+      cardId: match.card.cardId,
+      relevanceScore: match.score,
+      matchReason: match.reason,
+      linkMethod: "automatic",
+    }).onDuplicateKeyUpdate({
+      set: { relevanceScore: match.score, matchReason: match.reason, linkMethod: "automatic" },
+    });
+  }
+  return { changed: true, relevant: Boolean(match || automatic.length) };
 }
 
 async function syncDriveEvidence(vaId: number, settings: GoogleEvidenceSettings["drive"], token: string) {
@@ -780,10 +891,8 @@ async function syncDriveEvidence(vaId: number, settings: GoogleEvidenceSettings[
   for (const file of files) {
     const sourceId = `${vaId}:${file.id}`;
     const observedAt = new Date();
-    const metadata = JSON.stringify({ googleFileId: file.id, parents: file.parents, size: file.size });
-    const contentHash = createHash("sha256")
-      .update(JSON.stringify({ name: file.name, description: file.description, modifiedAt: file.modifiedAt?.toISOString(), sourceUrl: file.sourceUrl }))
-      .digest("hex");
+    const metadata = JSON.stringify({ googleFileId: file.id, parents: [...file.parents].sort(), size: file.size });
+    const contentHash = googleDriveEvidenceRevision(file);
     const values = {
       vaId,
       source: "google_drive" as const,
@@ -801,33 +910,69 @@ async function syncDriveEvidence(vaId: number, settings: GoogleEvidenceSettings[
       metadataJson: metadata,
       active: true,
     };
-    await db.insert(workspaceEvidenceItems).values(values).onDuplicateKeyUpdate({
-      set: {
-        vaId,
-        sourceContainerId: values.sourceContainerId,
-        kind: values.kind,
-        title: values.title,
-        summary: values.summary,
-        content: values.content,
-        sourceUrl: values.sourceUrl,
-        mimeType: values.mimeType,
-        modifiedAt: values.modifiedAt,
-        observedAt: values.observedAt,
-        contentHash: values.contentHash,
-        metadataJson: values.metadataJson,
-        active: true,
-      },
-    });
-    const [stored] = await db.select({ id: workspaceEvidenceItems.id })
-      .from(workspaceEvidenceItems)
-      .where(and(
+    const match = findExactCardMatch(`${file.name}\n${file.description ?? ""}`, cards);
+    const outcome = await db.transaction(async (tx) => {
+      const [existing] = await tx.select({
+        id: workspaceEvidenceItems.id,
+        contentHash: workspaceEvidenceItems.contentHash,
+        active: workspaceEvidenceItems.active,
+        observedAt: workspaceEvidenceItems.observedAt,
+        modifiedAt: workspaceEvidenceItems.modifiedAt,
+      }).from(workspaceEvidenceItems).where(and(
         eq(workspaceEvidenceItems.vaId, vaId),
         eq(workspaceEvidenceItems.source, "google_drive"),
         eq(workspaceEvidenceItems.sourceId, sourceId),
-      ))
-      .limit(1);
-    const match = findExactCardMatch(`${file.name}\n${file.description ?? ""}`, cards);
-    if (stored && await replaceAutomaticEvidenceLinks(stored.id, match)) linked++;
+      )).limit(1).for("update");
+      const revisionDisposition = googleDriveRevisionDisposition(existing ? {
+        modifiedAt: existing.modifiedAt,
+        contentHash: existing.contentHash,
+      } : null, { modifiedAt: file.modifiedAt, contentHash });
+      if (revisionDisposition === "stale") return { linked: false, changed: false };
+      if (revisionDisposition === "ambiguous") {
+        throw new Error("Google Drive returned changed file metadata without a strictly newer modification time.");
+      }
+      const changed = evidenceRevisionChanged(existing?.contentHash, contentHash, existing?.active);
+      const stableValues = {
+        ...values,
+        observedAt: changed ? observedAt : existing?.observedAt ?? observedAt,
+      };
+      await tx.insert(workspaceEvidenceItems).values(stableValues).onDuplicateKeyUpdate({
+        set: {
+          vaId,
+          sourceContainerId: stableValues.sourceContainerId,
+          kind: stableValues.kind,
+          title: stableValues.title,
+          summary: stableValues.summary,
+          content: stableValues.content,
+          sourceUrl: stableValues.sourceUrl,
+          mimeType: stableValues.mimeType,
+          modifiedAt: stableValues.modifiedAt,
+          observedAt: stableValues.observedAt,
+          contentHash: stableValues.contentHash,
+          metadataJson: stableValues.metadataJson,
+          active: true,
+        },
+      });
+      const [stored] = await tx.select({ id: workspaceEvidenceItems.id })
+        .from(workspaceEvidenceItems)
+        .where(and(
+          eq(workspaceEvidenceItems.vaId, vaId),
+          eq(workspaceEvidenceItems.source, "google_drive"),
+          eq(workspaceEvidenceItems.sourceId, sourceId),
+        ))
+        .limit(1);
+      if (!stored) throw new Error("Drive evidence was not retained");
+      const linkOutcome = await replaceAutomaticEvidenceLinks(tx, stored.id, match);
+      if ((changed || linkOutcome.changed) && linkOutcome.relevant) {
+        await enqueueManagerTask(tx, {
+          vaId,
+          trigger: "source_ingested",
+          eventKey: `google-drive:${sourceId}:${contentHash}:${file.modifiedAt?.toISOString() ?? "unknown"}:${match?.card.cardId ?? "unlinked"}:${observedAt.getTime()}`,
+        });
+      }
+      return { linked: Boolean(match), changed };
+    });
+    if (outcome.linked) linked++;
   }
   return { scanned: files.length, imported: files.length, linked };
 }
@@ -865,12 +1010,14 @@ export async function getGoogleEvidenceStatus(vaId: number) {
     gmail: {
       enabled: settings.gmail.enabled,
       lastSyncedAt: settings.lastGmailSyncAt,
+      lastError: settings.lastGmailError,
       intervalMinutes: settings.gmail.intervalMinutes,
       hasRetainedEvidence: emailRows.length > 0,
     },
     drive: {
       enabled: settings.drive.enabled,
       lastSyncedAt: settings.lastDriveSyncAt,
+      lastError: settings.lastDriveError,
       intervalMinutes: settings.drive.intervalMinutes,
       folderScoped: Boolean(settings.drive.folderId),
       hasRetainedEvidence: driveRows.length > 0,
@@ -905,7 +1052,12 @@ export async function syncWorkerGoogleEvidence(
     token = await getGoogleAccessToken(vaId);
   } catch (error) {
     const message = safeGoogleError(error);
-    await writeSettings(vaId, { ...settings, lastError: message });
+    await writeSettings(vaId, {
+      ...settings,
+      lastGmailError: gmailDue ? message : settings.lastGmailError,
+      lastDriveError: driveDue ? message : settings.lastDriveError,
+      lastError: message,
+    });
     return {
       configured: true,
       gmail: { state: gmailDue ? "failed" : "skipped", scanned: 0, imported: 0, linked: 0 },
@@ -924,19 +1076,21 @@ export async function syncWorkerGoogleEvidence(
   if (gmailDue) {
     try {
       Object.assign(result.gmail, await syncGmailEvidence(vaId, settings.gmail, token));
-      next = { ...next, lastGmailSyncAt: now.toISOString() };
+      next = { ...next, lastGmailSyncAt: now.toISOString(), lastGmailError: null };
     } catch (error) {
       result.gmail.state = "failed";
       lastError = safeGoogleError(error);
+      next = { ...next, lastGmailError: lastError };
     }
   }
   if (driveDue) {
     try {
       Object.assign(result.drive, await syncDriveEvidence(vaId, settings.drive, token));
-      next = { ...next, lastDriveSyncAt: now.toISOString() };
+      next = { ...next, lastDriveSyncAt: now.toISOString(), lastDriveError: null };
     } catch (error) {
       result.drive.state = "failed";
       lastError = safeGoogleError(error);
+      next = { ...next, lastDriveError: lastError };
     }
   }
   next = { ...next, lastError };

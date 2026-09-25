@@ -2,7 +2,6 @@ import { TRPCError } from "@trpc/server";
 import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import { z } from "zod";
 import {
-  aptlssAssessments,
   aptlssPlans,
   aptlssSteps,
   cardStates,
@@ -15,7 +14,7 @@ import {
   workspaceEvidenceItems,
   workspaceEvidenceLinks,
 } from "../drizzle/schema";
-import { getActiveWaitingReason, getActiveWaitingReasons, getWaitingReasonHistory, recordAptlssWaitingReason, resolveAptlssWaitingReason } from "./aptlssWaitingReasonDb";
+import { getActiveWaitingReason, getActiveWaitingReasons, getWaitingReasonHistory, recordAptlssWaitingReason, resolveAptlssWaitingReason, WaitingReasonCardChangedError, WaitingReasonNotInQueueError } from "./aptlssWaitingReasonDb";
 import { selectWorkQueueNextAction } from "./aptlssWorkQueue";
 import {
   ensureBrowserTabCollectorToken,
@@ -36,9 +35,7 @@ import {
 } from "./googleEvidence";
 import {
   buildOperatorEvidenceSummary,
-  type OperatorAssessmentEvidence,
   type OperatorEvidenceSourceKey,
-  type OperatorIntelligenceSnapshot,
 } from "./operatorEvidence";
 import { protectedProcedure, router } from "./_core/trpc";
 import { indexWorkQueueSteps } from "./operatorWorkQueueIndex";
@@ -210,14 +207,11 @@ export const operatorRouter = router({
       getActiveWaitingReasons(vaId),
     ]);
     const cardIds = plans.map((plan) => plan.cardId);
-    const [states, scores, steps, assessments, linkedEvidence, linkedCommunication, linkedEmails, completedTimeEntries, cachedCards, founderDeadlines] = cardIds.length
+    const [states, scores, steps, linkedEvidence, linkedCommunication, linkedEmails, completedTimeEntries, cachedCards, founderDeadlines] = cardIds.length
       ? await Promise.all([
           db.select().from(cardStates).where(and(eq(cardStates.vaId, vaId), inArray(cardStates.cardId, cardIds))),
           db.select().from(priorityScores).where(and(eq(priorityScores.vaId, vaId), inArray(priorityScores.cardId, cardIds))),
           db.select().from(aptlssSteps).where(and(eq(aptlssSteps.vaId, vaId), inArray(aptlssSteps.cardId, cardIds))),
-          db.select().from(aptlssAssessments)
-            .where(inArray(aptlssAssessments.cardId, cardIds))
-            .orderBy(desc(aptlssAssessments.assessedAt)),
           db.select({
             cardId: workspaceEvidenceLinks.cardId,
             source: workspaceEvidenceItems.source,
@@ -257,11 +251,7 @@ export const operatorRouter = router({
             .where(eq(founderDecisionDeadlines.vaId, vaId))
             .orderBy(desc(founderDecisionDeadlines.id)),
         ])
-      : [[], [], [], [], [], [], [], [], [], []];
-    const latestAssessment = new Map<string, typeof assessments[number]>();
-    assessments.forEach((assessment) => {
-      if (!latestAssessment.has(assessment.cardId)) latestAssessment.set(assessment.cardId, assessment);
-    });
+      : [[], [], [], [], [], [], [], [], []];
     const stateMap = new Map(states.map((item) => [item.cardId, item]));
     const cachedCardMap = new Map<string, typeof cachedCards[number]>();
     cachedCards.forEach((item) => {
@@ -300,32 +290,19 @@ export const operatorRouter = router({
         const cachedCard = parseJson<Record<string, unknown>>(cachedCardRow?.cardData, {});
         const state = stateMap.get(plan.cardId);
         const score = scoreMap.get(plan.cardId);
-        const assessment = latestAssessment.get(plan.cardId);
         const cardSteps = stepsByCardId.get(plan.cardId) ?? [];
-        const assessmentEvidence = assessment
-          ? parseJson<OperatorAssessmentEvidence[]>(assessment.evidenceJson, [])
-          : [];
-        const intelligence = assessment
-          ? parseJson<OperatorIntelligenceSnapshot>(assessment.intelligenceJson, {})
-          : {};
-        const rawUncertainties = assessment
-          ? parseJson<string[]>(assessment.uncertaintiesJson, [])
-          : [];
         const openRobertStep = cardSteps.find((step) => step.requiresRobert && step.status !== "complete") ?? null;
-        const recommendations = assessment
-          ? parseJson<string[]>(assessment.recommendationsJson, [])
-          : Array.isArray(planValue.recommendations) ? planValue.recommendations.filter((item): item is string => typeof item === "string") : [];
         const nextBestAction = waitingMap.get(plan.cardId)?.nextAction ?? selectWorkQueueNextAction({
           planAction: typeof planValue.nextBestAction === "string" ? planValue.nextBestAction : typeof planValue.action === "string" ? planValue.action : null,
-          primaryState: assessment?.primaryState ?? state?.state ?? null,
-          actionability: assessment?.actionability ?? null,
-          recommendations,
+          primaryState: state?.state ?? null,
+          actionability: null,
+          recommendations: [],
           openRobertStep,
         });
         const evidenceSummary = buildOperatorEvidenceSummary({
-          rawUncertainties,
-          assessmentEvidence,
-          intelligence,
+          rawUncertainties: [],
+          assessmentEvidence: [],
+          intelligence: {},
           linkedSourceCounts: sourceCounts.get(plan.cardId) ?? {},
           completedTimeSamples: completedTimeSamples.get(plan.cardId) ?? 0,
         });
@@ -343,10 +320,10 @@ export const operatorRouter = router({
           dueAt: typeof cachedCard?.due === "string" ? cachedCard.due : typeof planValue.due === "string" ? planValue.due : null,
           overdue: state?.isOverdue ?? false,
           nextBestAction,
-          primaryState: assessment?.primaryState ?? state?.state ?? null,
-          actionability: assessment?.actionability ?? null,
-          priorityScore: assessment?.priorityScore ?? score?.score ?? 0,
-          priorityTier: assessment?.priorityTier ?? score?.tier ?? "MEDIUM",
+          primaryState: state?.state ?? null,
+          actionability: null,
+          priorityScore: score?.score ?? 0,
+          priorityTier: score?.tier ?? "MEDIUM",
           evidenceSummary: {
             sources: evidenceSummary.sources,
             forecast: evidenceSummary.forecast ? {
@@ -426,16 +403,26 @@ export const operatorRouter = router({
         founderName: worker.founderName,
         timeZone: worker.timezone,
       });
-      return recordAptlssWaitingReason({
-        cardId: ownedCardInput.cardId,
-        cardName: ownedCardInput.cardName,
-        cardUrl: ownedCardInput.cardUrl,
-        boardName: ownedCardInput.boardName,
-        listName: ownedCardInput.listName,
-        vaId: worker.userId,
-        interpretation,
-        recordedBy: String(ctx.user.openId),
-      });
+      try {
+        return await recordAptlssWaitingReason({
+          cardId: ownedCardInput.cardId,
+          cardName: ownedCardInput.cardName,
+          cardUrl: ownedCardInput.cardUrl,
+          boardName: ownedCardInput.boardName,
+          listName: ownedCardInput.listName,
+          vaId: worker.userId,
+          interpretation,
+          recordedBy: String(ctx.user.openId),
+        });
+      } catch (error) {
+        if (error instanceof WaitingReasonNotInQueueError) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "You can only record a waiting reason for a card in your work queue" });
+        }
+        if (error instanceof WaitingReasonCardChangedError) {
+          throw new TRPCError({ code: "CONFLICT", message: "This card changed. Refresh your work queue and try again." });
+        }
+        throw error;
+      }
     }),
 
   getWaitingReasons: operatorProcedure.query(({ ctx }) => getActiveWaitingReasons(ctx.user.id)),

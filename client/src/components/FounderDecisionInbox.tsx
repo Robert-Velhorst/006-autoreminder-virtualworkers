@@ -113,7 +113,7 @@ export default function FounderDecisionInbox() {
             <p className="flex items-start gap-2 text-muted-foreground"><Clock3 className="mt-0.5 size-4 shrink-0" />{selected.taskDueAt ? `Last recorded task deadline: ${new Date(selected.taskDueAt).toLocaleString()}. Verify in the source.` : "No task deadline recorded. Set the urgency from the original source."}</p>
             {selected.completionCriteria && <p><span className="font-medium">Decision complete when:</span> {selected.completionCriteria}</p>}
           </div>
-          {/^https:\/\//i.test(selected.cardUrl) && <a href={selected.cardUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-sm font-medium text-primary underline">Open source card <ExternalLink className="size-4" /></a>}
+          {/^https:\/\//i.test(selected.cardUrl) && <a href={selected.cardUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-sm font-medium text-blue-700 underline dark:text-blue-300">Open source card <ExternalLink aria-hidden="true" className="size-4" /></a>}
           <div className="space-y-2 border-y py-3">
             <Label htmlFor="founder-decision-due">Decision deadline</Label>
             <Input id="founder-decision-due" type="datetime-local" value={dueLocal} onChange={event => setDueLocal(event.target.value)} />

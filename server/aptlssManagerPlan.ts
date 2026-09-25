@@ -252,12 +252,16 @@ export function reconcileManagerPlan(args: {
   };
   let orderCursor = nowMinute;
   if (!workingDay) {
-    for (const a of candidates)
+    const affectedCards = new Set<string>();
+    for (const a of candidates) {
+      if (affectedCards.has(a.cardId)) continue;
+      affectedCards.add(a.cardId);
       unscheduled.push({
         cardId: a.cardId,
         cardName: cardMap.get(a.cardId)?.name ?? a.title,
         reason: "This is a protected non-working day.",
       });
+    }
   } else {
     // The manager already supplied the order. Neither priority sorting nor gap
     // filling may turn that order into a different execution sequence.

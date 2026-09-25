@@ -10,7 +10,7 @@ describe('Trello checklist completion safety', () => {
     );
 
     expect(route).toContain("if (typeof isCompleted !== 'boolean')");
-    expect(route).toContain('if (!await requireAssignedCard(req, res, String(cardId))) return;');
+    expect(route).toContain('if (!await requireAssignedCard(req, res, cardId, { checklistId, checkItemId })) return;');
     expect(route).toContain('encodeURIComponent(checklistId)');
     expect(route).toContain('encodeURIComponent(checkItemId)');
     expect(route).toContain('{ maxRetries: 0, timeoutMs: 15_000 }');

@@ -14,3 +14,21 @@ export function inventory(tabs) {
       pinned: Boolean(tab.pinned), active: Boolean(tab.active), windowId: tab.windowId };
   });
 }
+
+export function nextCaptureVersion(collectorId, sequence, newCollectorId = () => crypto.randomUUID()) {
+  const validCollectorId = typeof collectorId === "string" && collectorId.length > 0;
+  if (!validCollectorId) return { collectorId: newCollectorId(), captureSequence: 1 };
+  if (sequence === undefined || sequence === null) return { collectorId, captureSequence: 1 };
+  const validSequence = Number.isSafeInteger(sequence) && sequence >= 0 && sequence < 4_294_967_295;
+  if (!validSequence) return { collectorId: newCollectorId(), captureSequence: 1 };
+  return { collectorId, captureSequence: sequence + 1 };
+}
+
+export function reconcileCaptureVersion(collectorId, localSequence, storedSequence, newCollectorId = () => crypto.randomUUID()) {
+  const validCollectorId = typeof collectorId === "string" && collectorId.length > 0;
+  const validLocal = Number.isSafeInteger(localSequence) && localSequence >= 0 && localSequence <= 4_294_967_295;
+  const validStored = Number.isSafeInteger(storedSequence) && storedSequence >= 0 && storedSequence <= 4_294_967_295;
+  if (!validCollectorId || !validLocal || !validStored) return null;
+  if (storedSequence >= 4_294_967_295) return { collectorId: newCollectorId(), captureSequence: 0 };
+  return { collectorId, captureSequence: Math.max(localSequence, storedSequence) };
+}
