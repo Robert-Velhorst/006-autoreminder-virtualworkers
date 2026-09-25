@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { eq, inArray } from 'drizzle-orm';
 import { getDb } from '../db';
-import { timeEntries, taskAssignments, vaProfiles } from '../../drizzle/schema';
+import { taskAssignments, vaProfiles } from '../../drizzle/schema';
 import { requireAuthenticated, requestUser } from '../middleware/auth';
+import { loadAccountTimeEntries } from '../timeEntryOwnership';
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -35,11 +36,7 @@ router.get('/export', async (req, res) => {
     const profileIds = profiles.map(profile => profile.id);
 
     if (type === 'time-entries') {
-      const times = user.role === 'admin'
-        ? await db.select().from(timeEntries)
-        : profileIds.length > 0
-          ? await db.select().from(timeEntries).where(inArray(timeEntries.vaId, profileIds))
-          : [];
+      const times = await loadAccountTimeEntries(db, user);
       const rows = [
         ['id', 'vaId', 'founderId', 'taskId', 'durationMinutes', 'startTime', 'endTime', 'source'],
         ...times.map(entry => [entry.id, entry.vaId, entry.founderId, entry.taskId, entry.durationMinutes,
