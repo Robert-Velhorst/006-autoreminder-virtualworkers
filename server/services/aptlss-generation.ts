@@ -1,5 +1,6 @@
 import { getLLMText, invokeLLM } from "../_core/llm";
-import { createChecklistSyncService } from "./trello-checklist-sync";
+import { assertAptlssJobOwnership, createChecklistSyncService } from "./trello-checklist-sync";
+import { ScheduledJobLeaseLostError, type ScheduledJobContext } from "../scheduledJobRuntime";
 
 export type AptlssGenerationSettings = {
   applyToTrello?: boolean;
@@ -143,6 +144,22 @@ function existingAptlssChecklist(card: AptlssSourceCard) {
   );
 }
 
+async function waitForGeneration<T>(operation: Promise<T>, context?: ScheduledJobContext): Promise<T> {
+  if (!context) return operation;
+  let onAbort!: () => void;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(new ScheduledJobLeaseLostError());
+    if (context.signal.aborted) onAbort();
+    else context.signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    // The LLM API has no caller signal; abandon its result without allowing writes.
+    return await Promise.race([operation, cancelled]);
+  } finally {
+    context.signal.removeEventListener("abort", onAbort);
+  }
+}
+
 export function normalizeGeneratedAptlssPlan(raw: unknown, card: AptlssSourceCard): AptlssGeneratedPlan {
   const value = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
   const rawSteps = Array.isArray(value.steps) ? value.steps : [];
@@ -239,7 +256,8 @@ function compactCardContext(card: AptlssSourceCard, clarifiedGoal: unknown) {
   };
 }
 
-export async function fetchAptlssSourceCard(cardId: string): Promise<AptlssSourceCard> {
+export async function fetchAptlssSourceCard(cardId: string, context?: ScheduledJobContext): Promise<AptlssSourceCard> {
+  await assertAptlssJobOwnership(context);
   const apiKey = process.env.TRELLO_API_KEY?.trim();
   const token = process.env.TRELLO_TOKEN?.trim();
   if (!apiKey || !token) throw new Error("Trello credentials not configured");
@@ -261,7 +279,7 @@ export async function fetchAptlssSourceCard(cardId: string): Promise<AptlssSourc
     action_memberCreator_fields: "username,fullName",
   });
   const response = await fetch(`https://api.trello.com/1/cards/${encodeURIComponent(cardId)}?${query}`, {
-    signal: AbortSignal.timeout(30_000),
+    signal: context ? AbortSignal.any([context.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
   });
   if (!response.ok) {
     const detail = (await response.text().catch(() => "")).slice(0, 500);
@@ -273,44 +291,60 @@ export async function fetchAptlssSourceCard(cardId: string): Promise<AptlssSourc
 export async function generateAptlssForCard(
   card: AptlssSourceCard,
   settings: AptlssGenerationSettings = {},
+  context?: ScheduledJobContext,
 ): Promise<AptlssGenerationResult> {
+  await assertAptlssJobOwnership(context);
   if (!card?.id || !cleanText(card.name)) throw new Error("A valid Trello card is required");
   const existing = existingAptlssChecklist(card);
   const applyToTrello = settings.applyToTrello !== false;
 
   if (settings.skipExisting !== false && existing) {
     const existingSteps = existing.checkItems ?? [];
-    const plan = normalizeGeneratedAptlssPlan({
-      summary: `Existing APTLSS checklist retained for ${card.name}.`,
-      nextBestAction: existingSteps.find((item) => item.state !== "complete")?.name ?? "Review the completed checklist.",
-      stateReason: "An APTLSS checklist already exists and skip-existing is enabled.",
-      urgencyLabel: "MEDIUM",
-      confidenceScore: 100,
-      missingInformation: [],
-      steps: existingSteps.map((item) => ({
-        title: item.name,
-        estimatedMinutes: 30,
-        category: "existing_checklist",
-        requiresFounder: false,
-        blockedBy: null,
-        completionCriteria: "The checklist item is complete and its result is verified.",
-        riskIfSkipped: "The existing execution plan would remain incomplete.",
-        recommendedDecision: null,
-      })),
-    }, card);
-    return {
-      success: true,
-      cardId: card.id,
-      aptlss: plan,
-      checklistId: existing.id ?? null,
-      itemsCreated: 0,
-      appliedToTrello: false,
-      reusedExistingChecklist: true,
-      validation: { confidenceScore: plan.confidenceScore, minimumConfidence: 0, passed: true, needsReview: false, issues: [] },
-    };
+    const syncStatus = await createChecklistSyncService(context).getSyncStatus(card.id);
+    await assertAptlssJobOwnership(context);
+    const previouslyVerified = Boolean(
+      existing.id
+      && existingSteps.length > 0
+      && syncStatus.synced
+      && syncStatus.checklistId === existing.id
+      && syncStatus.itemCount === existingSteps.length,
+    );
+
+    // Existence alone is not proof: failed writes can leave a partial checklist.
+    if (previouslyVerified) {
+      const plan = normalizeGeneratedAptlssPlan({
+        summary: `Existing APTLSS checklist retained for ${card.name}.`,
+        nextBestAction: existingSteps.find((item) => item.state !== "complete")?.name ?? "Review the completed checklist.",
+        stateReason: "The existing APTLSS checklist has a matching successful synchronization record.",
+        urgencyLabel: "MEDIUM",
+        confidenceScore: 100,
+        missingInformation: [],
+        steps: existingSteps.map((item) => ({
+          title: item.name,
+          estimatedMinutes: 30,
+          category: "existing_checklist",
+          requiresFounder: false,
+          blockedBy: null,
+          completionCriteria: "The checklist item is complete and its result is verified.",
+          riskIfSkipped: "The existing execution plan would remain incomplete.",
+          recommendedDecision: null,
+        })),
+      }, card);
+      return {
+        success: true,
+        cardId: card.id,
+        aptlss: plan,
+        checklistId: existing.id ?? null,
+        itemsCreated: 0,
+        appliedToTrello: false,
+        reusedExistingChecklist: true,
+        validation: { confidenceScore: plan.confidenceScore, minimumConfidence: 0, passed: true, needsReview: false, issues: [] },
+      };
+    }
   }
 
-  const response = await invokeLLM({
+  await assertAptlssJobOwnership(context);
+  const response = await waitForGeneration(invokeLLM({
     messages: [
       {
         role: "system",
@@ -330,7 +364,8 @@ export async function generateAptlssForCard(
       type: "json_schema",
       json_schema: { name: "aptlss_execution_plan", strict: true, schema: generationSchema as unknown as Record<string, unknown> },
     },
-  });
+  }), context);
+  await assertAptlssJobOwnership(context);
   const text = getLLMText(response);
   if (!text) throw new Error("OpenAI returned no APTLSS plan");
 
@@ -353,8 +388,12 @@ export async function generateAptlssForCard(
   let checklistId: string | null = null;
   let itemsCreated = 0;
   const mayApply = applyToTrello && (settings.validateBeforeGenerate === false || passed);
+  if (existing && applyToTrello && !mayApply) {
+    throw new Error("The existing APTLSS checklist is not verified as complete, and the replacement plan did not pass validation.");
+  }
   if (mayApply) {
-    const sync = await createChecklistSyncService().syncChecklistToCard(
+    await assertAptlssJobOwnership(context);
+    const sync = await createChecklistSyncService(context).syncChecklistToCard(
       card.id,
       plan.steps.map((step) => ({
         step: step.title,
@@ -374,6 +413,7 @@ export async function generateAptlssForCard(
     itemsCreated = sync.itemsCreated ?? 0;
   }
 
+  await assertAptlssJobOwnership(context);
   return {
     success: true,
     cardId: card.id,
@@ -395,6 +435,7 @@ export async function generateAptlssForCard(
 export async function fetchAndGenerateAptlss(
   cardId: string,
   settings: AptlssGenerationSettings = {},
+  context?: ScheduledJobContext,
 ) {
-  return generateAptlssForCard(await fetchAptlssSourceCard(cardId), settings);
+  return generateAptlssForCard(await fetchAptlssSourceCard(cardId, context), settings, context);
 }

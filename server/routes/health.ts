@@ -40,8 +40,9 @@ router.get('/', async (req: Request, res: Response) => {
 
     const statusCode = dbHealthy && (!redisRequired || redisHealthy) ? 200 : 503;
     res.status(statusCode).json(health);
-  } catch (error) {
-    console.error('[Health] Health check failed:', error);
+  } catch {
+    // Driver errors can include connection credentials and query data.
+    console.error('[Health] Health check failed');
     res.status(503).json({
       status: 'unhealthy',
       error: 'Health check failed',
@@ -76,8 +77,8 @@ router.get('/ready', async (req: Request, res: Response) => {
       ready: true,
       timestamp: new Date().toISOString(),
     });
-  } catch (error) {
-    console.error('[Health] Readiness check failed:', error);
+  } catch {
+    console.error('[Health] Readiness check failed');
     res.status(503).json({
       ready: false,
       reason: 'Readiness check failed',

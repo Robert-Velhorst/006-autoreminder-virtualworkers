@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   maintenanceJobSettings,
   scheduledJobRuns,
@@ -9,7 +9,7 @@ import { upsertWeeklyAnalysis } from "./aptlssPoliciesDb";
 import { getAllCardStates } from "./aptlssStepsDb";
 import { getDb } from "./db";
 import { syncWorkerGoogleEvidence } from "./googleEvidence";
-import { runScheduledJob, type ScheduledJobTrigger } from "./scheduledJobRuntime";
+import { runScheduledJob, type ScheduledJobContext, type ScheduledJobTransaction, type ScheduledJobTrigger } from "./scheduledJobRuntime";
 import { syncWorkerTrelloCommitments } from "./sourceCommitments";
 import { processDueAptlssGenerationJobs } from "./services/aptlss-scheduled-generation";
 import { warmUpCache } from "./services/cache-warming";
@@ -120,6 +120,7 @@ type ProgressState = {
 
 const activeRuns = new Map<MaintenanceJobKey, ProgressState>();
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
+let schedulerInitialTimer: ReturnType<typeof setTimeout> | null = null;
 let schedulerScanning = false;
 
 function definitionFor(jobKey: string) {
@@ -152,10 +153,12 @@ function isoWeekKey(date = new Date()) {
   return `${target.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
 }
 
-async function generateWeeklyAnalysis() {
+async function generateWeeklyAnalysis(context: ScheduledJobContext) {
+  await context.assertOwnership();
   const workers = await activeWorkers();
   let records = 0;
   for (const [index, worker] of workers.entries()) {
+    await context.assertOwnership();
     setProgress("weekly_analysis", index, workers.length, `Analyzing ${worker.name}`);
     const [states, plans] = await Promise.all([
       getAllCardStates(worker.userId),
@@ -183,6 +186,7 @@ async function generateWeeklyAnalysis() {
     if (plans.length < states.length) improvements.push("Generate or repair APTLSS plans for active cards that have state evidence but no current plan.");
     if (improvements.length === 0) improvements.push("No recurring process exception was detected; keep the current review cadence.");
     const weekKey = isoWeekKey();
+    await context.assertOwnership();
     await upsertWeeklyAnalysis({
       vaId: worker.userId,
       weekKey,
@@ -201,36 +205,39 @@ async function generateWeeklyAnalysis() {
   return { recordsProcessed: records, detail: `Weekly analysis saved for ${records} active worker(s).` };
 }
 
-async function executeMaintenanceWork(jobKey: MaintenanceJobKey, trigger: ScheduledJobTrigger) {
+async function executeMaintenanceWork(jobKey: MaintenanceJobKey, trigger: ScheduledJobTrigger, context: ScheduledJobContext) {
+  await context.assertOwnership();
   if (jobKey === "aptlss_queue") {
     setProgress(jobKey, 0, 1, "Checking due generation jobs");
-    const result = await processDueAptlssGenerationJobs();
+    const result = await processDueAptlssGenerationJobs(new Date(), context);
     setProgress(jobKey, 1, 1, "Queue scan complete");
     return { recordsProcessed: result.processed, detail: JSON.stringify(result) };
   }
   if (jobKey === "database_preload") {
     setProgress(jobKey, 0, 1, "Preloading database buffers");
     const result = await warmUpCache();
+    await context.assertOwnership();
     setProgress(jobKey, 1, 1, "Preload complete");
     return { recordsProcessed: result.totalCards + result.totalBoards, detail: JSON.stringify(result) };
   }
   if (jobKey === "webhook_sync") {
     if (!getWebhookCallbackUrl()) throw new Error("Trello webhook callback URL is not configured");
     setProgress(jobKey, 0, 1, "Reconciling Trello webhooks");
-    const result = await syncWebhooks();
+    const result = await syncWebhooks(context);
     if (result.errors > 0) throw new Error(`Webhook reconciliation reported ${result.errors} error(s)`);
     setProgress(jobKey, 1, 1, "Webhook registry is synchronized");
     return { recordsProcessed: result.registered + result.removed, detail: JSON.stringify(result) };
   }
-  if (jobKey === "weekly_analysis") return generateWeeklyAnalysis();
+  if (jobKey === "weekly_analysis") return generateWeeklyAnalysis(context);
 
   const workers = await activeWorkers();
   let recordsProcessed = 0;
   const details: unknown[] = [];
   for (const [index, worker] of workers.entries()) {
+    await context.assertOwnership();
     setProgress(jobKey, index, workers.length, `Processing ${worker.name}`);
     if (jobKey === "google_evidence") {
-      const result = await syncWorkerGoogleEvidence(worker.userId, { onlyDue: true });
+      const result = await syncWorkerGoogleEvidence(worker.userId, { onlyDue: true, context });
       recordsProcessed += result.gmail.imported + result.drive.imported;
       details.push({ workerId: worker.userId, gmail: result.gmail.state, drive: result.drive.state, message: result.message });
     } else if (jobKey === "trello_commitments") {
@@ -238,6 +245,7 @@ async function executeMaintenanceWork(jobKey: MaintenanceJobKey, trigger: Schedu
         userId: worker.userId,
         workspaceOwnerId: worker.founderId,
         trelloMemberId: worker.trelloMemberId,
+        context,
       });
       recordsProcessed += result.scanned;
       details.push({ workerId: worker.userId, ...result });
@@ -245,17 +253,41 @@ async function executeMaintenanceWork(jobKey: MaintenanceJobKey, trigger: Schedu
       const result = await syncWorkerTrelloReplyEvidence({
         vaId: worker.userId,
         trelloMemberId: worker.trelloMemberId,
+        context,
       });
       recordsProcessed += result.threads;
       details.push({ workerId: worker.userId, ...result });
     } else if (jobKey === "eod_compliance") {
-      const result = await collectComplianceSnapshot(worker, trigger === "manual" ? "manual" : "auto");
+      const result = await collectComplianceSnapshot(worker, trigger === "manual" ? "manual" : "auto", context);
       recordsProcessed += result ? 1 : 0;
       details.push({ workerId: worker.userId, recorded: Boolean(result) });
     }
+    await context.assertOwnership();
     setProgress(jobKey, index + 1, workers.length, `Completed ${worker.name}`);
   }
   return { recordsProcessed, detail: JSON.stringify(details) };
+}
+
+function dueMaintenanceCondition(jobKey: MaintenanceJobKey) {
+  return and(eq(maintenanceJobSettings.jobKey, jobKey), eq(maintenanceJobSettings.enabled, true),
+    or(isNull(maintenanceJobSettings.lastScheduledAt),
+      sql`TIMESTAMPADD(MINUTE, ${maintenanceJobSettings.intervalMinutes}, ${maintenanceJobSettings.lastScheduledAt}) <= CURRENT_TIMESTAMP`));
+}
+
+async function recordMaintenanceSchedule(jobKey: MaintenanceJobKey, context: ScheduledJobContext, tx: ScheduledJobTransaction) {
+  await context.assertOwnership(tx);
+  const definition = definitionFor(jobKey)!;
+  await tx.insert(maintenanceJobSettings).values({ jobKey, enabled: definition.defaultEnabled,
+    intervalMinutes: definition.defaultIntervalMinutes,
+  }).onDuplicateKeyUpdate({ set: { jobKey } });
+  const [due] = await tx.select({ jobKey: maintenanceJobSettings.jobKey }).from(maintenanceJobSettings)
+    .where(dueMaintenanceCondition(jobKey)).limit(1).for("update");
+  if (!due) return false;
+  await context.assertOwnership(tx);
+  await tx.update(maintenanceJobSettings).set({ lastScheduledAt: sql`CURRENT_TIMESTAMP` })
+    .where(dueMaintenanceCondition(jobKey));
+  await context.assertOwnership(tx);
+  return true;
 }
 
 export async function runMaintenanceJob(jobKey: MaintenanceJobKey, trigger: ScheduledJobTrigger = "manual") {
@@ -267,7 +299,8 @@ export async function runMaintenanceJob(jobKey: MaintenanceJobKey, trigger: Sche
       trigger,
       leaseMs: 60 * 60_000,
       skipIfSuccessful: false,
-    }, () => executeMaintenanceWork(jobKey, trigger));
+      shouldRun: trigger === "cron" ? (context, tx) => recordMaintenanceSchedule(jobKey, context, tx) : undefined,
+    }, context => executeMaintenanceWork(jobKey, trigger, context));
   } finally {
     activeRuns.delete(jobKey);
   }
@@ -345,16 +378,12 @@ async function scanScheduledMaintenance() {
     const now = new Date();
     for (const job of status) {
       if (!job.enabled || job.active || !job.nextRunAt || new Date(job.nextRunAt) > now) continue;
-      await db.insert(maintenanceJobSettings).values({
-        jobKey: job.key,
-        enabled: true,
-        intervalMinutes: job.intervalMinutes,
-        lastScheduledAt: now,
-      }).onDuplicateKeyUpdate({ set: { lastScheduledAt: now } });
       await runMaintenanceJob(job.key, "cron").catch((error) => {
-        console.error(`[MaintenanceCenter] ${job.key} failed`, error);
+        console.error(`[MaintenanceCenter] ${job.key} failed; retained history requires review`);
       });
     }
+  } catch {
+    console.error("[MaintenanceCenter] Scheduled scan unavailable; will retry at the next interval");
   } finally {
     schedulerScanning = false;
   }
@@ -362,13 +391,18 @@ async function scanScheduledMaintenance() {
 
 export function startMaintenanceCenter() {
   if (schedulerTimer) return;
-  const initial = setTimeout(() => void scanScheduledMaintenance(), 5_000);
-  initial.unref?.();
+  schedulerInitialTimer = setTimeout(() => {
+    schedulerInitialTimer = null;
+    void scanScheduledMaintenance();
+  }, 5_000);
+  schedulerInitialTimer.unref?.();
   schedulerTimer = setInterval(() => void scanScheduledMaintenance(), 60_000);
   schedulerTimer.unref?.();
 }
 
 export function stopMaintenanceCenter() {
   if (schedulerTimer) clearInterval(schedulerTimer);
+  if (schedulerInitialTimer) clearTimeout(schedulerInitialTimer);
   schedulerTimer = null;
+  schedulerInitialTimer = null;
 }

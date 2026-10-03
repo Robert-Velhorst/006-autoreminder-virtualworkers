@@ -372,6 +372,13 @@
       "when": 1790365036594,
       "tag": "0052_manager_completion_reports",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "5",
+      "when": 1790828562234,
+      "tag": "0053_manager_history_checks",
+      "breakpoints": true
     }
   ]
 }

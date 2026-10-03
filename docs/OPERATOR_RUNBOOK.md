@@ -43,7 +43,18 @@ interruption is expected; an `ERR_NGROK_8012` upstream-error page is not.
 
 ## Rollback
 
-Stop the current app, retain its logs, restore the prior image and database
-snapshot together, then run health/readiness checks before reopening traffic.
+Do not automatically restore an older database snapshot when changing application
+images: later worker activity and assessment history must remain intact. Keep the
+current database, prior image, verified backup and incident logs recoverable.
+
+Legacy application rollback is currently disabled by the pilot tooling. It must
+not be bypassed with a generic refresh or deployment command. Before an image
+switch is authorized, complete the isolated full-data backward/forward rehearsal
+in [the shadow rollout guide](APTLSS_SHADOW_ROLLOUT.md) and the full-history
+materialization checks in [assessment history storage](APTLSS_HISTORY_STORAGE.md).
+Database restore is a separate disaster-recovery decision requiring explicit
+authorization, reconciliation of later activity and demonstrated preservation.
+Health/readiness alone does not prove data or binary compatibility.
+
 The immutable Kamal delivery and Joyce pre-consolidation archive remain Git
 recovery points; neither should be force-updated.

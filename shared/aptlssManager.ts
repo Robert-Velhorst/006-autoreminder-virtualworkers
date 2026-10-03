@@ -1,5 +1,10 @@
 import type { ManagerEvidenceMetadata, ManagerGraphConflict, ManagerReliability, ManagerFact } from "./aptlssManagerEvidence";
 
+export type ManagerSchedulerStatus = {
+  scope: "current_process";
+  state: "stopped" | "checking" | "responding" | "unavailable";
+};
+
 export const WORKER_EXECUTION_HOLD_MESSAGE = "The full work list has not been checked. Do not start a task yet. Ask your supervisor to restore the missing work information, then check again.";
 
 export function workerFacingManagerQuestion(question: string) {

@@ -29,7 +29,7 @@ function storage() {
   const state: any = { vaId: 2, enabled: true, mode: "active", intervalMinutes: 5, policyRevision: 0 };
   const retainedRuns: any[] = [];
   let runtime: any;
-  const reads: Array<{ table: string; condition?: SQL }> = [];
+  const reads: Array<{ table: string; condition?: SQL; lock?: string }> = [];
   const writes: Array<{ table: string; values: any }> = [];
   const canonicalPlan = { dateKey: "2026-09-04", scheduleJson: JSON.stringify({ version: 2,
     dateKey: "2026-09-04", generatedAt: now.toISOString(), blocks: [], robertItems: [], unscheduledCards: [],
@@ -39,13 +39,13 @@ function storage() {
   const db = {
     transaction: vi.fn(async (fn: (tx: any) => unknown) => fn(db)),
     select: () => {
-      let table: any, condition: SQL | undefined;
+      let table: any, condition: SQL | undefined, lock: string | undefined;
       const query: any = {
         from: (value: any) => { table = value; return query; },
         where: (value: SQL) => { condition = value; return query; },
-        orderBy: () => query, limit: () => query, for: () => query, innerJoin: () => query,
+        orderBy: () => query, limit: () => query, for: (value: string) => { lock = value; return query; }, innerJoin: () => query,
         then: (resolve: any, reject: any) => {
-          reads.push({ table: getTableName(table), condition });
+          reads.push({ table: getTableName(table), condition, lock });
           const rows = table === aptlssManagerTrialEvents ? (control.closed ? [{ event: "closed" }] : [])
             : table === aptlssManagerState ? [{ ...state, enabled: control.enabled }]
             : table === aptlssManagerRuns ? [...retainedRuns].reverse()
@@ -75,7 +75,7 @@ function storage() {
       if (table === aptlssManagerState) Object.assign(state, values);
     } }) }),
   };
-  return { db, reads, writes, canonicalPlan, control };
+  return { db, reads, writes, canonicalPlan, control, state };
 }
 
 beforeEach(() => {
@@ -118,6 +118,42 @@ describe("manager shadow execution", () => {
     expect(dependencies.model).toHaveBeenCalledTimes(2);
     expect(recovered.sourceGaps).not.toContain("Semantic review unavailable");
     expect(recovered.applied).toBe(false);
+  });
+  it("does not let a late failure overwrite a newer successful assessment status", async () => {
+    const { db, state, reads, writes } = storage();
+    dependencies.getDb.mockResolvedValue(db);
+    let signalModelStarted!: () => void;
+    let rejectModel!: (error: Error) => void;
+    const modelStarted = new Promise<void>(resolve => { signalModelStarted = resolve; });
+    const pendingModel = new Promise<never>((_resolve, reject) => { rejectModel = reject; });
+    dependencies.model.mockImplementationOnce(async () => {
+      signalModelStarted();
+      return pendingModel;
+    });
+
+    const olderAssessment = runManager(2);
+    await modelStarted;
+    const newerSuccessAt = new Date(now.getTime() + 60_000);
+    Object.assign(state, {
+      checkedAt: newerSuccessAt,
+      lastSuccessfulAt: newerSuccessAt,
+      lastError: null,
+      inputHash: "newer-success-input",
+      sourceHash: "newer-success-source",
+      updatedAt: newerSuccessAt,
+    });
+    rejectModel(new Error("provider failed after the newer assessment completed"));
+
+    await expect(olderAssessment).rejects.toThrow(/assessment failed/i);
+    expect(reads.some(read => read.table === "aptlss_manager_state" && read.lock === "update")).toBe(true);
+    expect(writes.filter(write => write.table === "aptlss_manager_state")).toEqual([]);
+    expect(state).toMatchObject({
+      checkedAt: newerSuccessAt,
+      lastSuccessfulAt: newerSuccessAt,
+      lastError: null,
+      inputHash: "newer-success-input",
+      sourceHash: "newer-success-source",
+    });
   });
   it("requires founder restart after closure, even if stored enabled is true", async () => {
     const { db, control, writes } = storage();

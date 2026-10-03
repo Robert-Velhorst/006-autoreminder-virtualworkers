@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import { users, userWorkingHours, vaProfiles, type User } from "../drizzle/schema";
+import { validateWorkerTimeZone } from "../shared/workerTime";
 import { getDb } from "./db";
 import { normalizeBreakLabel } from "./dailySchedule";
 
@@ -90,8 +91,38 @@ function missingTable(error: unknown) {
 
 export function selectWorkerProfile<T extends { status: string }>(profiles: readonly T[]): T | null {
   const activeProfiles = profiles.filter((profile) => profile.status === "active");
-  if (activeProfiles.length === 1) return activeProfiles[0];
-  return activeProfiles.length === 0 && profiles.length === 1 ? profiles[0] : null;
+  return activeProfiles.length === 1 ? activeProfiles[0] : null;
+}
+
+export async function getActiveWorkerProfileResolution(
+  userId: number,
+  database?: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+): Promise<{ profileId: number | null; ambiguous: boolean }> {
+  const db = database ?? await getDb();
+  if (!db) return { profileId: null, ambiguous: false };
+
+  try {
+    const profiles = await db
+      .select({ id: vaProfiles.id, status: vaProfiles.status })
+      .from(vaProfiles)
+      .where(eq(vaProfiles.userId, userId))
+      .orderBy(vaProfiles.id);
+    const activeProfiles = profiles.filter(profile => profile.status === "active");
+    return {
+      profileId: activeProfiles.length === 1 ? activeProfiles[0].id : null,
+      ambiguous: activeProfiles.length > 1,
+    };
+  } catch (error) {
+    if (missingTable(error)) return { profileId: null, ambiguous: false };
+    throw error;
+  }
+}
+
+export async function getActiveWorkerProfileId(
+  userId: number,
+  database?: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+): Promise<number | null> {
+  return (await getActiveWorkerProfileResolution(userId, database)).profileId;
 }
 
 export async function resolveWorkerOperatorContext(user: User, database?: NonNullable<Awaited<ReturnType<typeof getDb>>>): Promise<WorkerOperatorContext> {
@@ -132,15 +163,18 @@ export async function resolveWorkerOperatorContext(user: User, database?: NonNul
     ? (await db.select().from(userWorkingHours).where(eq(userWorkingHours.userId, profile.founderId)).limit(1))[0] ?? null
     : null;
   const effectiveHours = hours ?? founderHours;
+  const timezone = validateWorkerTimeZone(effectiveHours?.timezone || profile?.timezone);
   const founder = profile
     ? (await db.select({ name: users.name }).from(users).where(eq(users.id, profile.founderId)).limit(1))[0]
     : null;
 
   const breaks: WorkerBreak[] = [];
-  if (effectiveHours?.enableBreaks) {
-    addBreak(breaks, "Breakfast", effectiveHours.breakfastTime, effectiveHours.breakfastDuration);
-    addBreak(breaks, "Lunch", effectiveHours.lunchTime, effectiveHours.lunchDuration);
-    addBreak(breaks, "Dinner", effectiveHours.dinnerTime, effectiveHours.dinnerDuration);
+  if (effectiveHours) {
+    if (effectiveHours.enableBreaks) {
+      addBreak(breaks, "Breakfast", effectiveHours.breakfastTime, effectiveHours.breakfastDuration);
+      addBreak(breaks, "Lunch", effectiveHours.lunchTime, effectiveHours.lunchDuration);
+      addBreak(breaks, "Dinner", effectiveHours.dinnerTime, effectiveHours.dinnerDuration);
+    }
   } else if (profile) {
     addBreak(breaks, "Breakfast", profile.breakfastTime == null ? null : hourTime(profile.breakfastTime), profile.breakfastDuration);
     addBreak(breaks, "Lunch", profile.lunchTime == null ? null : hourTime(profile.lunchTime), profile.lunchDuration);
@@ -154,7 +188,7 @@ export async function resolveWorkerOperatorContext(user: User, database?: NonNul
     trelloMemberId: profile?.trelloMemberId?.trim() || null,
     displayName: profile?.name?.trim() || fallbackName,
     founderName: founder?.name?.trim() || "Founder",
-    timezone: effectiveHours?.timezone || profile?.timezone || "UTC",
+    timezone,
     workStartTime: effectiveHours
       ? hourTime(effectiveHours.workStartHour, effectiveHours.workStartMinute)
       : hourTime(profile?.workStartHour ?? 9),

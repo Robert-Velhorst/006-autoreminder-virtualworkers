@@ -6,13 +6,16 @@
  */
 
 import { getDb } from '../db';
-import { eq, and, desc, gte, sql } from 'drizzle-orm';
+import { eq, and, desc, gte, inArray, ne, sql } from 'drizzle-orm';
 import { 
   atisCards, 
   atisCardUnderstanding, 
+  aptlssPlans,
+  taskAssignments,
   timeEntries, 
   vaProfiles 
 } from '../../drizzle/schema';
+import { managerPilotWorkerIds } from '../aptlssManagerPilot';
 
 const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -75,21 +78,100 @@ export function isTrelloCommentAutomationEnabled(env: Record<string, string | un
 export const TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE =
   'Trello comment automation is disabled. Set NOTIFICATIONS_ENABLED=true after reviewing the outbound-action policy.';
 
-/**
- * Post a comment to a Trello card
- */
-export async function postTrelloComment(cardId: string, text: string): Promise<boolean> {
-  // Check global kill switch
+const APTLSS_PILOT_CARD_LOOKUP_LIMIT = 101;
+
+type TrelloCommentAttempt = { posted: true } | { posted: false; failureReason: string };
+type TrelloCommentOrigin = { kind: 'webhook'; authorTrelloMemberId?: unknown };
+
+function hasAptlssPilotConfiguration() {
+  return Boolean(process.env.APTLSS_MANAGER_PILOT_WORKER_IDS?.trim());
+}
+
+async function getAptlssPilotCommentHoldReason(cardId: string, origin?: TrelloCommentOrigin): Promise<string | null> {
+  if (!hasAptlssPilotConfiguration()) return null;
+  if (process.env.APTLSS_MANAGER_SHADOW_ONLY !== 'true') {
+    return 'Held for worker review because APTLSS pilot automation requires shadow-only mode.';
+  }
+
+  const pilotWorkerIds = managerPilotWorkerIds();
+  if (pilotWorkerIds.length === 0) {
+    return 'Held for worker review because the APTLSS pilot worker configuration is invalid.';
+  }
+
+  try {
+    const db = await getDb();
+    if (!db) return 'Held for worker review because APTLSS card ownership could not be verified.';
+
+    if (origin?.kind === 'webhook') {
+      const authorTrelloMemberId = typeof origin.authorTrelloMemberId === 'string'
+        ? origin.authorTrelloMemberId.trim()
+        : '';
+      if (!authorTrelloMemberId) {
+        return 'Held for worker review because the Trello author could not be verified.';
+      }
+
+      const authors = await db
+        .select({ vaId: vaProfiles.userId })
+        .from(vaProfiles)
+        .where(eq(vaProfiles.trelloMemberId, authorTrelloMemberId))
+        .limit(APTLSS_PILOT_CARD_LOOKUP_LIMIT);
+      if (authors.length === 0 || authors.length >= APTLSS_PILOT_CARD_LOOKUP_LIMIT) {
+        return 'Held for worker review because the Trello author could not be verified.';
+      }
+      if (authors.some(author => pilotWorkerIds.includes(author.vaId))) {
+        return 'Held for worker review. APTLSS pilot workers cannot trigger automatic Trello replies.';
+      }
+    }
+
+    const [plans, assignments] = await Promise.all([
+      db
+        .select({ vaId: aptlssPlans.vaId })
+        .from(aptlssPlans)
+        .where(eq(aptlssPlans.cardId, cardId))
+        .limit(APTLSS_PILOT_CARD_LOOKUP_LIMIT),
+      db
+        .select({ vaId: vaProfiles.userId })
+        .from(taskAssignments)
+        .innerJoin(vaProfiles, eq(taskAssignments.vaId, vaProfiles.id))
+        .where(and(eq(taskAssignments.taskId, cardId), ne(taskAssignments.status, 'completed')))
+        .limit(APTLSS_PILOT_CARD_LOOKUP_LIMIT),
+    ]);
+
+    if (plans.length === 0 || plans.length >= APTLSS_PILOT_CARD_LOOKUP_LIMIT || assignments.length >= APTLSS_PILOT_CARD_LOOKUP_LIMIT) {
+      return 'Held for worker review because APTLSS card ownership could not be verified.';
+    }
+    if (plans.some(plan => pilotWorkerIds.includes(plan.vaId)) || assignments.some(assignment => pilotWorkerIds.includes(assignment.vaId))) {
+      return 'Held for worker review. The VA must review and explicitly post this comment.';
+    }
+    return null;
+  } catch (error) {
+    console.error('[TrelloChatbot] Could not verify APTLSS card ownership; holding automated comment', error);
+    return 'Held for worker review because APTLSS card ownership could not be verified.';
+  }
+}
+
+async function attemptTrelloComment(
+  cardId: string,
+  text: string,
+  origin?: TrelloCommentOrigin,
+): Promise<TrelloCommentAttempt> {
   if (!isTrelloCommentAutomationEnabled()) {
     console.log(`[TrelloChatbot] ${TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE}`);
-    return false;
+    return { posted: false, failureReason: TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE };
   }
+
+  const holdReason = await getAptlssPilotCommentHoldReason(cardId, origin);
+  if (holdReason) {
+    console.log(`[TrelloChatbot] ${holdReason}`);
+    return { posted: false, failureReason: holdReason };
+  }
+
   const credentials = trelloCredentials();
   if (!credentials) {
     console.error('[TrelloChatbot] Cannot post comment because Trello credentials are not configured');
-    return false;
+    return { posted: false, failureReason: 'Trello credentials are not configured.' };
   }
-  
+
   try {
     const response = await fetch(
       `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}/actions/comments?${new URLSearchParams(credentials).toString()}`,
@@ -100,11 +182,20 @@ export async function postTrelloComment(cardId: string, text: string): Promise<b
         signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS),
       }
     );
-    return response.ok;
+    return response.ok
+      ? { posted: true }
+      : { posted: false, failureReason: 'Trello did not accept the comment.' };
   } catch (error) {
     console.error('[TrelloChatbot] Failed to post comment:', error);
-    return false;
+    return { posted: false, failureReason: 'The Trello comment request failed before success could be confirmed.' };
   }
+}
+
+/**
+ * Post a comment to a Trello card
+ */
+export async function postTrelloComment(cardId: string, text: string): Promise<boolean> {
+  return (await attemptTrelloComment(cardId, text)).posted;
 }
 
 /**
@@ -570,6 +661,11 @@ export async function handleTrelloWebhook(payload: any): Promise<void> {
       return;
     }
 
+    if (!isTrelloCommentAutomationEnabled()) {
+      console.log(`[TrelloChatbot] ${TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE}`);
+      return;
+    }
+
     console.log(`[TrelloChatbot] Received @bot mention from ${authorName} on card ${cardId}`);
 
     // Parse the command
@@ -624,7 +720,11 @@ export async function handleTrelloWebhook(payload: any): Promise<void> {
     });
 
     // Post response as comment
-    const posted = await postTrelloComment(cardId, response.text);
+    const commentAttempt = await attemptTrelloComment(cardId, response.text, {
+      kind: 'webhook',
+      authorTrelloMemberId: authorId,
+    });
+    const posted = commentAttempt.posted;
     
     // Update conversation with response
     if (conversationId) {
@@ -633,11 +733,7 @@ export async function handleTrelloWebhook(payload: any): Promise<void> {
         '', // We don't get the response comment ID back from Trello
         response.text,
         posted ? 'success' : 'failed',
-        posted
-          ? undefined
-          : isTrelloCommentAutomationEnabled()
-            ? 'Trello did not accept the comment'
-            : TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE
+        posted ? undefined : commentAttempt.failureReason
       );
     }
 

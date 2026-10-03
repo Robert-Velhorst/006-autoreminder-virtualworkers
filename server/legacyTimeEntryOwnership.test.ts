@@ -12,6 +12,17 @@ describe("legacy founder time-entry ownership", () => {
     expect(start).toContain("eq(vaProfiles.founderId, user.id)");
   });
 
+  it("gates pilot timer starts only on stale or unverified sources cited by that card's next action", () => {
+    const start = source.slice(source.indexOf("router.post('/time-entries/start'"), source.indexOf("router.put('/time-entries/:id/stop'"));
+
+    expect(start).toContain("isManagerPilotWorker(worker[0].userId)");
+    expect(start).toContain("await readCurrentManagerHistory(db, worker[0].userId)");
+    expect(start).toContain("if (!snapshot) return res.status(409)");
+    expect(start).toContain("managerActionSourceRequirements(JSON.stringify(snapshot), cardId)");
+    expect(start).toContain("managerActionNeedsSourceVerification(sourceRequirements");
+    expect(start.indexOf("managerActionNeedsSourceVerification")).toBeLessThan(start.indexOf("db.insert(timeEntries)"));
+  });
+
   it("does not let a founder stop another founder's time entry by numeric ID", () => {
     const stop = source.slice(source.indexOf("router.put('/time-entries/:id/stop'"), source.indexOf("router.get('/time-entries/:taskId'"));
 

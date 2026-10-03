@@ -31,6 +31,14 @@ describe("assessWorkerSourceChecks", () => {
     expect(checks[0].nextAction).toContain("original Trello card");
   });
 
+  it("marks a Trello copy overdue at the exact expiry instant", () => {
+    const { checks } = assessWorkerSourceChecks(input({
+      trelloCache: { cachedAt: "2026-09-23T11:55:00Z", expiresAt: "2026-09-23T12:00:00Z" },
+    }));
+
+    expect(checks[0].status).toBe("overdue");
+  });
+
   it("does not claim a successful Google check from linked evidence alone", () => {
     const { checks } = assessWorkerSourceChecks(input({ gmail: null, trelloCache: null }));
     expect(checks.map(check => check.status)).toEqual(["unknown", "unknown"]);
@@ -49,11 +57,52 @@ describe("assessWorkerSourceChecks", () => {
     expect(disabled.checkedAt).toBe("2026-09-23T11:40:00.000Z");
   });
 
+  it("does not use a fresh sync from one Google provider to satisfy another linked provider", () => {
+    const driveRequired = assessWorkerSourceChecks(input({
+      sources: [{ key: "google_drive", count: 1 }],
+      gmail: { enabled: true, lastSyncedAt: "2026-09-23T11:55:00Z", intervalMinutes: 30 },
+      drive: { enabled: true, lastSyncedAt: "2026-09-23T10:00:00Z", intervalMinutes: 30 },
+    })).checks.find(check => check.key === "google_drive");
+    const gmailRequired = assessWorkerSourceChecks(input({
+      sources: [{ key: "gmail", count: 1 }],
+      gmail: { enabled: true, lastSyncedAt: "2026-09-23T10:00:00Z", intervalMinutes: 30 },
+      drive: { enabled: true, lastSyncedAt: "2026-09-23T11:55:00Z", intervalMinutes: 30 },
+    })).checks.find(check => check.key === "gmail");
+
+    expect(driveRequired).toMatchObject({
+      status: "overdue",
+      checkedAt: "2026-09-23T10:00:00.000Z",
+    });
+    expect(gmailRequired).toMatchObject({
+      status: "overdue",
+      checkedAt: "2026-09-23T10:00:00.000Z",
+    });
+  });
+
   it("does not report a recent sync as currently usable after the Google connection is lost", () => {
     const gmail = assessWorkerSourceChecks(input({ googleConnectionReady: false })).checks[1];
     expect(gmail.status).toBe("disconnected");
     expect(gmail.checkedAt).toBe("2026-09-23T11:40:00.000Z");
     expect(gmail.nextAction).toContain("original email");
+  });
+
+  it.each(["gmail", "google_drive"] as const)("does not mark %s current when Google connection readiness is unknown", key => {
+    const check = assessWorkerSourceChecks(input({
+      sources: [{ key, count: 1 }],
+      gmail: key === "gmail"
+        ? { enabled: true, lastSyncedAt: "2026-09-23T11:55:00Z", intervalMinutes: 30 }
+        : null,
+      drive: key === "google_drive"
+        ? { enabled: true, lastSyncedAt: "2026-09-23T11:55:00Z", intervalMinutes: 30 }
+        : null,
+      googleConnectionReady: null,
+    })).checks.find(item => item.key === key);
+
+    expect(check).toMatchObject({
+      status: "unknown",
+      checkedAt: "2026-09-23T11:55:00.000Z",
+    });
+    expect(check?.nextAction).toContain(key === "gmail" ? "original email" : "original file");
   });
 
   it("does not trust a Trello cache whose expiry predates its saved copy", () => {

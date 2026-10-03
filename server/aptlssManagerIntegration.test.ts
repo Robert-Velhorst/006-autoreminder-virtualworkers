@@ -152,6 +152,52 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     return { ...user, cardId, stepId: step.id, profileId: profile.id };
   }
 
+  it("projects only worker-scoped timing actions, preserves latest-100 order and leaves full history intact", async () => {
+    const other = await insertWorker();
+    const values = Array.from({ length: 101 }, (_, index) => ({
+      vaId: worker.id, inputHash: hash(`timing-${index}`), trigger: "timing_projection",
+      createdAt: new Date(NOW.getTime() - (101 - index) * 60_000),
+      snapshotJson: JSON.stringify({
+        evidence: index === 100 ? "retained private dossier".repeat(110000) : [],
+        actions: [{ cardId: worker.cardId, stepIds: [worker.stepId], title: "private rationale",
+          minutes: { low: index, likely: index + 1, high: index + 2, samples: 0, basis: "initial estimate" } }],
+      }),
+    }));
+    await db.insert(schema.aptlssManagerRuns).values(values);
+    await db.insert(schema.aptlssManagerRuns).values({ vaId: other.id, inputHash: hash("other timing"), trigger: "timing_projection",
+      snapshotJson: JSON.stringify({ actions: [{ cardId: other.cardId, stepIds: [other.stepId], minutes: { low: 1, likely: 2, high: 3 } }] }) });
+    const history = await service.loadManagerTimingHistory(db, worker.id);
+    expect(history).toHaveLength(100);
+    expect(history.map(row => row.actions[0].minutes.low)).toEqual(Array.from({ length: 100 }, (_, index) => 100 - index));
+    expect(history.every(row => row.actions[0].cardId === worker.cardId)).toBe(true);
+    expect(JSON.stringify(history).length).toBeLessThan(30000);
+    const saved = await db.select({ snapshotJson: schema.aptlssManagerRuns.snapshotJson }).from(schema.aptlssManagerRuns)
+      .where(eq(schema.aptlssManagerRuns.vaId, worker.id));
+    expect(saved).toHaveLength(101);
+    expect(saved.map(row => row.snapshotJson).sort()).toEqual(values.map(row => row.snapshotJson).sort());
+  });
+
+  it("calibrates completed work against its latest pre-start estimate using projected history", async () => {
+    await db.update(schema.aptlssSteps).set({ status: "complete" }).where(eq(schema.aptlssSteps.id, worker.stepId));
+    await db.insert(schema.timeEntries).values({ vaId: worker.id, founderId: adminId, taskId: worker.cardId,
+      cardId: worker.cardId, aptlssStepId: worker.stepId, category: "client_work",
+      startTime: new Date(NOW.getTime() - 30 * 60_000), endTime: new Date(NOW.getTime() - 15 * 60_000),
+      durationMinutes: 15, durationSeconds: 900 });
+    await db.insert(schema.aptlssManagerRuns).values([
+      { vaId: worker.id, inputHash: hash("prior prediction"), trigger: "timing_projection",
+        createdAt: new Date(NOW.getTime() - 60 * 60_000), snapshotJson: JSON.stringify({ actions: [
+          { cardId: worker.cardId, stepIds: [worker.stepId], minutes: { low: 10, likely: 18, high: 20 } }
+        ] }) },
+      { vaId: worker.id, inputHash: hash("later prediction"), trigger: "timing_projection",
+        createdAt: new Date(NOW.getTime() - 20 * 60_000), snapshotJson: JSON.stringify({ actions: [
+          { cardId: worker.cardId, stepIds: [worker.stepId], minutes: { low: 30, likely: 40, high: 50 } }
+        ] }) },
+    ]);
+    const result = await service.runManager(worker.id);
+    expect(result.timing).toMatchObject({ samples: 1, withinRange: 1, meanAbsoluteErrorMinutes: 3 });
+    expect(result.applied).toBe(false);
+  });
+
   it.each([
     { dependsOnCards: '["1"]', blockedBy: null },
     { dependsOnCards: '[]', blockedBy: "Step 1" },
@@ -255,6 +301,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       await tx.delete(schema.aptlssManagerCorrections).where(inArray(schema.aptlssManagerCorrections.vaId, ownedUsers));
       await tx.delete(schema.aptlssManagerTrialEvents).where(inArray(schema.aptlssManagerTrialEvents.vaId, ownedUsers));
       await tx.delete(schema.aptlssManagerReviews).where(inArray(schema.aptlssManagerReviews.vaId, ownedUsers));
+      await tx.delete(schema.aptlssManagerChecks).where(inArray(schema.aptlssManagerChecks.vaId, ownedUsers));
       await tx.delete(schema.aptlssManagerRuns).where(inArray(schema.aptlssManagerRuns.vaId, ownedUsers));
       await tx.delete(schema.aptlssManagerUpdates).where(inArray(schema.aptlssManagerUpdates.vaId, ownedUsers));
       await tx.delete(schema.aptlssManagerState).where(inArray(schema.aptlssManagerState.vaId, ownedUsers));
@@ -319,13 +366,24 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
   const runs = (id = worker.id) => db.select().from(schema.aptlssManagerRuns).where(eq(schema.aptlssManagerRuns.vaId, id));
   const state = async (id = worker.id) => (await db.select().from(schema.aptlssManagerState).where(eq(schema.aptlssManagerState.vaId, id)))[0];
   const lease = async () => (await db.select().from(schema.aptlssManagerControl).where(eq(schema.aptlssManagerControl.id, 1)))[0];
-  const reviewedManagerSnapshot = async (vaId = worker.id, details: Record<string, unknown> = {}) => JSON.stringify({
-    executionCoverageComplete: true,
-    assignmentFingerprint: (await readManagerAssignmentState(db, vaId)).fingerprint,
-    actions: [],
-    interventions: [],
-    ...details,
-  });
+  const reviewedManagerSnapshot = async (vaId = worker.id, details: Record<string, unknown> = {}) => {
+    const assessedAt = new Date();
+    // This helper models a successfully persisted assessment, not an invalidated state.
+    await db.update(schema.aptlssManagerState).set({ inputHash: hash(`reviewed:${vaId}:${assessedAt.toISOString()}`),
+      sourceHash: hash(`reviewed-source:${vaId}`), currentCheckId: null, historyScopeHash: null,
+      enabled: true, intervalMinutes: 60, checkedAt: assessedAt, lastSuccessfulAt: assessedAt })
+      .where(eq(schema.aptlssManagerState.vaId, vaId));
+    return JSON.stringify({
+      executionCoverageComplete: true,
+      assignmentFingerprint: (await readManagerAssignmentState(db, vaId)).fingerprint,
+      assessedAt: assessedAt.toISOString(),
+      nextCheckAt: new Date(assessedAt.getTime() + 50 * 60_000).toISOString(),
+      policy: { enabled: true, intervalMinutes: 60 },
+      actions: [],
+      interventions: [],
+      ...details,
+    });
+  };
   const seedGlobalBlockedAssessment = (cardId: string) => db.insert(schema.aptlssAssessments).values({
     cardId,
     cardName: "Shared card assessment",
@@ -455,7 +513,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(input.timeSummary).toEqual({ waitingMinutes: 7, interruptedMinutes: 15 });
   });
 
-  it("reassesses only changed Gmail evidence and rolls it back when the queue receipt fails", async () => {
+  it("preserves conflicting Gmail snapshots, surfaces a sticky warning, and rolls back failed queue receipts", async () => {
     const google = await connectGoogleForTest(worker.id);
     const message = {
       id: `google-it-${randomUUID()}`,
@@ -463,6 +521,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       subject: `Update ${worker.cardId}`,
       snippet: "Please review the original source.",
     };
+    const originalSnippet = message.snippet;
     installGoogleProvider({ gmailMessage: message });
     const sync = () => google.syncWorkerGoogleEvidence(worker.id, { gmail: true, drive: false });
 
@@ -480,11 +539,45 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
 
     message.snippet = "The source now contains a revised request.";
     const revised = await sync();
-    expect(revised.gmail.state).toBe("synced");
+    expect(revised).toMatchObject({
+      message: null,
+      gmail: {
+        state: "synced",
+        scanned: 1,
+        imported: 0,
+        sourceConflictCount: 1,
+        sourceConflictWarning: expect.stringContaining("The saved data was left unchanged"),
+      },
+    });
+    expect(revised.gmail.sourceConflictWarning).not.toContain(message.snippet);
+    expect(revised.gmail.sourceConflictWarning).not.toContain(message.subject);
+    expect(revised.gmail.sourceConflictWarning).not.toContain(message.id);
     expect((await db.select().from(schema.emailTasks).where(eq(schema.emailTasks.gmailMessageId, message.id)))[0].snippet)
-      .toBe(message.snippet);
-    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
-    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0].generation).toBe(2);
+      .toBe(originalSnippet);
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0].generation).toBe(1);
+    const statusAfterConflict = await google.getGoogleEvidenceStatus(worker.id);
+    expect(statusAfterConflict.gmail).toMatchObject({
+      lastError: null,
+      sourceConflictPending: true,
+      sourceConflictWarning: revised.gmail.sourceConflictWarning,
+    });
+
+    installGoogleProvider({ gmailMessage: null });
+    const successfulSync = await sync();
+    expect(successfulSync.gmail).toMatchObject({
+      state: "synced",
+      sourceConflictCount: 0,
+      sourceConflictWarning: revised.gmail.sourceConflictWarning,
+    });
+    expect(successfulSync.message).toBeNull();
+    const statusAfterSuccess = await google.getGoogleEvidenceStatus(worker.id);
+    expect(statusAfterSuccess.gmail).toMatchObject({
+      lastError: null,
+      sourceConflictPending: true,
+      sourceConflictWarning: revised.gmail.sourceConflictWarning,
+    });
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
 
     const failedMessage = {
       id: `google-it-${randomUUID()}`,
@@ -498,8 +591,8 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(failed.gmail.state).toBe("failed");
     expect(failed.message).not.toContain("Controlled queue failure");
     expect(await db.select().from(schema.emailTasks).where(eq(schema.emailTasks.gmailMessageId, failedMessage.id))).toHaveLength(0);
-    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
-    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0].generation).toBe(2);
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
+    expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0].generation).toBe(1);
     expect(provider).toHaveBeenCalled();
   });
 
@@ -1188,6 +1281,213 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(row.appliedPlanHash).toBeNull();
   });
 
+  async function seedHistoryDossier() {
+    vi.setSystemTime(new Date("2026-09-06T10:00:15.000Z")); // Protected Sunday: no slot movement.
+    for (let i = 0; i < 12; i++) {
+      const content = `Reference material for comparison ${i}: ${"x".repeat(5800)}`;
+      const [item] = await db.insert(schema.workspaceEvidenceItems).values({ vaId: worker.id, source: "trello",
+        sourceId: `manager-it-history-${randomUUID()}`, kind: "document", title: `Requirements reference ${i}`,
+        content, observedAt: NOW, contentHash: hash(content), reviewStatus: "linked" }).$returningId();
+      ownedEvidenceIds.push(item.id);
+      await db.insert(schema.workspaceEvidenceLinks).values({ evidenceId: item.id, cardId: worker.cardId,
+        relevanceScore: 100, linkMethod: "manual", matchReason: "Synthetic history preservation fixture" });
+    }
+    return service.runManager(worker.id, "scheduled");
+  }
+
+  it("retains unchanged dossiers once while preserving every changed-clock check exactly", async () => {
+    const first = await seedHistoryDossier();
+    const [original] = await runs();
+    const history = [];
+    for (let i = 1; i <= 3; i++) {
+      vi.setSystemTime(new Date(Date.parse(first.assessedAt) + i * 60_000));
+      const next = await service.runManager(worker.id, "scheduled");
+      expect(next.runId).toBe(first.runId);
+      expect(next.assessedAt).not.toBe(first.assessedAt);
+      history.push(next);
+    }
+    const checks = await db.select().from(schema.aptlssManagerChecks).where(eq(schema.aptlssManagerChecks.vaId, worker.id)).orderBy(schema.aptlssManagerChecks.id);
+    expect(checks).toHaveLength(3);
+    expect(await runs()).toEqual([original]); // Exact original JSON remains untouched.
+    for (let i = 0; i < checks.length; i++) {
+      const restored = await service.loadManagerHistoryCheck(db, worker.id, checks[i].id);
+      expect(restored.snapshot).toEqual(JSON.parse(JSON.stringify(history[i])));
+      expect(Buffer.byteLength(checks[i].snapshotPatchJson)).toBeLessThan(Buffer.byteLength(original.snapshotJson) / 2);
+    }
+    expect((await service.getManagerStatus(worker.id)).snapshot).toEqual(JSON.parse(JSON.stringify(history.at(-1))));
+    expect((await state()).currentCheckId).toBe(checks.at(-1)!.id);
+    expect(await plans()).toEqual([]);
+    const other = await insertWorker();
+    await expect(service.loadManagerHistoryCheck(db, other.id, checks[0].id)).rejects.toThrow(/worker scope/);
+  });
+
+  it("requires a new full run after source changes, semantic retries and policy invalidation", async () => {
+    const first = await seedHistoryDossier();
+    vi.setSystemTime(new Date(Date.parse(first.assessedAt) + 60_000));
+    await service.runManager(worker.id, "scheduled");
+    expect(await runs()).toHaveLength(1);
+    const sourceId = ownedEvidenceIds[0];
+    await db.update(schema.workspaceEvidenceItems).set({ content: "A changed reference fact requires a fresh assessment.",
+      contentHash: hash("changed history reference") }).where(eq(schema.workspaceEvidenceItems.id, sourceId));
+    const changed = await service.runManager(worker.id, "scheduled");
+    expect(changed.runId).not.toBe(first.runId);
+    expect((await state()).currentCheckId).toBeNull();
+    vi.setSystemTime(new Date(Date.parse(changed.semanticReview!.retryAfter) + 1));
+    const retried = await service.runManager(worker.id, "manual");
+    expect(retried.runId).not.toBe(changed.runId);
+    await service.updateManagerPolicy(worker.id, { enabled: true, intervalMinutes: 10 });
+    const invalidated = await service.getManagerStatus(worker.id);
+    expect(invalidated.snapshot?.executionCoverageComplete).toBe(false);
+    const afterPolicy = await service.runManager(worker.id, "scheduled");
+    expect(afterPolicy.runId).not.toBe(retried.runId);
+  });
+
+  it("fails closed for a corrupt current check and retains all history bytes", async () => {
+    const first = await seedHistoryDossier();
+    vi.setSystemTime(new Date(Date.parse(first.assessedAt) + 60_000));
+    await service.runManager(worker.id, "scheduled");
+    const before = await runs();
+    const checkId = (await state()).currentCheckId!;
+    expect(checkId).toBeGreaterThan(0);
+    await db.update(schema.aptlssManagerChecks).set({ snapshotHash: hash("controlled corruption") }).where(eq(schema.aptlssManagerChecks.id, checkId));
+    await expect(service.getManagerStatus(worker.id)).rejects.toThrow(/integrity check/);
+    expect(await runs()).toEqual(before);
+    expect(await plans()).toEqual([]);
+  });
+
+  it("can materialize fresh full history before a compatible application rollback", async () => {
+    const first = await seedHistoryDossier();
+    vi.setSystemTime(new Date(Date.parse(first.assessedAt) + 60_000));
+    const compact = await service.runManager(worker.id, "scheduled");
+    expect(compact.runId).toBe(first.runId);
+    vi.stubEnv("APTLSS_MANAGER_COMPACT_HISTORY", "false");
+    vi.setSystemTime(new Date(Date.parse(first.assessedAt) + 120_000));
+    const materialized = await service.runManager(worker.id, "scheduled");
+    expect(materialized.runId).not.toBe(first.runId);
+    expect((await state()).currentCheckId).toBeNull();
+    const retained = await runs();
+    expect(retained).toHaveLength(2);
+    expect(JSON.parse(retained.at(-1)!.snapshotJson)).toMatchObject({ assessedAt: materialized.assessedAt,
+      nextCheckAt: materialized.nextCheckAt, evidence: materialized.evidence, proposal: materialized.proposal });
+    expect(await db.select().from(schema.aptlssManagerChecks).where(eq(schema.aptlssManagerChecks.vaId, worker.id))).toHaveLength(1);
+  });
+
+  it("materializes a compact head on identical input without a provider retry or duplicate full runs", async () => {
+    const first = await seedHistoryDossier();
+    vi.setSystemTime(new Date(Date.parse(first.assessedAt) + 60_000));
+    const compact = await service.runManager(worker.id, "scheduled");
+    const beforeRuns = await runs(), beforePlans = await plans();
+    const beforeChecks = await db.select().from(schema.aptlssManagerChecks).where(eq(schema.aptlssManagerChecks.vaId, worker.id));
+    const providerCalls = controls.model.mock.calls.length;
+    expect(beforeChecks).toHaveLength(1);
+    vi.stubEnv("APTLSS_MANAGER_COMPACT_HISTORY", "false");
+    // Same clock and source fingerprint used to bypass both materialization points.
+    const full = await service.runManager(worker.id, "scheduled");
+    expect(full.runId).not.toBe(compact.runId);
+    expect(full).toEqual({ ...compact, runId: full.runId });
+    expect(controls.model).toHaveBeenCalledTimes(providerCalls);
+    expect((await state()).currentCheckId).toBeNull();
+    const retained = await runs();
+    expect(retained).toHaveLength(2);
+    expect(retained.slice(0, 1)).toEqual(beforeRuns);
+    expect(await db.select().from(schema.aptlssManagerChecks).where(eq(schema.aptlssManagerChecks.vaId, worker.id))).toEqual(beforeChecks);
+    expect(await plans()).toEqual(beforePlans);
+    const repeated = await service.runManager(worker.id, "scheduled");
+    expect(repeated.runId).toBe(full.runId);
+    expect(await runs()).toEqual(retained);
+    expect(controls.model).toHaveBeenCalledTimes(providerCalls);
+  });
+
+  it("retains the compact head and every history row when full materialization fails", async () => {
+    const first = await seedHistoryDossier();
+    vi.setSystemTime(new Date(Date.parse(first.assessedAt) + 60_000));
+    await service.runManager(worker.id, "scheduled");
+    const beforeState = await state(), beforeRuns = await runs(), beforePlans = await plans();
+    const beforeChecks = await db.select().from(schema.aptlssManagerChecks).where(eq(schema.aptlssManagerChecks.vaId, worker.id));
+    vi.stubEnv("APTLSS_MANAGER_COMPACT_HISTORY", "false");
+    controls.db = new Proxy(db, {
+      get(target, property) {
+        if (property !== "transaction") {
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (callback: any, config: any) => (target.transaction as any)(async (tx: any) => callback(new Proxy(tx, {
+          get(transaction, key) {
+            if (key === "insert") return (table: unknown) => {
+              if (table === schema.aptlssManagerRuns) throw new Error("Controlled full history write failure");
+              return transaction.insert(table);
+            };
+            const value = Reflect.get(transaction, key, transaction);
+            return typeof value === "function" ? value.bind(transaction) : value;
+          },
+        })), config);
+      },
+    }) as typeof db;
+    await db.transaction(tx => enqueueManagerTask(tx, { vaId: worker.id, trigger: "scheduled", eventKey: randomUUID() }));
+    const lease = (await claimManagerTask(db, { leaseMs: 60_000 }))!;
+    expect(lease.vaId).toBe(worker.id);
+    try { await expect(service.runManager(worker.id, "scheduled", lease)).rejects.toThrow(/Controlled full history/); }
+    finally { controls.db = db; }
+    expect(await state()).toEqual(beforeState);
+    expect(await runs()).toEqual(beforeRuns);
+    expect(await plans()).toEqual(beforePlans);
+    expect(await db.select().from(schema.aptlssManagerChecks).where(eq(schema.aptlssManagerChecks.vaId, worker.id))).toEqual(beforeChecks);
+  });
+
+  it("rejects an answer to invalidated guidance before saving a new worker report", async () => {
+    const first = await seedHistoryDossier();
+    await service.updateManagerPolicy(worker.id, { enabled: true, intervalMinutes: 10 });
+    await expect(service.submitManagerUpdate(worker.id, worker.cardId, "The assigned reference was checked.", undefined,
+      { expectedRunId: first.runId, requestKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id))).toEqual([]);
+  });
+
+  it("rolls a compact check back when its state pointer cannot be persisted", async () => {
+    const first = await seedHistoryDossier();
+    const beforeState = await state(), beforeRuns = await runs();
+    vi.setSystemTime(new Date(Date.parse(first.assessedAt) + 60_000));
+    controls.db = new Proxy(db, {
+      get(target, property) {
+        if (property !== "transaction") {
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (callback: any, config: any) => (target.transaction as any)(async (tx: any) => callback(new Proxy(tx, {
+          get(transaction, key) {
+            if (key === "insert") return (table: unknown) => {
+              if (table === schema.aptlssManagerState) throw new Error("Controlled history pointer write failure");
+              return transaction.insert(table);
+            };
+            const value = Reflect.get(transaction, key, transaction);
+            return typeof value === "function" ? value.bind(transaction) : value;
+          },
+        })), config);
+      },
+    }) as typeof db;
+    // A leased failure belongs to queue handling, not the unleased error-state writer.
+    await db.transaction(tx => enqueueManagerTask(tx, { vaId: worker.id, trigger: "scheduled", eventKey: randomUUID() }));
+    const claimed = (await claimManagerTask(db, { leaseMs: 60_000 }))!;
+    expect(claimed.vaId).toBe(worker.id);
+    try { await expect(service.runManager(worker.id, "scheduled", claimed)).rejects.toThrow(/Controlled history pointer/); }
+    finally { controls.db = db; }
+    expect(await runs()).toEqual(beforeRuns);
+    expect(await state()).toEqual(beforeState);
+    expect(await db.select().from(schema.aptlssManagerChecks).where(eq(schema.aptlssManagerChecks.vaId, worker.id))).toEqual([]);
+  });
+
+  it("accepts a newer legacy full-run writer instead of a stale compact pointer", async () => {
+    const first = await seedHistoryDossier();
+    vi.setSystemTime(new Date(Date.parse(first.assessedAt) + 60_000));
+    await service.runManager(worker.id, "scheduled");
+    const pointer = (await state()).currentCheckId;
+    const legacy = { ...first, assessedAt: new Date().toISOString(), changes: ["A newer legacy full assessment"] };
+    const [created] = await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash("legacy-write"),
+      trigger: "scheduled", snapshotJson: JSON.stringify(legacy), proposalHash: legacy.proposalHash }).$returningId();
+    await db.update(schema.aptlssManagerState).set({ inputHash: hash("legacy-write"), checkedAt: new Date() }).where(eq(schema.aptlssManagerState.vaId, worker.id));
+    expect((await state()).currentCheckId).toBe(pointer);
+    expect((await service.getManagerStatus(worker.id)).snapshot).toMatchObject({ runId: created.id, changes: legacy.changes });
+  });
+
   it("never updates an existing daily plan in shadow mode", async () => {
     await seedPlan();
     const before = await plans();
@@ -1217,12 +1517,12 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const previous = await service.runManager(worker.id);
     vi.setSystemTime(new Date(Date.parse(previous.semanticReview!.retryAfter) + 1));
     const detail = "The local requirements document was verified today; comparison can continue.";
-    const result = await service.submitManagerUpdate(worker.id, worker.cardId, detail);
-    expect(result.runId).not.toBe(previous.runId);
-    expect(result.trigger).toBe("worker_update");
-    expect(result.evidence).toEqual(expect.arrayContaining([expect.objectContaining({ cardId: worker.cardId, kind: "worker", text: expect.stringContaining(detail) })]));
+    const result = await service.submitManagerUpdate(worker.id, worker.cardId, detail, undefined, { expectedRunId: previous.runId });
+    expect(result.assessment?.runId).not.toBe(previous.runId);
+    expect(result.assessment?.trigger).toBe("worker_update");
+    expect(result.assessment?.evidence).toEqual(expect.arrayContaining([expect.objectContaining({ cardId: worker.cardId, kind: "worker", text: expect.stringContaining(detail) })]));
     const [update] = await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id));
-    expect(update.detail).toBe(detail);
+    expect(update).toMatchObject({ detail, requestKey: expect.stringMatching(/^[0-9a-f-]{36}$/i) });
     const links = await db.select().from(schema.aptlssEvidenceSubjectLinks).where(eq(schema.aptlssEvidenceSubjectLinks.vaId, worker.id));
     expect(links).toHaveLength(1);
     expect(links[0]).toMatchObject({ subjectType: "card", subjectId: worker.cardId, linkMethod: "confirmed" });
@@ -1238,14 +1538,86 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(source).toBeDefined();
     vi.setSystemTime(new Date(Date.parse(previous.semanticReview!.retryAfter) + 1));
     const result = await service.submitManagerUpdate(worker.id, worker.cardId, "The document asks for a reply.", undefined, {
+      expectedRunId: previous.runId,
       outcome: "Action needed", deadlineDate: "2026-09-25", sourceEvidenceId: source!.id,
       sourceDescription: "Full correspondence in the portal",
     });
     const [update] = await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id));
     expect(update).toMatchObject({ detail: "The document asks for a reply.", outcome: "Action needed", deadlineDate: "2026-09-25", sourceEvidenceId: source!.id, sourceDescription: "Full correspondence in the portal" });
-    expect(result.evidence).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "worker", text: expect.stringContaining("Worker-reported deadline date: 2026-09-25") })]));
-    await expect(service.submitManagerUpdate(worker.id, worker.cardId, "Wrong source.", undefined, { sourceEvidenceId: "card:some-other-worker" })).rejects.toThrow(/not linked/);
+    expect(result.assessment?.evidence).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "worker", text: expect.stringContaining("Worker-reported deadline date: 2026-09-25") })]));
+    await expect(service.submitManagerUpdate(worker.id, worker.cardId, "Wrong source.", undefined, {
+      expectedRunId: result.assessment!.runId, sourceEvidenceId: "card:some-other-worker",
+    })).rejects.toThrow(/not linked/);
     expect((await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id)))).toHaveLength(1);
+  });
+
+  it("replays ordinary worker answers by request key and rejects a changed payload", async () => {
+    const previous = await service.runManager(worker.id);
+    const requestKey = randomUUID();
+    const detail = "I reviewed the full correspondence and recorded its requested action.";
+    const fields = { requestKey, expectedRunId: previous.runId, outcome: "Action needed" as const, sourceDescription: "Full correspondence in the portal" };
+    const first = await service.submitManagerUpdate(worker.id, worker.cardId, detail, undefined, fields);
+    const updatesAfterFirst = await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id));
+    const eventsAfterFirst = await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id));
+    const evidenceLinksAfterFirst = await db.select().from(schema.aptlssEvidenceSubjectLinks).where(eq(schema.aptlssEvidenceSubjectLinks.vaId, worker.id));
+    const workerEvidenceAfterFirst = await db.select().from(schema.workspaceEvidenceItems)
+      .where(like(schema.workspaceEvidenceItems.sourceId, `worker-assertion:${worker.id}:%`));
+
+    expect(first).toMatchObject({ alreadyRecorded: false, reportId: expect.any(Number) });
+    expect(updatesAfterFirst).toHaveLength(1);
+    expect(updatesAfterFirst[0].requestKey).toBe(requestKey.toLowerCase());
+
+    const replay = await service.submitManagerUpdate(worker.id, worker.cardId, detail, undefined, fields);
+    expect(replay).toMatchObject({ reportId: first.reportId, alreadyRecorded: true, applied: false });
+    expect(replay.assessment).toBeUndefined();
+    expect(await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id))).toHaveLength(1);
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(eventsAfterFirst.length);
+    expect((await service.getManagerStatus(worker.id)).snapshot?.runId).not.toBe(previous.runId);
+
+    await expect(service.submitManagerUpdate(worker.id, worker.cardId, "A new answer from the stale form.", undefined, {
+      ...fields, requestKey: randomUUID(),
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id))).toHaveLength(1);
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(eventsAfterFirst.length);
+    expect(await db.select().from(schema.aptlssEvidenceSubjectLinks).where(eq(schema.aptlssEvidenceSubjectLinks.vaId, worker.id))).toHaveLength(evidenceLinksAfterFirst.length);
+    expect(await db.select().from(schema.workspaceEvidenceItems)
+      .where(like(schema.workspaceEvidenceItems.sourceId, `worker-assertion:${worker.id}:%`))).toHaveLength(workerEvidenceAfterFirst.length);
+
+    await expect(service.submitManagerUpdate(worker.id, worker.cardId, "A materially different answer using the same key.", undefined, fields))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(service.submitManagerUpdate(worker.id, worker.cardId, detail, undefined, { ...fields, requestKey: "not-a-uuid" }))
+      .rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id))).toHaveLength(1);
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(eventsAfterFirst.length);
+  });
+
+  it("serializes concurrent ordinary-answer retries to one report and one queue event", async () => {
+    const previous = await service.runManager(worker.id);
+    const requestKey = randomUUID();
+    const detail = "The full source is checked; the deadline is tomorrow.";
+    const input = { requestKey, expectedRunId: previous.runId, outcome: "Action needed" as const, deadlineDate: "2026-09-05" };
+    const [first, concurrentRetry] = await Promise.all([
+      service.submitManagerUpdate(worker.id, worker.cardId, detail, undefined, input),
+      service.submitManagerUpdate(worker.id, worker.cardId, detail, undefined, input),
+    ]);
+    expect(first.reportId).toBe(concurrentRetry.reportId);
+    expect([first.alreadyRecorded, concurrentRetry.alreadyRecorded].sort()).toEqual([false, true]);
+    expect(await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id))).toHaveLength(1);
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
+  });
+
+  it("keeps legacy dashboard retries idempotent when they omit a request key", async () => {
+    const previous = await service.runManager(worker.id);
+    const detail = "I checked the source and recorded the current deadline.";
+    const fields = { expectedRunId: previous.runId };
+    const first = await service.submitManagerUpdate(worker.id, worker.cardId, detail, undefined, fields);
+    const [stored] = await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id));
+    const retry = await service.submitManagerUpdate(worker.id, worker.cardId, detail, undefined, fields);
+
+    expect(stored.requestKey).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    expect(retry).toMatchObject({ reportId: first.reportId, alreadyRecorded: true, applied: false });
+    expect(await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id))).toHaveLength(1);
+    expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
   });
 
   it("stores an idempotent source-linked completion report without closing the step or changing the plan", async () => {
@@ -1330,6 +1702,9 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
   });
 
   it("rolls back worker evidence and its nested savepoint when the update transaction fails", async () => {
+    const previous = await service.runManager(worker.id);
+    const beforeRuns = await runs();
+    controls.model.mockClear();
     const transaction = db.transaction.bind(db);
     let evidenceWritten = false;
     vi.spyOn(db, "transaction").mockImplementationOnce(callback => transaction(async tx => {
@@ -1338,12 +1713,12 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       await tx.execute(sql`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'integration update rollback'`);
       return result;
     }));
-    await expect(service.submitManagerUpdate(worker.id, worker.cardId, "Verified local requirements.")).rejects.toThrow();
+    await expect(service.submitManagerUpdate(worker.id, worker.cardId, "Verified local requirements.", undefined, { expectedRunId: previous.runId })).rejects.toThrow();
     expect(evidenceWritten).toBe(true);
     expect(await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id))).toEqual([]);
     expect(await db.select().from(schema.aptlssEvidenceSubjectLinks).where(eq(schema.aptlssEvidenceSubjectLinks.vaId, worker.id))).toEqual([]);
     expect(await db.select().from(schema.workspaceEvidenceItems).where(like(schema.workspaceEvidenceItems.sourceId, `worker-assertion:${worker.id}:%`))).toEqual([]);
-    expect(await runs()).toEqual([]);
+    expect(await runs()).toEqual(beforeRuns);
     expect(controls.model).not.toHaveBeenCalled();
   });
 
@@ -1390,6 +1765,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
   });
 
   it("rejects another worker's run, card update, and review access without writes", async () => {
+    const workerRun = await service.runManager(worker.id);
     const other = await insertWorker();
     const run = await service.runManager(other.id);
     await expect(reviews.recordManagerReview(adminId, reviewInput(run.runId))).rejects.toThrow(/worker-scoped/);
@@ -1397,7 +1773,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     await expect(reviews.recordManagerReview(worker.id, reviewInput(run.runId, other.id))).rejects.toThrow(/admin/i);
     await expect(reviews.setManagerMode(worker.id, other.id, "active")).rejects.toThrow(/shadow-only/i);
     await expect(reviews.restoreManagerPlan(worker.id, other.id, run.runId)).rejects.toThrow(/shadow-only/i);
-    await expect(service.submitManagerUpdate(worker.id, other.cardId, "Unrelated worker update")).rejects.toThrow(/scope/);
+    await expect(service.submitManagerUpdate(worker.id, other.cardId, "Unrelated worker update", undefined, { expectedRunId: workerRun.runId })).rejects.toThrow(/scope/);
     expect(await db.select().from(schema.aptlssManagerReviews).where(eq(schema.aptlssManagerReviews.runId, run.runId))).toEqual([]);
     expect(await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id))).toEqual([]);
     const inbox = await reviews.getManagerReviewInbox(adminId, other.id);
@@ -1697,6 +2073,74 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(controls.model).not.toHaveBeenCalled();
   });
 
+  it("automatically consumes a durable conflict with the real manager and preserves the shadow day plan", async () => {
+    const graph = await import("./aptlssEvidenceGraphDb");
+    const { createManagerQueueRunner } = await import("./aptlssManagerQueue");
+    const fixture = await seedGraphConflict();
+    await seedPlan();
+    const baseline = await plans();
+    await graph.createEvidenceConflict({ vaId: worker.id, cardId: worker.cardId,
+      sourceEvidenceId: fixture.input.sourceEvidenceId, assertedEvidenceId: fixture.assertedEvidenceId,
+      question: "Is invoice A-12 paid or unpaid?", createdBy: String(adminId) });
+    const errors: Error[] = [];
+    const runner = createManagerQueueRunner({ db, execute: service.runManager,
+      pollMs: 100, fallbackMs: 60_000, onError: error => errors.push(error) });
+    try {
+      runner.start();
+      await vi.waitFor(async () => {
+        const saved = await runs();
+        expect(saved.length).toBeGreaterThan(0);
+        const snapshot = JSON.parse(saved[saved.length - 1].snapshotJson!);
+        expect(snapshot.interventions).toEqual(expect.arrayContaining([
+          expect.objectContaining({ cardId: worker.cardId, severity: "urgent" }),
+        ]));
+        const work = snapshot.actions.filter((action: { cardId: string; kind: string; blocked: boolean }) => action.cardId === worker.cardId && action.kind === "work");
+        expect(work.length).toBeGreaterThan(0);
+        expect(work.every((action: { blocked: boolean }) => action.blocked)).toBe(true);
+        expect(snapshot.policy.mode).toBe("shadow");
+        expect(snapshot.applied).toBe(false);
+      }, { timeout: 15_000, interval: 100 });
+    } finally {
+      await runner.stop();
+    }
+    expect(errors).toEqual([]);
+    expect(await plans()).toEqual(baseline);
+  });
+
+  it("retains a conflict through an unsupported answer and reassesses its proof-backed resolution without changing the day plan", async () => {
+    const { resolveVerificationFollowup } = await import("./aptlssEvidenceGraphDb");
+    const fixture = await seedGraphConflict();
+    await seedPlan();
+    const baseline = await plans();
+    const initial = await service.runManager(worker.id);
+    expect(initial.interventions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ cardId: worker.cardId, severity: "urgent" }),
+    ]));
+    expect(initial.assessments.find(item => item.cardId === worker.cardId)?.reliability.conflicts).toBe("unresolved");
+
+    const { sourceEvidenceId, sourceQuote, ...unsupported } = fixture.input;
+    expect(await resolveVerificationFollowup({ ...unsupported, resolution: "I believe the invoice was paid." }))
+      .toMatchObject({ requiresEvidence: true, resolvedAt: null });
+    const noted = await graphRows();
+    expect(noted.conflicts[0].status).toBe("needs_verification");
+    expect(noted.followups[0].status).toBe("open");
+    expect(noted.decisions).toHaveLength(0);
+    const stillOpen = await service.runManager(worker.id);
+    expect(stillOpen.assessments.find(item => item.cardId === worker.cardId)?.reliability.conflicts).toBe("unresolved");
+    expect(await plans()).toEqual(baseline);
+
+    expect(await resolveVerificationFollowup({ ...unsupported, sourceEvidenceId, sourceQuote }))
+      .toMatchObject({ requiresEvidence: false });
+    const reassessed = await service.runManager(worker.id);
+    expect(reassessed.runId).toBeGreaterThan(stillOpen.runId!);
+    expect(reassessed.policy.mode).toBe("shadow");
+    expect(reassessed.applied).toBe(false);
+    expect((await graphRows()).conflicts[0].status).toBe("resolved");
+    const collected = await service.collectManagerInput(db, worker.id, NOW);
+    expect(collected.graphConflicts.some(item => item.id === `graph:${fixture.conflictId}` && item.status !== "resolved")).toBe(false);
+    expect(await plans()).toEqual(baseline);
+  });
+
   it("atomically persists a proof-backed canonical conflict, decision evidence and resolved follow-up", async () => {
     const { resolveVerificationFollowup } = await import("./aptlssEvidenceGraphDb");
     const fixture = await seedGraphConflict();
@@ -1850,12 +2294,23 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
 
     const status = await caller.getManagerStatus();
     const reassessment = await caller.runManager();
-    const update = await caller.submitManagerUpdate({ cardId: worker.cardId, detail: "I checked the assigned source and recorded the result.", outcome: "Update" });
+    const update = await caller.submitManagerUpdate({ cardId: worker.cardId, detail: "I checked the assigned source and recorded the result.", outcome: "Update", requestKey: randomUUID(), expectedRunId: internal.runId });
 
+    expect(status.expectedRunId).toBe(internal.runId);
     expect(status.snapshot).not.toHaveProperty("semanticReview");
     expect(reassessment).not.toHaveProperty("semanticReview");
     expect(update).not.toHaveProperty("semanticReview");
     expect(JSON.stringify({ status, reassessment, update })).not.toContain("chronology");
+  });
+
+  it("rejects malformed request keys at the worker API boundary", async () => {
+    const { operatorRouter } = await import("./operatorRouter");
+    const current = await service.runManager(worker.id);
+    const user = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
+    const caller = operatorRouter.createCaller({ user, req: {}, res: {} } as TrpcContext);
+    await expect(caller.submitManagerUpdate({ cardId: worker.cardId, detail: "I checked the assigned source.", requestKey: "not-a-uuid", expectedRunId: current.runId }))
+      .rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(await db.select().from(schema.aptlssManagerUpdates).where(eq(schema.aptlssManagerUpdates.vaId, worker.id))).toEqual([]);
   });
 
   it("builds a worker case file from only that worker's linked human records", async () => {
@@ -1944,7 +2399,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       caller.resolveWaitingReason({ cardId: worker.cardId }),
       caller.getDailyPlan(),
       caller.generateDailyPlan({ dateKey: DATE_KEY, force: true }),
-      caller.updateDailyPlan(emptyPlan()),
+      caller.updateDailyPlan({ ...emptyPlan(), expectedPlanVersion: null }),
       caller.getDecisionHistory(),
       caller.getBrowserTabStatus(),
       caller.getBrowserTabPolicy(),
@@ -1975,11 +2430,23 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(await state()).toEqual(beforeState);
   });
 
-  it("rejects daily-plan card and step references outside the requesting worker before saving", async () => {
+  it("keeps the shadow-pilot worker's saved agenda unchanged through both plan-write routes", async () => {
+    const { operatorRouter } = await import("./operatorRouter");
+    const user = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
+    const caller = operatorRouter.createCaller({ user, req: {}, res: {} } as TrpcContext);
+    const before = await plans(worker.id);
+
+    await expect(caller.generateDailyPlan({ dateKey: DATE_KEY, force: true })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(caller.updateDailyPlan({ ...emptyPlan(), expectedPlanVersion: null })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(await plans(worker.id)).toEqual(before);
+  });
+
+  it("rejects daily-plan card and step references outside the requesting non-pilot worker before saving", async () => {
     const { operatorRouter } = await import("./operatorRouter");
     const otherWorker = await insertWorker();
     const user = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
     const caller = operatorRouter.createCaller({ user, req: {}, res: {} } as TrpcContext);
+    vi.stubEnv("APTLSS_MANAGER_PILOT_WORKER_IDS", "");
     const block = (cardId: string, stepIds: number[]) => ({
       id: "scope-check",
       startTime: "09:00",
@@ -2000,14 +2467,14 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     });
 
     const otherTaskPayload = { ...emptyPlan(), blocks: [block(otherWorker.cardId, [otherWorker.stepId])] };
-    await expect(caller.updateDailyPlan(otherTaskPayload)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(caller.updateDailyPlan({ ...otherTaskPayload, expectedPlanVersion: null })).rejects.toMatchObject({ code: "FORBIDDEN" });
 
     const foreignStepPayload = { ...emptyPlan(), blocks: [block(worker.cardId, [otherWorker.stepId])] };
-    await expect(caller.updateDailyPlan(foreignStepPayload)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(caller.updateDailyPlan({ ...foreignStepPayload, expectedPlanVersion: null })).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(await plans(worker.id)).toEqual([]);
     expect(await plans(otherWorker.id)).toEqual([]);
 
-    const saved = await caller.updateDailyPlan({ ...emptyPlan(), blocks: [block(worker.cardId, [worker.stepId])] });
+    const saved = await caller.updateDailyPlan({ ...emptyPlan(), blocks: [block(worker.cardId, [worker.stepId])], expectedPlanVersion: null });
     expect(saved).toMatchObject({ vaId: worker.id, schedule: { blocks: [{ cardId: worker.cardId, stepIds: [worker.stepId] }] } });
     expect(await plans(otherWorker.id)).toEqual([]);
   });
@@ -2290,11 +2757,26 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     alerts = await db.select().from(schema.notificationHistory).where(and(
       eq(schema.notificationHistory.userId, adminId), like(schema.notificationHistory.taskId, alertKey)));
     expect(alerts).toHaveLength(1);
+    const admins = await db.select({ id: schema.users.id, openId: schema.users.openId })
+      .from(schema.users).where(eq(schema.users.role, "admin"));
+    const preferences = admins.length
+      ? await db.select().from(schema.userNotificationPreferences)
+        .where(inArray(schema.userNotificationPreferences.userOpenId, admins.map(admin => admin.openId)))
+      : [];
+    const expectedRecipients = admins.filter(admin => {
+      const preference = preferences.find(item => item.userOpenId === admin.openId);
+      return preference?.notificationMode !== "disabled" && preference?.inAppEnabled !== 0;
+    }).map(admin => admin.openId).sort();
     const simultaneous = await Promise.all([
       processFounderDecisionAlerts(new Date("2026-09-04T11:01:00.000Z")),
       processFounderDecisionAlerts(new Date("2026-09-04T11:01:00.000Z")),
     ]);
-    expect(simultaneous.reduce((sum, result) => sum + result.created, 0)).toBe(1);
+    expect(simultaneous.reduce((sum, result) => sum + result.created, 0)).toBe(expectedRecipients.length);
+    const overdueAlerts = await db.select().from(schema.notificationHistory).where(and(
+      like(schema.notificationHistory.taskId, alertKey),
+      eq(schema.notificationHistory.notificationType, "task_overdue"),
+    ));
+    expect(overdueAlerts.map(alert => alert.userOpenId).sort()).toEqual(expectedRecipients);
     expect(await processFounderDecisionAlerts(new Date("2026-09-04T11:02:00.000Z"))).toMatchObject({ created: 0 });
     alerts = await db.select().from(schema.notificationHistory).where(and(
       eq(schema.notificationHistory.userId, adminId), like(schema.notificationHistory.taskId, alertKey)));
@@ -2516,6 +2998,12 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const otherCaller = timerRouter.createCaller(context(otherUser));
     const input = { cardId: worker.cardId, cardName: "Spoofed name", cardUrl: "https://example.com/spoofed",
       boardName: "Spoofed board", listName: "DOING" };
+    await expect(caller.start(input)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      message: expect.stringMatching(/not currently assigned to your worker profile/i),
+    });
+    await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: worker.profileId,
+      founderId: adminId, assignedBy: adminId, status: "assigned" });
     await seedGlobalBlockedAssessment(worker.cardId);
     await db.insert(schema.cardStates).values({
       vaId: worker.id, cardId: worker.cardId, cardName: "Review local requirements",
@@ -2538,7 +3026,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ cardName: "Review local requirements", boardName: "Integration fixture", listName: "TO DO" });
 
-    await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: worker.profileId,
+    await db.insert(schema.taskAssignments).values({ taskId: `missing-${randomUUID()}`, vaId: worker.profileId,
       founderId: adminId, assignedBy: adminId, status: "assigned" });
     await expect(caller.start(input)).rejects.toMatchObject({ code: "PRECONDITION_FAILED", message: expect.stringMatching(/full work list has not been checked/i) });
     const current = await reviewedManagerSnapshot();
@@ -2562,6 +3050,78 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
     expect(await caller.stop({ cardId: worker.cardId })).toBeNull();
     expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
+  });
+
+  it("blocks both timer APIs when the next action cites Gmail that has not been verified", async () => {
+    const { timerRouter } = await import("./routes/manus");
+    const { default: express } = await import("express");
+    const { default: request } = await import("supertest");
+    const { default: timeTrackingRoutes } = await import("./routes/time-tracking");
+    const ownUser = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
+    await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: worker.profileId,
+      founderId: adminId, assignedBy: adminId, status: "assigned" });
+    await db.insert(schema.cardStates).values({ vaId: worker.id, cardId: worker.cardId,
+      cardName: "Review local requirements", boardName: "Integration fixture", listName: "DOING",
+      state: "DOING", calculatedAt: NOW });
+    const evidenceId = "gmail:source-check-required";
+    await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
+      trigger: "source_gate", mode: "shadow", snapshotJson: await reviewedManagerSnapshot(worker.id, {
+        actions: [{ cardId: worker.cardId, blocked: false, evidenceIds: [evidenceId] }],
+        evidence: [{ id: evidenceId, cardId: worker.cardId, source: "gmail", kind: "source" }],
+      }) });
+
+    const timerInput = { cardId: worker.cardId, cardName: "Review local requirements",
+      cardUrl: `https://trello.com/c/${worker.cardId}`, boardName: "Integration fixture", listName: "DOING" };
+    const caller = timerRouter.createCaller({ user: ownUser, req: {}, res: {} } as TrpcContext);
+    await expect(caller.start(timerInput)).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      message: expect.stringMatching(/source required by the next step/i),
+    });
+
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { (req as typeof req & { user: schema.User }).user = ownUser; next(); });
+    app.use("/api", timeTrackingRoutes);
+    const response = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
+    expect(response.status).toBe(409);
+    expect(response.body.error).toMatch(/source required by the next step/i);
+    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toHaveLength(0);
+  });
+
+  it("blocks both timer routes for a step awaiting the founder's recorded decision", async () => {
+    const { timerRouter } = await import("./routes/manus");
+    const { default: express } = await import("express");
+    const { default: request } = await import("supertest");
+    const { default: timeTrackingRoutes } = await import("./routes/time-tracking");
+    const ownUser = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
+    await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: worker.profileId,
+      founderId: adminId, assignedBy: adminId, status: "assigned" });
+    await db.update(schema.aptlssSteps).set({ requiresRobert: true })
+      .where(eq(schema.aptlssSteps.id, worker.stepId));
+
+    const assessment = await service.runManager(worker.id);
+    expect(assessment.actions.find(action => action.stepIds.includes(worker.stepId))).toMatchObject({
+      kind: "decision",
+      blocked: true,
+      reason: expect.stringMatching(/founder's decision/i),
+    });
+
+    const trpcCaller = timerRouter.createCaller({ user: ownUser, req: {}, res: {} } as TrpcContext);
+    const timerInput = { cardId: worker.cardId, cardName: "Review local requirements",
+      cardUrl: `https://trello.com/c/${worker.cardId}`, boardName: "Integration fixture", listName: "TO DO" };
+    await expect(trpcCaller.start(timerInput)).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      message: expect.stringMatching(/verification before work can continue/i),
+    });
+
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { (req as typeof req & { user: schema.User }).user = ownUser; next(); });
+    app.use("/api", timeTrackingRoutes);
+    const httpResponse = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
+    expect(httpResponse.status).toBe(409);
+    expect(httpResponse.body.error).toMatch(/verification before work can continue/i);
+    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toHaveLength(0);
   });
 
   it("uses the sole active profile for both worker timer routes when an older profile is inactive", async () => {

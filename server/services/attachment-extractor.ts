@@ -9,13 +9,9 @@
 
 import { getDb } from '../db';
 import { sql } from 'drizzle-orm';
-import { createRequire } from 'module';
+import { PDFParse } from 'pdf-parse';
 import { downloadPinnedHttpsAttachment, MAX_ATTACHMENT_DOWNLOAD_BYTES } from './attachment-download';
 import { isTrelloAttachmentUrl, resolveSafeAttachmentDownloadTarget } from './attachment-url-policy';
-
-// pdf-parse doesn't have proper ESM exports, use createRequire
-const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
 
 // `unreadable` is the terminal state in the persisted ATIS attachment enum.
 export const UNSUPPORTED_ATTACHMENT_STATUS = "unreadable" as const;
@@ -93,11 +89,11 @@ export class AttachmentExtractorService {
         downloadUrl.searchParams.set("token", this.trelloToken);
       }
 
-      return downloadPinnedHttpsAttachment(downloadUrl, target.addresses, {
+      return await downloadPinnedHttpsAttachment(downloadUrl, target.addresses, {
         Accept: '*/*',
       });
-    } catch (error: any) {
-      console.error(`[AttachmentExtractor] Download error:`, error.message);
+    } catch {
+      console.error('[AttachmentExtractor] Attachment download failed');
       return null;
     }
   }
@@ -106,22 +102,30 @@ export class AttachmentExtractorService {
    * Extract text from PDF
    */
   private async extractPdf(buffer: Buffer): Promise<ExtractionResult> {
+    let parser: PDFParse | undefined;
     try {
-      const data = await pdfParse(buffer);
+      parser = new PDFParse({ data: buffer });
+      const data = await parser.getText({ pageJoiner: "" });
       const content = data.text.trim();
       
       return {
         success: true,
         content,
-        wordCount: content.split(/\s+/).filter(Boolean).length,
-        pageCount: data.numpages,
+        wordCount: content ? content.split(/\s+/).length : 0,
+        pageCount: data.total,
         extractedAt: new Date(),
       };
-    } catch (error: any) {
+    } catch {
       return {
         success: false,
-        error: `PDF extraction failed: ${error.message}`,
+        error: 'PDF extraction failed',
       };
+    } finally {
+      // Release the PDF worker on both successful and rejected documents.
+      if (parser) {
+        try { await parser.destroy(); }
+        catch { console.warn('[AttachmentExtractor] PDF parser cleanup failed'); }
+      }
     }
   }
 

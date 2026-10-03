@@ -1,10 +1,13 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
-import { and, desc, eq, lt } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import nodemailer from "nodemailer";
 import {
   appSettings,
   aptlssPlans,
+  aptlssEvidenceRevisions,
+  aptlssEvidenceSubjectLinks,
   emailTasks,
+  users,
   workspaceEvidenceItems,
   workspaceEvidenceLinks,
 } from "../drizzle/schema";
@@ -14,10 +17,12 @@ import { resolveWorkerOperatorContextById } from "./workerOperatorContext";
 import { zonedDateTimeToUtc } from "../shared/workerTime";
 import { gmailContentScope } from "../shared/gmailContentScope";
 import { mapWithConcurrency } from "./utils/concurrency";
-import { enqueueManagerTask, type ManagerQueueConnection } from "./aptlssManagerQueue";
+import { enqueueManagerTask, type ManagerQueueConnection, type ManagerQueueTransaction } from "./aptlssManagerQueue";
+import { ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader } from "./scheduledJobRuntime";
 
 const SETTINGS_KEY = "googleEvidence";
 const TOKEN_KEY = "googleEvidenceRefreshToken";
+const OAUTH_STATE_KEY = "googleEvidenceOAuthState";
 const MAIL_DELIVERY_TOKEN_KEY = "googleMailDeliveryRefreshToken";
 const MAIL_DELIVERY_PROFILE_KEY = "googleMailDeliveryProfile";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -25,6 +30,24 @@ const GMAIL_API_URL = "https://gmail.googleapis.com/gmail/v1/users/me";
 const DRIVE_API_URL = "https://www.googleapis.com/drive/v3";
 const REQUEST_TIMEOUT_MS = 15_000;
 const GMAIL_MESSAGE_DETAILS_CONCURRENCY = 5;
+export const GOOGLE_GMAIL_SOURCE_CONFLICT_WARNING = "Review required: at least one email record could not be safely updated. The saved data was left unchanged because source order or ownership could not be verified. Do not rely on the affected evidence; ask your manager to review and reconcile the source.";
+
+async function googleOwnershipCheckpoint(context?: ScheduledJobContext, transaction?: ScheduledJobOwnershipReader) {
+  if (!context) return;
+  if (context.signal.aborted) throw new ScheduledJobLeaseLostError();
+  await context.assertOwnership(transaction);
+  if (context.signal.aborted) throw new ScheduledJobLeaseLostError();
+}
+
+function googleRequestSignal(context?: ScheduledJobContext) {
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  return context ? AbortSignal.any([context.signal, timeout]) : timeout;
+}
+
+async function rethrowGoogleOwnershipLoss(error: unknown, context?: ScheduledJobContext) {
+  if (error instanceof ScheduledJobLeaseLostError) throw error;
+  await googleOwnershipCheckpoint(context);
+}
 
 export type GoogleEvidenceSettings = {
   gmail: {
@@ -41,8 +64,11 @@ export type GoogleEvidenceSettings = {
   lastGmailSyncAt: string | null;
   lastDriveSyncAt: string | null;
   lastGmailError: string | null;
+  // Sticky until a future explicit review flow reconciles the affected source record.
+  gmailSourceConflictPending: boolean;
   lastDriveError: string | null;
   lastError: string | null;
+  invalidRefreshTokenFingerprint: string | null;
 };
 
 type GoogleEvidenceSettingsInput = {
@@ -65,6 +91,16 @@ type GmailMessage = {
   fromAddress: string;
   fromName: string;
   snippet: string;
+  receivedAt: Date;
+};
+
+type GmailEvidenceSourceSnapshot = {
+  gmailMessageId: string;
+  gmailThreadId: string;
+  subject: string;
+  fromAddress: string;
+  fromName: string;
+  snippet: string | null;
   receivedAt: Date;
 };
 
@@ -113,6 +149,97 @@ export function googleGmailEvidenceRevision(value: {
   ])).digest("hex");
 }
 
+function normalizeGmailEvidenceInsert(value: typeof emailTasks.$inferInsert) {
+  return {
+    gmailMessageId: value.gmailMessageId,
+    gmailThreadId: value.gmailThreadId,
+    subject: value.subject ?? "(no subject)",
+    fromAddress: value.fromAddress ?? "",
+    fromName: value.fromName ?? "",
+    snippet: value.snippet ?? null,
+    receivedAt: value.receivedAt,
+    category: value.category ?? "non_financial",
+    deadlineAt: value.deadlineAt ?? null,
+    trelloCardId: value.trelloCardId ?? null,
+    trelloCardName: value.trelloCardName ?? null,
+    trelloCardUrl: value.trelloCardUrl ?? null,
+    suggestedNextAction: value.suggestedNextAction ?? null,
+    llmSummary: value.llmSummary ?? null,
+  };
+}
+
+function googleGmailSourceRevision(value: GmailEvidenceSourceSnapshot) {
+  return createHash("sha256").update(JSON.stringify([
+    value.gmailMessageId,
+    value.gmailThreadId,
+    value.subject,
+    value.fromAddress,
+    value.fromName,
+    value.snippet,
+    value.receivedAt.toISOString(),
+  ])).digest("hex");
+}
+
+export function googleGmailSourceDisposition(
+  existing: GmailEvidenceSourceSnapshot | null,
+  incoming: GmailEvidenceSourceSnapshot,
+): "new" | "same_source" | "conflict" {
+  if (!existing) return "new";
+  // receivedAt is message time, not a persisted revision sequence for changed content.
+  return googleGmailSourceRevision(existing) === googleGmailSourceRevision(incoming)
+    ? "same_source"
+    : "conflict";
+}
+
+export function googleGmailSourceConflictState(pending: boolean, newlyDetected = 0) {
+  const unresolved = pending || newlyDetected > 0;
+  return {
+    pending: unresolved,
+    warning: unresolved ? GOOGLE_GMAIL_SOURCE_CONFLICT_WARNING : null,
+  };
+}
+
+export function googleGmailRevisionTransition(messageId: string, previousRevision: string | null, nextRevision: string) {
+  if (previousRevision === nextRevision) return null;
+  return `google-gmail:${messageId}:${randomBytes(16).toString("hex")}`;
+}
+
+export async function enqueueGoogleGmailReassessment(
+  tx: ManagerQueueTransaction,
+  vaId: number,
+  messageId: string,
+  previousRevision: string | null,
+  nextRevision: string,
+  context?: ScheduledJobContext,
+) {
+  const eventKey = googleGmailRevisionTransition(messageId, previousRevision, nextRevision);
+  if (!eventKey) return false;
+  await googleOwnershipCheckpoint(context, tx);
+  await enqueueManagerTask(tx, { vaId, trigger: "source_ingested", eventKey });
+  return true;
+}
+
+export function gmailEvidenceNeedsReassessment(
+  existing: { status: string; trelloCardId: string | null } | null,
+  incomingCardId: string | null | undefined,
+  archivedOnImport = false,
+) {
+  if (archivedOnImport && !existing?.trelloCardId && !incomingCardId) return false;
+  return !existing || existing.status === "pending" || Boolean(existing.trelloCardId || incomingCardId);
+}
+
+export function reconcileGmailThreadMessage(
+  incoming: { id: string; receivedAt: Date },
+  retained: Array<{ gmailMessageId: string; receivedAt: Date }>,
+) {
+  return {
+    archiveIncoming: retained.some((item) => item.gmailMessageId !== incoming.id && item.receivedAt > incoming.receivedAt),
+    archiveOlderMessageIds: retained
+      .filter((item) => item.gmailMessageId !== incoming.id && item.receivedAt < incoming.receivedAt)
+      .map((item) => item.gmailMessageId),
+  };
+}
+
 export function googleDriveEvidenceRevision(file: DriveFile) {
   return createHash("sha256").update(JSON.stringify({
     name: file.name,
@@ -130,14 +257,13 @@ export function googleDriveRevisionDisposition(
   incoming: { modifiedAt: Date | null; contentHash: string },
 ): "accept" | "stale" | "ambiguous" {
   if (!existing) return "accept";
-  if (existing.modifiedAt && !incoming.modifiedAt) return "ambiguous";
+  if (existing.contentHash === incoming.contentHash) return "accept";
+  if (!existing.modifiedAt || !incoming.modifiedAt) return "ambiguous";
   if (existing.modifiedAt && incoming.modifiedAt) {
     if (incoming.modifiedAt.getTime() < existing.modifiedAt.getTime()) return "stale";
     if (incoming.modifiedAt.getTime() > existing.modifiedAt.getTime()) return "accept";
-    return existing.contentHash === incoming.contentHash ? "accept" : "ambiguous";
   }
-  if (incoming.modifiedAt) return "accept";
-  return existing.contentHash === incoming.contentHash ? "accept" : "ambiguous";
+  return "ambiguous";
 }
 
 export function evidenceRevisionChanged(previous: string | null | undefined, next: string, active = true) {
@@ -146,6 +272,57 @@ export function evidenceRevisionChanged(previous: string | null | undefined, nex
 
 export function gmailEvidenceOwnerMatches(existingVaId: number | null, requestedVaId: number) {
   return existingVaId === null || existingVaId === requestedVaId;
+}
+
+export async function retainGmailEvidenceRecord(
+  tx: ManagerQueueTransaction,
+  values: typeof emailTasks.$inferInsert,
+  context?: ScheduledJobContext,
+) {
+  // A non-locking read avoids taking a gap lock for a globally unique ID that is not inserted yet.
+  await googleOwnershipCheckpoint(context, tx);
+  const [existing] = await tx.select().from(emailTasks)
+    .where(eq(emailTasks.gmailMessageId, values.gmailMessageId)).limit(1);
+  if (!gmailEvidenceOwnerMatches(existing?.vaId ?? null, values.vaId)) {
+    return { retained: false as const, existing: null, conflict: "ownership" as const };
+  }
+
+  const normalizedValues = normalizeGmailEvidenceInsert(values);
+  const sourceDisposition = googleGmailSourceDisposition(existing ?? null, normalizedValues);
+  if (sourceDisposition === "conflict") {
+    return { retained: false as const, existing: null, conflict: "source_revision" as const };
+  }
+  const exactDuplicate = existing
+    && googleGmailEvidenceRevision(existing) === googleGmailEvidenceRevision(normalizedValues);
+
+  if (!exactDuplicate) {
+    await googleOwnershipCheckpoint(context, tx);
+    await tx.insert(emailTasks).values(values).onDuplicateKeyUpdate({
+      set: {
+        gmailThreadId: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.gmailThreadId}, ${emailTasks.gmailThreadId})`,
+        subject: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.subject}, ${emailTasks.subject})`,
+        fromAddress: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.fromAddress}, ${emailTasks.fromAddress})`,
+        fromName: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.fromName}, ${emailTasks.fromName})`,
+        snippet: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.snippet ?? null}, ${emailTasks.snippet})`,
+        receivedAt: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.receivedAt}, ${emailTasks.receivedAt})`,
+        category: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.category}, ${emailTasks.category})`,
+        deadlineAt: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.deadlineAt ?? null}, ${emailTasks.deadlineAt})`,
+        trelloCardId: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.trelloCardId ?? null}, ${emailTasks.trelloCardId})`,
+        trelloCardName: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.trelloCardName ?? null}, ${emailTasks.trelloCardName})`,
+        trelloCardUrl: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.trelloCardUrl ?? null}, ${emailTasks.trelloCardUrl})`,
+        suggestedNextAction: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.suggestedNextAction ?? null}, ${emailTasks.suggestedNextAction})`,
+        llmSummary: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.llmSummary ?? null}, ${emailTasks.llmSummary})`,
+      },
+    });
+  }
+
+  // This locking read sees the winner of a concurrent first insert, even under repeatable-read.
+  const [retained] = await tx.select().from(emailTasks)
+    .where(eq(emailTasks.gmailMessageId, values.gmailMessageId)).limit(1).for("update");
+  if (!retained || retained.vaId !== values.vaId) {
+    return { retained: false as const, existing: null, conflict: "ownership" as const };
+  }
+  return { retained: true as const, existing: existing ?? null };
 }
 
 type GoogleMailDeliveryProfile = {
@@ -187,8 +364,10 @@ export function defaultGoogleEvidenceSettings(): GoogleEvidenceSettings {
     lastGmailSyncAt: null,
     lastDriveSyncAt: null,
     lastGmailError: null,
+    gmailSourceConflictPending: false,
     lastDriveError: null,
     lastError: null,
+    invalidRefreshTokenFingerprint: null,
   };
 }
 
@@ -213,8 +392,10 @@ export function normalizeGoogleEvidenceSettings(value: unknown): GoogleEvidenceS
     lastGmailSyncAt: nullableString(raw.lastGmailSyncAt, 64),
     lastDriveSyncAt: nullableString(raw.lastDriveSyncAt, 64),
     lastGmailError: nullableString(raw.lastGmailError, 512),
+    gmailSourceConflictPending: raw.gmailSourceConflictPending === true,
     lastDriveError: nullableString(raw.lastDriveError, 512),
     lastError: nullableString(raw.lastError, 512),
+    invalidRefreshTokenFingerprint: nullableString(raw.invalidRefreshTokenFingerprint, 64),
   };
 }
 
@@ -233,15 +414,25 @@ async function readSettings(vaId: number) {
   }
 }
 
-async function writeSettings(vaId: number, settings: GoogleEvidenceSettings) {
+async function writeSettings(vaId: number, settings: GoogleEvidenceSettings, context?: ScheduledJobContext) {
   const db = await getDb();
   if (!db) throw new Error("Database is required to save Google evidence settings");
+  const serialized = JSON.stringify(settings);
+  await googleOwnershipCheckpoint(context);
   await db.insert(appSettings).values({
     vaId,
     key: scopedKey(vaId),
-    value: JSON.stringify(settings),
+    value: serialized,
   }).onDuplicateKeyUpdate({
-    set: { vaId, value: JSON.stringify(settings) },
+    set: {
+      vaId,
+      value: sql`CASE
+        WHEN JSON_VALID(${appSettings.value})
+          AND JSON_UNQUOTE(JSON_EXTRACT(${appSettings.value}, '$.gmailSourceConflictPending')) = 'true'
+        THEN JSON_SET(${serialized}, '$.gmailSourceConflictPending', true)
+        ELSE ${serialized}
+      END`,
+    },
   });
 }
 
@@ -379,18 +570,52 @@ export async function clearGoogleRefreshToken(vaId: number) {
   await db.delete(appSettings).where(eq(appSettings.key, scopedTokenKey(vaId)));
 }
 
+export async function saveGoogleOAuthState(
+  purpose: "worker" | "mail-delivery",
+  userId: number,
+  nonce: string,
+  expiresAt: number,
+) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is required to save Google OAuth state");
+  const key = `${OAUTH_STATE_KEY}:${purpose}:${userId}`;
+  const value = JSON.stringify({ nonce, expiresAt });
+  await db.insert(appSettings).values({ vaId: userId, key, value }).onDuplicateKeyUpdate({
+    set: { vaId: userId, value },
+  });
+}
+
+export async function consumeGoogleOAuthState(
+  purpose: "worker" | "mail-delivery",
+  userId: number,
+  nonce: string,
+  expiresAt: number,
+) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is required to consume Google OAuth state");
+  const key = `${OAUTH_STATE_KEY}:${purpose}:${userId}`;
+  const value = JSON.stringify({ nonce, expiresAt });
+  const [result] = await db.delete(appSettings).where(and(
+    eq(appSettings.key, key),
+    eq(appSettings.vaId, userId),
+    eq(appSettings.value, value),
+  ));
+  return result.affectedRows === 1;
+}
+
 async function configuredGoogleCredentials(vaId: number) {
   const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
-  // A global refresh token is suitable only for local development. In a
-  // shared production workspace, every worker must use their own encrypted
-  // OAuth connection so evidence cannot cross worker boundaries.
-  const refreshToken = await getStoredRefreshToken(vaId) ?? developmentGoogleRefreshTokenFallback();
+  const [refreshToken, settings] = await Promise.all([getStoredRefreshToken(vaId), readSettings(vaId)]);
+  const reconnectRequired = Boolean(
+    refreshToken && settings.invalidRefreshTokenFingerprint === googleRefreshTokenFingerprint(refreshToken),
+  );
   return {
     clientId,
     clientSecret,
     refreshToken,
-    ready: Boolean(clientId && clientSecret && refreshToken),
+    reconnectRequired,
+    ready: Boolean(clientId && clientSecret && refreshToken && !reconnectRequired),
   };
 }
 
@@ -410,9 +635,13 @@ export function googleEvidenceSetupMessage(credentials: {
   clientId?: string | null;
   clientSecret?: string | null;
   refreshToken?: string | null;
+  reconnectRequired?: boolean;
 }) {
   if (!credentials.clientId || !credentials.clientSecret) {
     return "Google evidence needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on the server.";
+  }
+  if (credentials.reconnectRequired) {
+    return "Google connection expired. Reconnect Google for this worker to continue Gmail and Drive evidence sync.";
   }
   if (!credentials.refreshToken) {
     return "Connect Google for this worker to authorize read-only Gmail and Drive evidence.";
@@ -420,12 +649,21 @@ export function googleEvidenceSetupMessage(credentials: {
   return null;
 }
 
-export function developmentGoogleRefreshTokenFallback(env = process.env) {
-  if (env.NODE_ENV === "production") return null;
-  return env.GOOGLE_REFRESH_TOKEN?.trim() || null;
+function googleRefreshTokenFingerprint(refreshToken: string) {
+  return createHash("sha256").update(refreshToken).digest("hex");
+}
+
+class GoogleTokenRequestError extends Error {
+  constructor(readonly status: number, readonly providerCode: string | null) {
+    super(`Google token request failed (${status})`);
+    this.name = "GoogleTokenRequestError";
+  }
 }
 
 function safeGoogleError(error: unknown) {
+  if (error instanceof GoogleTokenRequestError && error.providerCode === "invalid_grant") {
+    return "Google connection expired. Reconnect Google for this worker to continue Gmail and Drive evidence sync.";
+  }
   if (!(error instanceof Error)) return "Google evidence sync failed.";
   if (/timed out|abort/i.test(error.message)) return "Google evidence request timed out.";
   if (/unauthori[sz]ed|forbidden|invalid_grant|access token/i.test(error.message)) {
@@ -434,27 +672,40 @@ function safeGoogleError(error: unknown) {
   return "Google evidence sync failed. Check server configuration and Google API access.";
 }
 
-async function getGoogleAccessToken(vaId: number) {
-  const credentials = await configuredGoogleCredentials(vaId);
+async function getGoogleAccessToken(credentials: Awaited<ReturnType<typeof configuredGoogleCredentials>>, context?: ScheduledJobContext) {
   if (!credentials.ready) throw new Error(googleEvidenceSetupMessage(credentials) ?? "Google evidence is not ready.");
-  return getGoogleAccessTokenForRefreshToken(credentials.clientId!, credentials.clientSecret!, credentials.refreshToken!);
+  return getGoogleAccessTokenForRefreshToken(credentials.clientId!, credentials.clientSecret!, credentials.refreshToken!, context);
 }
 
-async function getGoogleAccessTokenForRefreshToken(clientId: string, clientSecret: string, refreshToken: string) {
+async function getGoogleAccessTokenForRefreshToken(clientId: string, clientSecret: string, refreshToken: string, context?: ScheduledJobContext) {
   const body = new URLSearchParams({
     client_id: clientId,
     client_secret: clientSecret,
     refresh_token: refreshToken,
     grant_type: "refresh_token",
   });
+  await googleOwnershipCheckpoint(context);
   const response = await fetch(GOOGLE_TOKEN_URL, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: googleRequestSignal(context),
   });
-  if (!response.ok) throw new Error(`Google token request failed (${response.status})`);
+  await googleOwnershipCheckpoint(context);
+  if (!response.ok) {
+    let providerCode: string | null = null;
+    try {
+      const payload = await response.json() as { error?: unknown };
+      if (typeof payload.error === "string") providerCode = payload.error;
+    } catch (error) {
+      await rethrowGoogleOwnershipLoss(error, context);
+      // Provider error bodies are optional; status remains available without logging response content.
+    }
+    await googleOwnershipCheckpoint(context);
+    throw new GoogleTokenRequestError(response.status, providerCode);
+  }
   const payload = await response.json() as { access_token?: unknown };
+  await googleOwnershipCheckpoint(context);
   if (typeof payload.access_token !== "string" || !payload.access_token) {
     throw new Error("Google token response did not include an access token");
   }
@@ -480,10 +731,10 @@ export async function getGoogleMailDeliveryStatus(): Promise<GoogleMailDeliveryS
   };
 }
 
-async function getGoogleMailDeliveryAccessToken() {
+async function getGoogleMailDeliveryAccessToken(context?: ScheduledJobContext) {
   const credentials = await configuredGoogleMailDeliveryCredentials();
   if (!credentials.ready) throw new Error("Google mail delivery is not connected");
-  return getGoogleAccessTokenForRefreshToken(credentials.clientId!, credentials.clientSecret!, credentials.refreshToken!);
+  return getGoogleAccessTokenForRefreshToken(credentials.clientId!, credentials.clientSecret!, credentials.refreshToken!, context);
 }
 
 export async function getGoogleMailDeliverySenderEmail() {
@@ -506,11 +757,13 @@ export async function validateGoogleMailDeliveryConnection() {
   }
 }
 
-export async function sendGoogleMail(options: { to: string; subject: string; html: string; text: string }) {
+export async function sendGoogleMail(options: { to: string; subject: string; html: string; text: string }, context?: ScheduledJobContext) {
+  await googleOwnershipCheckpoint(context);
   const [token, from] = await Promise.all([
-    getGoogleMailDeliveryAccessToken(),
+    getGoogleMailDeliveryAccessToken(context),
     getGoogleMailDeliverySenderEmail(),
-  ]);
+  ]).catch(async error => { await rethrowGoogleOwnershipLoss(error, context); throw error; });
+  await googleOwnershipCheckpoint(context);
   const composer = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: "windows" });
   const composed = await composer.sendMail({
     from,
@@ -520,24 +773,57 @@ export async function sendGoogleMail(options: { to: string; subject: string; htm
     text: options.text,
   });
   const raw = (composed.message as Buffer).toString("base64url");
+  await googleOwnershipCheckpoint(context);
   const response = await fetch(`${GMAIL_API_URL}/messages/send`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ raw }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
+    signal: googleRequestSignal(context),
+  }).catch(async error => { await rethrowGoogleOwnershipLoss(error, context); throw error; });
+  await googleOwnershipCheckpoint(context);
   if (!response.ok) throw new Error(`Google Gmail send request failed (${response.status})`);
-  const payload = await response.json() as { id?: unknown };
+  const payload = await response.json().catch(async error => {
+    await rethrowGoogleOwnershipLoss(error, context); throw error;
+  }) as { id?: unknown };
+  await googleOwnershipCheckpoint(context);
   return { id: typeof payload.id === "string" ? payload.id : null };
 }
 
-async function googleJson<T>(url: string, token: string) {
+async function googleJson<T>(url: string, token: string, context?: ScheduledJobContext) {
+  await googleOwnershipCheckpoint(context);
   const response = await fetch(url, {
     headers: { authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: googleRequestSignal(context),
   });
+  await googleOwnershipCheckpoint(context);
   if (!response.ok) throw new Error(`Google API request failed (${response.status})`);
-  return response.json() as Promise<T>;
+  const payload = await response.json() as T;
+  await googleOwnershipCheckpoint(context);
+  return payload;
+}
+
+async function googleJsonPages<T>(url: string, token: string, collection: "messages" | "files", context?: ScheduledJobContext) {
+  const items: T[] = [];
+  const visitedPageTokens = new Set<string>();
+  let pageToken: string | undefined;
+
+  while (true) {
+    const pageUrl = new URL(url);
+    if (pageToken) pageUrl.searchParams.set("pageToken", pageToken);
+    const page = await googleJson<Record<string, unknown> & { nextPageToken?: unknown }>(pageUrl.toString(), token, context);
+    const pageItems = page[collection];
+    if (pageItems !== undefined && pageItems !== null && !Array.isArray(pageItems)) {
+      throw new Error("Google API returned an invalid evidence page.");
+    }
+    if (Array.isArray(pageItems)) items.push(...pageItems as T[]);
+
+    const nextPageToken = page.nextPageToken;
+    if (nextPageToken === undefined || nextPageToken === null || nextPageToken === "") return items;
+    if (typeof nextPageToken !== "string") throw new Error("Google API returned an invalid page token.");
+    if (visitedPageTokens.has(nextPageToken)) throw new Error("Google API repeated an evidence page token.");
+    visitedPageTokens.add(nextPageToken);
+    pageToken = nextPageToken;
+  }
 }
 
 function normalizeText(value: string) {
@@ -674,16 +960,19 @@ function splitFrom(value: string) {
     : { fromName: "", fromAddress: value.trim() };
 }
 
-async function listGmailMessages(token: string, lookbackDays: number): Promise<GmailMessage[]> {
+export async function listGmailMessages(token: string, lookbackDays: number, context?: ScheduledJobContext): Promise<GmailMessage[]> {
   const query = new URLSearchParams({
     q: `in:inbox -in:spam -in:trash newer_than:${lookbackDays}d`,
     maxResults: "100",
   });
-  const listed = await googleJson<{ messages?: Array<{ id?: string; threadId?: string }> }>(
+  const listedMessages = await googleJsonPages<{ id?: string; threadId?: string }>(
     `${GMAIL_API_URL}/messages?${query.toString()}`,
     token,
+    "messages",
+    context,
   );
-  const messages = await mapWithConcurrency((listed.messages ?? []).slice(0, 100), GMAIL_MESSAGE_DETAILS_CONCURRENCY, async (item) => {
+  const messages = await mapWithConcurrency(listedMessages, GMAIL_MESSAGE_DETAILS_CONCURRENCY, async (item) => {
+    await googleOwnershipCheckpoint(context);
     if (!item.id || !item.threadId) return null;
     const params = new URLSearchParams({ format: "metadata", metadataHeaders: "From", fields: "id,threadId,snippet,internalDate,payload(headers)" });
     params.append("metadataHeaders", "Subject");
@@ -693,7 +982,7 @@ async function listGmailMessages(token: string, lookbackDays: number): Promise<G
       snippet?: string;
       internalDate?: string;
       payload?: { headers?: Array<{ name?: string; value?: string }> };
-    }>(`${GMAIL_API_URL}/messages/${encodeURIComponent(item.id)}?${params.toString()}`, token);
+    }>(`${GMAIL_API_URL}/messages/${encodeURIComponent(item.id)}?${params.toString()}`, token, context);
     if (!details.id || !details.threadId || !details.internalDate) return null;
     const headers = new Map((details.payload?.headers ?? []).map((header) => [header.name?.toLocaleLowerCase(), header.value ?? ""]));
     const from = splitFrom(headers.get("from") ?? "");
@@ -708,6 +997,7 @@ async function listGmailMessages(token: string, lookbackDays: number): Promise<G
     } satisfies GmailMessage;
   });
 
+  await googleOwnershipCheckpoint(context);
   const latestByThread = new Map<string, GmailMessage>();
   for (const message of messages.filter((item): item is GmailMessage => Boolean(item))) {
     const current = latestByThread.get(message.threadId);
@@ -716,17 +1006,19 @@ async function listGmailMessages(token: string, lookbackDays: number): Promise<G
   return Array.from(latestByThread.values());
 }
 
-async function syncGmailEvidence(vaId: number, settings: GoogleEvidenceSettings["gmail"], token: string) {
+async function syncGmailEvidence(vaId: number, settings: GoogleEvidenceSettings["gmail"], token: string, context?: ScheduledJobContext) {
   const db = await getDb();
   if (!db) throw new Error("Database is required to ingest Gmail evidence");
   const [messages, cards, worker] = await Promise.all([
-    listGmailMessages(token, settings.lookbackDays),
+    listGmailMessages(token, settings.lookbackDays, context),
     getWorkerCards(vaId),
     resolveWorkerOperatorContextById(vaId),
   ]);
+  await googleOwnershipCheckpoint(context);
   let linked = 0;
   let imported = 0;
   let commitmentsCreated = 0;
+  let sourceConflictCount = 0;
   for (const message of messages) {
     const classification = classifyGoogleEmail(message.subject, message.snippet);
     const match = findExactCardMatch(`${message.subject}\n${message.snippet}`, cards);
@@ -734,7 +1026,6 @@ async function syncGmailEvidence(vaId: number, settings: GoogleEvidenceSettings[
     const deadlineIsPlausible = deadline
       && deadline.dueAt.getTime() >= message.receivedAt.getTime() - 24 * 60 * 60_000
       && deadline.dueAt.getTime() <= message.receivedAt.getTime() + 5 * 365 * 24 * 60 * 60_000;
-    if (match) linked++;
     const values = {
       vaId,
       gmailMessageId: message.id,
@@ -754,46 +1045,62 @@ async function syncGmailEvidence(vaId: number, settings: GoogleEvidenceSettings[
       llmSummary: classification.summary,
     };
     const revision = googleGmailEvidenceRevision(values);
+    await googleOwnershipCheckpoint(context);
     const retained = await db.transaction(async (tx) => {
-      const [existing] = await tx.select().from(emailTasks)
-        .where(eq(emailTasks.gmailMessageId, message.id)).limit(1).for("update");
-      if (!gmailEvidenceOwnerMatches(existing?.vaId ?? null, vaId)) return false;
-      const changed = !existing || googleGmailEvidenceRevision(existing) !== revision;
-      await tx.insert(emailTasks).values(values).onDuplicateKeyUpdate({
-        set: {
-          gmailThreadId: values.gmailThreadId,
-          subject: values.subject,
-          fromAddress: values.fromAddress,
-          fromName: values.fromName,
-          snippet: values.snippet,
-          receivedAt: values.receivedAt,
-          category: values.category,
-          deadlineAt: values.deadlineAt,
-          trelloCardId: values.trelloCardId,
-          trelloCardName: values.trelloCardName,
-          trelloCardUrl: values.trelloCardUrl,
-          suggestedNextAction: values.suggestedNextAction,
-          llmSummary: values.llmSummary,
-        },
-      });
-      await tx.update(emailTasks).set({ status: "archived", archivedAt: new Date() }).where(and(
+      await googleOwnershipCheckpoint(context, tx);
+      // Serialize overlapping sync snapshots for this worker before reading thread state.
+      const [workerLock] = await tx.select({ id: users.id }).from(users)
+        .where(eq(users.id, vaId)).limit(1).for("update");
+      if (!workerLock) {
+        await googleOwnershipCheckpoint(context, tx);
+        return { retained: false, sourceConflict: false };
+      }
+      const retainedRecord = await retainGmailEvidenceRecord(tx, values, context);
+      if (!retainedRecord.retained) {
+        await googleOwnershipCheckpoint(context, tx);
+        return { retained: false, sourceConflict: true };
+      }
+      const { existing } = retainedRecord;
+      const previousRevision = existing ? googleGmailEvidenceRevision(existing) : null;
+      const retainedThreadMessages = await tx.select({
+        gmailMessageId: emailTasks.gmailMessageId,
+        receivedAt: emailTasks.receivedAt,
+      }).from(emailTasks).where(and(
         eq(emailTasks.vaId, vaId),
         eq(emailTasks.gmailThreadId, message.threadId),
-        lt(emailTasks.receivedAt, message.receivedAt),
       ));
-      const relevant = existing?.trelloCardId || values.trelloCardId;
-      if (changed && relevant) {
-        await enqueueManagerTask(tx, {
-          vaId,
-          trigger: "source_ingested",
-          eventKey: `google-gmail:${message.id}:${revision}`,
-        });
+      const threadDisposition = reconcileGmailThreadMessage(message, retainedThreadMessages);
+      if (threadDisposition.archiveIncoming) {
+        await googleOwnershipCheckpoint(context, tx);
+        await tx.update(emailTasks).set({ status: "archived", archivedAt: new Date() }).where(and(
+          eq(emailTasks.vaId, vaId),
+          eq(emailTasks.gmailMessageId, message.id),
+        ));
       }
-      return true;
+      if (threadDisposition.archiveOlderMessageIds.length) {
+        await googleOwnershipCheckpoint(context, tx);
+        await tx.update(emailTasks).set({ status: "archived", archivedAt: new Date() }).where(and(
+          eq(emailTasks.vaId, vaId),
+          inArray(emailTasks.gmailMessageId, threadDisposition.archiveOlderMessageIds),
+        ));
+      }
+      if (gmailEvidenceNeedsReassessment(existing ? {
+        status: existing.status,
+        trelloCardId: existing.trelloCardId,
+      } : null, values.trelloCardId, threadDisposition.archiveIncoming)) {
+        await enqueueGoogleGmailReassessment(tx, vaId, message.id, previousRevision, revision, context);
+      }
+      // Reject inside the callback so detected lease loss rolls back the staged writes.
+      await googleOwnershipCheckpoint(context, tx);
+      return { retained: true, sourceConflict: false };
     });
-    if (!retained) continue;
+    await googleOwnershipCheckpoint(context);
+    if (retained.sourceConflict) sourceConflictCount++;
+    if (!retained.retained) continue;
     imported++;
+    if (match) linked++;
     if (deadlineIsPlausible && worker.founderId) {
+      await googleOwnershipCheckpoint(context);
       const outcome = await upsertSourceCommitment({
         workspaceOwnerId: worker.founderId,
         assignedUserId: vaId,
@@ -809,14 +1116,15 @@ async function syncGmailEvidence(vaId: number, settings: GoogleEvidenceSettings[
         ].filter(Boolean).join("\n"),
         dueAt: deadline.dueAt,
         reminderOffsetMinutes: deadline.dateOnly ? 14 * 60 + 59 : 60,
-      });
+      }, context);
+      await googleOwnershipCheckpoint(context);
       if (outcome.state === "created" || outcome.state === "updated") commitmentsCreated++;
     }
   }
-  return { scanned: messages.length, imported, linked, commitmentsCreated };
+  return { scanned: messages.length, imported, linked, commitmentsCreated, sourceConflictCount };
 }
 
-async function listDriveFiles(token: string, settings: GoogleEvidenceSettings["drive"]): Promise<DriveFile[]> {
+export async function listDriveFiles(token: string, settings: GoogleEvidenceSettings["drive"], context?: ScheduledJobContext): Promise<DriveFile[]> {
   const modifiedAfter = new Date(Date.now() - settings.lookbackDays * 24 * 60 * 60 * 1_000).toISOString();
   const clauses = ["trashed = false", `modifiedTime >= '${modifiedAfter}'`];
   if (settings.folderId) clauses.push(`'${settings.folderId.replace(/'/g, "\\'")}' in parents`);
@@ -826,8 +1134,8 @@ async function listDriveFiles(token: string, settings: GoogleEvidenceSettings["d
     orderBy: "modifiedTime desc",
     fields: "files(id,name,mimeType,modifiedTime,webViewLink,description,parents,size)",
   });
-  const result = await googleJson<{ files?: Array<Record<string, unknown>> }>(`${DRIVE_API_URL}/files?${query.toString()}`, token);
-  return (result.files ?? []).flatMap((file) => {
+  const files = await googleJsonPages<Record<string, unknown>>(`${DRIVE_API_URL}/files?${query.toString()}`, token, "files", context);
+  return files.flatMap((file) => {
     if (typeof file.id !== "string" || typeof file.name !== "string") return [];
     const modifiedAt = typeof file.modifiedTime === "string" ? new Date(file.modifiedTime) : null;
     return [{
@@ -847,6 +1155,7 @@ async function replaceAutomaticEvidenceLinks(
   db: ManagerQueueConnection,
   evidenceId: number,
   match: ReturnType<typeof findExactCardMatch>,
+  context?: ScheduledJobContext,
 ) {
   const current = await db.select({
     cardId: workspaceEvidenceLinks.cardId,
@@ -865,11 +1174,13 @@ async function replaceAutomaticEvidenceLinks(
       && automatic[0].matchReason === match.reason
     : automatic.length === 0;
   if (unchanged) return { changed: false, relevant: Boolean(match || automatic.length) };
+  await googleOwnershipCheckpoint(context, db);
   await db.delete(workspaceEvidenceLinks).where(and(
     eq(workspaceEvidenceLinks.evidenceId, evidenceId),
     eq(workspaceEvidenceLinks.linkMethod, "automatic"),
   ));
   if (match) {
+    await googleOwnershipCheckpoint(context, db);
     await db.insert(workspaceEvidenceLinks).values({
       evidenceId,
       cardId: match.card.cardId,
@@ -883,11 +1194,117 @@ async function replaceAutomaticEvidenceLinks(
   return { changed: true, relevant: Boolean(match || automatic.length) };
 }
 
-async function syncDriveEvidence(vaId: number, settings: GoogleEvidenceSettings["drive"], token: string) {
+export async function retainGoogleDriveEvidenceRecord(
+  tx: ManagerQueueTransaction,
+  values: typeof workspaceEvidenceItems.$inferInsert,
+  context?: ScheduledJobContext,
+) {
+  if (values.vaId === null || values.vaId === undefined) {
+    return { retained: false as const, changed: false as const };
+  }
+
+  // Serialize first inserts too; locking only the evidence row cannot lock a missing row.
+  await googleOwnershipCheckpoint(context, tx);
+  const [workerLock] = await tx.select({ id: users.id }).from(users)
+    .where(eq(users.id, values.vaId)).limit(1).for("update");
+  if (!workerLock) return { retained: false as const, changed: false as const };
+
+  const [existing] = await tx.select({
+    id: workspaceEvidenceItems.id,
+    contentHash: workspaceEvidenceItems.contentHash,
+    active: workspaceEvidenceItems.active,
+    observedAt: workspaceEvidenceItems.observedAt,
+    modifiedAt: workspaceEvidenceItems.modifiedAt,
+  }).from(workspaceEvidenceItems).where(and(
+    eq(workspaceEvidenceItems.vaId, values.vaId),
+    eq(workspaceEvidenceItems.source, values.source),
+    eq(workspaceEvidenceItems.sourceId, values.sourceId),
+  )).limit(1).for("update");
+  const revisionDisposition = googleDriveRevisionDisposition(existing ? {
+    modifiedAt: existing.modifiedAt,
+    contentHash: existing.contentHash,
+  } : null, {
+    modifiedAt: values.modifiedAt ?? null,
+    contentHash: values.contentHash,
+  });
+  if (revisionDisposition === "stale") {
+    return { retained: false as const, changed: false as const };
+  }
+  if (revisionDisposition === "ambiguous") {
+    throw new Error("Google Drive returned changed file metadata without a provably newer modification time.");
+  }
+
+  const changed = evidenceRevisionChanged(existing?.contentHash, values.contentHash, existing?.active);
+  const stableValues = {
+    ...values,
+    observedAt: changed ? values.observedAt : existing?.observedAt ?? values.observedAt,
+  };
+  await googleOwnershipCheckpoint(context, tx);
+  await tx.insert(workspaceEvidenceItems).values(stableValues).onDuplicateKeyUpdate({
+    set: {
+      vaId: stableValues.vaId,
+      sourceContainerId: stableValues.sourceContainerId,
+      kind: stableValues.kind,
+      title: stableValues.title,
+      summary: stableValues.summary,
+      content: stableValues.content,
+      sourceUrl: stableValues.sourceUrl,
+      mimeType: stableValues.mimeType,
+      modifiedAt: stableValues.modifiedAt,
+      observedAt: stableValues.observedAt,
+      contentHash: stableValues.contentHash,
+      metadataJson: stableValues.metadataJson,
+      active: true,
+      ...(changed ? {
+        reviewStatus: "unreviewed" as const,
+        reviewedAt: null,
+        reviewedBy: null,
+      } : {}),
+    },
+  });
+  const [stored] = await tx.select({ id: workspaceEvidenceItems.id })
+    .from(workspaceEvidenceItems)
+    .where(and(
+      eq(workspaceEvidenceItems.vaId, values.vaId),
+      eq(workspaceEvidenceItems.source, values.source),
+      eq(workspaceEvidenceItems.sourceId, values.sourceId),
+    ))
+    .limit(1)
+    .for("update");
+  if (!stored) throw new Error("Google Drive evidence was not retained");
+
+  if (changed) {
+    const [knownRevision] = await tx.select({ id: aptlssEvidenceRevisions.id })
+      .from(aptlssEvidenceRevisions)
+      .where(and(
+        eq(aptlssEvidenceRevisions.evidenceId, stored.id),
+        eq(aptlssEvidenceRevisions.contentHash, values.contentHash),
+      ))
+      .limit(1);
+    if (!knownRevision) {
+      await googleOwnershipCheckpoint(context, tx);
+      await tx.insert(aptlssEvidenceRevisions).values({
+        evidenceId: stored.id,
+        contentHash: values.contentHash,
+        truthClass: "source_record",
+        summary: values.summary ?? null,
+        content: values.content ?? null,
+        metadataJson: values.metadataJson ?? null,
+        observedAt: values.observedAt,
+        recordedBy: null,
+      });
+    }
+  }
+  return { retained: true as const, changed, evidenceId: stored.id };
+}
+
+async function syncDriveEvidence(vaId: number, settings: GoogleEvidenceSettings["drive"], token: string, context?: ScheduledJobContext) {
   const db = await getDb();
   if (!db) throw new Error("Database is required to ingest Google Drive evidence");
-  const [files, cards] = await Promise.all([listDriveFiles(token, settings), getWorkerCards(vaId)]);
+  const [files, cards] = await Promise.all([listDriveFiles(token, settings, context), getWorkerCards(vaId)]);
+  await googleOwnershipCheckpoint(context);
   let linked = 0;
+  let imported = 0;
   for (const file of files) {
     const sourceId = `${vaId}:${file.id}`;
     const observedAt = new Date();
@@ -911,70 +1328,38 @@ async function syncDriveEvidence(vaId: number, settings: GoogleEvidenceSettings[
       active: true,
     };
     const match = findExactCardMatch(`${file.name}\n${file.description ?? ""}`, cards);
+    await googleOwnershipCheckpoint(context);
     const outcome = await db.transaction(async (tx) => {
-      const [existing] = await tx.select({
-        id: workspaceEvidenceItems.id,
-        contentHash: workspaceEvidenceItems.contentHash,
-        active: workspaceEvidenceItems.active,
-        observedAt: workspaceEvidenceItems.observedAt,
-        modifiedAt: workspaceEvidenceItems.modifiedAt,
-      }).from(workspaceEvidenceItems).where(and(
-        eq(workspaceEvidenceItems.vaId, vaId),
-        eq(workspaceEvidenceItems.source, "google_drive"),
-        eq(workspaceEvidenceItems.sourceId, sourceId),
-      )).limit(1).for("update");
-      const revisionDisposition = googleDriveRevisionDisposition(existing ? {
-        modifiedAt: existing.modifiedAt,
-        contentHash: existing.contentHash,
-      } : null, { modifiedAt: file.modifiedAt, contentHash });
-      if (revisionDisposition === "stale") return { linked: false, changed: false };
-      if (revisionDisposition === "ambiguous") {
-        throw new Error("Google Drive returned changed file metadata without a strictly newer modification time.");
+      await googleOwnershipCheckpoint(context, tx);
+      const retained = await retainGoogleDriveEvidenceRecord(tx, values, context);
+      if (!retained.retained) {
+        await googleOwnershipCheckpoint(context, tx);
+        return { linked: false, changed: false, retained: false };
       }
-      const changed = evidenceRevisionChanged(existing?.contentHash, contentHash, existing?.active);
-      const stableValues = {
-        ...values,
-        observedAt: changed ? observedAt : existing?.observedAt ?? observedAt,
-      };
-      await tx.insert(workspaceEvidenceItems).values(stableValues).onDuplicateKeyUpdate({
-        set: {
-          vaId,
-          sourceContainerId: stableValues.sourceContainerId,
-          kind: stableValues.kind,
-          title: stableValues.title,
-          summary: stableValues.summary,
-          content: stableValues.content,
-          sourceUrl: stableValues.sourceUrl,
-          mimeType: stableValues.mimeType,
-          modifiedAt: stableValues.modifiedAt,
-          observedAt: stableValues.observedAt,
-          contentHash: stableValues.contentHash,
-          metadataJson: stableValues.metadataJson,
-          active: true,
-        },
-      });
-      const [stored] = await tx.select({ id: workspaceEvidenceItems.id })
-        .from(workspaceEvidenceItems)
-        .where(and(
-          eq(workspaceEvidenceItems.vaId, vaId),
-          eq(workspaceEvidenceItems.source, "google_drive"),
-          eq(workspaceEvidenceItems.sourceId, sourceId),
-        ))
-        .limit(1);
-      if (!stored) throw new Error("Drive evidence was not retained");
-      const linkOutcome = await replaceAutomaticEvidenceLinks(tx, stored.id, match);
-      if ((changed || linkOutcome.changed) && linkOutcome.relevant) {
+      const linkOutcome = await replaceAutomaticEvidenceLinks(tx, retained.evidenceId, match, context);
+      const [graphLink] = retained.changed && !linkOutcome.relevant
+        ? await tx.select({ id: aptlssEvidenceSubjectLinks.id }).from(aptlssEvidenceSubjectLinks).where(and(
+          eq(aptlssEvidenceSubjectLinks.evidenceId, retained.evidenceId),
+          eq(aptlssEvidenceSubjectLinks.vaId, vaId),
+          eq(aptlssEvidenceSubjectLinks.subjectType, "card"),
+        )).limit(1)
+        : [];
+      if ((retained.changed || linkOutcome.changed) && (linkOutcome.relevant || graphLink)) {
+        await googleOwnershipCheckpoint(context, tx);
         await enqueueManagerTask(tx, {
           vaId,
           trigger: "source_ingested",
           eventKey: `google-drive:${sourceId}:${contentHash}:${file.modifiedAt?.toISOString() ?? "unknown"}:${match?.card.cardId ?? "unlinked"}:${observedAt.getTime()}`,
         });
       }
-      return { linked: Boolean(match), changed };
+      await googleOwnershipCheckpoint(context, tx);
+      return { linked: Boolean(match), changed: retained.changed, retained: true };
     });
+    await googleOwnershipCheckpoint(context);
+    if (outcome.retained) imported++;
     if (outcome.linked) linked++;
   }
-  return { scanned: files.length, imported: files.length, linked };
+  return { scanned: files.length, imported, linked };
 }
 
 function shouldSync(lastSync: string | null, intervalMinutes: number, now: Date) {
@@ -1001,16 +1386,20 @@ export async function getGoogleEvidenceStatus(vaId: number) {
       .limit(1),
   ]);
   const credentials = await configuredGoogleCredentials(vaId);
+  const sourceConflict = googleGmailSourceConflictState(settings.gmailSourceConflictPending);
   return {
     credentialsReady: credentials.ready,
     clientConfigured: Boolean(credentials.clientId && credentials.clientSecret),
-    connectionMode: credentials.refreshToken ? (await getStoredRefreshToken(vaId) ? "worker" : "environment") : null,
+    connectionMode: credentials.refreshToken ? "worker" : null,
+    connectionStatus: credentials.reconnectRequired ? "reconnect_required" : credentials.refreshToken ? "configured" : "not_connected",
     setupMessage: googleEvidenceSetupMessage(credentials),
     settings,
     gmail: {
       enabled: settings.gmail.enabled,
       lastSyncedAt: settings.lastGmailSyncAt,
       lastError: settings.lastGmailError,
+      sourceConflictPending: sourceConflict.pending,
+      sourceConflictWarning: sourceConflict.warning,
       intervalMinutes: settings.gmail.intervalMinutes,
       hasRetainedEvidence: emailRows.length > 0,
     },
@@ -1028,56 +1417,100 @@ export async function getGoogleEvidenceStatus(vaId: number) {
 
 export async function syncWorkerGoogleEvidence(
   vaId: number,
-  options: { gmail?: boolean; drive?: boolean; onlyDue?: boolean } = {},
+  options: { gmail?: boolean; drive?: boolean; onlyDue?: boolean; context?: ScheduledJobContext } = {},
 ) {
+  const { context } = options;
+  await googleOwnershipCheckpoint(context);
   const settings = await readSettings(vaId);
+  await googleOwnershipCheckpoint(context);
   const now = new Date();
   const requestedGmail = options.gmail ?? true;
   const requestedDrive = options.drive ?? true;
   const gmailDue = settings.gmail.enabled && requestedGmail && (!options.onlyDue || shouldSync(settings.lastGmailSyncAt, settings.gmail.intervalMinutes, now));
   const driveDue = settings.drive.enabled && requestedDrive && (!options.onlyDue || shouldSync(settings.lastDriveSyncAt, settings.drive.intervalMinutes, now));
   const credentials = await configuredGoogleCredentials(vaId);
+  await googleOwnershipCheckpoint(context);
+  const existingSourceConflict = googleGmailSourceConflictState(settings.gmailSourceConflictPending);
 
   if (!credentials.ready) {
     return {
       configured: false,
-      gmail: { state: gmailDue ? "blocked" : "skipped", scanned: 0, imported: 0, linked: 0 },
+      gmail: {
+        state: gmailDue ? "blocked" : "skipped", scanned: 0, imported: 0, linked: 0,
+        sourceConflictCount: 0, sourceConflictWarning: existingSourceConflict.warning,
+      },
       drive: { state: driveDue ? "blocked" : "skipped", scanned: 0, imported: 0, linked: 0 },
       message: googleEvidenceSetupMessage(credentials),
     };
   }
 
+  if (options.onlyDue && !gmailDue && !driveDue) {
+    return {
+      configured: true,
+      gmail: {
+        state: "skipped" as const, scanned: 0, imported: 0, linked: 0,
+        sourceConflictCount: 0, sourceConflictWarning: existingSourceConflict.warning,
+      },
+      drive: { state: "skipped" as const, scanned: 0, imported: 0, linked: 0 },
+      message: null,
+    };
+  }
+
   let token: string;
   try {
-    token = await getGoogleAccessToken(vaId);
+    token = await getGoogleAccessToken(credentials, context);
   } catch (error) {
+    await rethrowGoogleOwnershipLoss(error, context);
     const message = safeGoogleError(error);
     await writeSettings(vaId, {
       ...settings,
+      ...(error instanceof GoogleTokenRequestError && error.providerCode === "invalid_grant" && credentials.refreshToken
+        ? { invalidRefreshTokenFingerprint: googleRefreshTokenFingerprint(credentials.refreshToken) }
+        : {}),
       lastGmailError: gmailDue ? message : settings.lastGmailError,
       lastDriveError: driveDue ? message : settings.lastDriveError,
       lastError: message,
-    });
+    }, context);
+    await googleOwnershipCheckpoint(context);
     return {
       configured: true,
-      gmail: { state: gmailDue ? "failed" : "skipped", scanned: 0, imported: 0, linked: 0 },
+      gmail: {
+        state: gmailDue ? "failed" : "skipped", scanned: 0, imported: 0, linked: 0,
+        sourceConflictCount: 0, sourceConflictWarning: existingSourceConflict.warning,
+      },
       drive: { state: driveDue ? "failed" : "skipped", scanned: 0, imported: 0, linked: 0 },
       message,
     };
   }
-  let next = settings;
+  let next = { ...settings, invalidRefreshTokenFingerprint: null };
   let lastError: string | null = null;
   const result = {
     configured: true,
-    gmail: { state: gmailDue ? "synced" : "skipped", scanned: 0, imported: 0, linked: 0 },
+    gmail: {
+      state: gmailDue ? "synced" : "skipped", scanned: 0, imported: 0, linked: 0,
+      sourceConflictCount: 0, sourceConflictWarning: existingSourceConflict.warning,
+    },
     drive: { state: driveDue ? "synced" : "skipped", scanned: 0, imported: 0, linked: 0 },
     message: null as string | null,
   };
   if (gmailDue) {
     try {
-      Object.assign(result.gmail, await syncGmailEvidence(vaId, settings.gmail, token));
-      next = { ...next, lastGmailSyncAt: now.toISOString(), lastGmailError: null };
+      const gmailOutcome = await syncGmailEvidence(vaId, settings.gmail, token, context);
+      await googleOwnershipCheckpoint(context);
+      Object.assign(result.gmail, gmailOutcome);
+      const sourceConflict = googleGmailSourceConflictState(
+        next.gmailSourceConflictPending,
+        gmailOutcome.sourceConflictCount,
+      );
+      result.gmail.sourceConflictWarning = sourceConflict.warning;
+      next = {
+        ...next,
+        lastGmailSyncAt: now.toISOString(),
+        lastGmailError: null,
+        gmailSourceConflictPending: sourceConflict.pending,
+      };
     } catch (error) {
+      await rethrowGoogleOwnershipLoss(error, context);
       result.gmail.state = "failed";
       lastError = safeGoogleError(error);
       next = { ...next, lastGmailError: lastError };
@@ -1085,16 +1518,20 @@ export async function syncWorkerGoogleEvidence(
   }
   if (driveDue) {
     try {
-      Object.assign(result.drive, await syncDriveEvidence(vaId, settings.drive, token));
+      Object.assign(result.drive, await syncDriveEvidence(vaId, settings.drive, token, context));
+      await googleOwnershipCheckpoint(context);
       next = { ...next, lastDriveSyncAt: now.toISOString(), lastDriveError: null };
     } catch (error) {
+      await rethrowGoogleOwnershipLoss(error, context);
       result.drive.state = "failed";
       lastError = safeGoogleError(error);
       next = { ...next, lastDriveError: lastError };
     }
   }
   next = { ...next, lastError };
-  await writeSettings(vaId, next);
+  await googleOwnershipCheckpoint(context);
+  await writeSettings(vaId, next, context);
+  await googleOwnershipCheckpoint(context);
   result.message = lastError;
   return result;
 }

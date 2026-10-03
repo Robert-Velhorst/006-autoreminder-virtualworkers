@@ -1,6 +1,6 @@
 import { useAuth } from "@/_core/hooks/useAuth";
-import { Loader2 } from "lucide-react";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { Loader2, RefreshCw, WifiOff } from "lucide-react";
+import React, { lazy, Suspense, useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { Button } from "./ui/button";
@@ -15,7 +15,7 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const { loading, user } = useAuth();
+  const { loading, user, verificationUnavailable, checking, refresh } = useAuth();
   const [location] = useLocation();
 
   if (loading) {
@@ -26,11 +26,29 @@ export default function DashboardLayout({
     if (location === '/trello-callback') {
       return <TrelloCallbackPage />;
     }
+    if (verificationUnavailable) {
+      return <main className="flex min-h-screen items-center justify-center bg-background p-6">
+        <section role="alert" className="w-full max-w-md space-y-4">
+          <WifiOff className="h-6 w-6 text-muted-foreground" aria-hidden="true" />
+          <h1 className="text-xl font-semibold">Dashboard temporarily unavailable</h1>
+          <p className="text-sm text-muted-foreground">Your access cannot be checked right now. You do not need to reset your password. We will reconnect automatically.</p>
+          <Button disabled={checking} onClick={() => void refresh()}>
+            <RefreshCw className={`mr-2 h-4 w-4${checking ? " animate-spin" : ""}`} aria-hidden="true" />
+            {checking ? "Checking connection" : "Try again"}
+          </Button>
+        </section>
+      </main>;
+    }
     return <LocalLoginForm onSuccess={() => window.location.href = '/'} />;
   }
 
   if (user.role === 'worker') {
-    return <>{children}</>;
+    return <>
+      {verificationUnavailable && <div role="alert" className="border-b border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm">
+        Connection interrupted. Your page is kept open. Wait for reconnection before saving changes.
+      </div>}
+      {children}
+    </>;
   }
 
   return (

@@ -12,6 +12,8 @@ type ProviderSync = {
   enabled: boolean;
   lastSyncedAt: string | null;
   intervalMinutes: number;
+  lastError?: string | null;
+  sourceConflictPending?: boolean;
 } | null;
 
 export type WorkerSourceCheckInput = {
@@ -45,9 +47,9 @@ export function assessWorkerSourceChecks(input: WorkerSourceCheckInput) {
     label: "Trello card",
     linkedCount: count("trello"),
     checkedAt: cacheTime ? new Date(cacheTime).toISOString() : null,
-    status: !cacheTime || !expiry || expiry < cacheTime ? "unknown" : input.now > expiry ? "overdue" : "current",
+    status: !cacheTime || !expiry || expiry < cacheTime ? "unknown" : input.now >= expiry ? "overdue" : "current",
     checkedLabel: "Cached copy saved",
-    nextAction: !cacheTime || !expiry || expiry < cacheTime || input.now > expiry ? "Open the original Trello card and verify it before changing it." : null,
+    nextAction: !cacheTime || !expiry || expiry < cacheTime || input.now >= expiry ? "Open the original Trello card and verify it before changing it." : null,
   });
 
   const addProvider = (key: "gmail" | "google_drive", label: string, provider: ProviderSync, action: string) => {
@@ -58,6 +60,9 @@ export function assessWorkerSourceChecks(input: WorkerSourceCheckInput) {
     const status = !provider ? "unknown"
       : !provider.enabled ? "disabled"
       : input.googleConnectionReady === false ? "disconnected"
+      : input.googleConnectionReady !== true ? "unknown"
+      : provider.sourceConflictPending ? "unknown"
+      : provider.lastError?.trim() ? "unknown"
       : !lastSync || !Number.isFinite(interval) || interval <= 0 ? "unknown"
       : input.now - lastSync > interval * 2 * 60_000 ? "overdue" : "current";
     checks.push({

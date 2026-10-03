@@ -61,6 +61,9 @@ export type WorkerInvitationProfileInput = {
 };
 
 export async function createWorkerInvitation(founderId: number, input: WorkerInvitationProfileInput) {
+  if (!Number.isSafeInteger(founderId) || founderId <= 0) {
+    throw new WorkerInvitationError("A valid founder account is required to invite a worker.", "invalid");
+  }
   const db = await getDb();
   if (!db) throw new WorkerInvitationError("Database unavailable", "database");
 
@@ -164,47 +167,119 @@ export async function getWorkerInvitation(token: string) {
 }
 
 export async function acceptWorkerInvitation(token: string, password: string) {
+  if (!token || token.length > 128) throw new WorkerInvitationError("This invitation link is invalid.", "invalid");
   validateWorkerInvitationPassword(password);
   const db = await getDb();
   if (!db) throw new WorkerInvitationError("Database unavailable", "database");
   const tokenHash = hashWorkerInvitationToken(token);
   const passwordHash = await bcrypt.hash(password, 12);
-  const now = new Date();
 
   return db.transaction(async (tx) => {
-    const [row] = await tx.select({
-      id: workerInvitations.id,
-      userId: workerInvitations.userId,
-      vaId: workerInvitations.vaId,
-      openId: users.openId,
-      name: users.name,
-    }).from(workerInvitations)
+    const [row] = await tx
+      .select({
+        id: workerInvitations.id,
+        userId: workerInvitations.userId,
+        vaId: workerInvitations.vaId,
+        invitationFounderId: workerInvitations.founderId,
+        invitationEmail: workerInvitations.email,
+        expiresAt: workerInvitations.expiresAt,
+        openId: users.openId,
+        userEmail: users.email,
+        name: users.name,
+        role: users.role,
+        passwordHash: users.passwordHash,
+        profileUserId: vaProfiles.userId,
+        profileFounderId: vaProfiles.founderId,
+        profileEmail: vaProfiles.email,
+        profileStatus: vaProfiles.status,
+      })
+      .from(workerInvitations)
       .innerJoin(users, eq(users.id, workerInvitations.userId))
-      .where(and(
-        eq(workerInvitations.tokenHash, tokenHash),
-        isNull(workerInvitations.acceptedAt),
-        isNull(workerInvitations.revokedAt),
-        gt(workerInvitations.expiresAt, now),
-      ))
-      .limit(1);
+      .innerJoin(vaProfiles, eq(vaProfiles.id, workerInvitations.vaId))
+      .where(
+        and(
+          eq(workerInvitations.tokenHash, tokenHash),
+          isNull(workerInvitations.acceptedAt),
+          isNull(workerInvitations.revokedAt),
+        ),
+      )
+      .limit(1)
+      .for("update");
 
-    if (!row) throw new WorkerInvitationError("This invitation is invalid, expired, or already used.", "invalid");
+    if (!row || row.expiresAt.getTime() <= Date.now()) {
+      throw new WorkerInvitationError("This invitation is invalid, expired, or already used.", "invalid");
+    }
+    if (
+      row.role !== "worker" ||
+      row.passwordHash !== null ||
+      row.openId !== row.invitationEmail ||
+      row.userEmail !== row.invitationEmail ||
+      row.profileEmail !== row.invitationEmail ||
+      row.profileUserId !== row.userId ||
+      row.profileFounderId !== row.invitationFounderId ||
+      row.profileStatus !== "inactive"
+    ) {
+      throw new WorkerInvitationError("This invitation no longer matches its worker account.", "invalid");
+    }
 
-    const updateResult = await tx.update(workerInvitations)
-      .set({ acceptedAt: now })
-      .where(and(
-        eq(workerInvitations.id, row.id),
-        isNull(workerInvitations.acceptedAt),
-        isNull(workerInvitations.revokedAt),
-      ));
+    const acceptedAt = new Date();
+
+    const updateResult = await tx
+      .update(workerInvitations)
+      .set({ acceptedAt })
+      .where(
+        and(
+          eq(workerInvitations.id, row.id),
+          isNull(workerInvitations.acceptedAt),
+          isNull(workerInvitations.revokedAt),
+          gt(workerInvitations.expiresAt, acceptedAt),
+        ),
+      );
     const affectedRows = Array.isArray(updateResult)
       ? Number((updateResult[0] as { affectedRows?: number })?.affectedRows ?? 0)
       : 0;
     if (affectedRows !== 1) throw new WorkerInvitationError("This invitation has already been used.", "used");
 
-    await tx.update(users).set({ passwordHash, lastSignedIn: now }).where(eq(users.id, row.userId));
-    await tx.update(vaProfiles).set({ status: "active" }).where(eq(vaProfiles.id, row.vaId));
+    const userUpdate = await tx
+      .update(users)
+      .set({ passwordHash, lastSignedIn: acceptedAt })
+      .where(
+        and(
+          eq(users.id, row.userId),
+          eq(users.openId, row.invitationEmail),
+          eq(users.email, row.invitationEmail),
+          eq(users.role, "worker"),
+          isNull(users.passwordHash),
+        ),
+      );
+    const userAffectedRows = Array.isArray(userUpdate)
+      ? Number((userUpdate[0] as { affectedRows?: number })?.affectedRows ?? 0)
+      : 0;
+    if (userAffectedRows !== 1)
+      throw new WorkerInvitationError("This invitation no longer matches its worker account.", "invalid");
 
-    return { userId: row.userId, openId: row.openId, name: row.name || "Worker" };
+    const profileUpdate = await tx
+      .update(vaProfiles)
+      .set({ status: "active" })
+      .where(
+        and(
+          eq(vaProfiles.id, row.vaId),
+          eq(vaProfiles.userId, row.userId),
+          eq(vaProfiles.founderId, row.invitationFounderId),
+          eq(vaProfiles.email, row.invitationEmail),
+          eq(vaProfiles.status, "inactive"),
+        ),
+      );
+    const profileAffectedRows = Array.isArray(profileUpdate)
+      ? Number((profileUpdate[0] as { affectedRows?: number })?.affectedRows ?? 0)
+      : 0;
+    if (profileAffectedRows !== 1)
+      throw new WorkerInvitationError("This invitation no longer matches its worker account.", "invalid");
+
+    return {
+      userId: row.userId,
+      openId: row.openId,
+      name: row.name || "Worker",
+    };
   });
 }

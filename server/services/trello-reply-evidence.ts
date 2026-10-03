@@ -11,9 +11,16 @@ import {
   type TrelloMemberIdentity,
 } from "./trello-manus";
 import { mapWithConcurrency } from "../utils/concurrency";
+import { ScheduledJobLeaseLostError, type ScheduledJobContext } from "../scheduledJobRuntime";
 
 const REPLY_DEADLINE_MS = 12 * 60 * 60 * 1000;
 const COMMENT_CONCURRENCY = 5;
+
+async function checkpoint(context?: ScheduledJobContext) {
+  if (context?.signal.aborted) throw new ScheduledJobLeaseLostError();
+  await context?.assertOwnership();
+  if (context?.signal.aborted) throw new ScheduledJobLeaseLostError();
+}
 
 export type ReplyEvidenceAssessment = {
   latestExternal: TrelloAction | null;
@@ -59,7 +66,9 @@ export async function syncWorkerTrelloReplyEvidence(input: {
   apiKey?: string;
   apiToken?: string;
   nowMs?: number;
+  context?: ScheduledJobContext;
 }) {
+  await checkpoint(input.context);
   const apiKey = input.apiKey ?? process.env.TRELLO_API_KEY ?? process.env.TrelloAPIKey;
   const apiToken = input.apiToken ?? process.env.TRELLO_TOKEN ?? process.env.TrelloAPIToken;
   const trelloMemberId = input.trelloMemberId?.trim();
@@ -70,17 +79,17 @@ export async function syncWorkerTrelloReplyEvidence(input: {
     getTrelloMemberIdentity(apiKey, apiToken, trelloMemberId),
     getWorkerCards(apiKey, apiToken, trelloMemberId),
   ]);
+  await checkpoint(input.context);
   const orderedCards = [...cards].sort(
     (a, b) => new Date(b.dateLastActivity).getTime() - new Date(a.dateLastActivity).getTime(),
   );
-  const evidence = await mapWithConcurrency(orderedCards, COMMENT_CONCURRENCY, async (card) => ({
-    card,
-    assessment: assessReplyEvidence(
-      await getCardCommentActions(apiKey, apiToken, card.id),
-      worker,
-      input.nowMs,
-    ),
-  }));
+  const evidence = await mapWithConcurrency(orderedCards, COMMENT_CONCURRENCY, async (card) => {
+    await checkpoint(input.context);
+    const actions = await getCardCommentActions(apiKey, apiToken, card.id);
+    await checkpoint(input.context);
+    return { card, assessment: assessReplyEvidence(actions, worker, input.nowMs) };
+  });
+  await checkpoint(input.context);
 
   let threads = 0;
   let pending = 0;
@@ -90,6 +99,7 @@ export async function syncWorkerTrelloReplyEvidence(input: {
     if (!assessment.latestExternal || !assessment.status) continue;
     const latestExternal = assessment.latestExternal;
     const latestWorker = assessment.latestWorker;
+    await checkpoint(input.context);
     await upsertReplyThread(input.vaId, {
       source: "trello",
       cardId: card.id,
@@ -104,16 +114,19 @@ export async function syncWorkerTrelloReplyEvidence(input: {
       status: assessment.status,
       demerited: false,
     });
+    await checkpoint(input.context);
     threads += 1;
     if (assessment.status === "pending") pending += 1;
     if (assessment.status === "overdue") overdue += 1;
     if (assessment.status === "replied") replied += 1;
   }
 
+  await checkpoint(input.context);
   const inactive = await deactivateMissingTrelloReplyThreads(
     input.vaId,
     orderedCards.map((card: TrelloCard) => card.id),
   );
+  await checkpoint(input.context);
   return {
     scannedCards: orderedCards.length,
     threads,

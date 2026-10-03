@@ -26,7 +26,7 @@ import {
 import { getDb } from "./db";
 import { DecisionOutcomeError, getDecisionHistory, recordDecisionOutcome } from "./decisionOutcomesDb";
 import { FounderDecisionDeadlineError, deferFounderDecisionDeadline, getFounderDecisionInbox, setFounderDecisionDeadline } from "./founderDecisionInbox";
-import { generateOperatorDailyPlan, getOperatorDailyPlan, OperatorDailyPlanScopeError, updateOperatorDailyPlan, type OperatorDailyPlanPayload } from "./operatorDailyPlan";
+import { generateOperatorDailyPlan, getOperatorDailyPlan, OperatorDailyPlanConflictError, OperatorDailyPlanScopeError, toWorkerOperatorDailyPlan, updateOperatorDailyPlan, type OperatorDailyPlanPayload } from "./operatorDailyPlan";
 import {
   clearGoogleRefreshToken,
   getGoogleEvidenceStatus,
@@ -37,15 +37,15 @@ import {
   buildOperatorEvidenceSummary,
   type OperatorEvidenceSourceKey,
 } from "./operatorEvidence";
-import { protectedProcedure, router } from "./_core/trpc";
+import { activeWorkerProcedure, protectedProcedure, router } from "./_core/trpc";
 import { indexWorkQueueSteps } from "./operatorWorkQueueIndex";
 import { resolveWorkerOperatorContext } from "./workerOperatorContext";
 import { bindWaitingReasonToOwnedCard, interpretWaitingReasonForWorker } from "./workerWaitingReason";
 import { canRecordWaitingReasonForCard } from "./timerAccess";
-import { getManagerStatus, ManagerCompletionReportError, reportManagerActionCompletion, runManager, submitManagerUpdate, updateManagerPolicy } from "./aptlssManagerService";
+import { getManagerStatus, ManagerCompletionReportError, ManagerUpdateSubmissionError, reportManagerActionCompletion, runManager, submitManagerUpdate, updateManagerPolicy } from "./aptlssManagerService";
 import { closeManagerTrial, getManagerReviewInbox, ManagerExecutionPausedError, managerCorrectionRevokeInputSchema, managerPlanVersion, managerReviewInboxInputSchema, managerReviewInputSchema, managerTrialInputSchema, recordManagerReview, restartManagerTrial, restoreManagerPlan, revokeManagerCorrection, setManagerMode } from "./aptlssManagerReviewService";
 import { AptlssEvidenceGraphError, createEvidenceConflict, getCardEvidence, getOpenVerificationFollowups, recordWorkerEvidenceAssertion, resolveVerificationFollowup } from "./aptlssEvidenceGraphDb";
-import { assertManagerPilotWorker } from "./aptlssManagerPilot";
+import { assertManagerPilotWorker, assertManagerPlanMutationAllowed, isManagerPilotWorker } from "./aptlssManagerPilot";
 import { toWorkerManagerSnapshot, toWorkerManagerStatus } from "./workerManagerResponse";
 
 const managerReviewer = protectedProcedure.use(async ({ ctx, next }) => {
@@ -53,19 +53,8 @@ const managerReviewer = protectedProcedure.use(async ({ ctx, next }) => {
   return next({ ctx });
 });
 
-const operatorProcedure = protectedProcedure.use(async ({ ctx, next }) => {
-  if (ctx.user.role !== "worker") {
-    throw new TRPCError({ code: "FORBIDDEN", message: "Operator access requires a worker role" });
-  }
-  return next({ ctx });
-});
-
-const workerMutation = operatorProcedure.use(async ({ ctx, next }) => {
-  if (ctx.user.role !== "worker") {
-    throw new TRPCError({ code: "FORBIDDEN", message: "This action must be completed by the worker" });
-  }
-  return next({ ctx });
-});
+const operatorProcedure = activeWorkerProcedure;
+const workerMutation = operatorProcedure;
 
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
   if (!value) return fallback;
@@ -132,6 +121,10 @@ const dailyPlanPayloadSchema = z.object({
   })),
 });
 
+const dailyPlanUpdatePayloadSchema = dailyPlanPayloadSchema.extend({
+  expectedPlanVersion: z.string().length(64).nullable(),
+});
+
 export const operatorRouter = router({
   getManagerReviewInbox: managerReviewer.input(managerReviewInboxInputSchema.optional())
     .query(({ ctx, input }) => getManagerReviewInbox(ctx.user.id, input?.vaId, input?.page)),
@@ -150,18 +143,38 @@ export const operatorRouter = router({
   runManagerForReview: managerReviewer.input(z.object({ vaId: z.number().int().positive() }))
     .mutation(({ input }) => runManager(input.vaId, "founder_review")),
   getManagerStatus: operatorProcedure.query(async ({ ctx }) => {
-    return toWorkerManagerStatus(await getManagerStatus(Number(ctx.user.id)));
+    const status = await getManagerStatus(Number(ctx.user.id));
+    return { ...toWorkerManagerStatus(status), expectedRunId: status.snapshot?.runId ?? null };
   }),
   runManager: workerMutation.input(z.object({ trigger: z.enum(["manual", "worker_update"]).optional() }).optional())
     .mutation(async ({ ctx, input }) => ({ applied: (await runManager(Number(ctx.user.id), input?.trigger ?? "manual")).applied })),
-  updateManagerPolicy: workerMutation.input(z.object({ enabled: z.boolean(), intervalMinutes: z.number().int().min(1).max(60) }).strict())
-    .mutation(({ ctx, input }) => updateManagerPolicy(Number(ctx.user.id), input)),
+  updateManagerPolicy: managerReviewer.input(z.object({
+    vaId: z.number().int().positive(),
+    enabled: z.boolean(),
+    intervalMinutes: z.number().int().min(1).max(60),
+  }).strict())
+    .mutation(({ input }) => {
+      const { vaId, ...policy } = input;
+      return updateManagerPolicy(vaId, policy);
+    }),
   submitManagerUpdate: workerMutation.input(z.object({
     cardId: z.string().min(1), detail: z.string().trim().min(3).max(8000), interventionId: z.string().optional(),
+    requestKey: z.string().uuid().optional(),
+    expectedRunId: z.number().int().positive().max(2_147_483_647),
     outcome: z.enum(["Update", "Action needed", "No action needed", "Cannot access source", "Need Robert's decision"]).optional(),
     deadlineDate: z.string().optional(), sourceEvidenceId: z.string().optional(), sourceDescription: z.string().trim().max(512).optional(),
   }).strict())
-    .mutation(async ({ ctx, input }) => ({ applied: (await submitManagerUpdate(Number(ctx.user.id), input.cardId, input.detail, input.interventionId, input)).applied })),
+    .mutation(async ({ ctx, input }) => {
+      try {
+        const result = await submitManagerUpdate(Number(ctx.user.id), input.cardId, input.detail, input.interventionId, input);
+        return { applied: result.applied, reportId: result.reportId, alreadyRecorded: result.alreadyRecorded };
+      } catch (error) {
+        if (error instanceof ManagerUpdateSubmissionError) {
+          throw new TRPCError({ code: error.code, message: error.message });
+        }
+        throw error;
+      }
+    }),
   reportManagerActionCompletion: workerMutation.input(z.object({
     cardId: z.string().trim().min(1).max(64), actionId: z.string().trim().min(1).max(256),
     detail: z.string().trim().min(3).max(8000), requestKey: z.string().uuid(),
@@ -518,25 +531,43 @@ export const operatorRouter = router({
     .query(async ({ input, ctx }) => {
       const worker = await resolveWorkerOperatorContext(ctx.user);
       const plan = await getOperatorDailyPlan(worker.userId, input?.dateKey, worker);
-      return plan ? { ...plan, planVersion: managerPlanVersion(plan.scheduleJson) } : null;
+      return toWorkerOperatorDailyPlan(plan);
     }),
+  getDailyPlanEditingPolicy: operatorProcedure.query(({ ctx }) => ({
+    editable: !isManagerPilotWorker(Number(ctx.user.id)),
+  })),
   generateDailyPlan: workerMutation
     .input(z.object({
       dateKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
       force: z.boolean().default(false),
     }).optional())
     .mutation(async ({ input, ctx }) => {
+      if (isManagerPilotWorker(Number(ctx.user.id))) assertManagerPlanMutationAllowed(Number(ctx.user.id));
       const worker = await resolveWorkerOperatorContext(ctx.user);
-      return generateOperatorDailyPlan(worker.userId, input?.dateKey, input?.force ?? false, worker);
+      try {
+        const plan = await generateOperatorDailyPlan(worker.userId, input?.dateKey, input?.force ?? false, worker);
+        return toWorkerOperatorDailyPlan(plan);
+      } catch (error) {
+        if (error instanceof OperatorDailyPlanConflictError) {
+          throw new TRPCError({ code: "CONFLICT", message: error.message });
+        }
+        throw error;
+      }
     }),
   updateDailyPlan: workerMutation
-    .input(dailyPlanPayloadSchema)
+    .input(dailyPlanUpdatePayloadSchema)
     .mutation(async ({ input, ctx }) => {
+      if (isManagerPilotWorker(Number(ctx.user.id))) assertManagerPlanMutationAllowed(Number(ctx.user.id));
       try {
-        return await updateOperatorDailyPlan(Number(ctx.user.id), input as OperatorDailyPlanPayload);
+        const { expectedPlanVersion, ...payload } = input;
+        const plan = await updateOperatorDailyPlan(Number(ctx.user.id), payload as OperatorDailyPlanPayload, expectedPlanVersion);
+        return toWorkerOperatorDailyPlan(plan);
       } catch (error) {
         if (error instanceof OperatorDailyPlanScopeError) {
           throw new TRPCError({ code: "FORBIDDEN", message: error.message });
+        }
+        if (error instanceof OperatorDailyPlanConflictError) {
+          throw new TRPCError({ code: "CONFLICT", message: error.message });
         }
         throw error;
       }

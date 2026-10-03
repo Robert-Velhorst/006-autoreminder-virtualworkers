@@ -40,11 +40,32 @@ describe("production configuration", () => {
       "JWT_SECRET must contain at least 32 characters",
       "TRELLO_API_KEY is required",
       "TRELLO_TOKEN is required",
-      "OPENAI_API_KEY is required",
       "HOST must bind to a non-loopback interface in production",
       "PUBLIC_URL, WEBHOOK_BASE_URL, or APP_URL must provide an HTTPS public origin in production",
       "LOCAL_AUTH_BYPASS cannot be enabled in production",
     ]);
+  });
+
+  it.each([undefined, "", "  ", "codex-subscription", " codex-subscription "])(
+    "does not require a paid API key for subscription mode (%s)", provider => {
+      const env = { ...validProductionEnvironment, OPENAI_API_KEY: "", APTLSS_MANAGER_PROVIDER: provider };
+      expect(getProductionConfigurationErrors(env)).toEqual([]);
+      expect(() => assertProductionConfiguration(env)).not.toThrow();
+    },
+  );
+
+  it.each([undefined, "", "  "])("requires a nonempty key when the paid provider is explicitly selected (%s)", key => {
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment, APTLSS_MANAGER_PROVIDER: " openai-api ", OPENAI_API_KEY: key,
+    })).toEqual(["OPENAI_API_KEY is required"]);
+  });
+
+  it("accepts an explicitly configured API provider and rejects unknown providers without leaking their values", () => {
+    expect(getProductionConfigurationErrors({ ...validProductionEnvironment, APTLSS_MANAGER_PROVIDER: "openai-api" })).toEqual([]);
+    const env = { ...validProductionEnvironment, APTLSS_MANAGER_PROVIDER: "invalid-private-value" };
+    expect(getProductionConfigurationErrors(env)).toEqual(["APTLSS_MANAGER_PROVIDER must be codex-subscription or openai-api"]);
+    expect(() => assertProductionConfiguration(env)).toThrow("APTLSS_MANAGER_PROVIDER must be codex-subscription or openai-api");
+    expect(() => assertProductionConfiguration(env)).not.toThrow("invalid-private-value");
   });
 
   it("rejects a Vercel request-only production runtime", () => {

@@ -12,7 +12,20 @@ export type ScheduledJobWorkResult = {
 
 export type ScheduledJobResult =
   | { state: "success"; runId: number; recordsProcessed: number }
-  | { state: "skipped"; reason: "already_succeeded" | "lease_held" };
+  | { state: "skipped"; reason: "already_succeeded" | "lease_held" | "not_due" };
+
+export class ScheduledJobLeaseLostError extends Error {
+  constructor() { super("Scheduled job lease is no longer owned or has expired"); this.name = "ScheduledJobLeaseLostError"; }
+}
+
+export type ScheduledJobDatabase = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+export type ScheduledJobTransaction = Parameters<Parameters<ScheduledJobDatabase["transaction"]>[0]>[0];
+export type ScheduledJobOwnershipReader = Pick<ScheduledJobDatabase, "select">;
+
+export type ScheduledJobContext = {
+  signal: AbortSignal;
+  assertOwnership: (transaction?: ScheduledJobOwnershipReader) => Promise<void>;
+};
 
 function insertId(result: unknown) {
   if (Array.isArray(result)) return Number((result[0] as { insertId?: unknown } | undefined)?.insertId ?? 0);
@@ -31,15 +44,17 @@ export async function runScheduledJob(
     trigger?: ScheduledJobTrigger;
     leaseMs?: number;
     skipIfSuccessful?: boolean;
+    shouldRun?: (context: ScheduledJobContext, transaction: ScheduledJobTransaction) => Promise<boolean>;
   },
-  work: () => Promise<ScheduledJobWorkResult | void>,
+  work: (context: ScheduledJobContext) => Promise<ScheduledJobWorkResult | void>,
 ): Promise<ScheduledJobResult> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable for scheduled job execution");
 
   const jobKey = cleanJobKey(input.jobKey);
   const trigger = input.trigger ?? "cron";
-  const leaseMs = Math.min(60 * 60_000, Math.max(30_000, input.leaseMs ?? 10 * 60_000));
+  if (input.leaseMs !== undefined && !Number.isFinite(input.leaseMs)) throw new Error("Scheduled job lease duration must be finite");
+  const leaseMs = Math.round(Math.min(60 * 60_000, Math.max(30_000, input.leaseMs ?? 10 * 60_000)));
   const skipIfSuccessful = input.skipIfSuccessful ?? true;
 
   if (skipIfSuccessful) {
@@ -53,86 +68,109 @@ export async function runScheduledJob(
 
   const now = new Date();
   const ownerToken = randomBytes(24).toString("hex");
-  const leaseExpiresAt = new Date(now.getTime() + leaseMs);
+  // Every server uses the database clock for ownership, not its own wall clock.
+  const databaseNow = sql`CURRENT_TIMESTAMP`;
+  const leaseExpiry = sql`TIMESTAMPADD(MICROSECOND, ${leaseMs * 1000}, CURRENT_TIMESTAMP)`;
   await db.execute(sql`
     INSERT INTO ${scheduledJobLeases} (${scheduledJobLeases.jobKey}, ${scheduledJobLeases.ownerToken}, ${scheduledJobLeases.acquiredAt}, ${scheduledJobLeases.heartbeatAt}, ${scheduledJobLeases.leaseExpiresAt})
-    VALUES (${jobKey}, ${ownerToken}, ${now}, ${now}, ${leaseExpiresAt})
+    VALUES (${jobKey}, ${ownerToken}, ${databaseNow}, ${databaseNow}, ${leaseExpiry})
     ON DUPLICATE KEY UPDATE
-      ${scheduledJobLeases.ownerToken} = IF(${scheduledJobLeases.leaseExpiresAt} <= ${now}, VALUES(${scheduledJobLeases.ownerToken}), ${scheduledJobLeases.ownerToken}),
-      ${scheduledJobLeases.acquiredAt} = IF(${scheduledJobLeases.leaseExpiresAt} <= ${now}, VALUES(${scheduledJobLeases.acquiredAt}), ${scheduledJobLeases.acquiredAt}),
-      ${scheduledJobLeases.heartbeatAt} = IF(${scheduledJobLeases.leaseExpiresAt} <= ${now}, VALUES(${scheduledJobLeases.heartbeatAt}), ${scheduledJobLeases.heartbeatAt}),
-      ${scheduledJobLeases.leaseExpiresAt} = IF(${scheduledJobLeases.leaseExpiresAt} <= ${now}, VALUES(${scheduledJobLeases.leaseExpiresAt}), ${scheduledJobLeases.leaseExpiresAt})
+      ${scheduledJobLeases.ownerToken} = IF(${scheduledJobLeases.leaseExpiresAt} <= ${databaseNow}, VALUES(${scheduledJobLeases.ownerToken}), ${scheduledJobLeases.ownerToken}),
+      ${scheduledJobLeases.acquiredAt} = IF(${scheduledJobLeases.leaseExpiresAt} <= ${databaseNow}, VALUES(${scheduledJobLeases.acquiredAt}), ${scheduledJobLeases.acquiredAt}),
+      ${scheduledJobLeases.heartbeatAt} = IF(${scheduledJobLeases.leaseExpiresAt} <= ${databaseNow}, VALUES(${scheduledJobLeases.heartbeatAt}), ${scheduledJobLeases.heartbeatAt}),
+      ${scheduledJobLeases.leaseExpiresAt} = IF(${scheduledJobLeases.leaseExpiresAt} <= ${databaseNow}, VALUES(${scheduledJobLeases.leaseExpiresAt}), ${scheduledJobLeases.leaseExpiresAt})
   `);
 
-  const [lease] = await db.select({ ownerToken: scheduledJobLeases.ownerToken })
-    .from(scheduledJobLeases)
-    .where(eq(scheduledJobLeases.jobKey, jobKey))
-    .limit(1);
-  if (lease?.ownerToken !== ownerToken) return { state: "skipped", reason: "lease_held" };
-
-  const runResult = await db.insert(scheduledJobRuns).values({
-    jobKey,
-    trigger,
-    status: "running",
-    startedAt: now,
-  });
-  const runId = insertId(runResult);
-  if (!runId) {
-    await db.delete(scheduledJobLeases).where(and(
-      eq(scheduledJobLeases.jobKey, jobKey),
-      eq(scheduledJobLeases.ownerToken, ownerToken),
-    ));
-    throw new Error("Scheduled job run could not be recorded");
-  }
-
-  let heartbeatRunning = false;
+  let runId = 0;
+  const controller = new AbortController();
+  const ownershipCondition = and(eq(scheduledJobLeases.jobKey, jobKey),
+    eq(scheduledJobLeases.ownerToken, ownerToken), sql`${scheduledJobLeases.leaseExpiresAt} > CURRENT_TIMESTAMP`);
+  const assertOwnership = async (transaction?: ScheduledJobOwnershipReader) => {
+    if (controller.signal.aborted) throw new ScheduledJobLeaseLostError();
+    const query = (transaction ?? db).select({ jobKey: scheduledJobLeases.jobKey }).from(scheduledJobLeases)
+      .where(ownershipCondition).limit(1);
+    // A current locking read uses the transaction's own connection and retains
+    // ownership through its commit, rather than exhausting a second pool slot.
+    const [owned] = await (transaction ? query.for("share") : query);
+    if (!owned || controller.signal.aborted) { controller.abort(); throw new ScheduledJobLeaseLostError(); }
+  };
+  let heartbeatPending: Promise<void> | undefined;
+  let heartbeatTimer: NodeJS.Timeout | undefined;
   const heartbeatEveryMs = Math.min(60_000, Math.max(10_000, Math.floor(leaseMs / 3)));
-  const heartbeatTimer = setInterval(() => {
-    if (heartbeatRunning) return;
-    heartbeatRunning = true;
-    const heartbeatAt = new Date();
-    void db.update(scheduledJobLeases).set({
-      heartbeatAt,
-      leaseExpiresAt: new Date(heartbeatAt.getTime() + leaseMs),
-    }).where(and(
-      eq(scheduledJobLeases.jobKey, jobKey),
-      eq(scheduledJobLeases.ownerToken, ownerToken),
-    )).catch((error) => {
-      console.error(`[ScheduledJob] Lease heartbeat failed for ${jobKey}`, error);
-    }).finally(() => {
-      heartbeatRunning = false;
-    });
-  }, heartbeatEveryMs);
-  heartbeatTimer.unref?.();
-
   try {
-    const result = await work();
+    const [lease] = await db.select({ ownerToken: scheduledJobLeases.ownerToken })
+      .from(scheduledJobLeases).where(eq(scheduledJobLeases.jobKey, jobKey)).limit(1);
+    if (lease?.ownerToken !== ownerToken) return { state: "skipped", reason: "lease_held" };
+    // A contender may have checked success before the previous owner finished.
+    // Once this lease is held, repeat that check before recording or doing work.
+    if (skipIfSuccessful) {
+      const [completed] = await db.select({ id: scheduledJobRuns.id }).from(scheduledJobRuns)
+        .where(and(eq(scheduledJobRuns.jobKey, jobKey), eq(scheduledJobRuns.status, "success"))).limit(1);
+      if (completed) return { state: "skipped", reason: "already_succeeded" };
+    }
+    const runResult = await db.transaction(async tx => {
+      const [owned] = await tx.select({ jobKey: scheduledJobLeases.jobKey }).from(scheduledJobLeases)
+        .where(ownershipCondition).limit(1).for("update");
+      if (!owned) throw new ScheduledJobLeaseLostError();
+      if (input.shouldRun) {
+        const context = { signal: controller.signal,
+          assertOwnership: (reader: ScheduledJobOwnershipReader = tx) => assertOwnership(reader) };
+        if (!await input.shouldRun(context, tx)) return null;
+        await assertOwnership(tx);
+      }
+      await tx.update(scheduledJobRuns).set({ status: "abandoned", finishedAt: databaseNow,
+        errorMessage: "Previous owner interrupted; task outcome is not verified.",
+      }).where(and(eq(scheduledJobRuns.jobKey, jobKey), eq(scheduledJobRuns.status, "running")));
+      return tx.insert(scheduledJobRuns).values({ jobKey, trigger, status: "running", startedAt: databaseNow });
+    });
+    if (!runResult) return { state: "skipped", reason: "not_due" };
+    runId = insertId(runResult);
+    if (!runId) throw new Error("Scheduled job run could not be recorded");
+    await assertOwnership();
+    heartbeatTimer = setInterval(() => {
+      if (heartbeatPending || controller.signal.aborted) return;
+      heartbeatPending = db.update(scheduledJobLeases).set({ heartbeatAt: databaseNow, leaseExpiresAt: leaseExpiry })
+        .where(ownershipCondition).then(result => {
+          const header = Array.isArray(result) ? result[0] : result;
+          if (Number((header as { affectedRows?: number }).affectedRows) !== 1) controller.abort();
+        }).catch(() => {
+          controller.abort();
+          console.warn("[ScheduledJob] Lease renewal unavailable; ownership must be re-established");
+        }).finally(() => { heartbeatPending = undefined; });
+    }, heartbeatEveryMs);
+    heartbeatTimer.unref?.();
+    const result = await work({ signal: controller.signal, assertOwnership });
     const finishedAt = new Date();
     const recordsProcessed = Math.max(0, Math.round(result?.recordsProcessed ?? 0));
-    await db.update(scheduledJobRuns).set({
-      status: "success",
-      finishedAt,
-      durationMs: Math.max(0, finishedAt.getTime() - now.getTime()),
-      recordsProcessed,
-      detail: result?.detail?.slice(0, 8_000) ?? null,
-      errorMessage: null,
-    }).where(eq(scheduledJobRuns.id, runId));
+    // Lock ownership through the success write: an expired owner cannot claim
+    // completion, and a replacement owner cannot be released by this run.
+    await db.transaction(async tx => {
+      const [owned] = await tx.select({ jobKey: scheduledJobLeases.jobKey }).from(scheduledJobLeases)
+        .where(ownershipCondition).limit(1).for("update");
+      if (!owned || controller.signal.aborted) throw new ScheduledJobLeaseLostError();
+      await tx.update(scheduledJobRuns).set({ status: "success", finishedAt: databaseNow,
+        durationMs: Math.max(0, finishedAt.getTime() - now.getTime()), recordsProcessed,
+        detail: result?.detail?.slice(0, 8_000) ?? null, errorMessage: null,
+      }).where(and(eq(scheduledJobRuns.id, runId), eq(scheduledJobRuns.status, "running")));
+    });
     return { state: "success", runId, recordsProcessed };
   } catch (error) {
     const finishedAt = new Date();
     const message = error instanceof Error ? error.message : "Unknown scheduled job failure";
-    await db.update(scheduledJobRuns).set({
+    if (runId) await db.update(scheduledJobRuns).set({
       status: "error",
-      finishedAt,
+      finishedAt: databaseNow,
       durationMs: Math.max(0, finishedAt.getTime() - now.getTime()),
       errorMessage: message.slice(0, 8_000),
-    }).where(eq(scheduledJobRuns.id, runId));
+    }).where(and(eq(scheduledJobRuns.id, runId), eq(scheduledJobRuns.status, "running")))
+      .catch(() => { console.warn("[ScheduledJob] Could not record task failure; retained run needs reconciliation"); });
     throw error;
   } finally {
-    clearInterval(heartbeatTimer);
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (heartbeatPending) await heartbeatPending;
     await db.delete(scheduledJobLeases).where(and(
       eq(scheduledJobLeases.jobKey, jobKey),
       eq(scheduledJobLeases.ownerToken, ownerToken),
-    ));
+    )).catch(() => { console.warn("[ScheduledJob] Could not release owned lease; expiry will permit recovery"); });
   }
 }

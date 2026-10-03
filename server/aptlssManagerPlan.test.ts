@@ -92,6 +92,10 @@ function saved(blocks: OperatorPlanBlock[]): OperatorDailyPlanPayload {
     version: 2,
     dateKey: "2026-09-04",
     generatedAt: "2026-09-04T06:00:00Z",
+    planningImpact: {
+      timezone: worker.timezone,
+      deadlines: [],
+    } as NonNullable<OperatorDailyPlanPayload["planningImpact"]>,
     blocks,
     robertItems: [],
     unscheduledCards: [],
@@ -130,6 +134,65 @@ function run(
 }
 
 describe("reconcileManagerPlan", () => {
+  it.each([0, -5])("does not schedule a %i-minute action estimate", estimate => {
+    const { plan } = run([
+      action("invalid-duration", {
+        minutes: {
+          low: estimate,
+          likely: estimate,
+          high: estimate,
+          samples: 0,
+          basis: "test",
+        },
+      }),
+    ]);
+
+    expect(plan.blocks).toEqual([]);
+    expect(plan.unscheduledCards).toEqual([
+      expect.objectContaining({
+        cardId: "invalid-duration",
+        reason: expect.stringMatching(/invalid duration estimate/i),
+      }),
+    ]);
+  });
+
+  it.each([0, -5])(
+    "uses the fallback reservation for an overrun with a %i-minute estimate",
+    estimate => {
+      const active = block("running", { status: "active" });
+      const { plan } = run(
+        [
+          action("running", {
+            minutes: {
+              low: estimate,
+              likely: estimate,
+              high: estimate,
+              samples: 0,
+              basis: "test",
+            },
+          }),
+          action("next"),
+        ],
+        {
+          existing: saved([active]),
+          activeTimer: { cardId: "running", planBlockId: "running" },
+        }
+      );
+
+      expect(plan.planningImpact.buffer.reservations).toContainEqual(
+        expect.objectContaining({
+          blockId: "running",
+          startTime: "10:00",
+          endTime: "10:30",
+          basis: "planner_fallback_30_minutes",
+        })
+      );
+      expect(plan.blocks.find(item => item.cardId === "next")?.startTime).toBe(
+        "10:30"
+      );
+    }
+  );
+
   it("reserves the remaining estimate for an overrunning timer without rewriting its block", () => {
     const active = block("a", { status: "active" });
     const { plan } = run([action("a"), action("b")], {
@@ -469,6 +532,22 @@ describe("planning reliability regressions", () => {
     );
   });
 
+  it("does not schedule a same-source-date follow-up whose worker-local date is tomorrow", () => {
+    const { plan } = run(
+      [
+        action("tomorrow", {
+          kind: "follow_up",
+          notBefore: "2026-09-04T23:30:00-05:00",
+        }),
+      ],
+      { worker: { ...worker, workingDays: [0, 1, 2, 3, 4, 5, 6] } }
+    );
+
+    expect(plan.dateKey).toBe("2026-09-04");
+    expect(plan.blocks).toEqual([]);
+    expect(plan.unscheduledCards[0].reason).toMatch(/after today/i);
+  });
+
   it.each([
     "",
     "bad date",
@@ -500,7 +579,7 @@ describe("planning reliability regressions", () => {
       "Europe/Amsterdam",
       "2026-10-25T00:45:00Z",
       "2026-10-25T01:15:00Z",
-      "02:45",
+      "03:00",
     ],
     [
       "America/New_York",
@@ -526,6 +605,23 @@ describe("planning reliability regressions", () => {
       expect(plan.blocks[0].endTime > plan.blocks[0].startTime).toBe(true);
     }
   );
+
+  it("does not schedule work at an ambiguous fall-back clock time", () => {
+    const { plan } = run([action("a")], {
+      now: new Date("2026-10-25T00:30:00Z"), // 02:30 CEST, first occurrence.
+      worker: {
+        ...worker,
+        workingDays: [0],
+        workStartTime: "02:00",
+        workEndTime: "04:00",
+      },
+    });
+
+    expect(plan.blocks[0]).toMatchObject({
+      startTime: "03:00",
+      endTime: "03:30",
+    });
+  });
 
   it("does not invent a spring-forward clock time or shorten the estimated duration", () => {
     const { plan } = run([action("a")], {
@@ -571,6 +667,29 @@ describe("planning reliability regressions", () => {
     }
   );
 
+  it("schedules uncovered steps when a preserved block covers only part of an action", () => {
+    const preservedStep = block("combined", {
+      cardId: "a",
+      stepIds: [1],
+      status: "done",
+    });
+    const { plan } = run(
+      [action("combined", { cardId: "a", stepIds: [1, 2] })],
+      { existing: saved([preservedStep]) }
+    );
+
+    expect(plan.blocks).toHaveLength(2);
+    expect(plan.blocks[0]).toEqual(preservedStep);
+    expect(plan.blocks[1]).toMatchObject({
+      id: "combined::remaining::2",
+      cardId: "a",
+      stepIds: [2],
+      status: "planned",
+    });
+    expect(new Set(plan.blocks.map(item => item.id)).size).toBe(2);
+    expect(plan.unscheduledCards).toEqual([]);
+  });
+
   it("does not protect another card with the same numeric step id", () => {
     const { plan } = run([action("b", { stepIds: [1] })], {
       existing: saved([block("a", { stepIds: [1], status: "done" })]),
@@ -582,8 +701,9 @@ describe("planning reliability regressions", () => {
     const kept = block("timer", {
       cardId: "a",
       stepIds: [1],
-      startTime: "11:00",
-      endTime: "11:30",
+      status: "active",
+      startTime: "09:30",
+      endTime: "10:30",
     });
     const { plan } = run([action("later", { cardId: "a", stepIds: [2] })], {
       existing: saved([
@@ -596,22 +716,93 @@ describe("planning reliability regressions", () => {
       ]),
       activeTimer: { cardId: "a", planBlockId: "timer" },
     });
-    expect(plan.blocks.map(b => b.id)).toEqual(["later", "timer"]);
+    expect(plan.blocks.map(b => b.id)).toEqual(["timer", "later"]);
     expect(plan.blocks.find(b => b.id === "timer")).toEqual(kept);
   });
 
-  it("does not fall back to card identity when the explicit timer block id is missing", () => {
+  it("does not propose new work when the explicit timer block id is missing", () => {
+    const existing = saved([
+      block("obsolete", {
+        cardId: "a",
+        startTime: "11:00",
+        endTime: "12:00",
+      }),
+    ]);
     const { plan } = run([action("new", { cardId: "a" })], {
-      existing: saved([
-        block("obsolete", {
-          cardId: "a",
-          startTime: "11:00",
-          endTime: "12:00",
-        }),
-      ]),
+      existing,
       activeTimer: { cardId: "a", planBlockId: "missing" },
     });
-    expect(plan.blocks.map(b => b.id)).toEqual(["new"]);
+    expect(plan.blocks.some(b => b.id === "new")).toBe(false);
+    expect(plan.unscheduledCards).toContainEqual(
+      expect.objectContaining({
+        cardId: "a",
+        reason: expect.stringMatching(/active timer/i),
+      })
+    );
+    expect(plan.planningImpact.risks).toContainEqual(
+      expect.objectContaining({
+        code: "active_timer_unmapped",
+        subjectId: "missing",
+        requiresReview: true,
+      })
+    );
+    expect(plan.planningImpact.requiresReview).toBe(true);
+    expect(existing.blocks[0].id).toBe("obsolete");
+  });
+
+  it("does not propose new work when the timer points to a future plan block", () => {
+    const futureTimerBlock = block("timer", {
+      cardId: "a",
+      startTime: "11:00",
+      endTime: "11:30",
+    });
+    const existing = saved([futureTimerBlock]);
+    const { plan } = run([action("new", { cardId: "b" })], {
+      existing,
+      activeTimer: { cardId: "a", planBlockId: "timer" },
+    });
+
+    expect(plan.blocks.some(b => b.id === "new")).toBe(false);
+    expect(plan.blocks.find(b => b.id === "timer")).toEqual(futureTimerBlock);
+    expect(plan.unscheduledCards).toContainEqual(
+      expect.objectContaining({
+        cardId: "b",
+        reason: expect.stringMatching(/active timer/i),
+      })
+    );
+    expect(plan.planningImpact.risks).toContainEqual(
+      expect.objectContaining({
+        code: "active_timer_unmapped",
+        subjectId: "timer",
+        requiresReview: true,
+      })
+    );
+    expect(plan.planningImpact.requiresReview).toBe(true);
+    expect(existing.blocks).toEqual([futureTimerBlock]);
+  });
+
+  it.each([
+    ["skipped", block("timer", { cardId: "a", status: "skipped" })],
+    ["different card", block("timer", { cardId: "other" })],
+    ["invalid interval", block("timer", { cardId: "a", startTime: "09:30", endTime: "09:00" })],
+  ])("does not schedule new work against an unusable active timer block (%s)", (_case, preservedBlock) => {
+    const existing = saved([preservedBlock]);
+    const { plan } = run([action("new", { cardId: "b" })], {
+      existing,
+      activeTimer: { cardId: "a", planBlockId: "timer" },
+    });
+
+    expect(plan.blocks.some(item => item.id === "new")).toBe(false);
+    expect(plan.blocks.find(item => item.id === "timer")).toEqual(preservedBlock);
+    expect(plan.unscheduledCards).toContainEqual(
+      expect.objectContaining({
+        cardId: "b",
+        reason: expect.stringMatching(/active timer/i),
+      })
+    );
+    expect(plan.planningImpact.risks).toContainEqual(
+      expect.objectContaining({ code: "active_timer_unmapped", requiresReview: true })
+    );
   });
 
   it("card-only timer fallback selects one block, not all future blocks", () => {
@@ -636,7 +827,7 @@ describe("planning reliability regressions", () => {
     expect(plan.blocks[1].startTime).toBe("10:30");
   });
 
-  it("does not link null timer card ids to every cardless block", () => {
+  it("does not infer a timer association from null card and plan-block ids", () => {
     const { plan } = run([action("a")], {
       existing: saved([
         block("obsolete", {
@@ -647,7 +838,13 @@ describe("planning reliability regressions", () => {
       ]),
       activeTimer: { cardId: null, planBlockId: null },
     });
-    expect(plan.blocks.map(b => b.id)).toEqual(["a"]);
+    expect(plan.blocks.some(b => b.id === "a")).toBe(false);
+    expect(plan.planningImpact.risks).toContainEqual(
+      expect.objectContaining({
+        code: "active_timer_unmapped",
+        requiresReview: true,
+      })
+    );
   });
 
   it.each(["active", "skipped", "planned"] as const)(
@@ -913,6 +1110,38 @@ describe("planning reliability regressions", () => {
     ).toMatch(/dependenc.*complet/i);
   });
 
+  it("does not treat a step-less done block as completion of a multi-step prerequisite", () => {
+    const { plan } = run(
+      [
+        action("previous", { cardId: "a", stepIds: [1, 2] }),
+        action("next", { dependsOn: ["previous"] }),
+      ],
+      {
+        cards: [
+          card("a", { steps: [step(1, { complete: true }), step(2)] }),
+          card("next"),
+        ],
+        existing: saved([
+          block("previous", { cardId: "a", status: "done", stepIds: [] }),
+        ]),
+      }
+    );
+
+    expect(plan.blocks.map(item => item.id)).toEqual([
+      "previous",
+      "previous::remaining::2",
+    ]);
+    expect(
+      plan.blocks.find(item => item.id === "previous::remaining::2")?.stepIds
+    ).toEqual([2]);
+    expect(plan.unscheduledCards).toContainEqual(
+      expect.objectContaining({
+        cardId: "next",
+        reason: expect.stringMatching(/dependenc.*complet/i),
+      })
+    );
+  });
+
   it("accepts done step evidence even when the dependency action id changed", () => {
     const { plan } = run(
       [
@@ -936,6 +1165,29 @@ describe("planning reliability regressions", () => {
       ],
     });
     expect(plan.blocks.map(b => b.id)).toEqual(["next"]);
+  });
+
+  it("does not satisfy an incomplete step dependency from another card's numeric block id", () => {
+    const { plan } = run(
+      [action("next", { cardId: "a", stepIds: [2] })],
+      {
+        cards: [
+          card("a", { steps: [step(1), step(2, { dependsOn: ["1"] })] }),
+          card("other"),
+        ],
+        existing: saved([
+          block("1", { cardId: "other", stepIds: [99], status: "done" }),
+        ]),
+      }
+    );
+
+    expect(plan.blocks.map(item => item.id)).toEqual(["1"]);
+    expect(plan.unscheduledCards).toContainEqual(
+      expect.objectContaining({
+        cardId: "a",
+        reason: expect.stringMatching(/dependency 1 must be completed/i),
+      })
+    );
   });
 
   it("does not claim today's future work completed from a different card's step", () => {
@@ -1124,6 +1376,33 @@ describe("manager planning impact preflight", () => {
     expect(plan.planningImpact.requiresReview).toBe(false);
   });
 
+  it("does not treat a deadline as due today when its full offset instant is tomorrow for the worker", () => {
+    const { plan } = run(
+      [
+        action("tomorrow", {
+          minutes: {
+            low: 600,
+            likely: 600,
+            high: 600,
+            basis: "estimate",
+            samples: 0,
+          },
+        }),
+      ],
+      {
+        cards: [
+          card("tomorrow", { dueAt: "2026-09-04T20:00:00-05:00" }),
+        ],
+      }
+    );
+
+    expect(plan.planningImpact.deadlines[0].after.status).toBe("unscheduled");
+    expect(
+      plan.planningImpact.risks.find(risk => risk.code === "deadline_unscheduled")
+    ).toMatchObject({ requiresReview: false });
+    expect(plan.planningImpact.requiresReview).toBe(false);
+  });
+
   it("requires review when unfinished work due today has no slot", () => {
     const { plan } = run(
       [
@@ -1147,6 +1426,47 @@ describe("manager planning impact preflight", () => {
     ).toBe(true);
     expect(plan.planningImpact.requiresReview).toBe(true);
   });
+
+  it.each([
+    [
+      "UTC date is today but worker-local date is tomorrow",
+      "2026-09-04T22:30:00Z",
+      false,
+    ],
+    [
+      "UTC date is yesterday but worker-local date is today",
+      "2026-09-03T22:30:00Z",
+      true,
+    ],
+  ])(
+    "classifies deadline urgency by the full instant and worker timezone: %s",
+    (_, dueAt, requiresReview) => {
+      const { plan } = run(
+        [
+          action("boundary", {
+            minutes: {
+              low: 60,
+              likely: 600,
+              high: 660,
+              samples: 0,
+              basis: "test",
+            },
+          }),
+        ],
+        { cards: [card("boundary", { dueAt })] }
+      );
+
+      expect(plan.planningImpact.deadlines[0]).toMatchObject({
+        dueAt,
+        after: { status: "unscheduled" },
+      });
+      expect(
+        plan.planningImpact.risks.find(
+          risk => risk.code === "deadline_unscheduled"
+        )?.requiresReview
+      ).toBe(requiresReview);
+    }
+  );
 
   it("discloses inherited unknown estimates without blanket-blocking safe additions", () => {
     const { plan } = run([action("a")], {
@@ -1238,6 +1558,202 @@ describe("manager planning impact preflight", () => {
       inputPath: "cards[1]",
       value: { dueAt: "2026-09-04T08:45:00Z" },
     });
+  });
+
+  it("detects a same-day timezone change that moves a retained slot past its deadline", () => {
+    const actions = [action("deadline-task")];
+    const cards = [card("deadline-task", { dueAt: "2026-09-04T09:00:00Z" })];
+    const protectedBlock = block("already-done", {
+      status: "done",
+      startTime: "09:00",
+      endTime: "09:30",
+    });
+    const initial = run(actions, {
+      cards,
+      existing: saved([protectedBlock]),
+    });
+    expect(
+      initial.plan.blocks.find(item => item.id === "deadline-task")
+    ).toMatchObject({ startTime: "10:00", endTime: "10:30" });
+    expect(initial.plan.planningImpact.deadlines[0].after).toMatchObject({
+      latestScheduledEndAt: "2026-09-04T08:30:00.000Z",
+      status: "within_deadline",
+    });
+
+    const reassessed = run(actions, {
+      cards,
+      existing: initial.plan,
+      worker: { ...worker, timezone: "Europe/London" },
+    });
+    const impact = reassessed.plan.planningImpact;
+
+    expect(impact.scheduleChanged).toBe(true);
+    expect(
+      impact.risks.find(risk => risk.code === "timezone_changed")
+    ).toMatchObject({ requiresReview: true });
+    expect(impact.planChanges).toContainEqual(
+      expect.objectContaining({
+        kind: "updated",
+        blockId: "deadline-task",
+        before: { startTime: "10:00", endTime: "10:30" },
+        after: { startTime: "10:00", endTime: "10:30" },
+        reason: expect.stringMatching(/timezone changed/i),
+      })
+    );
+    expect(
+      reassessed.plan.blocks.find(item => item.id === "already-done")
+    ).toEqual(protectedBlock);
+    expect(impact.protectedBlocks).toContainEqual(
+      expect.objectContaining({
+        blockId: "already-done",
+        preservedExactly: true,
+      })
+    );
+    expect(
+      impact.planChanges?.some(change => change.blockId === "already-done")
+    ).toBe(false);
+    expect(impact.deadlines[0]).toMatchObject({
+      before: {
+        latestScheduledEndAt: "2026-09-04T08:30:00.000Z",
+        status: "within_deadline",
+      },
+      after: {
+        latestScheduledEndAt: "2026-09-04T09:30:00.000Z",
+        status: "after_deadline",
+      },
+      movement: "later",
+    });
+    expect(
+      impact.risks.some(risk => risk.code === "deadline_regression")
+    ).toBe(true);
+    expect(impact.requiresReview).toBe(true);
+  });
+
+  it("does not claim precise deadline timing from a legacy baseline without timezone metadata", () => {
+    const existing = {
+      ...saved([block("a", { startTime: "10:00", endTime: "10:30" })]),
+      planningImpact: undefined,
+    };
+    const { plan } = run([action("a")], {
+      existing,
+      cards: [card("a", { dueAt: "2026-09-04T08:45:00Z" })],
+    });
+
+    expect(plan.planningImpact.scheduleChanged).toBe(true);
+    expect(plan.planningImpact.deadlines[0].before).toMatchObject({
+      latestScheduledEndAt: null,
+      status: "unknown",
+    });
+    expect(
+      plan.planningImpact.risks.find(
+        risk => risk.code === "baseline_timezone_unknown"
+      )
+    ).toMatchObject({ requiresReview: true });
+    expect(plan.planningImpact.requiresReview).toBe(true);
+  });
+
+  it("surfaces a newly advanced deadline even when the retained slot does not move", () => {
+    const actions = [action("deadline-task")];
+    const initial = run(actions, {
+      cards: [card("deadline-task", { dueAt: "2026-10-04T08:00:00Z" })],
+    });
+    expect(
+      initial.plan.planningImpact.deadlines[0].after.status
+    ).toBe("within_deadline");
+
+    const reassessed = run(actions, {
+      existing: initial.plan,
+      cards: [card("deadline-task", { dueAt: "2026-09-04T08:15:00Z" })],
+    });
+    const impact = reassessed.plan.planningImpact;
+
+    expect(reassessed.plan.blocks).toEqual(initial.plan.blocks);
+    expect(impact.deadlines[0]).toMatchObject({
+      dueAt: "2026-09-04T08:15:00Z",
+      before: { status: "after_deadline" },
+      after: { status: "after_deadline" },
+    });
+    expect(
+      impact.risks.find(risk => risk.code === "deadline_overrun")
+        ?.requiresReview
+    ).toBe(true);
+    expect(
+      impact.risks.find(risk => risk.code === "deadline_changed")
+    ).toMatchObject({ requiresReview: true });
+    expect(reassessed.changes.join(" ")).toMatch(/deadline changed/i);
+  });
+
+  it("diffs from the latest saved blocks when an older proposal is stale and schedule inputs change", () => {
+    const actions = [action("deadline-task")];
+    const firstDeadline = "2026-09-04T12:00:00Z";
+    const staleProposal = run(actions, {
+      cards: [card("deadline-task", { dueAt: firstDeadline })],
+    }).plan;
+    expect(staleProposal.blocks[0]).toMatchObject({
+      startTime: "10:00",
+      endTime: "10:30",
+    });
+
+    const currentSavedPlan: OperatorDailyPlanPayload = {
+      ...staleProposal,
+      generatedAt: "2026-09-04T08:05:00Z",
+      blocks: [
+        block("deadline-task", {
+          startTime: "12:00",
+          endTime: "12:30",
+          notes: "Latest worker-saved version",
+        }),
+      ],
+    };
+    const currentDeadline = "2026-09-04T08:15:00Z";
+    const { plan } = run(actions, {
+      existing: currentSavedPlan,
+      cards: [card("deadline-task", { dueAt: currentDeadline })],
+      worker: {
+        ...worker,
+        timezone: "Europe/London",
+        workStartTime: "09:30",
+        breaks: [{ name: "Break", startTime: "12:00", durationMinutes: 30 }],
+      },
+    });
+
+    expect(plan.blocks.find(item => item.id === "deadline-task")).toMatchObject({
+      startTime: "09:30",
+      endTime: "10:00",
+    });
+    expect(plan.planningImpact.scheduleChanged).toBe(true);
+    expect(plan.planningImpact.availabilityChanged).toBe(true);
+    expect(
+      plan.planningImpact.planChanges?.find(
+        change => change.blockId === "deadline-task"
+      )
+    ).toMatchObject({
+      kind: "moved",
+      before: { startTime: "12:00", endTime: "12:30" },
+      after: { startTime: "09:30", endTime: "10:00" },
+      reason: expect.stringMatching(/timezone changed/i),
+    });
+    expect(
+      plan.planningImpact.assumptions.find(item => item.id === "baseline")?.value
+    ).toMatchObject({
+      generatedAt: currentSavedPlan.generatedAt,
+      blocks: [
+        expect.objectContaining({ startTime: "12:00", endTime: "12:30" }),
+      ],
+    });
+    expect(plan.planningImpact.timezone).toBe("Europe/London");
+    expect(plan.planningImpact.risks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "timezone_changed", requiresReview: true }),
+        expect.objectContaining({ code: "deadline_changed", requiresReview: true }),
+      ])
+    );
+    expect(plan.planningImpact.deadlines[0]).toMatchObject({
+      dueAt: currentDeadline,
+      before: { status: "after_deadline" },
+      after: { status: "after_deadline" },
+    });
+    expect(currentSavedPlan.blocks[0].notes).toBe("Latest worker-saved version");
   });
 
   it("does not manufacture deadlines or historical completion from a planned dependency", () => {

@@ -1,5 +1,6 @@
 import sgMail from '@sendgrid/mail';
 import nodemailer, { type Transporter } from 'nodemailer';
+import { ScheduledJobLeaseLostError, type ScheduledJobContext } from '../scheduledJobRuntime';
 import {
   getGoogleMailDeliveryStatus,
   sendGoogleMail,
@@ -32,6 +33,11 @@ interface EmailProviderStatus {
   ready: boolean;
   reason?: string;
 }
+
+export type EmailDeliveryOutcome =
+  | { status: 'sent' }
+  | { status: 'not_sent'; reason: string }
+  | { status: 'uncertain'; reason: string };
 
 let gmailTransporter: Transporter | null = null;
 
@@ -147,40 +153,76 @@ function escapeEmailHtml(value: string) {
   }[character] ?? character));
 }
 
-export async function sendEmail(options: EmailOptions): Promise<boolean> {
-  const status = await getEmailProviderStatus();
+async function assertEmailOwnership(context?: ScheduledJobContext): Promise<void> {
+  if (!context) return;
+  if (context.signal.aborted) throw new ScheduledJobLeaseLostError();
+  await context.assertOwnership();
+  if (context.signal.aborted) throw new ScheduledJobLeaseLostError();
+}
+
+export async function sendEmailWithOutcome(
+  options: EmailOptions,
+  context?: ScheduledJobContext,
+): Promise<EmailDeliveryOutcome> {
+  let status: EmailProviderStatus;
+  try {
+    await assertEmailOwnership(context);
+    status = await getEmailProviderStatus();
+    await assertEmailOwnership(context);
+  } catch (error) {
+    if (error instanceof ScheduledJobLeaseLostError) throw error;
+    console.error('[Email] Provider readiness could not be checked; no send was attempted.');
+    return { status: 'not_sent', reason: 'Email provider readiness could not be checked; no email was sent.' };
+  }
+
   if (!status.ready || !status.provider) {
     console.log(`[Email] Not sent: ${status.reason}`);
-    return false;
+    return { status: 'not_sent', reason: `${status.reason ?? 'Email provider is not ready'}; no email was sent.` };
   }
 
   try {
     const text = options.text || options.html.replace(/<[^>]*>/g, '');
     if (status.provider === 'gmail_api') {
-      await sendGoogleMail({ to: options.to, subject: options.subject, html: options.html, text });
+      const message = { to: options.to, subject: options.subject, html: options.html, text };
+      await assertEmailOwnership(context);
+      if (context) await sendGoogleMail(message, context);
+      else await sendGoogleMail(message);
     } else if (status.provider === 'sendgrid') {
-      await sgMail.send({
+      const message = {
         to: options.to,
         from: SENDGRID_FROM_EMAIL!,
         subject: options.subject,
         html: options.html,
         text,
-      });
+      };
+      await assertEmailOwnership(context);
+      await sgMail.send(message);
     } else {
-      await getGmailTransporter().sendMail({
+      const transporter = getGmailTransporter();
+      const message = {
         to: options.to,
         from: GMAIL_SMTP_USER!,
         subject: options.subject,
         html: options.html,
         text,
-      });
+      };
+      await assertEmailOwnership(context);
+      await transporter.sendMail(message);
     }
     console.log(`[Email] ${status.provider} delivery succeeded: ${options.subject}`);
-    return true;
+    return { status: 'sent' };
   } catch (error) {
+    if (error instanceof ScheduledJobLeaseLostError) throw error;
     console.error(`[Email] ${status.provider} delivery failed:`, error);
-    return false;
+    return {
+      status: 'uncertain',
+      reason: 'The provider did not confirm delivery. Verify the destination before authorizing a retry.',
+    };
   }
+}
+
+export async function sendEmail(options: EmailOptions, context?: ScheduledJobContext): Promise<boolean> {
+  return (await sendEmailWithOutcome(options, context)).status === 'sent';
 }
 
 export async function sendWorkerInvitationEmail({
@@ -424,26 +466,28 @@ export function generateEODReportHtml(data: EODReportData): string {
 
 export async function sendMorningBriefing(
   email: string,
-  data: WorkerBriefingData
+  data: WorkerBriefingData,
+  context?: ScheduledJobContext,
 ): Promise<boolean> {
   const html = generateMorningBriefingHtml(data);
   return sendEmail({
     to: email,
     subject: `☀️ Your Daily Briefing - ${data.date}`,
     html,
-  });
+  }, context);
 }
 
 export async function sendEODReport(
   email: string,
-  data: EODReportData
+  data: EODReportData,
+  context?: ScheduledJobContext,
 ): Promise<boolean> {
   const html = generateEODReportHtml(data);
   return sendEmail({
     to: email,
     subject: `🌙 End of Day Report - ${data.date}`,
     html,
-  });
+  }, context);
 }
 
 export async function validateEmailProvider(): Promise<boolean> {

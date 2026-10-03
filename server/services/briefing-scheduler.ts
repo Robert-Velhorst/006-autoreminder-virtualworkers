@@ -3,7 +3,7 @@ import { taskAssignments, timeEntries, vaProfiles, users } from '../../drizzle/s
 import { and, eq, gte, isNotNull } from 'drizzle-orm';
 import { sendMorningBriefing, sendEODReport } from './email';
 import { dateKeyInTimeZone, dateWindowInTimeZone } from '../../shared/workerTime';
-import { runScheduledJob } from '../scheduledJobRuntime';
+import { runScheduledJob, ScheduledJobLeaseLostError } from '../scheduledJobRuntime';
 import { getBriefingSettings, shouldRunBriefingAt, type BriefingSettings } from '../briefingSettings';
 import { createNonOverlappingRunner } from './non-overlapping-runner';
 
@@ -22,7 +22,7 @@ export function startBriefingScheduler() {
 
   const run = createNonOverlappingRunner(async () => {
     try {
-      await checkAndSendReports();
+      await processScheduledBriefings();
     } catch (error) {
       console.error('[Scheduler] Error in checkAndSendReports:', error);
     }
@@ -44,7 +44,7 @@ export function stopBriefingScheduler() {
   }
 }
 
-async function checkAndSendReports() {
+export async function processScheduledBriefings() {
   const db = await getDb();
   if (!db) return;
 
@@ -116,7 +116,8 @@ async function checkAndSendReports() {
       const dateKey = dateKeyInTimeZone(new Date(), workerTimezone);
 
       if (shouldSendMorning) {
-        await runScheduledJob({ jobKey: `briefing:${worker.userId}:${dateKey}` }, async () => {
+        await runScheduledJob({ jobKey: `briefing:${worker.userId}:${dateKey}` }, async context => {
+          await context.assertOwnership();
           console.log(`[Scheduler] Triggering Morning Briefing for ${worker.name} (${workerTimezone})`);
           const delivered = await sendMorningBriefing(worker.email!, {
             workerName: worker.name,
@@ -124,14 +125,14 @@ async function checkAndSendReports() {
             tasks,
             totalHours: tasks.reduce((sum, task) => sum + task.durationHours, 0),
             highPriorityCount: 0,
-          });
+          }, context);
           if (!delivered) throw new Error("Morning briefing provider did not confirm delivery");
           return { recordsProcessed: tasks.length, detail: `Delivered to worker for ${dateKey}` };
         });
       }
 
       if (shouldSendEod && founder[0].email) {
-        await runScheduledJob({ jobKey: `eod-report:${worker.userId}:${dateKey}` }, async () => {
+        await runScheduledJob({ jobKey: `eod-report:${worker.userId}:${dateKey}` }, async context => {
           console.log(`[Scheduler] Triggering EOD Report for ${worker.name} (${workerTimezone})`);
           const window = dateWindowInTimeZone(dateKey, workerTimezone);
           const entries = await db.select().from(timeEntries).where(and(
@@ -153,6 +154,7 @@ async function checkAndSendReports() {
           const completionRate = assignments.length === 0
             ? 0
             : Math.round((completedTasks.length / assignments.length) * 100);
+          await context.assertOwnership();
           const delivered = await sendEODReport(founder[0].email!, {
             workerName: worker.name,
             date: reportDate,
@@ -161,12 +163,13 @@ async function checkAndSendReports() {
             blockedTasks,
             totalHoursWorked,
             completionRate,
-          });
+          }, context);
           if (!delivered) throw new Error("EOD report provider did not confirm delivery");
           return { recordsProcessed: entries.length + assignments.length, detail: `Delivered to owner for ${dateKey}` };
         });
       }
     } catch (err) {
+      if (err instanceof ScheduledJobLeaseLostError) throw err;
       console.error(`[Scheduler] Error processing worker ${worker.id}:`, err);
     }
   }

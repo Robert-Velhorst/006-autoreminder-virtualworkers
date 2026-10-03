@@ -121,9 +121,10 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
     const actionByStep = new Map<number, ManagerAction>();
 
     for (const step of unresolved) {
+      const executionText = `${step.title} ${step.completionCriteria ?? ""}`;
       const kind: ManagerAction["kind"] = step.requiresDecision
         ? "decision"
-        : managerExternalAction(step.title)
+        : managerExternalAction(executionText)
           ? "draft"
           : "work";
       const action: ManagerAction = {
@@ -141,7 +142,9 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
           Math.max(5, step.minutes || 30),
           input
         ),
-        reason: step.blockReason || card.stateReason || "This is the next open step.",
+        reason: step.blockReason || (step.requiresDecision
+          ? "This step is waiting for the founder's decision. Do not start it until the decision is recorded."
+          : card.stateReason || "This is the next open step."),
         completionCriteria:
           kind === "draft"
             ? `A worker has reviewed the draft and explicitly sends or submits it.`
@@ -149,7 +152,7 @@ export function assessManagerContext(input: ManagerInput): ManagerResult {
               "Completion evidence is recorded in the linked work item.",
         evidenceIds: ev.map(e => e.id),
         notBefore: null,
-        blocked: step.blocked === true,
+        blocked: step.blocked === true || step.requiresDecision,
         priority: card.priority,
         draft:
           kind === "draft"

@@ -41,7 +41,10 @@ export function getProductionConfigurationErrors(env: Environment = process.env)
   if (!hasValue(env, "TRELLO_TOKEN")) {
     errors.push("TRELLO_TOKEN is required");
   }
-  if (!hasValue(env, "OPENAI_API_KEY")) {
+  const managerProvider = env.APTLSS_MANAGER_PROVIDER?.trim() || "codex-subscription";
+  if (managerProvider !== "codex-subscription" && managerProvider !== "openai-api") {
+    errors.push("APTLSS_MANAGER_PROVIDER must be codex-subscription or openai-api");
+  } else if (managerProvider === "openai-api" && !hasValue(env, "OPENAI_API_KEY")) {
     errors.push("OPENAI_API_KEY is required");
   }
   if (!host || LOOPBACK_HOSTS.has(host)) {

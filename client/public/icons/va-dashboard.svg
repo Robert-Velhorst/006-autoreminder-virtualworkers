@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">
+  <title>VA Dashboard</title>
+  <rect width="144" height="144" rx="28" fill="#155EEF"/>
+  <rect x="28" y="28" width="36" height="40" rx="7" fill="#FFFFFF"/>
+  <rect x="76" y="28" width="40" height="26" rx="7" fill="#FFFFFF"/>
+  <rect x="28" y="80" width="36" height="36" rx="7" fill="#FFFFFF"/>
+  <circle cx="96" cy="94" r="27" fill="#10B981"/>
+  <path d="M83 94L92 103L109 85" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

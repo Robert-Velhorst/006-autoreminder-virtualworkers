@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import type { ManagerCard, ManagerSnapshot } from "../shared/aptlssManager";
 import {
   managerReviewProposalIdentity,
+  requireManagerReviewer,
   summarizeManagerAcceptance,
   prepareManagerCorrection,
   filterApplicableManagerCorrections,
@@ -389,6 +390,46 @@ describe("meaningful manager proposal identity", () => {
   });
 });
 
+describe("reviewer authorization lifecycle", () => {
+  it("uses the role read under a row lock, not a stale pre-transaction role", async () => {
+    const query = {
+      then: (resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) =>
+        Promise.resolve([{ role: "admin" }]).then(resolve, reject),
+      for: vi.fn(() => Promise.resolve([{ role: "worker" }]))
+    };
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => ({ limit: () => query })
+        })
+      })
+    };
+
+    await expect(
+      requireManagerReviewer(99, db as never)
+    ).rejects.toThrow(/founder\/admin/i);
+    expect(query.for).toHaveBeenCalledWith("update");
+  });
+
+  it("continues to authorize an admin role confirmed by the locked read", async () => {
+    const query = {
+      then: (resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) =>
+        Promise.resolve([{ role: "admin" }]).then(resolve, reject),
+      for: vi.fn(() => Promise.resolve([{ role: "admin" }]))
+    };
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => ({ limit: () => query })
+        })
+      })
+    };
+
+    await expect(requireManagerReviewer(99, db as never)).resolves.toBeUndefined();
+    expect(query.for).toHaveBeenCalledWith("update");
+  });
+});
+
 describe("aggregated proposal acceptance", () => {
   const input = () => ({
     sample: Array.from({ length: 100 }, () => ({
@@ -471,6 +512,33 @@ describe("controlled founder correction knowledge", () => {
       ).toThrow(/source/i);
     }
   );
+  it.each(["worker", "worker_report", "worker-report", "virtual worker report"])(
+    "rejects %s-originated evidence when its truth class is missing",
+    source => {
+      const snap = snapshot();
+      snap.evidence[0].source = source;
+      delete snap.evidence[0].metadata!.truthClass;
+      expect(() =>
+        prepareManagerCorrection({
+          knowledge: knowledge(),
+          correction: "Treat the worker statement as confirmed",
+          snapshot: snap,
+          now,
+        })
+      ).toThrow(/source/i);
+
+      const row = correction(),
+        ctx = context(),
+        pins = JSON.parse(row.evidenceJson);
+      ctx.evidence[0].source = source;
+      delete ctx.evidence[0].metadata!.truthClass;
+      pins[0].fingerprint = sourceFingerprint(ctx.evidence[0]);
+      row.evidenceJson = JSON.stringify(pins);
+      expect(
+        selectApplicableManagerCorrections([row], ctx).corrections
+      ).toEqual([]);
+    }
+  );
   it.each([true, false])(
     "rejects Gmail portal notices as correction proof (explicit scope: %s)",
     explicitScope => {
@@ -489,6 +557,21 @@ describe("controlled founder correction knowledge", () => {
       expect(selectApplicableManagerCorrections([row], ctx).corrections).toEqual([]);
     }
   );
+  it("rejects a case-variant Gmail portal notice as correction proof at creation and reuse", () => {
+    const snap = snapshot();
+    snap.evidence[0].source = "GMAIL";
+    snap.evidence[0].text = "Er staat een bericht voor u klaar in uw persoonlijke mijn-omgeving. Inloggen.";
+    expect(() => prepareManagerCorrection({
+      knowledge: knowledge(), correction: "Check the underlying document", snapshot: snap, now,
+    })).toThrow(/source/i);
+
+    const row = correction(), ctx = context(), pins = JSON.parse(row.evidenceJson);
+    ctx.evidence[0].source = "GMAIL";
+    ctx.evidence[0].text = snap.evidence[0].text;
+    pins[0].fingerprint = sourceFingerprint(ctx.evidence[0]);
+    row.evidenceJson = JSON.stringify(pins);
+    expect(selectApplicableManagerCorrections([row], ctx).corrections).toEqual([]);
+  });
   it.each([
     ["future source", { sourceDate: "2026-09-06T10:00:00Z" }],
     ["invalid source", { sourceDate: "2026-02-30" }],
@@ -532,6 +615,76 @@ describe("controlled founder correction knowledge", () => {
     expect(selectApplicableManagerCorrections([row], ctx).corrections).toHaveLength(1);
     ctx.now = new Date("2026-09-06T10:00:00Z");
     expect(selectApplicableManagerCorrections([row], ctx).corrections).toEqual([]);
+  });
+  it("stops reusing guidance when a retained authoritative revision supersedes its pinned source", () => {
+    const snap = snapshot(),
+      pinned = snap.evidence[0];
+    pinned.text = "Invoice A is unpaid.";
+    Object.assign(pinned.metadata!, {
+      sourceDate: "2026-09-01",
+      effectiveFrom: "2026-09-01",
+      sourceRecordId: "invoice-record-a",
+      sourceRevision: "revision-1",
+      sender: "Accounts",
+    });
+    const prepared = prepareManagerCorrection({
+      knowledge: knowledge(),
+      correction: "Use the reviewed invoice status before deciding the reply.",
+      snapshot: snap,
+      now,
+    });
+    const row = { ...correction(), ...prepared },
+      superseding = {
+        ...structuredClone(pinned),
+        id: "source:a-revision-2",
+        text: "Invoice A is paid.",
+        metadata: {
+          ...pinned.metadata,
+          sourceDate: "2026-09-04",
+          effectiveFrom: "2026-09-04",
+          sourceRevision: "revision-2",
+          authority: "authoritative",
+          supersedesEvidenceIds: [pinned.id],
+        },
+      },
+      ctx = context();
+    ctx.evidence = [pinned, superseding];
+
+    expect(selectApplicableManagerCorrections([row], ctx).corrections).toEqual([]);
+  });
+  it("does not invalidate pinned guidance from a non-authoritative revision claim", () => {
+    const snap = snapshot(),
+      pinned = snap.evidence[0];
+    Object.assign(pinned.metadata!, {
+      sourceDate: "2026-09-01",
+      effectiveFrom: "2026-09-01",
+      sourceRecordId: "invoice-record-a",
+      sourceRevision: "revision-1",
+      sender: "Accounts",
+    });
+    const prepared = prepareManagerCorrection({
+      knowledge: knowledge(),
+      correction: "Use the reviewed invoice status before deciding the reply.",
+      snapshot: snap,
+      now,
+    });
+    const row = { ...correction(), ...prepared },
+      claimedRevision = {
+        ...structuredClone(pinned),
+        id: "source:a-revision-2",
+        metadata: {
+          ...pinned.metadata,
+          sourceDate: "2026-09-04",
+          effectiveFrom: "2026-09-04",
+          sourceRevision: "revision-2",
+          authority: "reported",
+          supersedesEvidenceIds: [pinned.id],
+        },
+      },
+      ctx = context();
+    ctx.evidence = [pinned, claimedRevision];
+
+    expect(selectApplicableManagerCorrections([row], ctx).corrections).toHaveLength(1);
   });
   it("stores a source-pinned correction to one reviewed step without changing legacy rules", () => {
     const nextStep = { actionId: "a", title: "Compare the signed invoice terms", completionCriteria: "Record the verified terms on the card." };

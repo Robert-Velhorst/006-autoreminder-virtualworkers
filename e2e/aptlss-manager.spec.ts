@@ -28,6 +28,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       planningImpact?: ManagerPlanImpact;
       savedPlan?: Record<string, unknown> | null;
       savedPlanVersion?: string;
+      dailyPlanEditable?: boolean;
       googleStatus?: Record<string, unknown>;
         founderDecisions?: boolean;
         founderNotification?: boolean;
@@ -361,6 +362,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
           };
         }
         if (method === "operator.getDailyPlan") value = options.savedPlan === null ? null : { schedule: options.savedPlan ?? proposal, planVersion: options.savedPlanVersion ?? "v-review-1" };
+        if (method === "operator.getDailyPlanEditingPolicy") value = { editable: options.dailyPlanEditable ?? true };
         if (method === "operator.getBrowserTabPolicy")
           value = {
             enabled: true,
@@ -372,6 +374,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
         if (method === "operator.getManagerStatus")
           value = {
             snapshot,
+            expectedRunId: snapshot.runId,
             policy: snapshot.policy,
             checkedAt: at,
             lastSuccessfulAt: at,
@@ -487,11 +490,9 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
           stepTitle: "Approve the delivery follow-up", tier: "HIGH",
         }] : [] };
         if (method === "operator.getDecisionHistory") value = [];
-        if (
-          method === "operator.recordManagerReview" ||
-          method === "operator.setManagerMode"
-        )
-          value = { success: true };
+        if (method === "operator.recordManagerReview")
+          value = { recorded: true, revertedToShadow: !!(input as { critical?: boolean }).critical, correctionId: null };
+        if (method === "operator.setManagerMode") value = { success: true };
         return { result: { data: superjson.serialize(value) } };
       });
       await route.fulfill({
@@ -640,7 +641,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
   for (const width of [1280, 390]) test(`focused questions preserve source comparison at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
     const { snapshot } = await managerFixture(page, "worker");
-    (snapshot.interventions as unknown[]).push({ id: "conflict", cardId: "card-1", severity: "urgent", title: "Verify deadline", explanation: "Sources disagree", question: "Which deadline applies now?", safeAction: "Verify before continuing", evidenceIds: ["e-1"], verification: {
+    (snapshot.interventions as unknown[]).push({ id: "conflict", cardId: "card-1", issueKind: "conflicting_claims", severity: "urgent", title: "Verify deadline", explanation: "Sources disagree", question: "Which deadline applies now?", safeAction: "Verify before continuing", evidenceIds: ["e-1"], verification: {
       issues: [{ id: "conflict", severity: "urgent", title: "Verify deadline", question: "Which deadline applies now?", explanation: "Sources disagree", evidenceIds: ["e-1"] }, { id: "approval", severity: "attention", title: "Approval", question: "Who approved the change?", explanation: "Approval is missing", evidenceIds: ["e-1"] }],
       passages: [{ evidenceId: "e-1", source: "gmail", kind: "source", quote: "Delivery due on September 7", sender: "Client", sourceDate: snapshot.assessedAt, effectiveFrom: null }, { evidenceId: "e-2", source: "worker_update", kind: "worker", quote: "Delivery moved to September 9", sender: "Worker", sourceDate: snapshot.assessedAt, effectiveFrom: null }],
       comparisons: [{ subject: "card-1", topic: "deadline",
@@ -655,11 +656,10 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect(comparison.getByText("Delivery due on September 7")).toBeVisible();
     await expect(comparison.getByText("Delivery moved to September 9")).toBeVisible();
     await expect(comparison.getByText("Worker report", { exact: true })).toBeVisible();
-    await expect(comparison.getByRole("link", { name: "Open source" })).toBeVisible();
+    await expect(comparison.getByRole("link", { name: "Open cited source" })).toBeVisible();
     await expect(manager.getByText("Original passages (2)")).toBeVisible();
     await expect(manager.getByText("Who approved the change?", { exact: true })).not.toBeVisible();
-    await manager.getByText("Other questions to resolve (1)", { exact: true }).click();
-    await expect(manager.getByText("Who approved the change?", { exact: true })).toBeVisible();
+    await expect(manager.getByText("Other questions to resolve (1)", { exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`focused-questions-${width}.png`), fullPage: true });
   });
@@ -674,7 +674,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await page.goto("/worker");
     const manager = page.getByRole("region", { name: "APTLSS work manager" });
     await expect(manager.getByRole("heading", { name: "Read the full correspondence" })).toBeVisible();
-    await expect(manager.getByText("What does the message ask you to do, is there a deadline, and what follow-up is needed?", { exact: true })).toBeVisible();
+    await expect(manager.getByText("What does the message ask you to do, and does it include a deadline?", { exact: true })).toBeVisible();
     await expect(manager.getByText("Resolve conflict before continuing", { exact: true })).not.toBeVisible();
     await manager.getByRole("button", { name: "Show evidence and answer" }).click();
     await expect(manager.getByText("A message is waiting in your portal.", { exact: true })).toBeVisible();
@@ -682,6 +682,64 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect(manager.getByText("Message metadata (2)", { exact: true })).toHaveCount(0);
     await expect(manager.getByLabel("Source preview", { exact: true })).toHaveCount(1);
     expect(calls.some(call => call.method === "operator.submitManagerUpdate")).toBe(false);
+  });
+
+  test("missing evidence is not described as a message preview or a confirmed conflict", async ({ page }) => {
+    const { snapshot } = await managerFixture(page, "worker");
+    (snapshot.interventions as unknown[]).push({
+      id: "missing-source",
+      cardId: "card-1",
+      issueKind: "source_check",
+      severity: "attention",
+      title: "Check the original source",
+      explanation: "The source is not attached.",
+      question: "Where can the original source be found?",
+      safeAction: "Ask the task owner where to find the source, or report that you cannot access it.",
+      evidenceIds: [],
+      verification: { issues: [], passages: [], comparisons: [] },
+    });
+    await page.goto("/worker");
+    const manager = page.getByRole("region", { name: "APTLSS work manager" });
+    await manager.getByRole("button", { name: "Show evidence and answer" }).click();
+
+    const evidence = manager.getByLabel("Verification evidence comparison");
+    await expect(evidence).toContainText("No source is attached to this check.");
+    await expect(evidence).toContainText("There are no source statements to compare, so this is not a confirmed conflict.");
+    await expect(evidence).not.toContainText(/message preview/i);
+    await expect(evidence.getByRole("region", { name: "Conflicting statements" })).toHaveCount(0);
+  });
+
+  test("worker does not see an empty original-passages disclosure when comparisons already contain quotes", async ({ page }) => {
+    const { snapshot } = await managerFixture(page, "worker");
+    (snapshot.interventions as unknown[]).push({
+      id: "quoted-conflict",
+      cardId: "card-1",
+      issueKind: "conflicting_claims",
+      severity: "attention",
+      title: "Check the due date",
+      explanation: "The retained records show different due dates.",
+      question: "Which date is confirmed by the original source?",
+      safeAction: "Open the cited message and confirm the current due date.",
+      evidenceIds: ["email-1", "email-2"],
+      verification: {
+        issues: [],
+        passages: [],
+        comparisons: [{
+          subject: "card-1",
+          topic: "deadline",
+          left: { evidenceId: "email-1", value: "September 7", quote: "Delivery is due September 7.", source: "gmail", kind: "source", sender: "Client", sourceDate: snapshot.assessedAt, url: "https://mail.google.com/mail/u/0/#all/first" },
+          right: { evidenceId: "email-2", value: "September 9", quote: "The delivery date is now September 9.", source: "gmail", kind: "source", sender: "Client", sourceDate: snapshot.assessedAt, url: "https://mail.google.com/mail/u/0/#all/second" },
+        }],
+      },
+    });
+    await page.goto("/worker");
+    const manager = page.getByRole("region", { name: "APTLSS work manager" });
+    await manager.getByRole("button", { name: "Show evidence and answer" }).click();
+
+    const comparison = manager.getByRole("region", { name: "Conflicting statements" });
+    await expect(comparison.getByText("Delivery is due September 7.")).toBeVisible();
+    await expect(comparison.getByText("The delivery date is now September 9.")).toBeVisible();
+    await expect(manager.getByText("Original passages (0)", { exact: true })).toHaveCount(0);
   });
 
   test("the manager's urgent task is not repeated as another primary task", async ({ page }) => {
@@ -705,6 +763,43 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect(page.getByRole("button", { name: "Start timer", exact: true })).toBeDisabled();
   });
 
+  test("task details use the manager's executable action instead of the first unfinished checklist step", async ({ page }) => {
+    const queueCard = (cardId: string, cardName: string) => ({
+      cardId, cardName, cardUrl: `https://trello.com/c/${cardId}`, boardName: "Work", listName: "DOING",
+      nextBestAction: "Execute the highest-priority open step", planSummary: null, primaryState: "DOING",
+      stateReason: null, actionability: "actionable", priorityScore: 50, priorityTier: "HIGH",
+      confidenceScore: null, confidenceReason: null, recommendations: [], uncertainties: [], waitingReason: null,
+      steps: [
+        { id: 1, stepNumber: 1, title: "Wait for the permit", status: "pending", category: "review", requiresRobert: false, completionCriteria: "Permit is recorded", riskIfSkipped: null },
+        { id: 2, stepNumber: 2, title: "Review independent records", status: "pending", category: "review", requiresRobert: false, completionCriteria: "Records are matched", riskIfSkipped: null },
+      ],
+      evidenceSummary: { sources: [], issues: [], forecast: null, confidenceProfile: null },
+    });
+    const { snapshot } = await managerFixture(page, "worker", {
+      queueCards: [queueCard("case-1", "Case one"), queueCard("case-2", "Case two")],
+    });
+    (snapshot.actions as unknown[]).push(
+      { id: "blocked-step", cardId: "case-1", title: "Wait for the permit", stepIds: [1], blocked: true, reason: "The permit is not recorded.", completionCriteria: "Permit is recorded" },
+      { id: "ready-step", cardId: "case-1", title: "Review independent records", stepIds: [2], blocked: false, reason: "This independent step is ready.", completionCriteria: "Records are matched", minutes: { low: 5, likely: 10, high: 15, samples: 2, basis: "Observed work" }, where: "Work board", kind: "work", dependsOn: [], evidenceIds: [], notBefore: null, priority: 40, draft: null },
+    );
+
+    const managerResponsePromise = page.waitForResponse(response => response.url().includes("operator.getManagerStatus"));
+    await page.goto("/worker");
+    const managerResponse = await managerResponsePromise;
+    const managerPayload = await managerResponse.text();
+    expect(managerPayload).toContain("Review independent records");
+    await page.getByRole("button", { name: /Doing second/ }).click();
+    await page.getByRole("button", { name: "Case one", exact: true }).click();
+    const inspector = page.getByRole("dialog");
+    const nextSection = inspector.getByText("Exactly next", { exact: true }).locator("..");
+    await expect(nextSection).toContainText("Review independent records");
+    await expect(nextSection).not.toContainText("Wait for the permit");
+    const taskSteps = inspector.getByText("Task steps", { exact: true }).locator("..");
+    await expect(taskSteps).toContainText("Waiting");
+    await expect(taskSteps).toContainText("Ready");
+    await expect(taskSteps).toContainText("The permit is not recorded.");
+  });
+
   test("the next task shows a source, completion condition and evidence-based time range", async ({ page }) => {
     await managerFixture(page, "worker", { queueCards: [{
       cardId: "card-1", cardName: "Verify delivery", cardUrl: "https://trello.com/c/example",
@@ -721,16 +816,36 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect(page.getByRole("link", { name: "Open source card" })).toHaveAttribute("href", "https://trello.com/c/example");
   });
 
+  test("Evidence shows current Google sync health instead of treating an old sync as connected", async ({ page }) => {
+    const recentSuccess = new Date(Date.now() - 5 * 60_000).toISOString();
+    const staleSuccess = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+    await managerFixture(page, "worker", {
+      googleStatus: {
+        credentialsReady: true,
+        gmail: { enabled: true, intervalMinutes: 30, lastSyncedAt: recentSuccess, lastError: "Google access was rejected." },
+        drive: { enabled: true, intervalMinutes: 30, lastSyncedAt: staleSuccess, lastError: null },
+      },
+    });
+    await page.goto("/worker/evidence");
+
+    await expect(page.getByText("Gmail sync", { exact: true })).toBeVisible();
+    await expect(page.getByText("Needs attention", { exact: true })).toBeVisible();
+    await expect(page.getByText("Google Drive metadata", { exact: true })).toBeVisible();
+    await expect(page.getByText("Check due", { exact: true })).toBeVisible();
+    await expect(page.getByText("Connected", { exact: true })).toHaveCount(0);
+    await expect(page.getByText(/Google access needs to be reconnected\. Open Google settings, reconnect Google, then sync again\./)).toBeVisible();
+  });
+
   test("selected context card and pending processing remain explicit", async ({ page }) => {
     const { snapshot, calls } = await managerFixture(page, "worker", { queued: true });
     snapshot.cards.push({ id: "card-2", name: "Second task", url: "https://trello.com/c/second", board: "Work", list: "Doing" });
-    (snapshot.interventions as unknown[]).push({ id: "urgent-first", cardId: "card-1", severity: "urgent", title: "First task conflict", explanation: "First issue", question: "Which date applies to first task?", safeAction: "Verify", evidenceIds: [] }, { id: "second-question", cardId: "card-2", severity: "attention", title: "Second task context", explanation: "Second issue", question: "Who approved second task?", safeAction: "Verify", evidenceIds: [] });
+    (snapshot.interventions as unknown[]).push({ id: "urgent-first", cardId: "card-1", issueKind: "reported_difference", severity: "urgent", title: "First task conflict", explanation: "First issue", question: "Which date applies to first task?", safeAction: "Verify", evidenceIds: [] }, { id: "second-question", cardId: "card-2", issueKind: "conflicting_claims", severity: "attention", title: "Second task context", explanation: "Second issue", question: "Who approved second task?", safeAction: "Verify", evidenceIds: [] });
     await page.goto("/worker");
     const manager = page.getByRole("region", { name: "APTLSS work manager" });
     await expect(manager.getByText("System status", { exact: true })).toHaveCount(0);
     await manager.getByRole("button", { name: "Show evidence and answer" }).click();
     await manager.getByLabel("Related task").selectOption("card-2");
-    await expect(manager.getByText("Who approved second task?", { exact: true })).toBeVisible();
+    await expect(manager.getByText("Which source is authoritative, and from what date does that information apply?", { exact: true })).toBeVisible();
     await expect(manager.getByText("Which date applies to first task?", { exact: true })).not.toBeVisible();
     await manager.getByLabel("What did you confirm?").fill("The second task needs source verification.");
     await manager.getByRole("button", { name: "Send answer to APTLSS" }).click();
@@ -752,7 +867,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     });
     await page.goto("/worker");
     const manager = page.getByRole("region", { name: "APTLSS work manager" });
-    await expect(manager.getByText("Can you open the receipt and confirm its date?", { exact: true })).toBeVisible();
+    await expect(manager.getByText("What changed, and which cited source confirms the current information?", { exact: true })).toBeVisible();
     await manager.getByRole("button", { name: "Show evidence and answer" }).click();
     await manager.getByLabel("Result", { exact: true }).selectOption("Cannot access source");
     await manager.getByLabel("Document or location checked (optional)").fill("Vendor portal receipt");
@@ -760,9 +875,10 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await manager.getByRole("button", { name: "Send answer to APTLSS" }).click();
 
     await expect.poll(() => calls.find(call => call.method === "operator.submitManagerUpdate")?.input.interventionId).toBe("initial-receipt-check");
+    expect(calls.find(call => call.method === "operator.submitManagerUpdate")?.input.requestKey).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
     await expect(manager.getByText("Your update was saved for review.", { exact: false })).toBeVisible();
-    await expect(manager.getByText("Can Robert provide an accessible copy of the receipt?", { exact: true })).toBeVisible();
-    await expect(manager.getByText("Keep the delivery status unchanged and request access to the original receipt.", { exact: true })).toBeVisible();
+    await expect(manager.getByText("What changed, and which cited source confirms the current information?", { exact: true })).toBeVisible();
+    await expect(manager.getByText("Can Robert provide an accessible copy of the receipt?", { exact: true })).toHaveCount(0);
     await expect(manager.getByText("Can you open the receipt and confirm its date?", { exact: true })).toHaveCount(0);
     await expect(manager.getByText("Full technical assessment", { exact: true })).toHaveCount(0);
   });
@@ -917,7 +1033,8 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await manager.getByRole("button", { name: "Submit completion report" }).click();
 
     await expect(page.getByText("Completion report saved. The step remains open until its source confirms the result.", { exact: true })).toBeVisible();
-    await expect(manager.getByRole("heading", { name: "Verify delivery", exact: true })).toBeVisible();
+    await expect(manager.getByRole("heading", { name: "Continue the recorded work step", exact: true })).toBeVisible();
+    await expect(manager.getByLabel("Current manager instruction").getByText("Verify delivery", { exact: true })).toBeVisible();
     await expect(manager.getByRole("button", { name: "Report step done" })).toBeVisible();
     const call = calls.find(item => item.method === "operator.reportManagerActionCompletion");
     expect(call?.input).toMatchObject({
@@ -976,15 +1093,16 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
   test("typing retains the urgent question for the selected task", async ({ page }) => {
     const { snapshot, calls } = await managerFixture(page, "worker");
     (snapshot.interventions as unknown[]).push(
-      { id: "ordinary", cardId: "card-1", severity: "attention", title: "Check address", explanation: "Address unclear", question: "Which address?", safeAction: "Check source", evidenceIds: [] },
-      { id: "urgent", cardId: "card-1", severity: "urgent", title: "Check deadline", explanation: "Dates disagree", question: "Which deadline?", safeAction: "Check source", evidenceIds: [] }
+      { id: "ordinary", cardId: "card-1", issueKind: "reported_difference", severity: "attention", title: "Check address", explanation: "Address unclear", question: "Which address?", safeAction: "Check source", evidenceIds: [] },
+      { id: "urgent", cardId: "card-1", issueKind: "conflicting_claims", severity: "urgent", title: "Check deadline", explanation: "Dates disagree", question: "Which deadline?", safeAction: "Check source", evidenceIds: [] }
     );
     await page.goto("/worker");
     const manager = page.getByRole("region", { name: "APTLSS work manager" });
     await manager.getByRole("button", { name: "Show evidence and answer" }).click();
-    await expect(manager.getByText("Which deadline?", { exact: true })).toBeVisible();
+    await expect(manager.getByText("Which source is authoritative, and from what date does that information apply?", { exact: true })).toBeVisible();
     await manager.getByLabel("What did you confirm?").fill("The source confirms Friday.");
-    await expect(manager.getByText("Which deadline?", { exact: true })).toBeVisible();
+    await expect(manager.getByText("Which source is authoritative, and from what date does that information apply?", { exact: true })).toBeVisible();
+    await expect(manager.getByText("Which deadline?", { exact: true })).toHaveCount(0);
     await manager.getByRole("button", { name: "Send answer to APTLSS" }).click();
     await expect.poll(() => calls.find(call => call.method === "operator.submitManagerUpdate")?.input.interventionId).toBe("urgent");
   });
@@ -1136,6 +1254,59 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       .toBe(3);
   });
 
+  for (const width of [1280, 390]) test(`confirmed review stays read-only while inbox refresh is delayed at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { calls } = await managerFixture(page, "admin");
+    await page.goto("/founder");
+    await page.getByRole("tab", { name: "Manager review" }).click();
+    await page.getByLabel("Review worker").selectOption("2");
+    await page.getByText("Review run 101", { exact: true }).click();
+    await page.getByLabel("Verdict").selectOption("insufficient");
+    await page.getByLabel("Correction or review notes").fill("Verify receipt before acting.");
+    await page.getByLabel("Review source").fill("Linked card comment, reviewed today");
+    let blockedRefreshes = 0;
+    let release!: () => void;
+    const heldRefresh = new Promise<void>(resolve => { release = resolve; });
+    await page.route(/\/api\/trpc\/[^?]*operator\.getManagerReviewInbox/, async route => {
+      blockedRefreshes++;
+      await heldRefresh;
+      await route.fallback();
+    });
+    try {
+      await page.getByRole("button", { name: "Save review" }).click();
+      await expect(page.getByText("Manager review saved")).toBeVisible();
+      await expect.poll(() => blockedRefreshes).toBeGreaterThan(0);
+      await expect(page.getByText("Recorded review (read-only)")).toBeVisible();
+      await expect(page.getByText("Reviewed: insufficient", { exact: true })).toBeVisible();
+      await expect(page.getByLabel("Verdict")).toBeDisabled();
+      await expect(page.getByRole("button", { name: "Save review" })).toHaveCount(0);
+      expect(calls.filter(call => call.method === "operator.recordManagerReview")).toHaveLength(1);
+    } finally {
+      release();
+    }
+  });
+
+  test("an unconfirmed review remains editable and preserves the entered notes", async ({ page }) => {
+    await managerFixture(page, "admin");
+    await page.goto("/founder");
+    await page.getByRole("tab", { name: "Manager review" }).click();
+    await page.getByLabel("Review worker").selectOption("2");
+    await page.getByText("Review run 101", { exact: true }).click();
+    await page.getByLabel("Correction or review notes").fill("Verify receipt before acting.");
+    await page.getByLabel("Review source").fill("Linked card comment, reviewed today");
+    await page.route(/\/api\/trpc\/[^?]*operator\.recordManagerReview/, route => route.fulfill({
+      json: { result: { data: superjson.serialize({ recorded: false, revertedToShadow: false, correctionId: null }) } },
+    }));
+    await page.getByRole("button", { name: "Save review" }).click();
+    await expect(page.getByText("Review could not be confirmed.")).toBeVisible();
+    await expect(page.getByText("Manager review saved")).toHaveCount(0);
+    await expect(page.getByText("Recorded review (read-only)")).toHaveCount(0);
+    await expect(page.getByLabel("Verdict")).toBeEnabled();
+    await expect(page.getByLabel("Correction or review notes")).toHaveValue("Verify receipt before acting.");
+    await expect(page.getByLabel("Review source")).toHaveValue("Linked card comment, reviewed today");
+    await expect(page.getByRole("button", { name: "Save review" })).toBeEnabled();
+  });
+
   for (const width of [1280, 390]) test(`founder sees a compact plan change comparison at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
     const impact: ManagerPlanImpact = {
@@ -1215,6 +1386,22 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await page.screenshot({ path: testInfo.outputPath(`worker-plan-suggestion-${width}.png`), fullPage: true });
   });
 
+  for (const width of [1280, 390]) for (const theme of ["dark", "light"] as const) test(`pilot worker understands why the agenda is read-only at ${width}px ${theme}`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.addInitScript(value => localStorage.setItem("theme", value), theme);
+    await managerFixture(page, "worker", { dailyPlanEditable: false, savedPlan: null });
+    await page.goto("/worker/plan");
+
+    await expect(page.getByRole("heading", { name: "Plan My Day", exact: true })).toBeVisible();
+    await expect(page.getByText("Agenda changes are paused", { exact: true })).toBeVisible();
+    await expect(page.getByText("No agenda is saved yet. Contact Robert to set today's schedule.", { exact: true })).toBeVisible();
+    await expect(page.getByText("No saved plan", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /generate plan|regenerate plan/i })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    await expectAccessible(page, `pilot-plan-${width}-${theme}`);
+    await page.screenshot({ path: testInfo.outputPath(`pilot-read-only-agenda-${width}-${theme}.png`), fullPage: true });
+  });
+
   test("worker does not act on a suggestion for an older plan version", async ({ page }) => {
     const dateKey = new Date().toISOString().slice(0, 10);
     const impact: ManagerPlanImpact = {
@@ -1244,22 +1431,39 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     ).toBeFalsy();
   });
 
-  test("worker schedule sends only own enabled and interval settings", async ({
+  test("worker can view manager schedule but cannot change it", async ({
     page,
   }) => {
     const { calls } = await managerFixture(page, "worker");
     await page.goto("/worker/settings");
-    await expect(page.getByText("Suggestions only", { exact: true })).toBeVisible();
-    await page.getByLabel("Assessment interval").fill("9");
-    await page.getByLabel("Continuous guidance").click();
-    await page.getByRole("button", { name: "Save manager schedule" }).click();
-    await expect(page.getByText("APTLSS manager schedule saved")).toBeVisible();
+    const managerSchedule = page.getByRole("region", {
+      name: "Manager schedule",
+    });
+    await expect(managerSchedule).toBeVisible();
+    await expect(
+      managerSchedule.getByText("Suggestions only", { exact: true })
+    ).toBeVisible();
+    await expect(
+      managerSchedule.getByText("Continuous guidance is on.", { exact: true })
+    ).toBeVisible();
+    await expect(
+      managerSchedule.getByText("Checks run every 5 minutes.", { exact: true })
+    ).toBeVisible();
+    await expect(
+      managerSchedule.getByText(
+        "Schedule changes are managed by your founder or admin.",
+        { exact: true }
+      )
+    ).toBeVisible();
+    await expect(managerSchedule.getByLabel("Assessment interval")).toHaveCount(0);
+    await expect(managerSchedule.getByLabel("Continuous guidance")).toHaveCount(0);
+    await expect(
+      managerSchedule.getByRole("button", { name: "Save manager schedule" })
+    ).toHaveCount(0);
     expect(
-      calls.find(call => call.method === "operator.updateManagerPolicy")?.input
-    ).toEqual({ enabled: false, intervalMinutes: 9 });
-    expect(
-      calls.some(call => call.method === "operator.setManagerMode")
+      calls.some(call => call.method === "operator.updateManagerPolicy")
     ).toBeFalsy();
+    expect(calls.some(call => call.method === "operator.setManagerMode")).toBeFalsy();
   });
 
   test("worker connection health identifies a failed provider separately from a healthy one", async ({ page }) => {
@@ -1303,7 +1507,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect(page.getByText("Needs attention", { exact: true })).toBeVisible();
     await expect(page.getByText("Google Drive", { exact: true })).toBeVisible();
     await expect(page.getByText("Up to date", { exact: true })).toBeVisible();
-    await expect(page.getByText("Reconnect the Google credentials.", { exact: false })).toBeVisible();
+    await expect(page.getByText("Google access needs to be reconnected.", { exact: false })).toBeVisible();
     await expectAccessible(page, "worker-connection-health");
   });
 
@@ -1413,27 +1617,82 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     }
   });
 
-  test("manager generated daily plan does not show uncalibrated confidence as zero percent", async ({
+  test("worker plan shows the saved agenda without uncalibrated confidence percentages", async ({
     page,
   }) => {
     await managerFixture(page, "worker");
     await page.goto("/worker/plan");
-    await expect(page.getByText("Check sources", { exact: true })).toBeVisible();
+    await expect(page.getByText("Today’s agenda", { exact: true })).toBeVisible();
     await expect(page.getByText("Uncalibrated", { exact: true })).toHaveCount(0);
     await expect(page.getByText("0%", { exact: true })).toHaveCount(0);
   });
 
-  test("worker sees task guidance without semantic-review diagnostics", async ({ page }) => {
+  test("worker guidance gives the operational issue, question, and next step without AI internals", async ({ page }) => {
     const { snapshot } = await managerFixture(page, "worker");
-    Object.assign(snapshot, { semanticReview: { success: false, failureKind: "quota", attemptedAt: new Date().toISOString(), retryAfter: new Date().toISOString(), failures: 1, sourceHash: "test" } });
+    (snapshot.interventions as unknown[]).push({
+      id: "private-ai-guidance",
+      cardId: "card-1",
+      issueKind: "conflicting_claims",
+      severity: "attention",
+      title: "PRIVATE_AI_TITLE_SENTINEL",
+      explanation: "PRIVATE_AI_REASONING_SENTINEL",
+      question: "PRIVATE_AI_QUESTION_SENTINEL",
+      safeAction: "PRIVATE_AI_ACTION_SENTINEL",
+      evidenceIds: [],
+      aiReasoning: "PRIVATE_INTERNAL_REASONING_SENTINEL",
+      model: "PRIVATE_INTERVENTION_MODEL_SENTINEL",
+      tokenUsage: { promptTokens: 987654, completionTokens: 123456, totalTokens: 1111110 },
+      rawDiagnostic: "PRIVATE_INTERVENTION_DIAGNOSTIC_SENTINEL",
+    });
+    Object.assign(snapshot, {
+      semanticReview: {
+        success: false,
+        failureKind: "quota",
+        attemptedAt: new Date().toISOString(),
+        retryAfter: new Date().toISOString(),
+        failures: 1,
+        sourceHash: "test",
+        provider: "PRIVATE_AI_PROVIDER_SENTINEL",
+        model: "PRIVATE_MODEL_NAME_SENTINEL",
+        tokens: { prompt: 987654, completion: 123456, total: 1111110 },
+        reasoning: "PRIVATE_SEMANTIC_REASONING_SENTINEL",
+        rawDiagnostic: "PRIVATE_RAW_TECHNICAL_DIAGNOSTIC_SENTINEL: ECONNRESET",
+        attempts: [{ effort: "high", outcome: "rejected", reason: "PRIVATE_ATTEMPT_REASONING_SENTINEL", durationMs: 10 }],
+      },
+    });
     await page.goto("/worker");
-    await expect(page.getByRole("status", { name: "Current manager instruction" })).toBeVisible();
+    const instruction = page.getByRole("status", { name: "Current manager instruction" });
+    await expect(instruction).toBeVisible();
+    const fields = instruction.getByTestId("manager-guidance-fields");
+    await expect(fields.getByTestId("manager-guidance-problem")).toContainText("Compare the cited sources");
+    await expect(fields.getByTestId("manager-guidance-problem")).toContainText("The cited sources disagree about information needed for this task.");
+    await expect(fields.getByTestId("manager-guidance-question")).toContainText("Which source is authoritative, and from what date does that information apply?");
+    await expect(fields.getByTestId("manager-guidance-action")).toContainText("Compare the cited sources and record which information applies and from when.");
     await expect(page.getByText("This advice has not been fully checked. Verify the source before acting.", { exact: true })).not.toBeVisible();
     await expect(page.getByText("AI API credit exhausted", { exact: true })).not.toBeVisible();
     await expect(page.getByText(/Automatic retry:/)).not.toBeVisible();
     await expect(page.getByText("System status", { exact: true })).toHaveCount(0);
     await expect(page.getByText("Full technical assessment", { exact: true })).toHaveCount(0);
     await expect(page.getByText(/technical assessment|semantic review|AI review/i)).toHaveCount(0);
+    const renderedText = await page.locator("body").innerText();
+    for (const internalDetail of [
+      "PRIVATE_AI_TITLE_SENTINEL",
+      "PRIVATE_AI_REASONING_SENTINEL",
+      "PRIVATE_INTERNAL_REASONING_SENTINEL",
+      "PRIVATE_AI_QUESTION_SENTINEL",
+      "PRIVATE_AI_ACTION_SENTINEL",
+      "PRIVATE_INTERVENTION_MODEL_SENTINEL",
+      "PRIVATE_AI_PROVIDER_SENTINEL",
+      "PRIVATE_MODEL_NAME_SENTINEL",
+      "987654",
+      "123456",
+      "1111110",
+      "PRIVATE_SEMANTIC_REASONING_SENTINEL",
+      "PRIVATE_ATTEMPT_REASONING_SENTINEL",
+      "PRIVATE_INTERVENTION_DIAGNOSTIC_SENTINEL",
+      "PRIVATE_RAW_TECHNICAL_DIAGNOSTIC_SENTINEL",
+      "ECONNRESET",
+    ]) expect(renderedText).not.toContain(internalDetail);
   });
 
   test("subscription connection identifies adaptive Luna and the actual used levels", async ({ page }) => {
@@ -1469,14 +1728,14 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await page.setViewportSize({ width, height: 900 });
     await page.addInitScript(value => localStorage.setItem("theme", value), theme);
     const { snapshot, calls } = await managerFixture(page, "worker");
-    (snapshot.interventions as unknown[]).push({ id: "missing", cardId: "card-1", severity: "urgent", title: "Missing dependency", explanation: "Dependency missing:2 is not available.", question: "What evidence or prior step satisfies this dependency?", safeAction: "Provide the missing dependency before execution.", evidenceIds: [] });
+    (snapshot.interventions as unknown[]).push({ id: "missing", cardId: "card-1", issueKind: "missing_dependency", severity: "urgent", title: "Missing dependency", explanation: "Dependency missing:2 is not available.", question: "What evidence or prior step satisfies this dependency?", safeAction: "Provide the missing dependency before execution.", evidenceIds: [] });
     Object.assign(snapshot, { semanticReview: { provider: "codex-subscription", success: true, attempts: [{ effort: "low", outcome: "accepted", durationMs: 10 }] } });
     await page.goto("/worker");
     const manager = page.getByRole("region", { name: "APTLSS work manager" });
-    await expect(manager.getByRole("heading", { name: "Missing dependency" })).toBeVisible();
+    await expect(manager.getByRole("heading", { name: "Confirm the required earlier step" })).toBeVisible();
     await expect(manager.getByText("Verify delivery", { exact: true })).toBeVisible();
-    await expect(manager.getByText("Provide the missing dependency before execution.", { exact: true })).toBeVisible();
-    await expect(manager.getByText(/Dependency missing:2/)).toBeVisible();
+    await expect(manager.getByText("Which completed step or source record confirms this requirement?", { exact: true })).toBeVisible();
+    await expect(manager.getByText(/Dependency missing:2/)).toHaveCount(0);
     await expect(manager.getByText(/AI: Codex subscription/)).not.toBeVisible();
     await expect(manager.getByText(/Last check:/)).not.toBeVisible();
     const bounds = await manager.boundingBox();
@@ -1486,7 +1745,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect(manager.getByText("System status", { exact: true })).toHaveCount(0);
     await expect(manager.getByText(/AI: Codex subscription/)).not.toBeVisible();
     await manager.getByRole("button", { name: "Show evidence and answer" }).click();
-    await expect(manager.getByText(/Dependency missing:2/)).toBeVisible();
+    await expect(manager.getByText(/Dependency missing:2/)).toHaveCount(0);
     await expect(manager.getByLabel("What did you confirm?")).toBeVisible();
     await manager.getByRole("button", { name: "Hide answer and evidence" }).click();
     await expect(manager.getByLabel("What did you confirm?")).not.toBeVisible();
@@ -1506,7 +1765,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
 
   test("changed question preserves draft and requires review before sending", async ({ page }) => {
     const { snapshot, calls, emitManagerUpdate } = await managerFixture(page, "worker", { realtime: true });
-    const question = { id: "original", cardId: "card-1", severity: "urgent", title: "Check deadline", explanation: "Dates disagree", question: "Which deadline applies?", safeAction: "Check source", evidenceIds: [] };
+    const question = { id: "original", cardId: "card-1", issueKind: "conflicting_claims", severity: "urgent", title: "Check deadline", explanation: "Dates disagree", question: "Which deadline applies?", safeAction: "Check source", evidenceIds: [] };
     (snapshot.interventions as unknown[]).push(question);
     await page.goto("/worker");
     await page.getByRole("button", { name: "Show evidence and answer" }).click();
@@ -1518,7 +1777,9 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect(page.getByRole("button", { name: "Send answer to APTLSS" })).toBeEnabled();
     question.question = "Who approved this deadline?";
     emitManagerUpdate();
-    await expect(page.getByText("Who approved this deadline?", { exact: true })).toBeVisible();
+    await expect(page.getByText("The instruction changed while you were writing.", { exact: false })).toBeVisible();
+    await expect(page.getByText("Which source is authoritative, and from what date does that information apply?", { exact: true })).toBeVisible();
+    await expect(page.getByText("Who approved this deadline?", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Send answer to APTLSS" })).toBeDisabled();
     await expect(page.getByLabel("What did you confirm?")).toHaveValue("The deadline is Friday.");
     await page.getByLabel("What did you confirm?").fill("Friday, according to the source.");
@@ -1623,5 +1884,49 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       sourceEvidenceId: 900,
       sourceQuote: "Invoice alpha is paid.",
     });
+  });
+
+  test("a running timer keeps another task's start action unavailable and points back to the timed task", async ({ page }) => {
+    const { calls } = await managerFixture(page, "worker", {
+      queueCards: [{
+        cardId: "selected-card",
+        cardName: "Selected work",
+        cardUrl: "https://trello.com/c/selected-card",
+        boardName: "Work",
+        listName: "DOING",
+        primaryState: "IN_PROGRESS",
+        actionability: "actionable",
+        priorityScore: 50,
+        priorityTier: "HIGH",
+        nextBestAction: "Review the next document",
+        waitingReason: null,
+        steps: [],
+        evidenceSummary: { sources: [], forecast: null },
+      }],
+    });
+    await page.route("**/api/trpc/timer.getActive*", route => route.fulfill({
+      json: { result: { data: superjson.serialize({
+        id: 77,
+        taskId: "active-card",
+        cardId: "active-card",
+        cardName: "Existing timed task",
+        cardUrl: "https://trello.com/c/active-card",
+        startTime: new Date(Date.now() - 10 * 60_000),
+        startedAt: new Date(Date.now() - 10 * 60_000),
+      }) } },
+    }));
+    await page.goto("/worker");
+
+    const timerNotice = page.getByRole("status").filter({ hasText: "Timer already running for Existing timed task" });
+    await expect(timerNotice).toContainText("Continue on that task");
+    await expect(timerNotice).toContainText("This selected task has not been started");
+    await expect(timerNotice.getByRole("link", { name: "Open running task" })).toHaveAttribute("href", "https://trello.com/c/active-card");
+    await expect(page.getByRole("button", { name: "Timer running on another task", exact: true })).toBeDisabled();
+
+    await page.getByRole("button", { name: "Open details", exact: true }).click();
+    const inspector = page.getByRole("dialog");
+    await expect(inspector.getByRole("status")).toContainText("Existing timed task");
+    await expect(inspector.getByRole("button", { name: "Timer running on another task", exact: true })).toBeDisabled();
+    expect(calls.filter(call => call.method === "timer.start")).toHaveLength(0);
   });
 });

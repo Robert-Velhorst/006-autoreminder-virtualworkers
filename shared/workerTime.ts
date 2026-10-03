@@ -1,13 +1,22 @@
 const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_KEY_PATTERN = /^\d{2}:\d{2}$/;
 
-function validTimeZone(timeZone: string | null | undefined) {
+export class InvalidWorkerTimeZoneError extends Error {
+  readonly code = "INVALID_WORKER_TIME_ZONE";
+
+  constructor() {
+    super("The saved worker time zone is invalid. Set it to a valid IANA time zone before creating or changing a schedule.");
+    this.name = "InvalidWorkerTimeZoneError";
+  }
+}
+
+export function validateWorkerTimeZone(timeZone: string | null | undefined) {
   const candidate = timeZone?.trim() || "UTC";
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format(0);
     return candidate;
   } catch {
-    return "UTC";
+    throw new InvalidWorkerTimeZoneError();
   }
 }
 
@@ -15,7 +24,7 @@ function parts(value: Date | number, timeZone?: string | null) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) throw new Error("A valid timestamp is required");
   const values = new Intl.DateTimeFormat("en-CA", {
-    timeZone: validTimeZone(timeZone),
+    timeZone: validateWorkerTimeZone(timeZone),
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -59,7 +68,7 @@ export function dayOfWeekInTimeZone(value: Date | number = Date.now(), timeZone?
 
 export function formatWorkerDate(value: Date | number = Date.now(), timeZone?: string | null) {
   return new Intl.DateTimeFormat("en-GB", {
-    timeZone: validTimeZone(timeZone),
+    timeZone: validateWorkerTimeZone(timeZone),
     weekday: "short",
     day: "2-digit",
     month: "short",
@@ -93,7 +102,7 @@ export function zonedDateTimeToUtc(
     timeValue.minute,
   );
   let candidate = targetUtc;
-  const zone = validTimeZone(timeZone);
+  const zone = validateWorkerTimeZone(timeZone);
 
   // Resolve the zone offset at the target instant. Repeating handles DST
   // boundaries where the first estimate lands on the other side of a change.

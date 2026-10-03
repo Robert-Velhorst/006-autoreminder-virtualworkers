@@ -1,4 +1,26 @@
-import type { ManagerTimeSample } from "../shared/aptlssManager";
+import type { ManagerAction, ManagerTimeSample } from "../shared/aptlssManager";
+
+type TimingPrediction = {
+  cardId: string;
+  stepIds: number[];
+  minutes: Pick<ManagerAction["minutes"], "low" | "likely" | "high">;
+};
+
+export function managerTimingPredictions(value: unknown): TimingPrediction[] {
+  if (typeof value === "string") {
+    try { value = JSON.parse(value); } catch { return []; }
+  }
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(action => {
+    if (!action || typeof action !== "object" || typeof action.cardId !== "string"
+      || !Array.isArray(action.stepIds) || !action.stepIds.every((id: unknown) => Number.isSafeInteger(id) && Number(id) > 0)
+      || !action.minutes || typeof action.minutes !== "object") return [];
+    const { low, likely, high } = action.minutes;
+    if (![low, likely, high].every(n => typeof n === "number" && Number.isFinite(n) && n >= 0)
+      || low > likely || likely > high) return [];
+    return [{ cardId: action.cardId, stepIds: [...action.stepIds], minutes: { low, likely, high } }];
+  });
+}
 
 type TimingEntry = {
   id: number;
@@ -9,6 +31,7 @@ type TimingEntry = {
   endTime: Date | string | null;
   durationSeconds: number | null;
   durationMinutes: number | null;
+  notes?: string | null;
 };
 
 type TimingStep = {
@@ -95,6 +118,9 @@ export function aggregateManagerTimeSamples(
       continue;
     }
 
+    const interrupted = interruptedEntries.has(entry.id) || /\(paused\)\s*$/i.test(entry.notes ?? "");
+    if (interrupted) interruptedIntervals.push(interval);
+
     const step = entry.aptlssStepId === null
       ? undefined
       : completedSteps.get(entry.aptlssStepId);
@@ -104,8 +130,6 @@ export function aggregateManagerTimeSamples(
       !startedAt
     ) continue;
 
-    const interrupted = interruptedEntries.has(entry.id);
-    if (interrupted) interruptedIntervals.push(interval);
     const intervals = sampleIntervals.get(step.id) ?? [];
     intervals.push(interval);
     sampleIntervals.set(step.id, intervals);

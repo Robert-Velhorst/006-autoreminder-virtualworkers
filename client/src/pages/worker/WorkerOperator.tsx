@@ -13,7 +13,6 @@ import {
   Copy,
   ExternalLink,
   FileCheck2,
-  Gauge,
   GripVertical,
   History,
   Inbox,
@@ -34,7 +33,7 @@ import {
   Timer,
 } from "lucide-react";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { trpc } from "@/lib/trpc";
+import { trpc, type RouterOutputs } from "@/lib/trpc";
 import { useTheme } from "@/contexts/ThemeContext";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -48,7 +47,8 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { getWorkLaneRank } from "@shared/workLanePriority";
-import { orderWorkerCards, selectManagerPrimary, selectTodayQueue, workerCardIsWaiting } from "@shared/workerTodayGuidance";
+import type { WorkerManagerAction, WorkerManagerPlanImpact } from "@shared/workerManagerView";
+import { orderWorkerCards, selectManagerActionForCard, selectManagerPrimary, selectTodayQueue, workerCardIsWaiting } from "@shared/workerTodayGuidance";
 import { managerExecutionCoverageReady, managerStatusQueryOptions } from "@/lib/managerPilotAvailability";
 import { dateKeyInTimeZone, formatWorkerDate } from "@shared/workerTime";
 import { assessWorkerSourceChecks } from "@shared/workerSourceChecks";
@@ -106,16 +106,48 @@ type OperatorCard = {
   }>;
 };
 
-function nextInstruction(card: OperatorCard) {
-  const step = card.steps.find(item => item.status !== "complete");
-  if (/require.*approval|execute the highest.priority open step/i.test(card.nextBestAction ?? "")) {
-    return step ? `${step.requiresRobert ? "Decision needed: " : "Next step: "}${step.title}` : "The next action is not specified. Open the task and record the missing question before starting.";
-  }
-  return card.nextBestAction || "Open the task and identify the next action before starting.";
+export function WorkerTaskStepRow({ step, action }: {
+  step: OperatorCard["steps"][number];
+  action?: Pick<WorkerManagerAction, "kind" | "blocked"> & Partial<Pick<WorkerManagerAction, "reason">>;
+}) {
+  const complete = step.status === "complete";
+  const needsDecision = !complete && step.requiresRobert;
+  return (
+    <div role="group" aria-label={`Step ${step.stepNumber}: ${step.title}`} className="flex gap-2 rounded-md border p-3 text-sm">
+      <span className="text-muted-foreground">{step.stepNumber}.</span>
+      <span className="min-w-0 flex-1">
+        {step.title}
+        {needsDecision && <span className="mt-1 block text-xs text-muted-foreground">Waiting for founder decision{step.decisionDeferred && step.decisionDueAt ? ` · review ${new Date(step.decisionDueAt).toLocaleString()}` : ""}</span>}
+        {!complete && action?.blocked && <span className="mt-1 block text-xs text-amber-700 dark:text-amber-300">{workerFacingActionInstruction(action)}</span>}
+      </span>
+      {complete ? <Badge variant="outline">Done</Badge> : action
+        ? <Badge variant="outline">{action.blocked ? "Waiting" : "Ready"}</Badge>
+        : needsDecision && <Badge variant="outline">{step.decisionDeferred ? "Deferred" : "Decision"}</Badge>}
+    </div>
+  );
 }
 
-function currentCompletionCriterion(card: OperatorCard) {
-  return card.steps.find(item => item.status !== "complete")?.completionCriteria?.trim() || null;
+function nextInstruction(card: OperatorCard, managerAction?: WorkerManagerAction | null) {
+  if (managerAction) {
+    if (managerAction.blocked) return workerFacingActionInstruction(managerAction);
+    const managerStep = card.steps.find(item => managerAction.stepIds.includes(item.id) && item.status !== "complete");
+    if (managerAction.kind === "work" && managerStep) {
+      return `Next step: ${workerFacingOperationalText(managerStep.title, "Review the recorded step in task details.")}`;
+    }
+    return workerFacingActionInstruction(managerAction);
+  }
+  const step = card.steps.find(item => item.status !== "complete");
+  if (/require.*approval|execute the highest.priority open step/i.test(card.nextBestAction ?? "")) {
+    return step
+      ? `${step.requiresRobert ? "Decision needed: " : "Next step: "}${workerFacingOperationalText(step.title, "Review the recorded step in task details.")}`
+      : "The next action is not specified. Open the task and record the missing question before starting.";
+  }
+  return workerFacingOperationalText(card.nextBestAction, "Open task details and confirm the next action before starting.");
+}
+
+function currentCompletionCriterion(card: OperatorCard, managerAction?: WorkerManagerAction | null) {
+  if (managerAction) return managerAction.blocked ? null : workerFacingOperationalText(managerAction.completionCriteria, "");
+  return workerFacingOperationalText(card.steps.find(item => item.status !== "complete")?.completionCriteria, "") || null;
 }
 
 const NAVIGATION = [
@@ -169,7 +201,7 @@ function describeBrowserConnection(status?: BrowserConnectionSnapshot) {
   if (status?.collectorConfigured) {
     return {
       label: "Waiting for data",
-      detail: "The collector token is configured, but no browser inventory has been received yet.",
+      detail: "The browser is paired, but no tab report has arrived yet.",
       healthy: false,
     };
   }
@@ -187,6 +219,118 @@ function formatDuration(minutes: number | null) {
   const hours = Math.floor(minutes / 60);
   const remainder = minutes % 60;
   return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+}
+
+const INTERNAL_OR_TECHNICAL_WORKER_TEXT = [
+  /\b(?:chain[-\s]?of[-\s]?thought|internal\s+(?:reasoning|thoughts?)|reasoning\s+trace|system\s+prompt|developer\s+prompt)\b/i,
+  /\bmodel\s+(?:selection|name|version|id)\b/i,
+  /\b(?:gpt|claude|gemini)[-\w.]*/i,
+  /\btokens?\b/i,
+  /\b(?:debug(?:ger|ging)?|stack\s+trace|traceback)\b/i,
+  /\bhttp\s*[45]\d{2}\b/i,
+  /\b(?:t?rpc|sql|database)\s+(?:error|failure|exception)\b/i,
+  /\b(?:server|backend)\s+(?:configuration|error|failure)\b/i,
+  /\bapi\b|\bservice\s+endpoint\b/i,
+  /\b(?:econn(?:refused|reset)|etimedout|internal\s+server\s+error)\b/i,
+  /\b(?:let\s+me\s+think|my\s+thought\s+process|i\s+think)\b/i,
+];
+
+export function workerFacingOperationalText(value: unknown, fallback: string) {
+  const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  return !text || text.length > 180 || INTERNAL_OR_TECHNICAL_WORKER_TEXT.some(pattern => pattern.test(text)) ? fallback : text;
+}
+
+export function workerFacingActionInstruction(action: Pick<WorkerManagerAction, "kind" | "blocked"> & Partial<Pick<WorkerManagerAction, "reason">>) {
+  if (action.blocked) {
+    const fallback = action.kind === "decision"
+      ? "Waiting for a founder decision."
+      : action.kind === "verify"
+        ? "Waiting for source verification."
+        : "Waiting for a required step.";
+    return workerFacingOperationalText(action.reason, fallback);
+  }
+  if (action.kind === "verify") return "Check the linked source.";
+  if (action.kind === "draft") return "Prepare a draft for review.";
+  if (action.kind === "decision") return "Prepare the decision for review.";
+  if (action.kind === "follow_up") return "Complete the scheduled follow-up.";
+  return "Continue the recorded work step.";
+}
+
+export function workerFacingPlanChangeReason(kind: NonNullable<WorkerManagerPlanImpact["planChanges"]>[number]["kind"]) {
+  if (kind === "added") return "A new time block is suggested.";
+  if (kind === "moved") return "This task is suggested at a different time.";
+  if (kind === "updated") return "The saved work block would change.";
+  return "This task is not included in the suggestion.";
+}
+
+export function workerFacingPlanImpact(impact: WorkerManagerPlanImpact | null | undefined) {
+  if (!impact) return impact;
+  return {
+    ...impact,
+    planChanges: impact.planChanges?.map(change => ({
+      ...change,
+      reason: workerFacingOperationalText(change.reason, workerFacingPlanChangeReason(change.kind)),
+    })),
+  };
+}
+
+function workerPlanBlockStatus(status: string) {
+  if (status === "planned") return "Planned";
+  if (status === "active") return "In progress";
+  if (status === "done") return "Done";
+  if (status === "skipped") return "Skipped";
+  return "Needs review";
+}
+
+export function workerFacingGoogleSyncFailure(value: unknown) {
+  const rawDetail = typeof value === "string" ? value : "";
+  const detail = rawDetail.toLowerCase();
+  if (/timed out|timeout|took too long/.test(detail)) {
+    return "Google did not finish checking this source in time. Try again; ask your supervisor to review the connection if it keeps happening.";
+  }
+  if (/expired|reconnect|access was rejected|unauthori[sz]ed|forbidden|invalid_grant/.test(detail)) {
+    return "Google access needs to be reconnected. Open Google settings, reconnect Google, then sync again.";
+  }
+  if (/quota|rate limit|too many requests/.test(detail)) {
+    return "Google has temporarily limited requests. Wait before trying again; contact your supervisor if it continues.";
+  }
+
+  const safeDetail = workerFacingOperationalText(rawDetail, "");
+  return safeDetail
+    ? `${safeDetail} Review Google settings and try again; contact your supervisor if it continues.`
+    : "Google could not check this source. Review Google settings and try again; contact your supervisor if the issue continues.";
+}
+
+export function workerSyncStatusDetail(sync: ReturnType<typeof describeWorkerIntegrationSync>) {
+  return sync.label === "Needs attention"
+    ? workerFacingGoogleSyncFailure(sync.detail)
+    : sync.detail;
+}
+
+export function workerPlanPendingStatus(startedAt: number, now = Date.now()) {
+  const elapsedSeconds = Math.max(0, Math.floor((now - startedAt) / 1_000));
+  return {
+    progress: "Plan generation is still running",
+    estimate: "completion estimate unavailable",
+    elapsed: `${elapsedSeconds}s elapsed`,
+  };
+}
+
+function PendingPlanGenerationStatus({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, []);
+  const status = workerPlanPendingStatus(startedAt, now);
+
+  return (
+    <div role="status" aria-live="polite" className="flex flex-wrap items-center gap-3 border-b p-4">
+      <Loader2 className="size-4 animate-spin" />
+      <span>{status.progress}; {status.estimate}.</span>
+      <span aria-live="off">{status.elapsed}</span>
+    </div>
+  );
 }
 
 export default function WorkerOperator({ view = "today" }: { view?: "today" | "plan" | "decisions" | "evidence" | "reminders" | "settings" }) {
@@ -237,7 +381,7 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
             >
               <Settings className="size-4" />{!collapsed && "Settings"}
             </button>
-            <button type="button" onClick={logout} className="flex h-10 w-full items-center gap-3 rounded-md px-3 text-sm text-muted-foreground hover:bg-accent hover:text-foreground">
+            <button type="button" onClick={() => { setMobileOpen(false); void logout(); }} className="flex h-10 w-full items-center gap-3 rounded-md px-3 text-sm text-muted-foreground hover:bg-accent hover:text-foreground">
               <LogOut className="size-4" />{!collapsed && "Sign out"}
             </button>
           </div>
@@ -261,13 +405,13 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
           </div>
           <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">{theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}</Button>
         </header>
-        <main className={`mx-auto w-full min-w-0 p-4 md:p-6 ${view === "today" ? "" : "max-w-[1280px]"}`}>
+        <main className={`mx-auto w-full min-w-0 p-4 md:p-6 ${view === "today" || view === "settings" ? "max-w-none" : "max-w-[1280px]"}`}>
           {(apiHealth.error || (apiHealth.data && apiHealth.data.runtime !== "unified-node")) && (
             <Alert variant="destructive" className="mb-5">
               <AlertTriangle className="size-4" />
-              <AlertTitle>Backend connection unavailable</AlertTitle>
+              <AlertTitle>Portal connection needs attention</AlertTitle>
               <AlertDescription>
-                This portal must be served by the unified Node application. Requests are not reaching the expected backend; check the container deployment and API domain before using operational actions.
+                This portal could not confirm its services are ready. Refresh before relying on saved updates, and contact your supervisor if the issue continues.
               </AlertDescription>
             </Alert>
           )}
@@ -290,7 +434,7 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
     const timer = window.setInterval(() => setOrderingTime(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
-  const [selected, setSelected] = useState<OperatorCard | null>(null);
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const managerQuery = trpc.operator.getManagerStatus.useQuery(undefined, managerStatusQueryOptions);
   const actionQuery = trpc.trello.actionAlerts.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const intelligenceQuery = trpc.operator.getWorkQueueContext.useQuery(undefined, { retry: false, staleTime: 60_000 });
@@ -300,8 +444,13 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
   const browserQuery = trpc.operator.getBrowserTabStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const startTimer = trpc.timer.start.useMutation({
     onSuccess: () => { void utils.timer.getActive.invalidate(); toast.success("Timer started"); },
-    onError: (error) => toast.error(error.message),
+    onError: () => toast.error("Timer could not be started. Refresh task status and try again."),
   });
+
+  const managerCoverageReady = managerExecutionCoverageReady(managerQuery.error, managerQuery.data?.snapshot?.executionReady);
+  const managerActions = managerCoverageReady ? managerQuery.data?.snapshot?.actions ?? [] : [];
+  const primary = selectManagerPrimary(managerQuery.data?.snapshot);
+  const managerInputCardId = primary?.kind === "verification" ? primary.cardId : null;
 
   const cards = useMemo(() => {
     const alertCards = [
@@ -317,16 +466,14 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
           ...card,
           boardName: card.boardName || alert?.boardName || "Unknown board",
           listName: card.listName || alert?.listName || "Unknown list",
+          actionability: card.cardId === managerInputCardId
+            || managerCoverageReady && selectManagerActionForCard(managerActions, card.cardId)?.blocked
+            ? "blocked"
+            : card.actionability,
         } as OperatorCard;
       }), orderingTime);
-  }, [actionQuery.data, intelligenceQuery.data, orderingTime]);
-  useEffect(() => {
-    if (!selected) return;
-    const refreshed = cards.find((card) => card.cardId === selected.cardId);
-    if (refreshed && refreshed !== selected) setSelected(refreshed);
-  }, [cards, selected]);
-  const primary = selectManagerPrimary(managerQuery.data?.snapshot);
-  const managerCoverageReady = managerExecutionCoverageReady(managerQuery.error, managerQuery.data?.snapshot?.executionReady);
+  }, [actionQuery.data, intelligenceQuery.data, managerActions, managerCoverageReady, managerInputCardId, orderingTime]);
+  const selected = cards.find((card) => card.cardId === selectedCardId) ?? null;
   const { related, first: now, next } = selectTodayQueue(cards, primary?.cardId ?? null);
   const visibleNextCards = managerCoverageReady ? next : cards.slice(0, 3);
   const openDecisions = cards.reduce((total, card) => total + card.steps.filter((step) => step.requiresRobert && step.status !== "complete").length, 0);
@@ -341,7 +488,6 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
     applied: managerQuery.data?.snapshot?.applied,
   });
   const isWaiting = workerCardIsWaiting;
-  const canStart = (card: OperatorCard) => managerCoverageReady && !(primary?.kind === "verification" && primary.cardId === card.cardId) && !isWaiting(card) && !timerQuery.isLoading && !timerQuery.error && !startTimer.isPending && timerQuery.data?.cardId !== card.cardId;
   const sourceChecksFor = (card: OperatorCard) => assessWorkerSourceChecks({
     sources: card.evidenceSummary.sources,
     trelloCache: card.trelloCache ?? null,
@@ -350,7 +496,16 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
     googleConnectionReady: googleQuery.data?.credentialsReady ?? null,
     now: orderingTime,
   });
+  const canStart = (card: OperatorCard) => managerCoverageReady
+    && !(primary?.kind === "verification" && primary.cardId === card.cardId)
+    && !isWaiting(card)
+    && !sourceChecksFor(card).checks.some(check => check.linkedCount > 0 && check.status !== "current")
+    && !timerQuery.isLoading && !timerQuery.error && !startTimer.isPending && !timerQuery.data;
   const nowSources = now ? sourceChecksFor(now) : null;
+  const nowManagerAction = now ? selectManagerActionForCard(managerActions, now.cardId) : null;
+  const selectedManagerActions = selected
+    ? managerActions.filter(action => action.cardId === selected.cardId)
+    : [];
 
   const begin = (card: OperatorCard) => { if (!canStart(card)) return; startTimer.mutate({
     cardId: card.cardId,
@@ -366,7 +521,7 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
       googleQuery.refetch(),
     ]);
     if (intelligenceResult.error || actionResult.error || googleResult.error) {
-      toast.error(intelligenceResult.error?.message ?? actionResult.error?.message ?? googleResult.error?.message ?? "Source status reload failed");
+      toast.error("Source status could not be reloaded. Try again; no external accounts were synced.");
       return;
     }
     toast.success("Saved source status reloaded. This does not sync external accounts.");
@@ -376,6 +531,11 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
     <div className="space-y-5">
       <PageHeading title="Today" description="" />
       <ManagerCoach />
+      {googleQuery.data?.gmail.sourceConflictPending && <Alert variant="destructive">
+        <AlertTriangle className="size-4" />
+        <AlertTitle>Gmail source needs review</AlertTitle>
+        <AlertDescription>A saved email could not be safely refreshed. Review the original before relying on it. Email-linked work remains paused until the source is reconciled.</AlertDescription>
+      </Alert>}
       {browserQuery.data?.shouldWarn && (
         <Alert className="border-amber-500/40 bg-amber-500/5">
           <Archive className="size-4 text-amber-500" />
@@ -393,31 +553,37 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
               {intelligenceQuery.isLoading ? <QueueSkeleton /> : !managerCoverageReady ? (
                 <div role="status" className="space-y-2 text-sm"><h2 className="font-semibold">No task is recommended yet</h2><p className="text-muted-foreground">The visible tasks are for reference, not a confirmed order. Do not start a timer until the full work list has been checked.</p></div>
               ) : now ? (
-                <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_180px]">
-                  <button type="button" className="min-w-0 text-left" onClick={() => setSelected(now)}>
-                    <div className="mb-2 flex flex-wrap items-center gap-2"><h2 className="text-lg font-semibold">{now.cardName}</h2><Badge variant="outline" className={priorityTone(now.priorityTier)}>{now.priorityTier}</Badge></div>
-                    <p className="text-sm text-muted-foreground">{now.boardName} · {now.listName}</p>
-                    <div className="mt-4 border-l-2 border-blue-500 pl-3"><div className="text-[11px] font-semibold uppercase text-muted-foreground">{isWaiting(now) ? "Prerequisite to check" : "Next action"}</div><p className="mt-1 text-sm font-medium">{nextInstruction(now)}</p></div>
-                    {now.waitingReason && <p className="mt-3 text-xs text-amber-600 dark:text-amber-300">Waiting evidence: {now.waitingReason.nextAction}</p>}
-                    {(currentCompletionCriterion(now) || now.evidenceSummary.forecast?.p50Minutes !== null && now.evidenceSummary.forecast?.p50Minutes !== undefined) && <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 border-t pt-3 text-xs text-muted-foreground">
-                      {currentCompletionCriterion(now) && <span><span className="font-semibold text-foreground">Done when:</span> {currentCompletionCriterion(now)}</span>}
-                      {now.evidenceSummary.forecast?.p50Minutes !== null && now.evidenceSummary.forecast?.p50Minutes !== undefined && <span><span className="font-semibold text-foreground">Working estimate:</span> {formatDuration(now.evidenceSummary.forecast.p50Minutes)}{now.evidenceSummary.forecast.p90Minutes !== null ? ` to ${formatDuration(now.evidenceSummary.forecast.p90Minutes)}` : ""}</span>}
-                    </div>}
-                    {nowSources?.checks.some(check => check.status !== "current") && <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">Source check needed. Open details to see what to verify before acting.</p>}
-                  </button>
-                  <div className="flex flex-col justify-end gap-2">
-                    <Button onClick={() => begin(now)} disabled={!canStart(now)}>
-                      {startTimer.isPending ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-                      {timerQuery.data?.cardId === now.cardId ? "Timer running" : !managerCoverageReady ? "Waiting for full work check" : isWaiting(now) ? "Waiting - review first" : "Start timer"}
-                    </Button>
-                    <Button variant="outline" onClick={() => setSelected(now)}>Open details</Button>
-                    {/^https?:\/\//i.test(now.cardUrl) && <a href={now.cardUrl} target="_blank" rel="noopener noreferrer" className="text-center text-xs font-medium text-primary underline">Open source card</a>}
+                <>
+                  {timerQuery.data && timerQuery.data.cardId !== now.cardId && <div role="status" className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
+                    <p><span className="font-semibold">Timer already running for {timerQuery.data.cardName}.</span> Continue on that task; its time is already being recorded. This selected task has not been started.</p>
+                    {/^https?:\/\//i.test(timerQuery.data.cardUrl) && <a href={timerQuery.data.cardUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block font-medium text-blue-700 underline dark:text-blue-300">Open running task</a>}
+                  </div>}
+                  <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_180px]">
+                    <button type="button" className="min-w-0 text-left" onClick={() => setSelectedCardId(now.cardId)}>
+                      <div className="mb-2 flex flex-wrap items-center gap-2"><h2 className="text-lg font-semibold">{now.cardName}</h2><Badge variant="outline" className={priorityTone(now.priorityTier)}>{now.priorityTier}</Badge></div>
+                      <p className="text-sm text-muted-foreground">{now.boardName} · {now.listName}</p>
+                      <div className="mt-4 border-l-2 border-blue-500 pl-3"><div className="text-[11px] font-semibold uppercase text-muted-foreground">{isWaiting(now) || nowManagerAction?.blocked ? "Waiting for" : "Next action"}</div><p className="mt-1 text-sm font-medium">{nextInstruction(now, nowManagerAction)}</p></div>
+                      {now.waitingReason && <p className="mt-3 text-xs text-amber-600 dark:text-amber-300">Waiting evidence: {workerFacingOperationalText(now.waitingReason.nextAction, "Review the recorded blocker before continuing.")}</p>}
+                      {(currentCompletionCriterion(now, nowManagerAction) || now.evidenceSummary.forecast?.p50Minutes !== null && now.evidenceSummary.forecast?.p50Minutes !== undefined) && <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 border-t pt-3 text-xs text-muted-foreground">
+                        {currentCompletionCriterion(now, nowManagerAction) && <span><span className="font-semibold text-foreground">Done when:</span> {currentCompletionCriterion(now, nowManagerAction)}</span>}
+                        {now.evidenceSummary.forecast?.p50Minutes !== null && now.evidenceSummary.forecast?.p50Minutes !== undefined && <span><span className="font-semibold text-foreground">Working estimate:</span> {formatDuration(now.evidenceSummary.forecast.p50Minutes)}{now.evidenceSummary.forecast.p90Minutes !== null ? ` to ${formatDuration(now.evidenceSummary.forecast.p90Minutes)}` : ""}</span>}
+                      </div>}
+                      {nowSources?.checks.some(check => check.status !== "current") && <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">Source check needed. Open details to see what to verify before acting.</p>}
+                    </button>
+                    <div className="flex flex-col justify-end gap-2">
+                      <Button onClick={() => begin(now)} disabled={!canStart(now)}>
+                        {startTimer.isPending ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+                        {timerQuery.data?.cardId === now.cardId ? "Timer running" : timerQuery.data ? "Timer running on another task" : !managerCoverageReady ? "Waiting for full work check" : isWaiting(now) ? "Waiting - review first" : "Start timer"}
+                      </Button>
+                      <Button variant="outline" onClick={() => setSelectedCardId(now.cardId)}>Open details</Button>
+                      {/^https?:\/\//i.test(now.cardUrl) && <a href={now.cardUrl} target="_blank" rel="noopener noreferrer" className="text-center text-xs font-medium text-blue-700 underline dark:text-blue-300">Open source card</a>}
+                    </div>
                   </div>
-                </div>
+                </>
               ) : primary ? (
-                <div className="space-y-3 text-sm"><p>No other task is ready to execute. Follow the work guidance above or review the waiting tasks below.</p>{related && <Button variant="outline" onClick={() => setSelected(related)}>Open related task</Button>}</div>
+                <div className="space-y-3 text-sm"><p>No other task is ready to execute. Follow the work guidance above or review the waiting tasks below.</p>{related && <Button variant="outline" onClick={() => setSelectedCardId(related.cardId)}>Open related task</Button>}</div>
               ) : (
-                <EmptyState title="No trusted work item yet" detail={intelligenceQuery.error?.message ?? "Generate APTLSS plans or connect Trello to build the queue."} />
+                <EmptyState title="No trusted work item yet" detail={intelligenceQuery.error ? "Task information could not be loaded. Refresh before relying on the work list." : "Generate APTLSS plans or connect Trello to build the queue."} />
               )}
             </CardContent>
           </Card>
@@ -426,16 +592,16 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
             <CardHeader className="border-b py-4"><CardTitle className="text-sm">{managerCoverageReady ? "Next up" : "Tasks to inspect"}</CardTitle><CardDescription>{managerCoverageReady ? "Only the next three cards are shown." : "These tasks are not ranked until the full work list is checked."}</CardDescription></CardHeader>
             <CardContent className="p-0">
               {intelligenceQuery.isLoading ? <QueueSkeleton /> : intelligenceQuery.error ? <p role="alert" className="p-4">Tasks could not be loaded. Refresh to try again.</p> : visibleNextCards.length ? visibleNextCards.map((card, index) => (
-                <button key={card.cardId} type="button" onClick={() => setSelected(card)} className="grid w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-3 border-b px-4 py-3 text-left last:border-b-0 hover:bg-accent/40">
+                <button key={card.cardId} type="button" onClick={() => setSelectedCardId(card.cardId)} className="grid w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-3 border-b px-4 py-3 text-left last:border-b-0 hover:bg-accent/40">
                   <span className="flex size-6 items-center justify-center rounded border text-xs text-muted-foreground">{index + 1}</span>
-                  <span className="min-w-0"><span className="block truncate text-sm font-medium">{card.cardName}</span><span className="block truncate text-xs text-muted-foreground">{card.listName} · {card.nextBestAction ?? "Review next action"}</span></span>
+                  <span className="min-w-0"><span className="block truncate text-sm font-medium">{card.cardName}</span><span className="block truncate text-xs text-muted-foreground">{card.listName} · {workerFacingOperationalText(card.nextBestAction, "Open task details for the next action.")}</span></span>
                   <Badge variant="outline" className={priorityTone(card.priorityTier)}>{card.priorityTier}</Badge>
                 </button>
               )) : <div className="p-5 text-sm text-muted-foreground">No additional cards queued.</div>}
             </CardContent>
           </Card>
 
-          {!intelligenceQuery.isLoading && !intelligenceQuery.error && <QueueLanes cards={cards} complete={managerCoverageReady} onSelect={setSelected} />}
+          {!intelligenceQuery.isLoading && !intelligenceQuery.error && <QueueLanes cards={cards} complete={managerCoverageReady} onSelect={(card) => setSelectedCardId(card.cardId)} />}
         </div>
 
         <aside className="space-y-3">
@@ -449,9 +615,11 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
       </div>
       <CardInspector
         card={selected}
+        activeTimer={timerQuery.data ?? null}
+        managerActions={selectedManagerActions}
         sourceChecks={selected ? sourceChecksFor(selected) : null}
         timeZone={timeZone}
-        onClose={() => setSelected(null)}
+        onClose={() => setSelectedCardId(null)}
         onStart={begin}
         canStart={canStart}
         onRefresh={refreshEvidence}
@@ -502,6 +670,8 @@ const INSPECTOR_MAX_WIDTH = 1_040;
 
 function CardInspector({
   card,
+  activeTimer,
+  managerActions,
   sourceChecks,
   timeZone,
   onClose,
@@ -511,6 +681,8 @@ function CardInspector({
   refreshing,
 }: {
   card: OperatorCard | null;
+  activeTimer: { cardId: string; cardName: string; cardUrl: string } | null;
+  managerActions: WorkerManagerAction[];
   sourceChecks: ReturnType<typeof assessWorkerSourceChecks> | null;
   timeZone: string;
   onClose: () => void;
@@ -539,6 +711,7 @@ function CardInspector({
     ? Math.max(0, viewportWidth - 8)
     : Math.max(INSPECTOR_MIN_WIDTH, Math.min(preferredWidth, desktopMax));
   const wide = panelWidth >= 720;
+  const managerAction = card ? selectManagerActionForCard(managerActions, card.cardId) : null;
   const evidenceSummary = card?.evidenceSummary ?? {
     sources: [
       { key: "trello" as const, label: "Trello", count: 0, status: "missing" as const, detail: "Refresh to check current evidence" },
@@ -647,8 +820,15 @@ function CardInspector({
             <div className="space-y-6 px-5 py-5">
               <section className="border-l-2 border-blue-500 pl-4">
                 <InspectorLabel>Exactly next</InspectorLabel>
-                <p className="text-sm font-medium">{nextInstruction(card)}</p>
+                <p className="text-sm font-medium">{nextInstruction(card, managerAction)}</p>
               </section>
+
+              {activeTimer && <section role="status" className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
+                {activeTimer.cardId === card.cardId
+                  ? <p>Timer running for this task. Continue working; time is being recorded.</p>
+                  : <p>Timer already running for {activeTimer.cardName}. Continue on that task; this selected task has not been started.</p>}
+                {activeTimer.cardId !== card.cardId && /^https?:\/\//i.test(activeTimer.cardUrl) && <a href={activeTimer.cardUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block font-medium text-blue-700 underline dark:text-blue-300">Open running task</a>}
+              </section>}
 
               <section>
                 <div className="flex items-center justify-between gap-3">
@@ -681,22 +861,18 @@ function CardInspector({
               <section>
                 <InspectorLabel>Task steps</InspectorLabel>
                 <div className={`mt-2 grid gap-2 ${wide ? "grid-cols-2" : "grid-cols-1"}`}>
-                  {card.steps.length ? card.steps.map((step) => (
-                    <div key={step.id} className="flex gap-2 rounded-md border p-3 text-sm">
-                      <span className="text-muted-foreground">{step.stepNumber}.</span>
-                      <span className="min-w-0 flex-1">
-                        {step.title}
-                        {step.requiresRobert && <span className="mt-1 block text-xs text-muted-foreground">Waiting for founder decision{step.decisionDeferred && step.decisionDueAt ? ` · review ${new Date(step.decisionDueAt).toLocaleString()}` : ""}</span>}
-                      </span>
-                      {step.requiresRobert && <Badge variant="outline">{step.decisionDeferred ? "Deferred" : "Decision"}</Badge>}
-                    </div>
-                  )) : <p className="text-sm text-muted-foreground">No structured steps recorded.</p>}
+                  {card.steps.length ? card.steps.map((step) => {
+                    const action = managerActions.find(item => item.stepIds.includes(step.id));
+                    return (
+                      <WorkerTaskStepRow key={step.id} step={step} action={action} />
+                    );
+                  }) : <p className="text-sm text-muted-foreground">No structured steps recorded.</p>}
                 </div>
               </section>
             </div>
           </div>
           <div className="grid shrink-0 gap-2 border-t bg-background p-4 sm:grid-cols-2">
-            <Button disabled={!canStart(card)} onClick={() => onStart(card)}><Play className="size-4" />Start timer</Button>
+            <Button disabled={!canStart(card)} onClick={() => onStart(card)}><Play className="size-4" />{activeTimer?.cardId === card.cardId ? "Timer running" : activeTimer ? "Timer running on another task" : "Start timer"}</Button>
             <Button variant="outline" asChild><a href={card.cardUrl} target="_blank" rel="noreferrer">Open Trello <ExternalLink className="size-4" /></a></Button>
           </div>
         </>}
@@ -707,62 +883,67 @@ function CardInspector({
 
 function PlanView({ founderName, timeZone }: { founderName: string; timeZone: string }) {
   const utils = trpc.useUtils();
+  const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null);
   const query = trpc.operator.getDailyPlan.useQuery(undefined, { staleTime: 60_000 });
+  const editingPolicy = trpc.operator.getDailyPlanEditingPolicy.useQuery(undefined, { staleTime: 60_000 });
   const manager = trpc.operator.getManagerStatus.useQuery(undefined, managerStatusQueryOptions);
   const mutation = trpc.operator.generateDailyPlan.useMutation({
     onSuccess: () => { void utils.operator.getDailyPlan.invalidate(); toast.success("Day plan generated"); },
-    onError: (error) => toast.error(error.message),
+    onError: () => toast.error("Your day plan could not be updated. Reload the saved plan before trying again."),
   });
-  const [elapsed, setElapsed] = useState(0);
-  useEffect(() => {
-    if (!mutation.isPending) return;
-    const started = Date.now();
-    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1_000)), 1_000);
-    return () => window.clearInterval(timer);
-  }, [mutation.isPending]);
   const run = (force: boolean) => {
-    setElapsed(0);
+    setGenerationStartedAt(Date.now());
     mutation.mutate({ force });
   };
   const plan = query.data?.schedule;
+  const workerPlanImpact = workerFacingPlanImpact(manager.data?.snapshot?.proposal?.planningImpact);
+  const canEditPlan = editingPolicy.data?.editable === true;
   return (
     <div className="space-y-5">
-      <PageHeading title="Plan My Day" description="" actions={<Button onClick={() => run(Boolean(plan))} disabled={mutation.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{plan ? "Regenerate plan" : "Generate plan"}</Button>} />
-      {mutation.isPending && <div role="status" aria-live="polite" className="flex flex-wrap items-center gap-3 border-b p-4"><Loader2 className="size-4 animate-spin" /><span>Generating plan</span><span className="text-sm text-muted-foreground">{elapsed}s elapsed · completion estimate unavailable</span></div>}
-      {query.error && <Alert variant="destructive"><AlertTitle>Plan could not be loaded</AlertTitle><AlertDescription>{query.error.message}<Button variant="outline" size="sm" onClick={() => void query.refetch()}>Retry</Button></AlertDescription></Alert>}
-      {mutation.error && <Alert variant="destructive"><AlertTitle>Plan generation could not be confirmed</AlertTitle><AlertDescription>{mutation.error.message} Reload the saved plan before retrying to check whether generation completed.</AlertDescription></Alert>}
+      <PageHeading title="Plan My Day" description="" actions={canEditPlan ? <Button onClick={() => run(Boolean(plan))} disabled={mutation.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{plan ? "Regenerate plan" : "Generate plan"}</Button> : undefined} />
+      {editingPolicy.isError && <Alert variant="destructive"><AlertTitle>Plan access could not be checked</AlertTitle><AlertDescription>Reload this page before making schedule changes.</AlertDescription></Alert>}
+      {editingPolicy.data?.editable === false && <Alert><CalendarDays className="size-4" /><AlertTitle>Agenda changes are paused</AlertTitle><AlertDescription>{plan ? `Your saved agenda remains the schedule to follow. Suggested changes above are not applied. Contact ${founderName} if it needs to change.` : `No agenda is saved yet. Contact ${founderName} to set today's schedule.`}</AlertDescription></Alert>}
+      {mutation.isPending && generationStartedAt !== null && <PendingPlanGenerationStatus startedAt={generationStartedAt} />}
+      {query.error && <Alert variant="destructive"><AlertTitle>Plan could not be loaded</AlertTitle><AlertDescription>The saved agenda is unavailable. Refresh the page before relying on it. <Button variant="outline" size="sm" onClick={() => void query.refetch()}>Retry</Button></AlertDescription></Alert>}
+      {mutation.error && <Alert variant="destructive"><AlertTitle>Plan update needs confirmation</AlertTitle><AlertDescription>Reload the saved plan before trying again to check whether the update completed.</AlertDescription></Alert>}
       {!query.isLoading && !query.error && !manager.isLoading && !manager.error && !manager.data?.error && <WorkerPlanSuggestion
-        impact={manager.data?.snapshot?.proposal?.planningImpact}
+        impact={workerPlanImpact}
         expectedPlanVersion={manager.data?.snapshot?.planVersion}
         currentPlanVersion={query.data?.planVersion}
         currentDateKey={dateKeyInTimeZone(Date.now(), timeZone)}
         hasSavedPlan={!!plan}
         applied={manager.data?.snapshot?.applied}
       />}
-      {query.isLoading ? <QueueSkeleton /> : !plan && !query.error ? <Alert><Inbox className="size-4" /><AlertTitle>No saved plan</AlertTitle><AlertDescription>Create a plan using your tasks and working hours.</AlertDescription></Alert> : plan ? (
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
-          <Card className="gap-0 rounded-lg py-0">
-            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Today’s agenda</CardTitle><CardDescription>{plan.constraints.startTime}–{plan.constraints.endTime} · {timeZone} · configured breaks protected</CardDescription></CardHeader>
-            <CardContent className="p-0">
-              {plan.blocks.length ? plan.blocks.map((block) => (
-                <div key={block.id} className="grid gap-3 border-b p-4 last:border-b-0 sm:grid-cols-[72px_minmax(0,1fr)_auto]">
-                  <div className="text-sm font-medium">{block.startTime}<div className="text-xs font-normal text-muted-foreground">{block.endTime}</div></div>
-                  <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-medium">{block.cardName}</span><Badge variant="outline" className={priorityTone(block.priority)}>{block.priority}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{block.action}</p></div>
-                  <Badge variant="outline">{block.status}</Badge>
-                </div>
-              )) : <div className="p-6 text-sm text-muted-foreground">No work blocks are scheduled for this protected day.</div>}
-            </CardContent>
-          </Card>
-          <div className="space-y-3">
-            <ContextMetric icon={Gauge} label="Before you start" value={plan.planHealth.availableMinutes === 0 && !plan.blocks.length ? "Day off" : "Check sources"} detail={plan.planHealth.availableMinutes === 0 && !plan.blocks.length ? "No working time scheduled" : "Advice still requires source verification"} />
-            <ContextMetric icon={Clock3} label="Scheduled" value={`${Math.round(plan.planHealth.scheduledMinutes / 60 * 10) / 10}h`} detail={`${plan.planHealth.gaps} min remains available`} />
-            <ContextMetric icon={BrainCircuit} label={`${founderName} items`} value={`${plan.robertItems.length}`} detail="Visible even when unscheduled" />
-            <ContextMetric icon={ListTodo} label="Unscheduled" value={`${plan.unscheduledCards.length}`} detail="Retained for replanning" />
-            {!!plan.robertItems.length && <details className="border-t py-3"><summary className="cursor-pointer text-sm font-medium">Decision details ({plan.robertItems.length})</summary><ul className="mt-3 space-y-3 text-sm">{plan.robertItems.map(item => <li key={`${item.cardId}:${item.stepId}`}><p className="font-medium">{item.cardName}</p><p className="text-muted-foreground">{item.decision}</p></li>)}</ul></details>}
-            {!!plan.unscheduledCards.length && <details className="border-t py-3"><summary className="cursor-pointer text-sm font-medium">Unscheduled details ({plan.unscheduledCards.length})</summary><ul className="mt-3 space-y-3 text-sm">{plan.unscheduledCards.map(item => <li key={item.cardId}><p className="font-medium">{item.cardName}</p><p className="text-muted-foreground">{item.reason}</p></li>)}</ul></details>}
-          </div>
-        </div>
-      ) : null}
+      {query.isLoading ? <QueueSkeleton /> : !plan && !query.error && canEditPlan ? <Alert><Inbox className="size-4" /><AlertTitle>No saved plan</AlertTitle><AlertDescription>Create a plan using your tasks and working hours.</AlertDescription></Alert> : plan ? <WorkerDailyPlanContent plan={plan} timeZone={timeZone} /> : null}
+    </div>
+  );
+}
+
+type WorkerDailyPlanSchedule = NonNullable<RouterOutputs["operator"]["getDailyPlan"]>["schedule"];
+
+export function WorkerDailyPlanContent({ plan, timeZone }: { plan: WorkerDailyPlanSchedule; timeZone: string }) {
+  const scheduledHours = Math.round(plan.planHealth.scheduledMinutes / 60 * 10) / 10;
+  const availableMinutes = Math.max(0, plan.planHealth.availableMinutes - plan.planHealth.scheduledMinutes);
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
+      <Card className="gap-0 rounded-lg py-0">
+        <CardHeader className="border-b py-4"><CardTitle className="text-sm">Today’s agenda</CardTitle><CardDescription>{plan.constraints.startTime}–{plan.constraints.endTime} · {timeZone} · breaks protected</CardDescription></CardHeader>
+        <CardContent className="p-0">
+          {plan.blocks.length ? plan.blocks.map((block) => (
+            <div key={block.id} className="grid gap-3 border-b p-4 last:border-b-0 sm:grid-cols-[72px_minmax(0,1fr)_auto]">
+              <div className="text-sm font-medium">{block.startTime}<div className="text-xs font-normal text-muted-foreground">{block.endTime}</div></div>
+              <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-medium">{block.cardName}</span><Badge variant="outline" className={priorityTone(block.priority)}>{block.priority}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{workerFacingOperationalText(block.action, "Continue the next recorded task step.")}</p></div>
+              <Badge variant="outline">{workerPlanBlockStatus(block.status)}</Badge>
+            </div>
+          )) : <div className="p-6 text-sm text-muted-foreground">No work blocks are scheduled for this protected day.</div>}
+        </CardContent>
+      </Card>
+      <div className="space-y-3">
+        <ContextMetric icon={Clock3} label="Scheduled" value={`${scheduledHours}h`} detail={`${availableMinutes} min available`} />
+        <ContextMetric icon={ListTodo} label="Unscheduled tasks" value={`${plan.unscheduledCards.length}`} detail="Not placed in today's agenda" />
+        {!!plan.unscheduledCards.length && <details className="border-t py-3"><summary className="cursor-pointer text-sm font-medium">Unscheduled tasks ({plan.unscheduledCards.length})</summary><ul className="mt-3 space-y-3 text-sm">{plan.unscheduledCards.map(item => <li key={item.cardId}><p className="font-medium">{item.cardName}</p><p className="text-muted-foreground">{workerFacingOperationalText(item.reason, "No suitable time block is available; review the task details.")}</p></li>)}</ul></details>}
+      </div>
     </div>
   );
 }
@@ -783,7 +964,7 @@ function DecisionsView({ founderName }: { founderName: string }) {
           <Card className="gap-0 rounded-lg py-0">
             <CardHeader className="border-b py-4"><CardTitle className="text-sm">Awaiting founder</CardTitle><CardDescription>Highest-priority unresolved decision first.</CardDescription></CardHeader>
             <CardContent className="p-0">
-              {queue.isLoading ? <div className="p-4"><QueueSkeleton /></div> : decisionItems.length ? <>
+              {queue.isLoading ? <div className="p-4"><QueueSkeleton /></div> : queue.error ? <p role="alert" className="p-4 text-sm">Decision items could not be loaded. Refresh before relying on this list.</p> : decisionItems.length ? <>
                 {visibleDecisionItems.map((item, index) => (
                   <button key={item.stepId} type="button" onClick={() => setSelectedId(item.stepId)} className={`grid w-full grid-cols-[28px_minmax(0,1fr)_auto] gap-3 border-b px-4 py-3 text-left hover:bg-accent/40 ${selected?.stepId === item.stepId ? "bg-accent/50" : ""}`}>
                     <span className="flex size-6 items-center justify-center rounded border text-xs">{index + 1}</span>
@@ -799,7 +980,7 @@ function DecisionsView({ founderName }: { founderName: string }) {
               </> : <EmptyState title="Decision inbox is clear" detail={`New ${founderName}-required APTLSS steps will appear here.`} />}
             </CardContent>
           </Card>
-          <RecentOutcomes rows={history.data ?? []} />
+          <RecentOutcomes rows={history.data ?? []} unavailable={!!history.error} />
         </div>
         <Card className="h-fit gap-4 rounded-lg p-5 lg:sticky lg:top-20">
           {selected ? <>
@@ -813,9 +994,9 @@ function DecisionsView({ founderName }: { founderName: string }) {
   );
 }
 
-function RecentOutcomes({ rows }: { rows: Array<{ id: number; cardName: string; outcome: string; resolvedAt: Date }> }) {
+function RecentOutcomes({ rows, unavailable }: { rows: Array<{ id: number; cardName: string; outcome: string; resolvedAt: Date }>; unavailable: boolean }) {
   const [open, setOpen] = useState(false);
-  return <Card className="gap-0 rounded-lg py-0"><Collapsible open={open} onOpenChange={setOpen}><CollapsibleTrigger className="flex w-full items-center justify-between p-4 text-left"><span><span className="block text-sm font-semibold">Recent outcomes</span><span className="block text-xs text-muted-foreground">Durable resolution history</span></span>{open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</CollapsibleTrigger><CollapsibleContent className="border-t">{rows.length ? rows.map((row) => <div key={row.id} className="border-b p-4 last:border-b-0"><div className="flex justify-between gap-3"><span className="text-sm font-medium">{row.cardName}</span><span className="shrink-0 text-xs text-muted-foreground">{new Date(row.resolvedAt).toLocaleDateString()}</span></div><p className="mt-1 text-sm">{row.outcome}</p></div>) : <div className="p-4 text-sm text-muted-foreground">No recorded outcomes yet.</div>}</CollapsibleContent></Collapsible></Card>;
+  return <Card className="gap-0 rounded-lg py-0"><Collapsible open={open} onOpenChange={setOpen}><CollapsibleTrigger className="flex w-full items-center justify-between p-4 text-left"><span><span className="block text-sm font-semibold">Recent outcomes</span><span className="block text-xs text-muted-foreground">Durable resolution history</span></span>{open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</CollapsibleTrigger><CollapsibleContent className="border-t">{unavailable ? <p role="alert" className="p-4 text-sm">Outcome history could not be loaded. Refresh before relying on this list.</p> : rows.length ? rows.map((row) => <div key={row.id} className="border-b p-4 last:border-b-0"><div className="flex justify-between gap-3"><span className="text-sm font-medium">{row.cardName}</span><span className="shrink-0 text-xs text-muted-foreground">{new Date(row.resolvedAt).toLocaleDateString()}</span></div><p className="mt-1 text-sm">{row.outcome}</p></div>) : <div className="p-4 text-sm text-muted-foreground">No recorded outcomes yet.</div>}</CollapsibleContent></Collapsible></Card>;
 }
 
 function EvidenceView() {
@@ -828,6 +1009,41 @@ function EvidenceView() {
   const google = trpc.operator.getGoogleEvidenceStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const latest = compliance.data?.[0] ?? null;
   const browserConnection = describeBrowserConnection(status.data);
+  const gmailSync = google.data?.credentialsReady ? describeWorkerIntegrationSync({
+    enabled: google.data.gmail.enabled,
+    intervalMinutes: google.data.gmail.intervalMinutes,
+    lastSyncedAt: google.data.gmail.lastSyncedAt,
+    lastError: google.data.gmail.lastError,
+  }) : null;
+  const driveSync = google.data?.credentialsReady ? describeWorkerIntegrationSync({
+    enabled: google.data.drive.enabled,
+    intervalMinutes: google.data.drive.intervalMinutes,
+    lastSyncedAt: google.data.drive.lastSyncedAt,
+    lastError: google.data.drive.lastError,
+  }) : null;
+  const integrationStatus = (provider: "gmail" | "drive", sync: typeof gmailSync) => !google.data
+    ? google.isLoading ? "Checking" : "Unavailable"
+    : !google.data.credentialsReady ? "Setup required"
+      : provider === "gmail" && google.data.gmail.sourceConflictPending ? "Review required"
+      : sync?.label ?? "Status unknown";
+  const integrationDetail = (provider: "gmail" | "drive", sync: typeof gmailSync) => {
+    if (!google.data) return google.isLoading
+      ? "Checking the Google connection and last successful sync."
+      : "Google sync status could not be checked. Open Settings to retry.";
+    if (!google.data.credentialsReady) return "Connect Google in Settings before these sources can be checked.";
+    const source = google.data[provider];
+    const when = source.lastSyncedAt && Number.isFinite(Date.parse(source.lastSyncedAt))
+      ? ` Last successful sync: ${new Date(source.lastSyncedAt).toLocaleString()}.`
+      : " No valid successful sync time is recorded.";
+    const statusDetail = sync ? workerSyncStatusDetail(sync) : "Sync status is unavailable.";
+    const providerDetail = provider === "gmail"
+      ? `${email.error ? "Pending email count is unavailable." : `${email.data?.count ?? 0} email${email.data?.count === 1 ? "" : "s"} awaiting review.`} Gmail is not changed automatically.`
+      : "This check collects accessible file metadata; open a matched Drive file to review its contents.";
+    if (provider === "gmail" && google.data.gmail.sourceConflictPending) {
+      return `A saved email could not be safely refreshed. Review the original before relying on it.${when} ${providerDetail}`;
+    }
+    return `${statusDetail}${when} ${providerDetail}`;
+  };
   return (
     <div className="space-y-5">
       <PageHeading title="Evidence" description="" />
@@ -840,14 +1056,14 @@ function EvidenceView() {
       <Card className="gap-0 rounded-lg py-0">
         <CardHeader className="border-b py-4"><CardTitle className="text-sm">Connected sources</CardTitle></CardHeader>
         <CardContent className="divide-y p-0">
-          <EvidenceRow label="Trello tasks" status={intelligence.error ? "Needs attention" : "Connected"} detail={intelligence.error?.message ?? "Task status, priority and remaining steps."} />
-          <EvidenceRow label="Waiting reasons" status="Operational" detail="Recorded reasons tasks are waiting and who needs to respond." />
+          <EvidenceRow label="Trello tasks" status={intelligence.isLoading ? "Checking" : intelligence.error ? "Unavailable" : "Available"} detail={intelligence.error ? "Task information could not be loaded. Refresh before relying on it." : "Task status, priority and remaining steps. Cached-source freshness is shown in each task's details."} />
+          <EvidenceRow label="Waiting reasons" status={waiting.isLoading ? "Checking" : waiting.error ? "Unavailable" : `${waiting.data?.length ?? 0} recorded`} detail={waiting.error ? "Waiting reasons could not be loaded. Refresh before relying on them." : "Recorded reasons tasks are waiting and who needs to respond."} />
           <EvidenceRow label="Browser tabs" status={browserConnection.label} detail={browserConnection.detail} />
-          <EvidenceRow label="Communication" status={latest?.verificationStatus ?? "No snapshot"} detail={latest ? `${latest.messageReplied}/${latest.messageTotal} messages answered; ${latest.messageNeedsClarification} need clarification.` : "No verified communication snapshot is available yet."} />
-          <EvidenceRow label="Gmail processing" status={!google.data?.credentialsReady ? "Setup required" : email.error ? "Needs attention" : `${email.data?.count ?? 0} pending`} detail={!google.data?.credentialsReady ? google.data?.setupMessage ?? "Google credentials have not been checked yet." : latest ? `${latest.emailCompleted}/${latest.emailTotal} retained emails were processed or archived for the latest snapshot.` : "Inbox tasks are retained without changing Gmail automatically."} />
-          <EvidenceRow label="Google Drive" status={!google.data?.credentialsReady ? "Setup required" : google.data.drive.lastSyncedAt ? "Connected" : "Waiting for first sync"} detail={!google.data?.credentialsReady ? google.data?.setupMessage ?? "Google credentials have not been checked yet." : google.data.drive.lastSyncedAt ? `File list last checked ${new Date(google.data.drive.lastSyncedAt).toLocaleString()}. Only files matched to a task are included.` : "No Drive files have been checked for your tasks yet."} />
-          <EvidenceRow label="Time accountability" status={latest ? `${Math.round(latest.trackedSeconds / 360) / 10}h tracked` : "No snapshot"} detail={latest ? `${Math.round(latest.overtimeSeconds / 360) / 10}h overtime against the configured worker schedule.` : "Completed timer entries are included in the next snapshot."} />
-          <EvidenceRow label="Browser history" status={`${history.data?.length ?? 0} days`} detail="Your recorded end-of-day tab checks." />
+          <EvidenceRow label="Communication" status={compliance.isLoading ? "Checking" : compliance.error ? "Unavailable" : latest?.verificationStatus ?? "No snapshot"} detail={compliance.error ? "Communication review status could not be loaded." : latest ? `${latest.messageReplied}/${latest.messageTotal} messages answered; ${latest.messageNeedsClarification} need clarification.` : "No verified communication snapshot is available yet."} />
+          <EvidenceRow label="Gmail sync" status={integrationStatus("gmail", gmailSync)} detail={integrationDetail("gmail", gmailSync)} />
+          <EvidenceRow label="Google Drive metadata" status={integrationStatus("drive", driveSync)} detail={integrationDetail("drive", driveSync)} />
+          <EvidenceRow label="Time accountability" status={compliance.isLoading ? "Checking" : compliance.error ? "Unavailable" : latest ? `${Math.round(latest.trackedSeconds / 360) / 10}h tracked` : "No snapshot"} detail={compliance.error ? "Time accountability could not be loaded." : latest ? `${Math.round(latest.overtimeSeconds / 360) / 10}h overtime against the configured worker schedule.` : "Completed timer entries are included in the next snapshot."} />
+          <EvidenceRow label="Browser history" status={history.isLoading ? "Checking" : history.error ? "Unavailable" : `${history.data?.length ?? 0} days`} detail={history.error ? "Browser history could not be loaded." : "Your recorded end-of-day tab checks."} />
         </CardContent>
       </Card>
     </div>
@@ -904,7 +1120,7 @@ function WorkerSettingsView() {
       void utils.operator.getBrowserTabStatus.invalidate();
       toast.success("Browser policy saved");
     },
-    onError: (error) => toast.error(error.message),
+    onError: () => toast.error("Browser settings could not be saved. Try again."),
   });
   const collectorToken = trpc.operator.getBrowserCollectorToken.useMutation({
     onSuccess: async ({ token }) => {
@@ -912,17 +1128,17 @@ function WorkerSettingsView() {
         await navigator.clipboard.writeText(token);
         toast.success("Collector token copied");
       } catch {
-        toast.error("Clipboard access was blocked");
+        toast.error("The pairing details could not be copied. Try again.");
       }
     },
-    onError: (error) => toast.error(error.message),
+    onError: () => toast.error("Browser pairing could not be created. Try again."),
   });
   const saveGoogle = trpc.operator.updateGoogleEvidenceSettings.useMutation({
     onSuccess: () => {
       void utils.operator.getGoogleEvidenceStatus.invalidate();
       toast.success("Google evidence settings saved");
     },
-    onError: (error) => toast.error(error.message),
+    onError: () => toast.error("Google settings could not be saved. Try again."),
   });
   const syncGoogle = trpc.operator.syncGoogleEvidence.useMutation({
     onSuccess: (result) => {
@@ -930,21 +1146,23 @@ function WorkerSettingsView() {
       void utils.emailInbox.getPendingCount.invalidate();
       void utils.operator.getWorkQueueContext.invalidate();
       if (!result.configured) {
-        toast.error(result.message ?? "Google evidence is not configured");
+        toast.error("Google evidence is not configured. Review the connection settings.");
       } else if (result.message) {
-        toast.error(result.message);
+        toast.error(workerFacingGoogleSyncFailure(result.message));
+      } else if (result.gmail.sourceConflictWarning) {
+        toast.info("Sync finished, but a Gmail source needs review. The previously saved evidence was left unchanged.");
       } else {
         toast.success(`Evidence refreshed: ${result.gmail.imported} emails and ${result.drive.imported} Drive files checked`);
       }
     },
-    onError: (error) => toast.error(error.message),
+    onError: (error) => toast.error(workerFacingGoogleSyncFailure(error.message)),
   });
   const disconnectGoogle = trpc.operator.disconnectGoogleEvidence.useMutation({
     onSuccess: () => {
       void utils.operator.getGoogleEvidenceStatus.invalidate();
       toast.success("Google worker connection removed");
     },
-    onError: (error) => toast.error(error.message),
+    onError: () => toast.error("Google connection could not be removed. Try again."),
   });
   const worker = context.data;
   const browserConnection = describeBrowserConnection(browser.data);
@@ -968,7 +1186,7 @@ function WorkerSettingsView() {
     <div className="space-y-5">
       <PageHeading title="Settings" description="" />
       <ManagerShadowSettings />
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">
         <Card className="gap-0 rounded-lg py-0">
           <CardHeader className="border-b py-4">
             <CardTitle className="text-sm">Browser organization</CardTitle>
@@ -1033,7 +1251,7 @@ function WorkerSettingsView() {
               <ConnectionRow
                 label="Dashboard connection"
                 status={apiHealth.data?.runtime === "unified-node" ? "Connected" : apiHealth.isLoading ? "Checking" : "Unavailable"}
-                detail={apiHealth.data?.runtime === "unified-node" ? "The dashboard API is responding." : "The dashboard API could not be confirmed. Refresh before relying on saved status."}
+                detail={apiHealth.data?.runtime === "unified-node" ? "The dashboard is responding." : "The dashboard connection could not be confirmed. Refresh before relying on saved status."}
                 tone={apiHealth.data?.runtime === "unified-node" ? "healthy" : apiHealth.isLoading ? "muted" : "critical"}
               />
               <ConnectionRow
@@ -1044,16 +1262,16 @@ function WorkerSettingsView() {
               />
               <ConnectionRow
                 label="Gmail"
-                status={!google.data ? google.error ? "Unavailable" : "Checking" : !googleReady ? "Setup required" : email.error ? "Needs attention" : gmailSync!.label}
-                detail={!google.data ? "Gmail status could not be loaded." : !googleReady ? google.data.setupMessage ?? "Connect Google for this worker." : `${gmailSync!.detail}${google.data.gmail.lastSyncedAt ? ` Last successful sync: ${connectionTime(google.data.gmail.lastSyncedAt)}.` : ""} ${email.data?.count ?? 0} pending message${email.data?.count === 1 ? "" : "s"}.`}
-                tone={!google.data ? "critical" : !googleReady || email.error ? "critical" : gmailSync!.tone}
+                status={!google.data ? google.error ? "Unavailable" : "Checking" : !googleReady ? "Setup required" : google.data.gmail.sourceConflictPending ? "Review required" : email.error ? "Needs attention" : gmailSync!.label}
+                detail={!google.data ? "Gmail status could not be loaded." : !googleReady ? "Connect Google to check this source." : google.data.gmail.sourceConflictPending ? `A saved email could not be safely refreshed. Review the original before relying on it.${google.data.gmail.lastSyncedAt ? ` Last successful sync: ${connectionTime(google.data.gmail.lastSyncedAt)}.` : ""}` : `${workerSyncStatusDetail(gmailSync!)}${google.data.gmail.lastSyncedAt ? ` Last successful sync: ${connectionTime(google.data.gmail.lastSyncedAt)}.` : ""} ${email.data?.count ?? 0} pending message${email.data?.count === 1 ? "" : "s"}.`}
+                tone={!google.data ? "critical" : !googleReady || email.error ? "critical" : google.data.gmail.sourceConflictPending ? "warning" : gmailSync!.tone}
                 href="#google-connection"
                 linkLabel="Review Gmail settings"
               />
               <ConnectionRow
                 label="Google Drive"
                 status={!google.data ? google.error ? "Unavailable" : "Checking" : !googleReady ? "Setup required" : driveSync!.label}
-                detail={!google.data ? "Drive status could not be loaded." : !googleReady ? google.data.setupMessage ?? "Connect Google for this worker." : `${driveSync!.detail}${google.data.drive.lastSyncedAt ? ` Last successful sync: ${connectionTime(google.data.drive.lastSyncedAt)}.` : ""} ${google.data.drive.folderScoped ? "Limited to the selected folder." : "Checks accessible file metadata."}`}
+                detail={!google.data ? "Drive status could not be loaded." : !googleReady ? "Connect Google to check this source." : `${workerSyncStatusDetail(driveSync!)}${google.data.drive.lastSyncedAt ? ` Last successful sync: ${connectionTime(google.data.drive.lastSyncedAt)}.` : ""} ${google.data.drive.folderScoped ? "Limited to the selected folder." : "Checks accessible file metadata."}`}
                 tone={!google.data ? "critical" : !googleReady ? "critical" : driveSync!.tone}
                 href="#google-connection"
                 linkLabel="Review Drive settings"
@@ -1077,7 +1295,7 @@ function WorkerSettingsView() {
           {!google.data?.credentialsReady && <Alert>
             <AlertTriangle className="size-4" />
             <AlertTitle>Google connection needs setup</AlertTitle>
-            <AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{google.data?.setupMessage ?? "Checking the Google connection."}</span>{google.data?.clientConfigured && <Button size="sm" asChild><a href="/api/google-evidence/connect">Connect Google</a></Button>}</AlertDescription>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{google.isLoading ? "Checking the Google connection." : "Connect Google to check these sources."}</span>{google.data?.clientConfigured && <Button size="sm" asChild><a href="/api/google-evidence/connect">Connect Google</a></Button>}</AlertDescription>
           </Alert>}
           <details><summary className="cursor-pointer text-sm font-medium">Google sync preferences</summary>
           <div className="mt-4 grid gap-5 lg:grid-cols-2">

@@ -33,8 +33,10 @@ async function readRuntime(db: Db, vaId: number): Promise<ManagerSemanticRuntime
   return row ? runtimeSchema.parse(JSON.parse(row.value)) : null;
 }
 async function writeRuntime(db: Db, vaId: number, runtime: ManagerSemanticRuntime) {
-  const values = { vaId, key: key(vaId), value: JSON.stringify(runtime) };
+  const validated = runtimeSchema.parse(runtime);
+  const values = { vaId, key: key(vaId), value: JSON.stringify(validated) };
   await db.insert(appSettings).values(values).onDuplicateKeyUpdate({ set: { value: values.value } });
+  return validated;
 }
 
 /** Reserve durably before the provider call; worker locking also fences other processes. */
@@ -53,8 +55,8 @@ export async function reserveManagerSemanticReview(db: Db, vaId: number, sourceH
       attemptId: randomUUID(), sourceHash, success: false, failures, provider: managerSemanticProvider(),
       attemptedAt: now.toISOString(), retryAfter: new Date(now.getTime() + managerSemanticBackoff(failures)).toISOString(),
     };
-    await writeRuntime(tx as unknown as Db, vaId, runtime);
-    return { reserved: true, runtime };
+    const stored = await writeRuntime(tx as unknown as Db, vaId, runtime);
+    return { reserved: true, runtime: stored };
   });
 }
 
@@ -63,8 +65,6 @@ export async function finishManagerSemanticReview(db: Db, vaId: number, runtime:
   await assertManagerExecutionAllowed(db, vaId);
   const current = await readRuntime(db, vaId);
   if (current?.attemptId !== runtime.attemptId) throw new Error("Semantic review reservation is no longer current.");
-  const finished = { ...runtime, success, attempts, failureKind: success ? undefined : failureKind, failures: success ? 0 : runtime.failures,
-    retryAfter: new Date(Date.now() + (success ? MANAGER_SEMANTIC_MIN_INTERVAL_MS : managerSemanticBackoff(runtime.failures, failureKind))).toISOString() };
-  await writeRuntime(db, vaId, finished);
-  return finished;
+  return writeRuntime(db, vaId, { ...runtime, success, attempts, failureKind: success ? undefined : failureKind, failures: success ? 0 : runtime.failures,
+    retryAfter: new Date(Date.now() + (success ? MANAGER_SEMANTIC_MIN_INTERVAL_MS : managerSemanticBackoff(runtime.failures, failureKind))).toISOString() });
 }

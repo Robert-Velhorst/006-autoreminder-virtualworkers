@@ -27,6 +27,7 @@ import {
   getOnHoldCards,
   getWorkerCommentedCardIdsToday,
   getRegisteredWebhooks,
+  getRegisteredWebhookStatus,
   getCardsDueToday,
   getOverdueCards,
   getWorkerBoards,
@@ -84,21 +85,193 @@ import {
   getAutopilotLevel,
 } from "../aptlssPoliciesDb";
 import { timeEntries } from "../../drizzle/schema";
-import { eq, and, gte, lte, sql } from "drizzle-orm";
+import { eq, and, gte, lte, sql, inArray, notInArray } from "drizzle-orm";
+import {
+  aptlssPlans,
+  aptlssSteps,
+  aptlssWaitingReasons,
+  cardStates,
+  decisionOutcomes,
+  taskAssignments,
+  vaProfiles,
+} from "../../drizzle/schema";
 import { resolveWorkerOperatorContext } from "../workerOperatorContext";
 import { fetchAuthorizedTrelloCard, TrelloAccessError } from "../trelloCardAccess";
 import { dateKeyInTimeZone, dateWindowInTimeZone, weekDateKeys } from "../../shared/workerTime";
 import { syncWorkerTrelloReplyEvidence } from "../services/trello-reply-evidence";
-import { isManagerPilotWorker } from "../aptlssManagerPilot";
+import { assertWorkerReviewedComment } from "../aptlssExternalActionPolicy";
+import { assertManagerPlanMutationAllowed, isManagerPilotWorker } from "../aptlssManagerPilot";
+import { normalizeManagerDependencies } from "../aptlssManagerDependencies";
+
+async function setWorkerChecklistState(userId: number, trelloCheckItemId: string, state: "complete" | "incomplete") {
+  const db = await getDb();
+  if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Database unavailable" });
+
+  return db.transaction(async tx => {
+    const profiles = await tx.select({ id: vaProfiles.id, founderId: vaProfiles.founderId, status: vaProfiles.status })
+      .from(vaProfiles)
+      .where(eq(vaProfiles.userId, userId))
+      .for("update");
+    const activeProfiles = profiles.filter(profile => profile.status === "active");
+    if (activeProfiles.length !== 1) {
+      throw new TRPCError({ code: "PRECONDITION_FAILED", message: "A single active worker profile is required to update this checklist." });
+    }
+    const profile = activeProfiles[0];
+
+    const candidates = await tx.select().from(aptlssSteps)
+      .where(and(eq(aptlssSteps.vaId, userId), eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId)))
+      .limit(2)
+      .for("update");
+    const steps = candidates.filter(candidate => candidate.status !== "obsolete");
+    if (steps.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Checklist step not found" });
+    if (steps.length !== 1) throw new TRPCError({ code: "CONFLICT", message: "This checklist item is ambiguous. Ask the Founder to refresh the work plan." });
+    const step = steps[0];
+
+    const exactAssignment = step.trelloChecklistId && step.trelloCheckItemId
+      ? `${step.cardId}:${step.trelloChecklistId}:${step.trelloCheckItemId}`
+      : null;
+    const cardAssignments = await tx.select({ vaId: taskAssignments.vaId, status: taskAssignments.status })
+      .from(taskAssignments)
+      .where(and(eq(taskAssignments.taskId, step.cardId), eq(taskAssignments.founderId, profile.founderId)))
+      .for("update");
+    if (cardAssignments.length > 1) {
+      throw new TRPCError({ code: "CONFLICT", message: "The card has multiple assignments. Ask the Founder to resolve them before changing this checklist." });
+    }
+
+    const stepAssignments = exactAssignment
+      ? await tx.select({ vaId: taskAssignments.vaId, status: taskAssignments.status })
+        .from(taskAssignments)
+        .where(and(eq(taskAssignments.taskId, exactAssignment), eq(taskAssignments.founderId, profile.founderId)))
+        .for("update")
+      : [];
+    if (stepAssignments.length > 1) {
+      throw new TRPCError({ code: "CONFLICT", message: "The checklist step has multiple assignments. Ask the Founder to resolve them before changing it." });
+    }
+
+    const assignment = stepAssignments[0] ?? cardAssignments.find(candidate => candidate.vaId === profile.id);
+    if (!assignment || assignment.vaId !== profile.id) {
+      throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This checklist item is no longer assigned to your active worker profile." });
+    }
+    if (assignment.status === "blocked"
+      || cardAssignments.some(candidate => candidate.vaId === profile.id && candidate.status === "blocked")) {
+      throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This checklist item is blocked in the current assignment. Ask the Founder before changing it." });
+    }
+    if (assignment.status !== "assigned" && assignment.status !== "in_progress") {
+      throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This checklist item is no longer assigned to your active worker profile." });
+    }
+
+    const [decision] = await tx.select({ id: decisionOutcomes.id }).from(decisionOutcomes)
+      .where(and(eq(decisionOutcomes.vaId, userId), eq(decisionOutcomes.stepId, step.id)))
+      .limit(1)
+      .for("update");
+    if (step.requiresRobert || decision) {
+      throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This checklist item requires the Founder's decision and cannot be changed here." });
+    }
+
+    if (state === "complete") {
+      const [plan] = await tx.select({ listName: aptlssPlans.listName }).from(aptlssPlans)
+        .where(and(eq(aptlssPlans.vaId, userId), eq(aptlssPlans.cardId, step.cardId)))
+        .limit(1)
+        .for("update");
+      const [cardState] = await tx.select({ listName: cardStates.listName, state: cardStates.state }).from(cardStates)
+        .where(and(eq(cardStates.vaId, userId), eq(cardStates.cardId, step.cardId)))
+        .limit(1)
+        .for("update");
+      const [activeWait] = await tx.select({ id: aptlssWaitingReasons.id }).from(aptlssWaitingReasons)
+        .where(and(
+          eq(aptlssWaitingReasons.vaId, userId),
+          eq(aptlssWaitingReasons.cardId, step.cardId),
+          eq(aptlssWaitingReasons.status, "active"),
+        ))
+        .limit(1)
+        .for("update");
+      const heldState = `${plan?.listName ?? ""} ${cardState?.listName ?? ""} ${cardState?.state ?? ""}`;
+      if (activeWait || /hold|wait|verification|blocked/i.test(heldState)) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This card is on hold for verification. Check the current source and resolve the hold before marking work complete." });
+      }
+
+      let declaredDependencies: unknown = [];
+      if (step.dependsOnCards) {
+        try {
+          declaredDependencies = JSON.parse(step.dependsOnCards);
+        } catch {
+          throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The checklist dependencies cannot be verified. Ask the Founder to review the work plan." });
+        }
+      }
+      if (!Array.isArray(declaredDependencies) || declaredDependencies.some(dependency => typeof dependency !== "string")) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The checklist dependencies cannot be verified. Ask the Founder to review the work plan." });
+      }
+      const rawDependencies = [...declaredDependencies, ...(step.blockedBy?.trim() ? [step.blockedBy.trim()] : [])];
+      if (rawDependencies.length) {
+        const workerSteps = await tx.select({ id: aptlssSteps.id, cardId: aptlssSteps.cardId, stepNumber: aptlssSteps.stepNumber, status: aptlssSteps.status })
+          .from(aptlssSteps)
+          .where(eq(aptlssSteps.vaId, userId))
+          .limit(5001);
+        if (workerSteps.length > 5000) {
+          throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The checklist dependencies are too large to verify safely. Ask the Founder to review the work plan." });
+        }
+        const normalized = normalizeManagerDependencies(step.cardId, rawDependencies, workerSteps);
+        const dependencyIds = new Set<number>();
+        for (const reference of normalized) {
+          const separator = reference.lastIndexOf(":");
+          const id = Number(reference.slice(separator + 1));
+          const cardId = reference.slice(0, separator);
+          if (reference.startsWith("unresolved:") || separator < 1 || !Number.isInteger(id) || id <= 0
+            || !workerSteps.some(candidate => candidate.cardId === cardId && candidate.id === id)) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "A required checklist step is missing or unclear. Resolve the dependency before marking this item complete." });
+          }
+          dependencyIds.add(id);
+        }
+        if (dependencyIds.size) {
+          const dependencies = await tx.select({ id: aptlssSteps.id, status: aptlssSteps.status }).from(aptlssSteps)
+            .where(and(eq(aptlssSteps.vaId, userId), inArray(aptlssSteps.id, [...dependencyIds])))
+            .for("update");
+          if (dependencies.length !== dependencyIds.size || dependencies.some(dependency => dependency.status !== "complete")) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Complete the prerequisite checklist step(s) before marking this item complete." });
+          }
+        }
+      }
+    }
+
+    const nextStatus = state === "complete" ? "complete" : "open";
+    if (step.status === nextStatus) return;
+    const result = await tx.update(aptlssSteps)
+      .set({ status: nextStatus, completedAt: state === "complete" ? new Date() : null })
+      .where(and(
+        eq(aptlssSteps.id, step.id),
+        eq(aptlssSteps.vaId, userId),
+        eq(aptlssSteps.requiresRobert, false),
+        notInArray(aptlssSteps.id, tx.select({ stepId: decisionOutcomes.stepId }).from(decisionOutcomes)),
+      ));
+    const resultHeader = Array.isArray(result) ? result[0] : result;
+    if (Number((resultHeader as { affectedRows?: unknown } | undefined)?.affectedRows ?? 0) !== 1) {
+      throw new TRPCError({ code: "CONFLICT", message: "This checklist step changed. Refresh the work item and try again." });
+    }
+  });
+}
 
 async function resolveTrelloWorker(ctx: { user: Parameters<typeof resolveWorkerOperatorContext>[0] }) {
   const worker = await resolveWorkerOperatorContext(ctx.user);
   return {
-    memberId: ctx.user.role === "worker" ? worker.trelloMemberId || "me" : "me",
+    memberId: ctx.user.role === "admin" ? "me" : worker.trelloMemberId ?? undefined,
     timezone: worker.timezone,
     weeklyHoursMin: worker.weeklyHoursMin,
     weeklyHoursMax: worker.weeklyHoursMax,
   };
+}
+
+function requireTrelloMemberId(
+  user: Parameters<typeof resolveWorkerOperatorContext>[0],
+  worker: Awaited<ReturnType<typeof resolveTrelloWorker>>,
+) {
+  if (user.role === "admin") return "me";
+  if (!worker.memberId) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "Link one unambiguous Trello member to your worker profile before viewing Trello cards or activity.",
+    });
+  }
+  return worker.memberId;
 }
 
 async function assertCardAccess(
@@ -187,9 +360,10 @@ export const trelloRouter = router({
     if (!apiKey || !apiToken) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Trello API credentials not configured" });
     
     const worker = await resolveTrelloWorker(ctx);
+    const memberId = requireTrelloMemberId(ctx.user, worker);
     const [cards, actions] = await Promise.all([
-      getWorkerCards(apiKey, apiToken, worker.memberId),
-      getWorkerRecentActions(apiKey, apiToken, worker.memberId, 15),
+      getWorkerCards(apiKey, apiToken, memberId),
+      getWorkerRecentActions(apiKey, apiToken, memberId, 15),
     ]);
 
     const cardBoardMap = new Map<string, string>();
@@ -217,7 +391,7 @@ export const trelloRouter = router({
     if (!apiKey || !apiToken) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Trello API credentials not configured" });
     
     const worker = await resolveTrelloWorker(ctx);
-    const trelloMemberId = worker.memberId;
+    const trelloMemberId = requireTrelloMemberId(ctx.user, worker);
     const [cards, recentActions, commentedCardIds] = await Promise.all([
       getWorkerCards(apiKey, apiToken, trelloMemberId),
       getWorkerRecentActions(apiKey, apiToken, trelloMemberId, 50),
@@ -268,6 +442,7 @@ export const trelloRouter = router({
   postComment: operatorAccountProcedure
     .input(z.object({ cardId: z.string().min(1), text: z.string().trim().min(1).max(16_000) }))
     .mutation(async ({ input, ctx }) => {
+      assertWorkerReviewedComment(ctx.user, input.text);
       const apiKey = process.env.TRELLO_API_KEY || process.env.TrelloAPIKey;
       const apiToken = process.env.TRELLO_TOKEN || process.env.TrelloAPIToken;
       if (!apiKey || !apiToken) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Trello API credentials not configured" });
@@ -292,6 +467,7 @@ export const aptlssRouter = router({
     .input(z.object({ cardId: z.string(), planJson: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
+      if (isManagerPilotWorker(vaId)) assertManagerPlanMutationAllowed(vaId);
       const apiKey = process.env.TRELLO_API_KEY || process.env.TrelloAPIKey;
       const apiToken = process.env.TRELLO_TOKEN || process.env.TrelloAPIToken;
       if (!apiKey || !apiToken) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Trello credentials not configured" });
@@ -402,7 +578,7 @@ export const aptlssRouter = router({
       };
     }),
 
-  getCached: operatorAccountProcedure
+  getCached: adminProcedure
     .input(z.object({ cardId: z.string() }))
     .query(async ({ input, ctx }) => {
       const vaId = Number(ctx.user.id);
@@ -427,12 +603,12 @@ export const aptlssRouter = router({
       };
     }),
 
-  getAll: operatorAccountProcedure.query(async ({ ctx }) => {
+  getAll: adminProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return await getAllAptlssPlans(vaId);
   }),
 
-  getFounderDecisionQueue: operatorAccountProcedure.query(async ({ ctx }) => {
+  getFounderDecisionQueue: adminProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return await getAllFounderDecisionSteps(vaId);
   }),
@@ -514,25 +690,36 @@ export const aptlssRouter = router({
       state: z.enum(["complete", "incomplete"]),
     }))
     .mutation(async ({ input, ctx }) => {
-      if (input.state === "complete" && isManagerPilotWorker(Number(ctx.user.id))) {
+      const vaId = Number(ctx.user.id);
+      if (isManagerPilotWorker(vaId)) {
         throw new TRPCError({
           code: "PRECONDITION_FAILED",
-          message: "Report the finished step through Work guidance first. A worker report does not close the step; the linked source must confirm it.",
+          message: "Checklist changes are paused in shadow mode. Report what changed through Work guidance; APTLSS will reassess it before the active checklist is changed.",
         });
       }
-      const updated = await setStepCompletionForWorker(
-        Number(ctx.user.id),
-        input.trelloCheckItemId,
-        input.state === "complete",
-      );
-      if (!updated) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Checklist step not found" });
+      if (ctx.user.role === "worker") {
+        await setWorkerChecklistState(vaId, input.trelloCheckItemId, input.state);
+      } else {
+        const updated = await setStepCompletionForWorker(
+          vaId,
+          input.trelloCheckItemId,
+          input.state === "complete",
+        );
+        if (!updated) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Checklist step not found" });
+        }
       }
       return { success: true };
     }),
 
   planMyDay: operatorAccountProcedure.mutation(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
+    if (isManagerPilotWorker(vaId)) {
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: "The legacy day planner is disabled for this shadow pilot. Use Work guidance for the current APTLSS recommendation.",
+      });
+    }
     const autopilotLvl = await getAutopilotLevel(vaId);
     if (autopilotLvl < 2) throw new TRPCError({ code: "PRECONDITION_FAILED", message: `Autopilot level ${autopilotLvl} is too low to generate daily plans. Set level ≥ 2 in Settings → Operational Policies.` });
     
@@ -711,7 +898,7 @@ export const aptlssRouter = router({
     return await getReadyForDoneCards(vaId);
   }),
 
-  getRisksAndExceptions: operatorAccountProcedure.query(async ({ ctx }) => {
+  getRisksAndExceptions: adminProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     const [allPlans, allSteps, allScores, allStates] = await Promise.all([
       getAllAptlssPlans(vaId),
@@ -970,16 +1157,16 @@ export const aptlssRouter = router({
     return allPolicies.filter((p) => p.ruleKey.startsWith("default_action_"));
   }),
 
-  getLatestWeeklyAnalysis: operatorAccountProcedure.query(async ({ ctx }) => {
+  getLatestWeeklyAnalysis: adminProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return getLatestWeeklyAnalysis(vaId);
   }),
-  getWeeklyAnalysisHistory: operatorAccountProcedure.query(async ({ ctx }) => {
+  getWeeklyAnalysisHistory: adminProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     return getRecentWeeklyAnalyses(vaId, 8);
   }),
 
-  getCommandCenter: operatorAccountProcedure.query(async ({ ctx }) => {
+  getCommandCenter: adminProcedure.query(async ({ ctx }) => {
     const vaId = Number(ctx.user.id);
     const [allPlans, allScores, allStates, allSteps] = await Promise.all([
       getAllAptlssPlans(vaId),
@@ -1370,13 +1557,7 @@ export const aptlssRouter = router({
       getRecentAuditLog(vaId, 50),
     ]);
 
-    let webhookStatus: { active: boolean; count: number; webhooks: unknown[] } = { active: false, count: 0, webhooks: [] };
-    if (apiKey && apiToken) {
-      try {
-        const webhooks = await getRegisteredWebhooks(apiKey, apiToken);
-        webhookStatus = { active: webhooks.length > 0, count: webhooks.length, webhooks };
-      } catch { /* ignore */ }
-    }
+    const webhookStatus = await getRegisteredWebhookStatus(apiKey, apiToken);
 
     const pendingApprovals = recentAudit.filter(e => e.requiresApproval && e.approved === null);
     const cardsSkipped = recentAudit.filter(e => e.action === 'card_skipped_low_confidence');

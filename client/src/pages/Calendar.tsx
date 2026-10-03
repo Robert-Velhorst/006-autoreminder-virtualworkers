@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link } from 'wouter';
 import { Button } from '@/components/ui/button';
 import { CalendarView } from '@/components/CalendarView';
@@ -30,6 +30,9 @@ export default function Calendar() {
   const { user } = useAuth();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [hasLoadedTasks, setHasLoadedTasks] = useState(false);
+  const [taskLoadFailed, setTaskLoadFailed] = useState(false);
+  const calendarRequestInFlight = useRef(false);
   const [holidays, setHolidays] = useState<string[]>([]);
   const [workingDays, setWorkingDays] = useState<number[]>(DEFAULT_SETTINGS.workingDays);
 
@@ -72,61 +75,25 @@ export default function Calendar() {
   };
 
   const fetchTasks = async () => {
-    setIsLoading(true);
     try {
       const response = await retryFetch('/api/trello/tasks', 2, 1000, 30000);
-
-      if (!response) {
-        console.error('No response from tasks endpoint');
-        setTasks([]);
-        return;
+      if (!response || !response.ok) {
+        throw new Error('Failed to load calendar tasks');
       }
 
-      if (!response.ok) {
-        if (response.status === 401) {
-          console.log('Unauthorized - user not logged in');
-          return;
-        }
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      const data = await response.json();
+      const nextTasks = Array.isArray(data) ? data : data?.tasks;
+      if (!Array.isArray(nextTasks)) {
+        throw new Error('Invalid calendar tasks response');
       }
-
-      const text = await response.text();
-      if (!text) {
-        console.log('Empty response from tasks endpoint');
-        setTasks([]);
-        return;
-      }
-
-      try {
-        const data = JSON.parse(text);
-        // Handle different response formats
-        if (Array.isArray(data)) {
-          setTasks(data);
-        } else if (data.tasks && Array.isArray(data.tasks)) {
-          setTasks(data.tasks);
-        } else {
-          console.warn('Unexpected tasks response format:', data);
-          setTasks([]);
-        }
-      } catch (parseError) {
-        console.error('Error parsing tasks JSON:', parseError, 'Response:', text.substring(0, 100));
-        setTasks([]);
-      }
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      console.error('Error fetching tasks:', errorMsg);
-      
-      if (errorMsg.includes('timeout') || errorMsg.includes('timed out')) {
-        toast.error('Task loading timed out - please try again');
-      } else if (errorMsg.includes('abort')) {
-        toast.error('Task loading was cancelled');
-      } else {
-        toast.error('Failed to load tasks - using empty list');
-      }
-      
-      setTasks([]);
-    } finally {
-      setIsLoading(false);
+      setTasks(nextTasks);
+      setHasLoadedTasks(true);
+      setTaskLoadFailed(false);
+      return true;
+    } catch {
+      setTaskLoadFailed(true);
+      toast.error('Calendar unavailable. Please try again.');
+      return false;
     }
   };
 
@@ -176,13 +143,9 @@ export default function Calendar() {
         }
       } catch (parseError) {
         console.error('Error parsing settings JSON:', parseError, 'Response:', text.substring(0, 100));
-        // Use defaults on parse error
-        setWorkingDays(DEFAULT_SETTINGS.workingDays);
       }
     } catch (error) {
       console.error('Error fetching settings:', error);
-      // Use defaults on fetch error
-      setWorkingDays(DEFAULT_SETTINGS.workingDays);
     }
   };
 
@@ -192,7 +155,6 @@ export default function Calendar() {
 
       if (!response) {
         console.log('No response from holidays endpoint');
-        setHolidays([]);
         return;
       }
 
@@ -200,14 +162,12 @@ export default function Calendar() {
         if (response.status === 404) {
           console.log('Holidays endpoint not found');
         }
-        setHolidays([]);
         return;
       }
 
       const text = await response.text();
       if (!text) {
         console.log('Empty response from holidays endpoint');
-        setHolidays([]);
         return;
       }
 
@@ -225,44 +185,34 @@ export default function Calendar() {
           setHolidays(data.dates);
         } else {
           console.warn('Unexpected holidays response format:', data);
-          setHolidays([]);
         }
       } catch (parseError) {
         console.error('Error parsing holidays JSON:', parseError);
-        setHolidays([]);
       }
     } catch (error) {
       console.error('Error fetching holidays:', error);
-      setHolidays([]);
     }
   };
 
   useEffect(() => {
     if (user) {
-      // Run all fetches in parallel
-      Promise.all([
-        fetchTasks(),
-        fetchSettings(),
-        fetchHolidays(),
-      ]).catch(error => {
-        console.error('Error in parallel fetches:', error);
-      });
+      void loadCalendar();
     }
   }, [user]);
 
-  const handleRefresh = async () => {
+  const loadCalendar = async (showSuccess = false) => {
+    if (calendarRequestInFlight.current) return;
+    calendarRequestInFlight.current = true;
     setIsLoading(true);
     try {
-      await Promise.all([
+      const [tasksLoaded] = await Promise.all([
         fetchTasks(),
         fetchSettings(),
         fetchHolidays(),
       ]);
-      toast.success('Calendar refreshed');
-    } catch (error) {
-      console.error('Error refreshing calendar:', error);
-      toast.error('Failed to refresh calendar');
+      if (showSuccess && tasksLoaded) toast.success('Calendar tasks refreshed');
     } finally {
+      calendarRequestInFlight.current = false;
       setIsLoading(false);
     }
   };
@@ -290,7 +240,7 @@ export default function Calendar() {
           <Button
             variant="outline"
             size="sm"
-            onClick={handleRefresh}
+            onClick={() => void loadCalendar(true)}
             disabled={isLoading}
           >
             <RefreshCw className="h-4 w-4 mr-2" />
@@ -298,11 +248,26 @@ export default function Calendar() {
           </Button>
         </div>
 
-        {isLoading ? (
+        {taskLoadFailed && (
+          <section role="alert" aria-labelledby="calendar-error-heading" className="mb-4 border border-destructive/40 rounded-lg p-4 space-y-2">
+            <h2 id="calendar-error-heading" className="text-lg font-semibold">Calendar unavailable</h2>
+            <p className="text-sm text-muted-foreground">
+              {hasLoadedTasks
+                ? 'Refresh failed. Showing the last successfully loaded calendar tasks; they may be out of date.'
+                : 'We could not load your calendar tasks. Please try again.'}
+            </p>
+            <Button variant="outline" size="sm" onClick={() => void loadCalendar(true)} disabled={isLoading}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
+              {isLoading ? 'Retrying...' : 'Try again'}
+            </Button>
+          </section>
+        )}
+        {isLoading && (
           <div className="flex items-center justify-center py-12">
-            <p className="text-muted-foreground">Loading calendar...</p>
+            <p role="status" className="text-muted-foreground">{hasLoadedTasks ? 'Refreshing calendar...' : 'Loading calendar...'}</p>
           </div>
-        ) : (
+        )}
+        {hasLoadedTasks && (
           <CalendarView 
             tasks={tasks} 
             holidays={holidays}

@@ -71,13 +71,13 @@ function SectionTitle({ icon, title }: { icon: React.ReactNode; title: string })
 
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function AdminMonitor() {
-  const { user, loading: authLoading } = useAuth();
+  const { loading: authLoading } = useAuth();
   const { data, isLoading, isFetching, refetch, error } = trpc.aptlss.getAdminMonitor.useQuery(undefined, {
     staleTime: 2 * 60_000,
     refetchInterval: 5 * 60_000,
   });
 
-  const { data: recentAudit } = trpc.aptlss.getRecentAuditLog.useQuery(
+  const { data: recentAudit, error: auditError, isLoading: auditLoading, refetch: refetchAudit } = trpc.aptlss.getRecentAuditLog.useQuery(
     { limit: 100 },
     { staleTime: 2 * 60_000 }
   );
@@ -96,13 +96,40 @@ export default function AdminMonitor() {
     );
   }
   // Access denied — not the owner
-  if (error?.data?.code === 'FORBIDDEN' || (user && !authLoading && error)) {
+  if (error?.data?.code === 'FORBIDDEN') {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-center space-y-4 max-w-sm">
           <Shield className="w-12 h-12 text-muted-foreground mx-auto" />
           <h1 className="text-lg font-semibold text-foreground">Access Restricted</h1>
           <p className="text-sm text-muted-foreground">Admin monitoring is only accessible to the project owner.</p>
+          <Link href="/robert">
+            <Button variant="outline" size="sm">
+              <ArrowLeft className="w-3 h-3 mr-1" /> Back to Dashboard
+            </Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data || error?.data?.code === 'UNAUTHORIZED') {
+    const sessionExpired = error?.data?.code === 'UNAUTHORIZED';
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center p-4">
+        <div role="alert" className="text-center space-y-4 max-w-sm">
+          <AlertTriangle className="w-12 h-12 text-amber-500 mx-auto" />
+          <h1 className="text-lg font-semibold text-foreground">
+            {sessionExpired ? "Session expired" : "Admin monitor temporarily unavailable"}
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            {sessionExpired ? "Sign in again to view admin monitoring." : "Monitoring data could not be loaded. No current health result is available."}
+          </p>
+          {!sessionExpired && (
+            <Button variant="outline" size="sm" disabled={isFetching} onClick={() => refetch()}>
+              <RefreshCw className={`w-3 h-3 mr-1 ${isFetching ? "animate-spin" : ""}`} /> Try again
+            </Button>
+          )}
           <Link href="/robert">
             <Button variant="outline" size="sm">
               <ArrowLeft className="w-3 h-3 mr-1" /> Back to Dashboard
@@ -137,7 +164,7 @@ export default function AdminMonitor() {
               <h1 className="text-sm font-semibold text-foreground">Admin Monitor</h1>
               {isFetching && <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />}
             </div>
-            <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => refetch()}>
+            <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => { void refetch(); void refetchAudit(); }}>
               <RefreshCw className="w-3 h-3 mr-1" /> Refresh
             </Button>
           </div>
@@ -145,6 +172,12 @@ export default function AdminMonitor() {
       </div>
 
       <div className="container py-6 space-y-6 max-w-4xl">
+        {error && (
+          <div role="alert" className="flex items-start gap-2 text-sm text-amber-700 dark:text-amber-300">
+            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <p>Refresh failed. Showing the last successful monitor result; it may be out of date.</p>
+          </div>
+        )}
         {/* ── Sync Health Stats ─────────────────────────────────────────────── */}
         <Card>
           <CardContent className="p-4">
@@ -226,8 +259,8 @@ export default function AdminMonitor() {
         <Card>
           <CardContent className="p-4">
             <SectionTitle icon={<Webhook className="w-3.5 h-3.5 text-indigo-500" />} title="Webhook Status" />
-            {webhookStatus ? (
-              <div className="flex items-center gap-3">
+            {webhookStatus?.state === "active" || webhookStatus?.state === "inactive" ? (
+              <div className="flex items-center gap-3 flex-wrap">
                 <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border ${webhookStatus.active ? "bg-green-500/10 border-green-500/30" : "bg-red-500/10 border-red-500/30"}`}>
                   {webhookStatus.active ? (
                     <CheckCircle2 className="w-4 h-4 text-green-500" />
@@ -240,8 +273,10 @@ export default function AdminMonitor() {
                 </div>
                 <span className="text-sm text-muted-foreground">{webhookStatus.count} webhook{webhookStatus.count !== 1 ? 's' : ''} registered</span>
               </div>
+            ) : webhookStatus?.state === "unconfigured" ? (
+              <p className="text-sm text-muted-foreground">Trello credentials not configured. Webhook health has not been checked.</p>
             ) : (
-              <p className="text-sm text-muted-foreground">Webhook status unavailable (Trello credentials not configured).</p>
+              <p role="status" className="text-sm text-amber-700 dark:text-amber-300">Webhook status unavailable. Trello could not be checked; activity and registered count are unknown.</p>
             )}
           </CardContent>
         </Card>
@@ -352,7 +387,16 @@ export default function AdminMonitor() {
                 {showFullAuditLog ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
               </button>
             </div>
-            {(recentAudit?.length ?? 0) === 0 ? (
+            {auditError && (
+              <p role="alert" className="text-sm text-amber-700 dark:text-amber-300 mb-2">
+                {recentAudit ? "Automation log refresh failed. Showing the last successful result; it may be out of date." : "Automation log temporarily unavailable."}
+              </p>
+            )}
+            {auditLoading ? (
+              <p className="text-xs text-muted-foreground">Loading automation log...</p>
+            ) : !recentAudit ? (
+              !auditError && <p className="text-xs text-muted-foreground">Automation log unavailable.</p>
+            ) : recentAudit.length === 0 && !auditError ? (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
                 No automation actions recorded yet.

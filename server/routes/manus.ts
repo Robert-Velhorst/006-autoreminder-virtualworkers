@@ -22,21 +22,24 @@ import {
   aptlssPlans,
   aptlssWaitingReasons,
   cardStates,
-  aptlssManagerRuns,
+  taskAssignments,
+  trelloCachedCards,
   users,
 } from "../../drizzle/schema";
-import { eq, and, desc, asc, gte, lte, sql, isNull, isNotNull } from "drizzle-orm";
+import { eq, and, desc, asc, gte, lte, sql, isNull, isNotNull, inArray } from "drizzle-orm";
 import { collectComplianceSnapshot } from "../services/manus-scheduler";
 import { parseDateKey } from "../utils/date-only";
 import { calculateCompliancePercentage } from "../complianceMetrics";
 import { dateKeyInTimeZone, dateWindowInTimeZone } from "../../shared/workerTime";
 import { resolveWorkerOperatorContext } from "../workerOperatorContext";
-import { canStartTimerForCard, managerExecutionCoverageComplete, managerIntervenesOnCard, timerExecutionBlockReason } from "../timerAccess";
+import { canStartTimerForCard, managerActionNeedsSourceVerification, managerActionSourceRequirements, managerExecutionCoverageComplete, managerIntervenesOnCard, timerExecutionBlockReason } from "../timerAccess";
 import { isManagerPilotWorker } from "../aptlssManagerPilot";
 import { enqueueManagerTask } from "../aptlssManagerQueue";
 import { WORKER_EXECUTION_HOLD_MESSAGE } from "../../shared/aptlssManager";
-import { readManagerAssignmentState } from "../aptlssManagerAssignments";
+import { parseManagerAssignmentReference, readManagerAssignmentState } from "../aptlssManagerAssignments";
 import { selectWorkerProfile } from "../workerOperatorContext";
+import { getGoogleEvidenceStatus } from "../googleEvidence";
+import { readCurrentManagerHistory } from "../aptlssManagerHistoryDb";
 
 // ─── Payment Cycles Router ──────────────────────────────────────────────────
 export const paymentRouter = router({
@@ -515,20 +518,49 @@ export const timerRouter = router({
         const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, vaId)).for("update");
         if (!account) throw new TRPCError({ code: "UNAUTHORIZED", message: "Account no longer exists" });
         const profiles = ctx.user.role === "worker"
-          ? await tx.select({ founderId: vaProfiles.founderId, status: vaProfiles.status }).from(vaProfiles)
-            .where(eq(vaProfiles.userId, vaId)).orderBy(vaProfiles.id)
+          ? await tx.select({ id: vaProfiles.id, founderId: vaProfiles.founderId, status: vaProfiles.status }).from(vaProfiles)
+            .where(eq(vaProfiles.userId, vaId)).orderBy(vaProfiles.id).for("update")
           : [];
         const profile = selectWorkerProfile(profiles);
         if (ctx.user.role === "worker" && !profile) {
-          throw new TRPCError({ code: "PRECONDITION_FAILED", message: profiles.length
-            ? "Your worker profile is ambiguous. Ask an administrator to resolve it before tracking time."
-            : "A worker profile is required before tracking time." });
+          const activeProfileCount = profiles.filter(candidate => candidate.status === "active").length;
+          throw new TRPCError({
+            code: activeProfileCount > 1 ? "PRECONDITION_FAILED" : "FORBIDDEN",
+            message: activeProfileCount > 1
+              ? "Your worker profile is ambiguous. Ask an administrator to resolve it before tracking time."
+              : "A worker profile is required before tracking time.",
+          });
         }
+        const managerPilot = ctx.user.role === "worker" && isManagerPilotWorker(vaId);
         const [workerPlan] = ctx.user.role === "worker"
           ? await tx.select().from(aptlssPlans)
             .where(and(eq(aptlssPlans.vaId, vaId), eq(aptlssPlans.cardId, input.cardId)))
             .limit(1)
           : [];
+        if (ctx.user.role === "worker") {
+          const assignments = await tx.select({ taskId: taskAssignments.taskId, status: taskAssignments.status })
+            .from(taskAssignments)
+            .where(and(
+              eq(taskAssignments.vaId, profile!.id),
+              eq(taskAssignments.founderId, profile!.founderId),
+              inArray(taskAssignments.status, ["assigned", "in_progress", "blocked"]),
+            ))
+            .orderBy(taskAssignments.taskId)
+            .limit(251)
+            .for("update");
+          if (assignments.length > 250) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Your current task assignments could not be verified. Refresh your work list before tracking time." });
+          }
+          const cardAssignments = assignments.filter(assignment =>
+            parseManagerAssignmentReference(assignment.taskId)?.cardId === input.cardId,
+          );
+          if (!cardAssignments.some(assignment => assignment.status === "assigned" || assignment.status === "in_progress")) {
+            if (cardAssignments.some(assignment => assignment.status === "blocked")) {
+              throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This task is blocked. Ask the founder to update the assignment before tracking time." });
+            }
+            throw new TRPCError({ code: "FORBIDDEN", message: "This task is not currently assigned to your worker profile." });
+          }
+        }
         if (!canStartTimerForCard(ctx.user.role, Boolean(workerPlan))) {
           throw new TRPCError({ code: "FORBIDDEN", message: "You can only start a timer for a card in your work queue" });
         }
@@ -539,21 +571,44 @@ export const timerRouter = router({
           const [cardState] = await tx.select({ state: cardStates.state }).from(cardStates)
             .where(and(eq(cardStates.vaId, vaId), eq(cardStates.cardId, input.cardId))).limit(1);
           let hasManagerIntervention = false;
-          if (isManagerPilotWorker(vaId)) {
-            const [run] = await tx.select({ snapshotJson: aptlssManagerRuns.snapshotJson }).from(aptlssManagerRuns)
-              .where(eq(aptlssManagerRuns.vaId, vaId)).orderBy(desc(aptlssManagerRuns.id)).limit(1);
+          let hasStaleRequiredSource = false;
+          if (managerPilot) {
             try {
+              const { snapshot } = await readCurrentManagerHistory(tx as unknown as NonNullable<Awaited<ReturnType<typeof getDb>>>, vaId);
+              if (!snapshot) throw new Error("Manager history is unavailable");
+              const snapshotJson = JSON.stringify(snapshot);
               const assignmentState = await readManagerAssignmentState(tx as unknown as NonNullable<Awaited<ReturnType<typeof getDb>>>, vaId);
-              if (!assignmentState.complete || !run || !managerExecutionCoverageComplete(run.snapshotJson, assignmentState.fingerprint)) {
+              if (!assignmentState.complete || !managerExecutionCoverageComplete(snapshotJson, assignmentState.fingerprint)) {
                 throw new Error("Work list coverage is incomplete");
               }
-              hasManagerIntervention = managerIntervenesOnCard(run.snapshotJson, input.cardId);
+              const sourceRequirements = managerActionSourceRequirements(snapshotJson, input.cardId);
+              let googleStatus: Awaited<ReturnType<typeof getGoogleEvidenceStatus>> | null = null;
+              if (sourceRequirements.sourceKeys.some(key => key === "gmail" || key === "google_drive")) {
+                try { googleStatus = await getGoogleEvidenceStatus(vaId); }
+                catch { googleStatus = null; }
+              }
+              let trelloCache: { cachedAt: string; expiresAt: string } | null = null;
+              if (sourceRequirements.sourceKeys.includes("trello")) {
+                const [cached] = await tx.select({ cachedAt: trelloCachedCards.cachedAt, expiresAt: trelloCachedCards.expiresAt })
+                  .from(trelloCachedCards)
+                  .where(and(eq(trelloCachedCards.userId, vaId), eq(trelloCachedCards.cardId, input.cardId)))
+                  .orderBy(desc(trelloCachedCards.cachedAt)).limit(1);
+                if (cached) trelloCache = { cachedAt: cached.cachedAt.toISOString(), expiresAt: cached.expiresAt.toISOString() };
+              }
+              hasStaleRequiredSource = managerActionNeedsSourceVerification(sourceRequirements, {
+                trelloCache,
+                gmail: googleStatus?.gmail ?? null,
+                drive: googleStatus?.drive ?? null,
+                googleConnectionReady: googleStatus?.credentialsReady ?? null,
+                now: Date.now(),
+              });
+              hasManagerIntervention = managerIntervenesOnCard(snapshotJson, input.cardId);
             } catch {
               throw new TRPCError({ code: "PRECONDITION_FAILED", message: WORKER_EXECUTION_HOLD_MESSAGE });
             }
           }
           const reason = timerExecutionBlockReason({ listName: workerPlan.listName,
-            hasActiveWaitingReason: Boolean(waiting), actionability: cardState?.state ?? null, hasManagerIntervention });
+            hasActiveWaitingReason: Boolean(waiting), actionability: cardState?.state ?? null, hasManagerIntervention, hasStaleRequiredSource });
           if (reason) throw new TRPCError({ code: "PRECONDITION_FAILED", message: reason });
         }
         const founderId = ctx.user.role === "worker" ? profile!.founderId : vaId;
@@ -579,7 +634,7 @@ export const timerRouter = router({
           startTime,
         });
         const id = (result as { insertId: number }).insertId;
-        if (isManagerPilotWorker(vaId)) {
+        if (managerPilot) {
           await enqueueManagerTask(tx, { vaId, trigger: "timer_changed", eventKey: `timer-start:${id}` });
         }
         return { id, cardId: input.cardId, cardName, startedAt: startTime };
@@ -738,11 +793,28 @@ export const timerRouter = router({
       const entry = rows[0];
       const newStoppedAt = new Date(new Date(entry.startTime).getTime() + input.durationSeconds * 1000);
 
-      await db.update(timeEntries).set({
+      const updateResult = await db.update(timeEntries).set({
         durationSeconds: input.durationSeconds,
         durationMinutes: Math.round(input.durationSeconds / 60),
         endTime: newStoppedAt,
-      }).where(eq(timeEntries.id, input.id));
+      }).where(and(eq(timeEntries.id, input.id), eq(timeEntries.vaId, vaId)));
+
+      const updateHeader = Array.isArray(updateResult) ? updateResult[0] : updateResult;
+      const affectedRows = Number((updateHeader as { affectedRows?: unknown }).affectedRows);
+      if (affectedRows === 0) {
+        const [stillOwned] = await db.select({
+          durationSeconds: timeEntries.durationSeconds,
+          endTime: timeEntries.endTime,
+        }).from(timeEntries).where(and(
+          eq(timeEntries.id, input.id),
+          eq(timeEntries.vaId, vaId),
+        )).limit(1);
+        if (!stillOwned) throw new TRPCError({ code: "NOT_FOUND", message: "Time entry not found" });
+        if (stillOwned.durationSeconds !== input.durationSeconds
+          || stillOwned.endTime?.getTime() !== newStoppedAt.getTime()) {
+          throw new TRPCError({ code: "CONFLICT", message: "Time entry changed while it was being updated" });
+        }
+      }
 
       return { success: true, id: input.id, durationSeconds: input.durationSeconds, stoppedAt: newStoppedAt };
     }),
@@ -925,6 +997,18 @@ export const complianceRouter = router({
 });
 
 // ─── Email Inbox Router ──────────────────────────────────────────────────────
+function isDuplicateEmailMessageError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error
+    && (error as { code?: unknown }).code === "ER_DUP_ENTRY";
+}
+
+function emailTaskOwnershipConflict() {
+  return new TRPCError({
+    code: "CONFLICT",
+    message: "One or more email tasks could not be saved. Refresh and try again.",
+  });
+}
+
 export const emailInboxRouter = router({
   getAll: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
@@ -1008,19 +1092,39 @@ export const emailInboxRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const vaId = Number(ctx.user.id);
-      let upserted = 0;
-      for (const task of input) {
-        await db.insert(emailTasks).values({
-          vaId,
-          ...task,
-        }).onDuplicateKeyUpdate({
-          set: {
-            ...task,
+      return db.transaction(async tx => {
+        let upserted = 0;
+        for (const task of input) {
+          const findExisting = () => tx.select({ id: emailTasks.id, vaId: emailTasks.vaId })
+            .from(emailTasks)
+            .where(eq(emailTasks.gmailMessageId, task.gmailMessageId))
+            .limit(1)
+            .for("update");
+          let [existing] = await findExisting();
+
+          if (existing && existing.vaId !== vaId) throw emailTaskOwnershipConflict();
+
+          if (!existing) {
+            try {
+              await tx.insert(emailTasks).values({ vaId, ...task });
+              upserted++;
+              continue;
+            } catch (error) {
+              if (!isDuplicateEmailMessageError(error)) throw error;
+              [existing] = await findExisting();
+              if (!existing) throw error;
+              if (existing.vaId !== vaId) throw emailTaskOwnershipConflict();
+            }
           }
-        });
-        upserted++;
-      }
-      return { success: true, upserted };
+
+          await tx.update(emailTasks).set(task).where(and(
+            eq(emailTasks.id, existing.id),
+            eq(emailTasks.vaId, vaId),
+          ));
+          upserted++;
+        }
+        return { success: true, upserted };
+      });
     }),
 });
 
@@ -1037,20 +1141,38 @@ export const cardSnoozeRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const vaId = Number(ctx.user.id);
-      await db.insert(cardSnoozes).values({
-        vaId,
-        cardId: input.cardId,
-        cardName: input.cardName,
-        cardUrl: input.cardUrl,
-        snoozedUntil: input.snoozedUntil,
-        isActive: true,
-      }).onDuplicateKeyUpdate({
-        set: {
-          snoozedUntil: input.snoozedUntil,
-          isActive: true,
+      return db.transaction(async tx => {
+        // Serialize a worker's snooze updates because this legacy table has no
+        // unique key for (vaId, cardId) to make an upsert atomic.
+        const [account] = await tx.select({ id: users.id }).from(users)
+          .where(eq(users.id, vaId)).for("update");
+        if (!account) throw new TRPCError({ code: "UNAUTHORIZED", message: "Account no longer exists" });
+
+        const existing = await tx.select({ id: cardSnoozes.id }).from(cardSnoozes)
+          .where(and(eq(cardSnoozes.vaId, vaId), eq(cardSnoozes.cardId, input.cardId)))
+          .orderBy(desc(cardSnoozes.updatedAt), desc(cardSnoozes.id))
+          .for("update");
+        const [current, ...duplicates] = existing;
+
+        if (current) {
+          await tx.update(cardSnoozes).set({ snoozedUntil: input.snoozedUntil, isActive: true })
+            .where(and(eq(cardSnoozes.id, current.id), eq(cardSnoozes.vaId, vaId)));
+          for (const duplicate of duplicates) {
+            await tx.update(cardSnoozes).set({ isActive: false })
+              .where(and(eq(cardSnoozes.id, duplicate.id), eq(cardSnoozes.vaId, vaId)));
+          }
+        } else {
+          await tx.insert(cardSnoozes).values({
+            vaId,
+            cardId: input.cardId,
+            cardName: input.cardName,
+            cardUrl: input.cardUrl,
+            snoozedUntil: input.snoozedUntil,
+            isActive: true,
+          });
         }
+        return { success: true };
       });
-      return { success: true };
     }),
 
   cancel: operatorAccountProcedure

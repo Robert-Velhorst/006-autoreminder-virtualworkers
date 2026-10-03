@@ -1,16 +1,37 @@
 import { Router } from 'express';
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { getDb } from '../db';
-import { taskAssignments, vaProfiles } from '../../drizzle/schema';
-import { requireAuthenticated, requestUser } from '../middleware/auth';
-import { loadAccountTimeEntries } from '../timeEntryOwnership';
+import { taskAssignments, timeEntries, vaProfiles } from '../../drizzle/schema';
+import { requireActiveWorkerProfile, requireAuthenticated, requestUser } from '../middleware/auth';
+import { attributeTimeEntriesToProfiles, loadAccountTimeEntries } from '../timeEntryOwnership';
+import { selectWorkerProfile } from '../workerOperatorContext';
 
 const router = Router();
 router.use(requireAuthenticated);
+router.use(requireActiveWorkerProfile);
 
 function csvCell(value: unknown) {
   const text = value == null ? '' : String(value);
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+async function loadWorkerProfileTimeEntries(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  activeProfile: { id: number; founderId: number },
+) {
+  const founderProfiles = await db.select({
+    id: vaProfiles.id,
+    userId: vaProfiles.userId,
+    founderId: vaProfiles.founderId,
+  }).from(vaProfiles).where(eq(vaProfiles.founderId, activeProfile.founderId));
+  const identities = Array.from(new Set(founderProfiles.flatMap(profile => [profile.id, profile.userId])));
+  if (identities.length === 0) return [];
+
+  const entries = await db.select().from(timeEntries).where(and(
+    eq(timeEntries.founderId, activeProfile.founderId),
+    inArray(timeEntries.vaId, identities),
+  ));
+  return attributeTimeEntriesToProfiles(founderProfiles, entries).entriesByProfileId.get(activeProfile.id) ?? [];
 }
 
 router.get('/export', async (req, res) => {
@@ -23,20 +44,40 @@ router.get('/export', async (req, res) => {
     });
   }
 
+  const user = requestUser(req)!;
+  const supportedRoles = new Set(['admin', 'worker', 'user']);
+  if (!supportedRoles.has(String(user.role))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
   const db = await getDb();
   if (!db) return res.status(503).json({ error: 'Database unavailable' });
 
   try {
-    const user = requestUser(req)!;
-    const profiles = user.role === 'admin'
-      ? await db.select({ id: vaProfiles.id }).from(vaProfiles)
-      : user.role === 'worker'
-        ? await db.select({ id: vaProfiles.id }).from(vaProfiles).where(eq(vaProfiles.userId, user.id))
-        : await db.select({ id: vaProfiles.id }).from(vaProfiles).where(eq(vaProfiles.founderId, user.id));
-    const profileIds = profiles.map(profile => profile.id);
+    let profiles: { id: number; status: string }[];
+    let activeProfile: { id: number; userId: number; founderId: number } | null = null;
+    if (user.role === 'admin') {
+      profiles = await db.select({ id: vaProfiles.id, status: vaProfiles.status }).from(vaProfiles);
+    } else if (user.role === 'worker') {
+      const workerProfiles = await db.select({
+        id: vaProfiles.id,
+        status: vaProfiles.status,
+        userId: vaProfiles.userId,
+        founderId: vaProfiles.founderId,
+      }).from(vaProfiles).where(eq(vaProfiles.userId, user.id));
+      profiles = workerProfiles;
+      activeProfile = selectWorkerProfile(workerProfiles);
+    } else {
+      profiles = await db.select({ id: vaProfiles.id, status: vaProfiles.status }).from(vaProfiles).where(eq(vaProfiles.founderId, user.id));
+    }
+    const profileIds = user.role === 'worker'
+      ? activeProfile ? [activeProfile.id] : []
+      : profiles.map(profile => profile.id);
 
     if (type === 'time-entries') {
-      const times = await loadAccountTimeEntries(db, user);
+      const times = user.role === 'worker'
+        ? activeProfile ? await loadWorkerProfileTimeEntries(db, activeProfile) : []
+        : await loadAccountTimeEntries(db, user);
       const rows = [
         ['id', 'vaId', 'founderId', 'taskId', 'durationMinutes', 'startTime', 'endTime', 'source'],
         ...times.map(entry => [entry.id, entry.vaId, entry.founderId, entry.taskId, entry.durationMinutes,
@@ -49,7 +90,10 @@ router.get('/export', async (req, res) => {
     const tasks = user.role === 'admin'
       ? await db.select().from(taskAssignments)
       : profileIds.length > 0
-        ? await db.select().from(taskAssignments).where(inArray(taskAssignments.vaId, profileIds))
+        ? await db.select().from(taskAssignments).where(and(
+          inArray(taskAssignments.vaId, profileIds),
+          eq(taskAssignments.founderId, user.role === 'worker' ? activeProfile!.founderId : user.id),
+        ))
         : [];
     const rows = [
       ['id', 'taskId', 'vaId', 'founderId', 'status', 'assignedAt', 'updatedAt'],

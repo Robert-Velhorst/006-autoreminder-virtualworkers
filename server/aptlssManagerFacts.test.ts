@@ -56,6 +56,38 @@ const assess = (items: ManagerEvidence[], c = card()) =>
 
 describe("fixed language and claim regressions", () => {
   it.each([
+    "The invoice may be paid.",
+    "The invoice should be paid.",
+    "The invoice must be paid.",
+  ])("does not turn a modal statement into a confirmed fact: %s", text => {
+    expect(extractManagerFacts(evidence(text))).toContainEqual(
+      expect.objectContaining({
+        topic: "unknown",
+        support: "unknown",
+        quote: text,
+      })
+    );
+  });
+  it("keeps a claim with an impossible stated effective date unknown", () => {
+    const text = "As of 2026-02-30, the invoice is paid.";
+    expect(extractManagerFacts(evidence(text))).toContainEqual(
+      expect.objectContaining({
+        topic: "unknown",
+        support: "unknown",
+        quote: text,
+      })
+    );
+    const proof = assess([evidence(text)]);
+    expect(proof.blocked).toBe(true);
+    expect(proof.reliability.reasons).toContain(
+      "Invalid, missing, future or timezone-ambiguous source date"
+    );
+    expect(proof.reliability.reasons).not.toContain(
+      "Essential evidence is not yet effective"
+    );
+  });
+  it.each([
+    ["No, the invoice was paid.", "paid", "yes"],
     ["The invoice is paid.", "paid", "yes"],
     ["INVOICE IS PAID.", "paid", "yes"],
     ["De factuur is betaald.", "paid", "yes"],
@@ -98,6 +130,16 @@ describe("fixed language and claim regressions", () => {
         quote: text,
         support: "explicit",
       })
+    );
+  });
+  it.each([
+    ["No invoice was paid.", "paid", "no"],
+    ["Geen factuur is betaald.", "paid", "no"],
+    ["No task was completed.", "completed", "no"],
+    ["Geen taak is afgerond.", "completed", "no"],
+  ])("does not invert subject negation into a positive fact: %s", (text, topic, value) => {
+    expect(extractManagerFacts(evidence(text))).toContainEqual(
+      expect.objectContaining({ topic, value, quote: text, support: "explicit" })
     );
   });
   it.each([
@@ -295,6 +337,41 @@ describe("provenance, scope, revisions and reliability", () => {
       ]).blocked
     ).toBe(true);
   });
+  it("does not let a later provider revision supersede a verified human decision", () => {
+    const decision = evidence("Invoice unpaid.", {
+      id: "reviewed-decision",
+      kind: "decision",
+      metadata: {
+        sourceDate: "2026-09-01",
+        effectiveFrom: "2026-09-01",
+        sourceRecordId: "invoice-record-a",
+        sourceRevision: "revision-1",
+        sender: "Accounts",
+        truthClass: "human_decision",
+        authority: "authoritative",
+      },
+    });
+    const laterProviderRevision = evidence("Invoice paid.", {
+      id: "later-source-revision",
+      kind: "source",
+      metadata: {
+        sourceDate: "2026-09-03",
+        effectiveFrom: "2026-09-03",
+        sourceRecordId: "invoice-record-a",
+        sourceRevision: "revision-2",
+        sender: "Accounts",
+        authority: "authoritative",
+        supersedesEvidenceIds: ["reviewed-decision"],
+      },
+    });
+
+    const proof = assess([decision, laterProviderRevision]);
+    expect(proof.unresolved).toBe(true);
+    expect(proof.conflictIds).toEqual([
+      "later-source-revision",
+      "reviewed-decision",
+    ]);
+  });
   it("resolved graph flags alone do not erase contradictory raw claims", () => {
     expect(
       assessManagerEvidence(
@@ -366,6 +443,18 @@ describe("provenance, scope, revisions and reliability", () => {
       );
     }
   );
+  it("does not let source metadata reclassify a provider record as a human decision", () => {
+    expect(
+      extractManagerFacts(
+        evidence("Invoice paid.", {
+          metadata: {
+            truthClass: "human_decision",
+            authority: "authoritative",
+          },
+        })
+      )[0].truthClass
+    ).toBe("source_record");
+  });
   it.each([
     "Invoice B is unpaid.",
     "Factuur B is niet betaald.",
@@ -390,6 +479,165 @@ describe("provenance, scope, revisions and reliability", () => {
     const independent = { ...repeated, id: "e-other", metadata: { ...first.metadata, sourceRecordId: "message-two" } };
     expect(assess([first, independent]).evidence).toHaveLength(2);
   });
+  it("preserves essential status across duplicate source-revision observations in either order", () => {
+    const metadata = {
+      sourceRecordId: "invoice-message",
+      sourceRevision: "revision-one",
+      sourceDate: "2026-07-01",
+    };
+    const optional = evidence("Invoice A is paid.", {
+      id: "optional-copy",
+      metadata: { ...metadata, essential: false },
+    });
+    const essential = evidence("Invoice A is paid.", {
+      id: "essential-copy",
+      metadata: { ...metadata, essential: true },
+    });
+
+    for (const items of [[optional, essential], [essential, optional]]) {
+      const proof = assess(items);
+      expect(proof.blocked).toBe(true);
+      expect(proof.reliability.freshness).toBe("stale");
+    }
+  });
+  it("does not let a duplicate portal notice lose its source-scope restriction", () => {
+    const metadata = {
+      sourceRecordId: "message-one",
+      sourceRevision: "revision-one",
+      sourceDate: now,
+      essential: true,
+    };
+    const completeMessage = evidence("Invoice A is paid.", {
+      id: "complete-message",
+      source: "gmail",
+      metadata,
+    });
+    const portalNotice = evidence("Invoice A is paid.", {
+      id: "portal-notice",
+      source: "gmail",
+      metadata: { ...metadata, contentScope: "portal_notice" },
+    });
+
+    for (const items of [
+      [completeMessage, portalNotice],
+      [portalNotice, completeMessage],
+    ]) {
+      const proof = assess(items);
+      expect(proof.blocked).toBe(true);
+      expect(proof.reliability.reasons).toContain(
+        "Only a portal notice is available; the underlying correspondence has not been checked"
+      );
+    }
+  });
+  it("does not make source-revision supersession depend on duplicate arrival order", () => {
+    const prior = evidence("Invoice A is unpaid.", {
+      id: "prior",
+      source: "gmail",
+      metadata: {
+        sourceRecordId: "invoice-record",
+        sourceRevision: "revision-one",
+        sourceDate: "2026-09-01",
+        effectiveFrom: "2026-09-01",
+        sender: "Accounts",
+        authority: "authoritative",
+      },
+    });
+    const linkedRevision = evidence("Invoice A is paid.", {
+      id: "linked-revision",
+      source: "gmail",
+      metadata: {
+        sourceRecordId: "invoice-record",
+        sourceRevision: "revision-two",
+        sourceDate: "2026-09-03",
+        effectiveFrom: "2026-09-03",
+        sender: "Accounts",
+        authority: "authoritative",
+        supersedesEvidenceIds: ["prior"],
+      },
+    });
+    const unlinkedRevision = {
+      ...linkedRevision,
+      id: "unlinked-revision",
+      metadata: { ...linkedRevision.metadata, supersedesEvidenceIds: undefined },
+    };
+
+    const linkedFirst = assess([prior, linkedRevision, unlinkedRevision]);
+    const unlinkedFirst = assess([prior, unlinkedRevision, linkedRevision]);
+    expect(linkedFirst.unresolved).toBe(false);
+    expect(unlinkedFirst.unresolved).toBe(linkedFirst.unresolved);
+  });
+  it("counts a repeated explicit claim once per retained source revision while preserving its excerpts", () => {
+    const metadata = {
+      sourceRecordId: "message-one",
+      sourceRevision: "hash-one",
+      sourceDate: now,
+      sender: "Client",
+    };
+    const first = evidence("Invoice A is paid.", { id: "excerpt-one", metadata });
+    const repeatedClaim = evidence("The invoice A has been paid.", {
+      id: "excerpt-two",
+      observedAt: "2026-09-04T09:50:00Z",
+      metadata,
+    });
+    const proof = assess([first, repeatedClaim]);
+
+    expect(proof.evidence).toHaveLength(2);
+    expect(
+      proof.facts.filter(
+        fact =>
+          fact.subject === "invoice:a" &&
+          fact.topic === "paid" &&
+          fact.value === "yes"
+      )
+    ).toHaveLength(1);
+    expect(proof.reliability).toEqual(assess([first]).reliability);
+  });
+  it("retains the same claim from distinct source records as independent facts", () => {
+    const first = evidence("Invoice A is paid.", {
+      id: "message-one-excerpt",
+      metadata: { sourceRecordId: "message-one", sourceRevision: "hash-one" },
+    });
+    const second = evidence("Invoice A is paid.", {
+      id: "message-two-excerpt",
+      metadata: { sourceRecordId: "message-two", sourceRevision: "hash-one" },
+    });
+    const claims = assess([first, second]).facts.filter(
+      fact =>
+        fact.subject === "invoice:a" &&
+        fact.topic === "paid" &&
+        fact.value === "yes"
+    );
+
+    expect(claims.map(fact => fact.evidenceId)).toEqual([
+      "message-one-excerpt",
+      "message-two-excerpt",
+    ]);
+  });
+  it("keeps contradictory claims from explicit revisions distinguishable", () => {
+    const oldRevision = evidence("Invoice A is unpaid.", {
+      id: "old-revision",
+      metadata: {
+        sourceRecordId: "invoice-message",
+        sourceRevision: "revision-one",
+        sourceDate: "2026-09-01",
+      },
+    });
+    const newRevision = evidence("Invoice A is paid.", {
+      id: "new-revision",
+      metadata: {
+        sourceRecordId: "invoice-message",
+        sourceRevision: "revision-two",
+        sourceDate: "2026-09-03",
+      },
+    });
+    const proof = assess([oldRevision, newRevision]);
+
+    expect(proof.unresolved).toBe(true);
+    expect(proof.facts.map(fact => [fact.sourceRevision, fact.value])).toEqual([
+      ["revision-one", "no"],
+      ["revision-two", "yes"],
+    ]);
+  });
   it("flags a colliding evidence identifier without discarding its contradiction", () => {
     expect(
       assess([evidence("Invoice paid."), evidence("Invoice unpaid.")])
@@ -402,6 +650,24 @@ describe("provenance, scope, revisions and reliability", () => {
         .support
     ).toBe("reported");
   });
+  it.each(["source_record", "human_decision"] as const)(
+    "does not trust worker-supplied %s metadata to satisfy required payment evidence",
+    truthClass => {
+      const workerEvidence = evidence("Invoice paid.", {
+        source: "worker",
+        kind: "worker",
+        metadata: { essential: true, sourceDate: now, truthClass },
+      });
+      const payCard = card({
+        steps: [{ ...card().steps[0], title: "Pay invoice" }],
+      });
+      const proof = assess([workerEvidence], payCard);
+
+      expect(proof.blocked).toBe(true);
+      expect(proof.facts[0].truthClass).toBe("worker_report");
+      expect(proof.reliability.support).toBe("unknown");
+    }
+  );
   it("does not promote model metadata into authoritative evidence", () => {
     const proof = assess([
       evidence("Invoice paid.", { metadata: { truthClass: "model_proposal" } }),
@@ -420,6 +686,17 @@ describe("provenance, scope, revisions and reliability", () => {
   ])("blocks unusable essential temporal metadata: %j", metadata => {
     expect(assess([evidence("Report ready.", { metadata })]).blocked).toBe(
       true
+    );
+  });
+  it("does not treat collection time as the source date for essential evidence", () => {
+    const proof = assess([
+      evidence("Invoice unpaid.", { metadata: { essential: true } }),
+    ]);
+
+    expect(proof.blocked).toBe(true);
+    expect(proof.reliability.freshness).toBe("unknown");
+    expect(proof.reliability.reasons).toContain(
+      "Invalid, missing, future or timezone-ambiguous source date"
     );
   });
   it("does not let a fresh incidental source hide stale essential evidence", () => {
@@ -457,6 +734,7 @@ describe("provenance, scope, revisions and reliability", () => {
         sourceRecordId: "invoice-record-a",
         sourceRevision: "revision-2",
         sender: "Accounts",
+        authority: "authoritative",
         supersedesEvidenceIds: ["old"],
       },
     });
@@ -465,7 +743,7 @@ describe("provenance, scope, revisions and reliability", () => {
     expect(proof.unresolved).toBe(false);
     expect(proof.facts).toHaveLength(2);
   });
-  it.each(["worker", "other_source", "other_record", "other_sender", "same_revision", "weaker_authority", "backdated", "undated", "older", "future", "proposal", "no_claim"])(
+  it.each(["worker", "other_source", "other_record", "other_sender", "same_revision", "unknown_authority", "weaker_authority", "backdated", "undated", "older", "future", "proposal", "no_claim"])(
     "does not supersede on an invalid revision: %s",
     mode => {
       const next = revision();
@@ -474,6 +752,7 @@ describe("provenance, scope, revisions and reliability", () => {
       if (mode === "other_record") next.metadata!.sourceRecordId = "another-invoice-record";
       if (mode === "other_sender") next.metadata!.sender = "Unrelated sender";
       if (mode === "same_revision") next.metadata!.sourceRevision = "revision-1";
+      if (mode === "unknown_authority") delete next.metadata!.authority;
       if (mode === "weaker_authority") next.metadata!.authority = "reported";
       if (mode === "backdated") next.metadata!.effectiveFrom = "2026-08-31";
       if (mode === "undated") next.metadata!.sourceDate = null;

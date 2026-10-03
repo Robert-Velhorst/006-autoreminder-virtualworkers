@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { evaluateBrowserTabHygiene, normalizeBrowserTabPolicy } from "../shared/browserTabPolicy";
+import {
+  browserTabLabelFromOrigin,
+  evaluateBrowserTabHygiene,
+  normalizeBrowserTabOrigin,
+  normalizeBrowserTabPolicy,
+} from "../shared/browserTabPolicy";
 
 const policy = normalizeBrowserTabPolicy({
   maxOpenTabs: 5,
@@ -8,6 +13,20 @@ const policy = normalizeBrowserTabPolicy({
 });
 
 describe("browser tab hygiene policy", () => {
+  it("reduces supported web URLs to a canonical origin without credentials or page details", () => {
+    expect(normalizeBrowserTabOrigin("https://worker:private@EXAMPLE.test:443/case/123?token=secret#notes"))
+      .toBe("https://example.test/");
+    expect(normalizeBrowserTabOrigin("http://localhost:3057/worker?session=secret"))
+      .toBe("http://localhost:3057/");
+  });
+
+  it("keeps file URLs generic and rejects unsupported or malformed schemes", () => {
+    expect(normalizeBrowserTabOrigin("file:///C:/private/case.pdf?secret=1#page=3")).toBe("file:///");
+    expect(browserTabLabelFromOrigin("file:///")).toBe("Local file");
+    expect(normalizeBrowserTabOrigin("javascript:alert(1)")).toBeNull();
+    expect(normalizeBrowserTabOrigin("not a url")).toBeNull();
+  });
+
   it("does not interrupt a worker before the end-of-day warning window", () => {
     const result = evaluateBrowserTabHygiene({
       now: new Date("2026-07-16T18:00:00Z"),

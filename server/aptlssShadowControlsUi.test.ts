@@ -7,7 +7,7 @@ import AptlssManagerReview from "../client/src/components/AptlssManagerReview";
 
 type StatusQuery = { state: { error: Error | null } };
 type StatusOptions = { enabled?: (query: StatusQuery) => boolean; refetchInterval?: (query: StatusQuery) => number | false };
-const fixture = vi.hoisted(() => ({ mode: "shadow" as string | undefined, enabled: true, error: null as null | Error, fetching: false, role: "admin", queries: [] as unknown[], statusOptions: [] as StatusOptions[], socketOptions: [] as Array<{ onManagerUpdated?: () => void }>, invalidations: [] as string[] }));
+const fixture = vi.hoisted(() => ({ mode: "shadow" as string | undefined, scheduler: undefined as undefined | { state: string }, enabled: true, error: null as null | Error, fetching: false, role: "admin", queries: [] as unknown[], statusOptions: [] as StatusOptions[], socketOptions: [] as Array<{ onManagerUpdated?: () => void }>, invalidations: [] as string[] }));
 vi.mock("../client/src/_core/hooks/useAuth", () => ({ useAuth: () => ({ user: { role: fixture.role } }) }));
 vi.mock("../client/src/hooks/useWebSocket", () => ({ useWebSocket: (options: { onManagerUpdated?: () => void }) => { fixture.socketOptions.push(options); return { status: { connected: false } }; } }));
 vi.mock("../client/src/lib/trpc", () => {
@@ -15,7 +15,7 @@ vi.mock("../client/src/lib/trpc", () => {
   return { trpc: {
     useUtils: () => ({ operator: Object.fromEntries(["getManagerStatus", "getDailyPlan", "getWorkQueueContext"].map(name => [name, { invalidate: () => fixture.invalidations.push(name) }])) }),
     operator: {
-      getManagerStatus: { useQuery: (_: unknown, options: StatusOptions) => { fixture.statusOptions.push(options); return { data: { policy: { mode: fixture.mode, enabled: fixture.enabled, intervalMinutes: 5 } }, error: fixture.error, isFetching: fixture.fetching }; } },
+      getManagerStatus: { useQuery: (_: unknown, options: StatusOptions) => { fixture.statusOptions.push(options); return { data: { scheduler: fixture.scheduler, policy: { mode: fixture.mode, enabled: fixture.enabled, intervalMinutes: 5 } }, error: fixture.error, isFetching: fixture.fetching }; } },
       getWorkQueueContext: { useQuery: () => ({ data: { cards: [] } }) },
       getManagerReviewInbox: { useQuery: (_: unknown, options: unknown) => { fixture.queries.push(options); return { data: { workers: [] }, isFetching: false }; } },
       runManager: mutation, submitManagerUpdate: mutation, reportManagerActionCompletion: mutation, updateManagerPolicy: mutation,
@@ -25,7 +25,7 @@ vi.mock("../client/src/lib/trpc", () => {
 });
 vi.stubGlobal("React", React);
 afterAll(() => vi.unstubAllGlobals());
-beforeEach(() => Object.assign(fixture, { mode: "shadow", enabled: true, error: null, fetching: false, role: "admin", queries: [], statusOptions: [], socketOptions: [], invalidations: [] }));
+beforeEach(() => Object.assign(fixture, { mode: "shadow", scheduler: undefined, enabled: true, error: null, fetching: false, role: "admin", queries: [], statusOptions: [], socketOptions: [], invalidations: [] }));
 
 const pilotDenial = "Manager pilot requires an explicitly allowlisted worker, valid APTLSS_MANAGER_PILOT_WORKER_IDS, and APTLSS_MANAGER_SHADOW_ONLY=true.";
 const queryError = (code: string, message: string) => Object.assign(new Error(message), { data: { code } });
@@ -34,6 +34,35 @@ const render = (component: React.ComponentType) => renderToStaticMarkup(createEl
 const button = (html: string, label: string) => html.match(new RegExp(`<button[^>]*>[^]*?${label}</button>`, "g"))?.at(-1)?.split("<button").at(-1)?.split(">")[0] ?? "missing";
 
 describe("shadow pilot controls", () => {
+  it("does not infer running automatic checks from enabled policy", () => {
+    const html = render(ManagerShadowSettings);
+    expect(html).toContain("Automatic-check status is unavailable");
+    expect(html).toContain("Configured check interval: 5 minutes");
+    expect(html).not.toContain("Continuous guidance is on");
+    expect(html).not.toContain("Checks run every");
+  });
+  it.each([
+    ["stopped", "Automatic checks are not running on this server"],
+    ["checking", "Automatic checks are starting or awaiting confirmation"],
+    ["unavailable", "Automatic checks need attention"],
+    ["responding", "Automatic checks on this server are responding"],
+  ])("shows observed scheduler state %s", (state, label) => {
+    fixture.scheduler = { state };
+    expect(render(ManagerShadowSettings)).toContain(label);
+  });
+  it("does not retain a healthy runtime claim after a failed status refresh", () => {
+    fixture.scheduler = { state: "responding" };
+    fixture.error = new Error("private runtime detail");
+    const html = render(ManagerShadowSettings);
+    expect(html).not.toContain("are responding");
+    expect(html).toContain("Automatic-check status is unavailable");
+  });
+  it("shows paused worker policy even if this server processes other workers", () => {
+    fixture.scheduler = { state: "responding" };
+    fixture.enabled = false;
+    expect(render(ManagerShadowSettings)).toContain("Automatic checks for your work are paused");
+    expect(render(ManagerShadowSettings)).not.toContain("are responding");
+  });
   it("enables assessment only for a loaded shadow policy", () => {
     const html = render(ManagerCoach);
     expect(button(html, "Reassess now")).not.toContain('disabled=""');
@@ -43,7 +72,10 @@ describe("shadow pilot controls", () => {
   it.each(["active", undefined])("blocks assessment and settings for %s mode", mode => {
     fixture.mode = mode;
     expect(button(render(ManagerCoach), "Reassess now")).toContain('disabled=""');
-    expect(render(ManagerShadowSettings)).toContain('<fieldset disabled=""');
+    const settings = render(ManagerShadowSettings);
+    expect(settings).toContain("Schedule changes are managed by your founder or admin.");
+    expect(settings).not.toContain("<fieldset");
+    expect(settings).not.toContain('type="checkbox"');
   });
   it("blocks assessment after a query error or during refresh", () => {
     fixture.error = new Error("Status unavailable");

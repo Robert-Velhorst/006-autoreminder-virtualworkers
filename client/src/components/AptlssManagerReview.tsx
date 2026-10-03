@@ -400,6 +400,7 @@ function RunReview({
   const [critical, setCritical] = useState(entry.review?.critical ?? false);
   const [correction, setCorrection] = useState(entry.review?.correction ?? "");
   const [source, setSource] = useState(entry.review?.source ?? "");
+  const [savedReview, setSavedReview] = useState<ReviewEntry["review"]>(null);
   const [reuse, setReuse] = useState(false);
   const [scope, setScope] = useState<"card" | "worker">("card");
   const [cardId, setCardId] = useState(entry.snapshot.cards[0]?.id ?? "");
@@ -436,12 +437,23 @@ function RunReview({
       Date.parse(validUntil) > Date.now() &&
       (!replaceNextStep || (scope === "card" && !!selectedActionId && nextTitle.trim().length >= 3 && nextCompletion.trim().length >= 3)));
   const save = trpc.operator.recordManagerReview.useMutation({
-    onSuccess: () => {
+    onSuccess: (result, submitted) => {
+      if (!result.recorded) {
+        toast.error("Review could not be confirmed.");
+        return;
+      }
+      setSavedReview({
+        verdict: submitted.verdict,
+        critical: submitted.critical,
+        correction: submitted.correction,
+        source: submitted.source,
+      });
       toast.success("Manager review saved");
       onSaved();
     },
     onError: error => toast.error(error.message),
   });
+  const recordedReview = entry.review ?? savedReview;
   const prefix = `review-${entry.vaId}-${entry.runId}`;
   return (
     <details className="min-w-0 border-t py-3">
@@ -457,7 +469,7 @@ function RunReview({
         <div className="flex flex-wrap gap-2 text-xs">
           <ManagerTimestamp value={entry.createdAt} />
           <Badge variant="outline">
-            {entry.review ? `Reviewed: ${entry.review.verdict}` : "Unreviewed"}
+            {recordedReview ? `Reviewed: ${recordedReview.verdict}` : "Unreviewed"}
           </Badge>
           {(entry.urgent ||
             entry.snapshot.interventions.some(
@@ -469,7 +481,7 @@ function RunReview({
           className="border-t pt-3"
           onSubmit={event => {
             event.preventDefault();
-            if (!entry.review && !save.isPending && !closed && knowledgeValid)
+            if (!recordedReview && !save.isPending && !closed && knowledgeValid)
               save.mutate({
                 vaId: entry.vaId,
                 runId: entry.runId,
@@ -508,13 +520,13 @@ function RunReview({
               });
           }}
         >
-          {entry.review && (
+          {recordedReview && (
             <p className="mb-3 text-xs text-muted-foreground">
               Recorded review (read-only)
             </p>
           )}
           <fieldset
-            disabled={!!entry.review || save.isPending || closed}
+            disabled={!!recordedReview || save.isPending || closed}
             className="space-y-3"
           >
             <div className="grid gap-3 sm:grid-cols-2">
@@ -523,7 +535,7 @@ function RunReview({
                 <select
                   id={`${prefix}-verdict`}
                   className={selectClass}
-                  value={entry.review?.verdict ?? verdict}
+                  value={recordedReview?.verdict ?? verdict}
                   onChange={event => {
                     setVerdict(event.target.value as typeof verdict);
                     if (event.target.value === "correct") setCritical(false);
@@ -537,10 +549,10 @@ function RunReview({
               <div className="flex items-center gap-3">
                 <Switch
                   id={`${prefix}-critical`}
-                  checked={entry.review?.critical ?? critical}
+                  checked={recordedReview?.critical ?? critical}
                   onCheckedChange={setCritical}
                   disabled={
-                    !!entry.review || save.isPending || verdict === "correct"
+                    !!recordedReview || save.isPending || verdict === "correct"
                   }
                 />
                 <Label htmlFor={`${prefix}-critical`}>Critical finding</Label>
@@ -552,7 +564,7 @@ function RunReview({
               </Label>
               <Textarea
                 id={`${prefix}-correction`}
-                value={entry.review?.correction ?? correction}
+                value={recordedReview?.correction ?? correction}
                 onChange={event => setCorrection(event.target.value)}
                 required={verdict !== "correct" || reuse}
                 minLength={verdict !== "correct" || reuse ? 3 : undefined}
@@ -563,7 +575,7 @@ function RunReview({
               <Label htmlFor={`${prefix}-source`}>Review source</Label>
               <Input
                 id={`${prefix}-source`}
-                value={entry.review?.source ?? source}
+                value={recordedReview?.source ?? source}
                 onChange={event => setSource(event.target.value)}
                 required
                 minLength={3}
@@ -571,7 +583,7 @@ function RunReview({
                 disabled={save.isPending}
               />
             </div>
-            {!entry.review && (
+            {!recordedReview && (
               <>
                 <div className="flex items-center gap-3">
                   <Switch
@@ -771,7 +783,7 @@ function RunReview({
                 )}
               </>
             )}
-            {!entry.review && (
+            {!recordedReview && (
               <Button
                 type="submit"
                 size="sm"

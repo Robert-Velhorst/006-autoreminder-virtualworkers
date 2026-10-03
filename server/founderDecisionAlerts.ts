@@ -32,16 +32,16 @@ export async function recordFounderDecisionAlertForStep(stepId: number, now = ne
       .from(users).where(eq(users.role, "admin"));
     let created = 0;
     for (const admin of admins) {
-      const [prefs] = await tx.select({ mode: userNotificationPreferences.notificationMode, enabled: userNotificationPreferences.inAppEnabled })
-        .from(userNotificationPreferences)
-        .where(eq(userNotificationPreferences.userOpenId, admin.openId)).limit(1);
-      if (prefs?.mode === "disabled" || prefs?.enabled === 0) continue;
       if (stage === "overdue") {
         await tx.update(notificationHistory).set({ isRead: 1, readAt: now }).where(and(
           eq(notificationHistory.userOpenId, admin.openId), eq(notificationHistory.isRead, 0),
           like(notificationHistory.taskId, `${ALERT_PREFIX}${stepId}:%:due_soon`),
         ));
       }
+      const [prefs] = await tx.select({ mode: userNotificationPreferences.notificationMode, enabled: userNotificationPreferences.inAppEnabled })
+        .from(userNotificationPreferences)
+        .where(eq(userNotificationPreferences.userOpenId, admin.openId)).limit(1);
+      if (prefs?.mode === "disabled" || prefs?.enabled === 0) continue;
       const [existing] = await tx.select({ id: notificationHistory.id }).from(notificationHistory)
         .where(and(eq(notificationHistory.userOpenId, admin.openId), eq(notificationHistory.taskId, taskId))).limit(1);
       if (existing) continue;

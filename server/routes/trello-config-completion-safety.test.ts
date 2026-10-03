@@ -9,11 +9,14 @@ describe('Trello checklist completion safety', () => {
       source.indexOf("router.put('/cards/:cardId/status'"),
     );
 
+    expect(source).toContain("function trelloRequest(url: URL, init?: RequestInit)");
+    expect(source).toContain('maxRetries: 0');
+    expect(source).toContain('timeoutMs: 15_000');
     expect(route).toContain("if (typeof isCompleted !== 'boolean')");
     expect(route).toContain('if (!await requireAssignedCard(req, res, cardId, { checklistId, checkItemId })) return;');
     expect(route).toContain('encodeURIComponent(checklistId)');
     expect(route).toContain('encodeURIComponent(checkItemId)');
-    expect(route).toContain('{ maxRetries: 0, timeoutMs: 15_000 }');
+    expect(route).toContain('await trelloRequest(updateUrl,');
     expect(route).not.toContain('details: errorText');
     expect(route).not.toContain('Failed to update task completion: ${error instanceof Error ? error.message');
   });

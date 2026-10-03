@@ -1,8 +1,8 @@
 import { TRPCError } from "@trpc/server";
 
-// Reject the entire policy on malformed input; never silently broaden or partially enable it.
+// Keep worker identity separate from the run-mode switch so a bad mode value
+// cannot remove pilot workers from the protections used by other features.
 export function managerPilotWorkerIds(): number[] {
-  if (process.env.APTLSS_MANAGER_SHADOW_ONLY !== "true") return [];
   const raw = process.env.APTLSS_MANAGER_PILOT_WORKER_IDS;
   if (!raw?.trim()) return [];
   const parts = raw.split(",").map(part => part.trim());
@@ -13,7 +13,7 @@ export function managerPilotWorkerIds(): number[] {
 }
 
 export function managerPilotEnabled() {
-  return managerPilotWorkerIds().length > 0;
+  return process.env.APTLSS_MANAGER_SHADOW_ONLY === "true" && managerPilotWorkerIds().length > 0;
 }
 
 export function isManagerPilotWorker(vaId: number) {
@@ -21,7 +21,7 @@ export function isManagerPilotWorker(vaId: number) {
 }
 
 export function assertManagerPilotWorker(vaId: number) {
-  if (!isManagerPilotWorker(vaId)) throw new TRPCError({
+  if (!isManagerPilotWorker(vaId) || process.env.APTLSS_MANAGER_SHADOW_ONLY !== "true") throw new TRPCError({
     code: "FORBIDDEN",
     message: "Manager pilot requires an explicitly allowlisted worker, valid APTLSS_MANAGER_PILOT_WORKER_IDS, and APTLSS_MANAGER_SHADOW_ONLY=true.",
   });

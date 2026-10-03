@@ -20,7 +20,6 @@ import {
   CheckCircle2,
   Clock,
   ExternalLink,
-  Loader2,
   ShieldAlert,
   Wrench,
   ZapOff,
@@ -76,8 +75,8 @@ function SectionHeader({ icon, title, count, color }: { icon: React.ReactNode; t
       <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${color}`}>
         {icon}
       </div>
-      <h2 className="text-sm font-semibold text-foreground flex-1">{title}</h2>
-      <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${color} border`}>
+      <h2 className="min-w-0 text-sm font-semibold text-foreground flex-1">{title}</h2>
+      <span className={`shrink-0 text-xs font-bold px-2 py-0.5 rounded-full ${color} border`}>
         {count}
       </span>
     </div>
@@ -90,31 +89,78 @@ function CardLink({ url, name, boardName }: { url: string; name: string; boardNa
       href={url}
       target="_blank"
       rel="noopener noreferrer"
-      className="flex items-center gap-1 text-xs font-medium text-foreground hover:text-blue-600 dark:hover:text-blue-400 transition-colors group"
+      className="flex min-w-0 flex-wrap items-center gap-1 text-xs font-medium text-foreground hover:text-blue-600 dark:hover:text-blue-400 transition-colors group"
     >
-      <span className="truncate">{name}</span>
-      {boardName && <span className="text-muted-foreground text-[10px] flex-shrink-0">· {boardName}</span>}
+      <span className="min-w-0 max-w-full truncate">{name}</span>
+      {boardName && <span className="min-w-0 max-w-full text-muted-foreground text-[10px]">· {boardName}</span>}
       <ExternalLink className="w-3 h-3 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
     </a>
   );
 }
 
-function AllClear({ label }: { label: string }) {
+function EmptySnapshot({ label }: { label: string }) {
   return (
-    <div className="flex items-center gap-2 py-2 text-emerald-600 dark:text-emerald-400 text-xs">
-      <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+    <div className="flex items-center gap-2 py-2 text-muted-foreground text-xs">
+      <HelpCircle className="w-4 h-4 flex-shrink-0" />
       <span className="font-medium">{label}</span>
     </div>
   );
 }
 
+function QueryNotice({ label, query, missing = false }: {
+  label: string;
+  query: { data?: unknown; error?: unknown; isError?: boolean; isLoading?: boolean; isFetching?: boolean; isStale?: boolean; refetch: () => unknown };
+  missing?: boolean;
+}) {
+  const hasSnapshot = query.data !== undefined && query.data !== null;
+  const failed = query.isError || !!query.error;
+  if (!failed && !query.isLoading && !query.isFetching && !query.isStale && !missing) return null;
+  const heading = failed || (missing && !query.isLoading && !query.isFetching)
+    ? `${label} ${hasSnapshot ? "refresh failed" : "unavailable"}`
+    : query.isLoading || query.isFetching
+      ? `${hasSnapshot ? "Refreshing" : "Loading"} ${label.toLowerCase()}`
+      : `${label} snapshot may be out of date`;
+  return (
+    <div role={failed || (missing && !query.isLoading && !query.isFetching) ? "alert" : "status"}
+      className="flex min-w-0 flex-wrap items-center gap-3 border border-border p-3 rounded-lg">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold">{heading}</p>
+        <p className="text-xs text-muted-foreground mt-1">
+          {hasSnapshot ? "Showing the last loaded snapshot; it may be out of date." : "This source has not provided a usable result yet."}
+        </p>
+      </div>
+      {(!query.isLoading || failed) && (
+        <Button variant="outline" size="sm" disabled={query.isFetching} onClick={() => void query.refetch()}>
+          <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${query.isFetching ? "animate-spin" : ""}`} />
+          {`Retry ${label.toLowerCase()}`}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 export default function AdminDashboard() {
-  const { data, isLoading, refetch, isFetching } = trpc.aptlss.getRisksAndExceptions.useQuery(undefined, {
+  const risksQuery = trpc.aptlss.getRisksAndExceptions.useQuery(undefined, {
     staleTime: 3 * 60_000,
   });
-  const { data: followUps } = trpc.aptlss.getPendingFollowUps.useQuery(undefined, { staleTime: 3 * 60_000 });
-  const { data: readyForDoneCards } = trpc.aptlss.getReadyForDone.useQuery(undefined, { staleTime: 3 * 60_000 });
-  const { data: weeklyAnalysis } = trpc.aptlss.getLatestWeeklyAnalysis.useQuery(undefined, { staleTime: 10 * 60_000 });
+  const followUpsQuery = trpc.aptlss.getPendingFollowUps.useQuery(undefined, { staleTime: 3 * 60_000 });
+  const readyForDoneQuery = trpc.aptlss.getReadyForDone.useQuery(undefined, { staleTime: 3 * 60_000 });
+  const weeklyQuery = trpc.aptlss.getLatestWeeklyAnalysis.useQuery(undefined, { staleTime: 10 * 60_000 });
+  const { data } = risksQuery;
+  const { data: followUps } = followUpsQuery;
+  const { data: readyForDoneCards } = readyForDoneQuery;
+  const { data: weeklyAnalysis } = weeklyQuery;
+  const queries = [risksQuery, followUpsQuery, readyForDoneQuery, weeklyQuery];
+  const isFetching = queries.some(query => query.isFetching);
+  const refreshAll = () => {
+    if (isFetching) return;
+    return Promise.allSettled(queries.map(query => query.refetch()));
+  };
+  // totalIssues excludes repairCards; counts describe stored categories, not live work.
+  const hasReportedIssues = data && [
+    data.pendingDecisions, data.escalations, data.stalledCards, data.blockedCards,
+    data.waitingCards, data.repairCards, data.deadlineRisks, data.readyForApproval,
+  ].some(category => category?.length > 0);
   const markSent = trpc.aptlss.markFollowUpSent.useMutation({ onSuccess: () => {} });
   const dismiss = trpc.aptlss.dismissFollowUp.useMutation({ onSuccess: () => {} });
   const utils = trpc.useUtils();
@@ -135,26 +181,25 @@ export default function AdminDashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen min-w-0 w-full bg-background">
       {/* Header */}
       <header className="sticky top-0 z-50 bg-card border-b border-border">
         <div className="container py-3">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-col items-start gap-3 lg:flex-row lg:flex-wrap lg:items-center">
             <Link href="/">
               <button
                 type="button"
                 className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
               >
-                <ArrowLeft className="w-3.5 h-3.5" />
+                <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
                 Back to Worker's Dashboard
               </button>
             </Link>
-            <div className="flex-1" />
-            <div>
+            <div className="min-w-0 lg:flex-1">
               <h1 className="text-lg font-bold text-foreground">Admin Oversight Dashboard</h1>
               <p className="text-[11px] text-muted-foreground">Decisions, risks, and exceptions requiring your attention</p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex max-w-full flex-wrap items-center gap-2">
               <Link href="/command-center">
                 <Button variant="outline" size="sm" className="flex items-center gap-1.5 text-xs">
                   <Zap className="w-3.5 h-3.5" />
@@ -170,7 +215,7 @@ export default function AdminDashboard() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => refetch()}
+                onClick={() => void refreshAll()}
                 disabled={isFetching}
                 className="flex items-center gap-1.5 text-xs"
               >
@@ -182,28 +227,22 @@ export default function AdminDashboard() {
         </div>
       </header>
 
-      <main className="container py-6 space-y-5 max-w-3xl">
-        {isLoading && (
-          <div className="flex items-center gap-2 py-12 justify-center text-muted-foreground text-sm">
-            <Loader2 className="w-4 h-4 animate-spin" />
-            Loading risks and exceptions…
-          </div>
-        )}
+      <main className="container min-w-0 py-6 space-y-5 max-w-3xl [overflow-wrap:anywhere]">
+        <QueryNotice label="Risks and exceptions" query={risksQuery} missing={!data} />
 
-        {!isLoading && data && (
+        {data && (
           <>
             {/* Summary banner — spec Item 16 */}
             <div className={`rounded-xl border p-4 ${
-              data.totalIssues === 0
-                ? "bg-emerald-500/8 border-emerald-500/30"
-                : "bg-amber-500/8 border-amber-500/30"
+              hasReportedIssues
+                ? "bg-amber-500/8 border-amber-500/30"
+                : "bg-muted/30 border-border"
             }`}>
-              {data.totalIssues === 0 ? (
+              {!hasReportedIssues ? (
                 <div className="flex items-center gap-3">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400 flex-shrink-0" />
+                  <HelpCircle className="w-5 h-5 text-muted-foreground flex-shrink-0" />
                   <div>
-                    <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">All clear — no issues require your attention</p>
-                    <p className="text-[11px] text-emerald-600/80 dark:text-emerald-400/80 mt-0.5">Worker is working autonomously. No decisions, escalations, or blockers.</p>
+                    <p className="text-sm font-semibold">No risks or exceptions returned</p>
                   </div>
                 </div>
               ) : (
@@ -212,7 +251,7 @@ export default function AdminDashboard() {
                     <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0" />
                     <div>
                       <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">Admin Attention Required</p>
-                      <p className="text-[11px] text-amber-600/80 dark:text-amber-400/80 mt-0.5">Review each section below and take action where needed.</p>
+                      <p className="text-[11px] text-amber-600/80 dark:text-amber-400/80 mt-0.5">Review the reported snapshot below and verify current state before taking action.</p>
                     </div>
                   </div>
                   {/* Attention-needed counts */}
@@ -221,7 +260,7 @@ export default function AdminDashboard() {
                       { label: "Decisions needed", count: data.pendingDecisions.length, color: "text-orange-600 dark:text-orange-400" },
                       { label: "Deadline risks", count: (data.deadlineRisks ?? []).length, color: "text-red-600 dark:text-red-400" },
                       { label: "Payment/scope issues", count: data.escalations.filter(e => e.escalationCategory === 'money_decision' || e.escalationCategory === 'scope_change').length, color: "text-rose-600 dark:text-rose-400" },
-                      { label: "Cards blocked 3+ days", count: data.blockedCards.length + data.stalledCards.length, color: "text-purple-600 dark:text-purple-400" },
+                      { label: "Blocked or stalled cards", count: data.blockedCards.length + data.stalledCards.length, color: "text-purple-600 dark:text-purple-400" },
                       { label: "Ready for final approval", count: (data.readyForApproval ?? []).length, color: "text-emerald-600 dark:text-emerald-400" },
                     ].map(item => (
                       <div key={item.label} className="flex items-center gap-2 bg-background/60 rounded-lg px-2.5 py-1.5 border border-border/40">
@@ -232,18 +271,18 @@ export default function AdminDashboard() {
                   </div>
                 </div>
               )}
-              {/* No-attention-needed section — always shown */}
-              <div className={`mt-2 pt-2 border-t ${data.totalIssues === 0 ? "border-emerald-500/20" : "border-amber-500/20"}`}>
-                <p className="text-[10px] font-semibold text-muted-foreground mb-1.5">No attention needed:</p>
+              <p className="text-[11px] text-muted-foreground mt-2">Source coverage and live work status are not confirmed by this result.</p>
+              <div className="mt-2 pt-2 border-t border-border">
+                <p className="text-[10px] font-semibold text-muted-foreground mb-1.5">Stored state counts:</p>
                 <div className="space-y-0.5">
-                  <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                    <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />
-                    <span>{data.normalCount ?? 0} card{(data.normalCount ?? 0) !== 1 ? "s are" : " is"} progressing normally.</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  {data.normalCount != null && <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <HelpCircle className="w-3 h-3 flex-shrink-0" />
+                    <span>{data.normalCount} stored card states in the backend normal category.</span>
+                  </div>}
+                  {data.externalCount != null && <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                     <Clock className="w-3 h-3 text-blue-500 flex-shrink-0" />
-                    <span>{data.externalCount ?? 0} external follow-up{(data.externalCount ?? 0) !== 1 ? "s are" : " is"} scheduled and not yet overdue.</span>
-                  </div>
+                    <span>{data.externalCount} stored card states waiting for external parties.</span>
+                  </div>}
                 </div>
               </div>
             </div>
@@ -258,7 +297,7 @@ export default function AdminDashboard() {
                   color="bg-orange-500/15 text-orange-600 dark:text-orange-400 border-orange-500/30"
                 />
                 {data.pendingDecisions.length === 0 ? (
-                  <AllClear label="No pending decisions — Worker can proceed autonomously." />
+                  <EmptySnapshot label="No pending decisions in this snapshot." />
                 ) : (
                   <div className="space-y-2">
                     {data.pendingDecisions.map((item, i) => (
@@ -290,7 +329,7 @@ export default function AdminDashboard() {
                   color="bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/30"
                 />
                 {data.escalations.length === 0 ? (
-                  <AllClear label="No escalations — no cards require special approval." />
+                  <EmptySnapshot label="No escalations in this snapshot." />
                 ) : (
                   <div className="space-y-2">
                     {data.escalations.map((item, i) => (
@@ -371,7 +410,7 @@ export default function AdminDashboard() {
                     color="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
                   />
                   <p className="text-[10px] text-muted-foreground mb-3">
-                    These cards have passed the Done quality gate and are waiting for your final approval before being moved to Done.
+                    These cards are recorded as ready for final approval. Verify the current checklist and Done quality gate before approving.
                   </p>
                   <div className="space-y-2">
                     {(data.readyForApproval ?? []).map((card, i) => (
@@ -389,7 +428,10 @@ export default function AdminDashboard() {
                 </CardContent>
               </Card>
             )}
+          </>
+        )}
             {/* ── 2b. Ready for Done (needs Admin to move to Done list) ── */}
+            <QueryNotice label="Ready-to-done cards" query={readyForDoneQuery} />
             {(readyForDoneCards ?? []).length > 0 && (
               <Card className="border-border/60">
                 <CardContent className="p-4">
@@ -400,7 +442,7 @@ export default function AdminDashboard() {
                     color="bg-teal-500/15 text-teal-600 dark:text-teal-400 border-teal-500/30"
                   />
                   <p className="text-[10px] text-muted-foreground mb-3">
-                    These cards have completed all checklist items and passed the Done quality gate. Move them to the Done list in Trello.
+                    These cards are recorded as ready to move to Done. Verify the current checklist and Done quality gate before moving them in Trello.
                   </p>
                   <div className="space-y-2">
                     {(readyForDoneCards ?? []).map((card) => (
@@ -425,6 +467,8 @@ export default function AdminDashboard() {
                 </CardContent>
               </Card>
             )}
+        {data && (
+          <>
             {/* ── 3. Stalled Cards ── */}
             <Card className="border-border/60">
               <CardContent className="p-4">
@@ -435,7 +479,7 @@ export default function AdminDashboard() {
                   color="bg-slate-500/15 text-slate-500 border-slate-500/30"
                 />
                 {data.stalledCards.length === 0 ? (
-                  <AllClear label="No stalled cards — all active work is progressing." />
+                  <EmptySnapshot label="No stalled cards in this snapshot." />
                 ) : (
                   <div className="space-y-2">
                     {data.stalledCards.map((card, i) => (
@@ -464,7 +508,7 @@ export default function AdminDashboard() {
                   color="bg-purple-500/15 text-purple-600 dark:text-purple-400 border-purple-500/30"
                 />
                 {data.blockedCards.length === 0 ? (
-                  <AllClear label="No blocked cards — all work can proceed." />
+                  <EmptySnapshot label="No blocked cards in this snapshot." />
                 ) : (
                   <div className="space-y-2">
                     {data.blockedCards.map((card, i) => (
@@ -493,7 +537,7 @@ export default function AdminDashboard() {
                   color="bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/30"
                 />
                 {data.waitingCards.length === 0 ? (
-                  <AllClear label="No cards waiting — Worker has answered all questions." />
+                  <EmptySnapshot label="No unanswered questions in this snapshot." />
                 ) : (
                   <div className="space-y-2">
                     {data.waitingCards.map((card, i) => (
@@ -525,7 +569,7 @@ export default function AdminDashboard() {
                   These cards are too vague, missing a description, or have no checklist. Worker needs to re-generate their APTLSS plan, or you need to add more detail to the Trello card.
                 </p>
                 {data.repairCards.length === 0 ? (
-                  <AllClear label="No cards need repair — all cards are well-structured." />
+                  <EmptySnapshot label="No cards needing repair in this snapshot." />
                 ) : (
                   <div className="space-y-2">
                     {data.repairCards.map((card, i) => (
@@ -544,7 +588,11 @@ export default function AdminDashboard() {
               </CardContent>
             </Card>
 
+          </>
+        )}
+
             {/* ── 7. Auto Follow-Up Drafts ── */}
+            <QueryNotice label="Follow-up drafts" query={followUpsQuery} />
             {followUps && followUps.length > 0 && (
               <Card className="border-border/60">
                 <CardContent className="p-4">
@@ -561,7 +609,7 @@ export default function AdminDashboard() {
                     {followUps.map((draft) => (
                       <div key={draft.id} className="rounded-lg border border-sky-500/20 bg-sky-500/5 p-3">
                         <div className="flex items-start justify-between gap-2 mb-2">
-                          <div>
+                          <div className="min-w-0 flex-1">
                             <p className="text-xs font-semibold text-foreground">{draft.cardName}</p>
                             <p className="text-[10px] text-muted-foreground mt-0.5">{draft.reason}</p>
                           </div>
@@ -570,7 +618,7 @@ export default function AdminDashboard() {
                           </span>
                         </div>
                         <pre className="text-[11px] text-foreground whitespace-pre-wrap font-sans bg-background/60 rounded p-2 border border-border/40 mb-2">{draft.draftMessage}</pre>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <button
                             type="button"
                             onClick={() => handleCopy(draft.id, draft.draftMessage)}
@@ -603,6 +651,7 @@ export default function AdminDashboard() {
             )}
 
             {/* ── 8. Weekly Analysis Snapshot ── */}
+            <QueryNotice label="Weekly analysis" query={weeklyQuery} />
             {weeklyAnalysis && (() => {
               let noProgressCards: { cardId: string; cardName: string; state: string }[] = [];
               let recurringBlockers: { reason: string; count: number; cards: string[] }[] = [];
@@ -668,10 +717,8 @@ export default function AdminDashboard() {
 
             {/* Footer timestamp */}
             <p className="text-center text-[10px] text-muted-foreground pb-4">
-              Data sourced from APTLSS AI engine · Refresh to get latest state
+              Stored APTLSS snapshots · Live Trello coverage and worker activity are not verified here
             </p>
-          </>
-        )}
       </main>
     </div>
   );

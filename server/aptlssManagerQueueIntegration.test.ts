@@ -312,29 +312,40 @@ describe.skipIf(!url)(
       let active = 0,
         max = 0,
         done = 0;
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
       const runner = createManagerQueueRunner({
         db,
         concurrency: 2,
         execute: async () => {
           active++;
           max = Math.max(max, active);
-          await new Promise(r => setTimeout(r, 60));
+          // Hold execution until both lanes start; SQL latency is not job duration.
+          await gate;
           active--;
           done++;
         },
       });
-      await runner.drain();
-      expect(max).toBe(2);
-      expect(done).toBe(3);
-      expect(
-        (
-          await db
-            .select()
-            .from(schema.aptlssManagerState)
-            .where(inArray(schema.aptlssManagerState.vaId, ids))
-        ).every(r => r.mode === "shadow")
-      ).toBe(true);
-      await runner.stop();
+      const draining = runner.drain();
+      try {
+        await expect.poll(() => active, { timeout: 5000 }).toBe(2);
+        release();
+        await draining;
+        expect(max).toBe(2);
+        expect(done).toBe(3);
+        expect(
+          (
+            await db
+              .select()
+              .from(schema.aptlssManagerState)
+              .where(inArray(schema.aptlssManagerState.vaId, ids))
+          ).every(r => r.mode === "shadow")
+        ).toBe(true);
+      } finally {
+        release();
+        await draining;
+        await runner.stop();
+      }
     });
     it("a later poll fills a free lane while a slow worker remains active", async () => {
       const slow = await worker(),

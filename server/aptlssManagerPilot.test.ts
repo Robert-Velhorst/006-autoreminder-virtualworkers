@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const database = vi.hoisted(() => ({ getDb: vi.fn() }));
 vi.mock("./db", () => database);
 import { collectManagerInput, getManagerStatus, runManager, submitManagerUpdate, updateManagerPolicy } from "./aptlssManagerService";
-import { isManagerPilotWorker } from "./aptlssManagerPilot";
+import { isManagerPilotWorker, managerPilotEnabled, managerPilotWorkerIds } from "./aptlssManagerPilot";
 import { restoreManagerPlan, setManagerMode, getManagerReviewInbox, recordManagerReview } from "./aptlssManagerReviewService";
 import { enqueueManagerTask } from "./aptlssManagerQueue";
 
@@ -33,9 +33,13 @@ describe("Joyce-only shadow pilot service boundaries", () => {
     expect(isManagerPilotWorker(19)).toBe(true);
     expect(isManagerPilotWorker(301)).toBe(true);
     expect(isManagerPilotWorker(2)).toBe(false);
+    expect(managerPilotEnabled()).toBe(true);
   });
-  it.each([undefined, "", "false", "TRUE", "1"])("requires explicit shadow-only true (%s)", async value => {
+  it.each([undefined, "", "false", "TRUE", "1", " true ", "enabled"])("keeps pilot protections and disables APTLSS unless shadow-only is exactly true (%s)", async value => {
     vi.stubEnv("APTLSS_MANAGER_SHADOW_ONLY", value);
+    expect(managerPilotWorkerIds()).toEqual([2]);
+    expect(isManagerPilotWorker(2)).toBe(true);
+    expect(managerPilotEnabled()).toBe(false);
     await expect(async () => runManager(2)).rejects.toThrow(/pilot/i);
     expect(database.getDb).not.toHaveBeenCalled();
   });

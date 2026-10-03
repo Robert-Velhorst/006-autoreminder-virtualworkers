@@ -7,7 +7,7 @@ import { registerOAuthRoutes } from "./oauth";
 import localAuthRoutes from "../routes/local-auth.js";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
-import { sdk } from "./sdk";
+import { attachRequestAuthentication } from "./requestAuthentication";
 import { serveStatic } from "./static";
 import { configureCompression } from "./compression";
 import aptlssRoutes from "../routes/aptlss.js";
@@ -55,6 +55,7 @@ import { log } from "../utils/logger.js";
 import { registerBrowserTabRoutes } from "../browserTabRoutes.js";
 import { assertLocalAuthBypassConfiguration, isLocalAuthBypassEnabled } from "./localAuthBypass.js";
 import { assertProductionConfiguration } from "./productionConfig.js";
+import { getBackgroundWorkConfiguration } from "./backgroundWork.js";
 import { getTrustedProxyHops } from "./trustedProxy.js";
 import { getPendingRequestQueueCap } from "./requestQueueCapacity.js";
 import googleEvidenceRoutes from "../googleEvidenceRoutes.js";
@@ -94,28 +95,6 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 function positiveInteger(value: string | undefined, fallback: number, maximum: number) {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, maximum) : fallback;
-}
-
-function isAptlssBrowserTestRuntime() {
-  if (process.env.APTLSS_TEST_DISABLE_BACKGROUND_JOBS !== "true") return false;
-  const raw = process.env.APTLSS_TEST_DATABASE_URL?.trim();
-  let database: URL;
-  try {
-    database = new URL(raw ?? "");
-  } catch {
-    throw new Error("APTLSS browser-test mode requires its explicit loopback test database URL.");
-  }
-  if (
-    process.env.NODE_ENV === "production" ||
-    database.protocol !== "mysql:" ||
-    database.search ||
-    database.hash ||
-    !["127.0.0.1", "localhost", "[::1]"].includes(database.hostname) ||
-    !/^\/(?:aptlss_test|recovery_test)$/.test(database.pathname)
-  ) {
-    throw new Error("APTLSS browser-test mode is restricted to non-production loopback test databases.");
-  }
-  return true;
 }
 
 const MAX_CONCURRENT = positiveInteger(process.env.MAX_CONCURRENT_REQUESTS, 100, 10_000);
@@ -195,6 +174,9 @@ function concurrencyLimiter(
 async function startServer() {
   assertProductionConfiguration();
   assertLocalAuthBypassConfiguration();
+  const backgroundWork = getBackgroundWorkConfiguration(process.env, {
+    localAuthBypassEnabled: isLocalAuthBypassEnabled(),
+  });
   const app = express();
   app.disable("x-powered-by");
   configureCompression(app);
@@ -224,15 +206,7 @@ async function startServer() {
   app.use("/readyz", healthRoutes);
 
   // Authentication middleware for all /api routes
-  app.use('/api', async (req: any, res, next) => {
-    try {
-      req.user = await sdk.authenticateRequest(req);
-    } catch (error) {
-      // Authentication is optional, continue without user
-      req.user = null;
-    }
-    next();
-  });
+  app.use('/api', attachRequestAuthentication);
 
   // Authenticated users receive independent API budgets even behind one proxy.
   app.use('/api', apiRateLimiterWithAnonymousSessionProbeBypass);
@@ -342,12 +316,7 @@ async function startServer() {
   // Initialize WebSocket server
   websocketService.initialize(server);
 
-  // A local bypass server and an isolated browser-test server must not run
-  // schedulers against a shared or disposable database.
-  const aptlssBrowserTestRuntime = isAptlssBrowserTestRuntime();
-  if (isLocalAuthBypassEnabled() || aptlssBrowserTestRuntime) {
-    console.warn(`[Server] ${aptlssBrowserTestRuntime ? "Isolated APTLSS browser-test mode" : "Local auth bypass enabled"}; background workers are disabled for this process`);
-  } else {
+  if (backgroundWork.enabled) {
     // Schedulers are independent from cache warming. External email briefings
     // remain disabled unless explicitly enabled by configuration.
     startBriefingScheduler();
@@ -356,6 +325,8 @@ async function startServer() {
     startMaintenanceCenter();
     startManagerScheduler();
     startFounderDecisionAlertWorker();
+  } else {
+    console.warn(`[Server] ${backgroundWork.reason}; background workers are disabled for this process`);
   }
 
   const host = process.env.HOST ?? "127.0.0.1";
@@ -370,6 +341,8 @@ async function startServer() {
       || process.env.PUBLIC_URL?.trim()
       || process.env.APP_URL?.trim();
     if (webhookUrl) {
+      // Configure the callback in memory for explicit authorized actions only.
+      // false must remain explicit: startup never registers provider webhooks.
       await initializeWebhookAutoRegister(webhookUrl, false);
     }
   });

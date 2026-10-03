@@ -5,6 +5,7 @@ import { getDb } from '../db';
 import { requestUser, requireAdmin, requireAuthenticated } from '../middleware/auth';
 import { fetchWithRetry } from '../utils/retry';
 import { selectWorkerProfile } from '../workerOperatorContext';
+import { isManagerPilotWorker } from '../aptlssManagerPilot';
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -16,6 +17,34 @@ router.use((req, res, next) => {
   next();
 });
 
+type TrelloCredentials = { apiKey: string; token: string };
+
+function getTrelloCredentials(): TrelloCredentials | null {
+  const apiKey = process.env.TRELLO_API_KEY?.trim();
+  const token = process.env.TRELLO_TOKEN?.trim();
+  return apiKey && token ? { apiKey, token } : null;
+}
+
+function trelloApiUrl(credentials: TrelloCredentials, resource: string, params: Record<string, string> = {}) {
+  const url = new URL(`/1/${resource}`, 'https://api.trello.com');
+  url.searchParams.set('key', credentials.apiKey);
+  url.searchParams.set('token', credentials.token);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  return url;
+}
+
+function trelloRequest(url: URL, init?: RequestInit) {
+  return fetchWithRetry(url.toString(), { ...init, redirect: 'error' }, {
+    maxRetries: 0,
+    retryableStatuses: [],
+    timeoutMs: 15_000,
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function completionLabelsKey(userId: number) {
   return `trelloCompletionLabels:${userId}`;
 }
@@ -25,12 +54,16 @@ async function getCompletionLabels(userId: number) {
   if (!db) throw new Error('Database not available');
   const [row] = await db.select({ value: appSettings.value }).from(appSettings)
     .where(eq(appSettings.key, completionLabelsKey(userId))).limit(1);
-  if (!row?.value) return [];
+  if (!row) return [];
+  if (!row.value) throw new Error('Invalid Trello completion label configuration');
   try {
     const parsed = JSON.parse(row.value);
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string').slice(0, 50) : [];
+    if (!Array.isArray(parsed) || parsed.length > 50 || parsed.some((value) => typeof value !== 'string' || !value.trim())) {
+      throw new Error('Invalid Trello completion label configuration');
+    }
+    return parsed as string[];
   } catch {
-    return [];
+    throw new Error('Invalid Trello completion label configuration');
   }
 }
 
@@ -43,6 +76,29 @@ async function saveCompletionLabels(userId: number, labels: string[]) {
 }
 
 type ChecklistItemReference = { checklistId: string; checkItemId: string };
+
+function rejectShadowPilotCompletion(req: Request, res: Response) {
+  const user = requestUser(req)!;
+  if (req.body?.isCompleted !== true || process.env.APTLSS_MANAGER_SHADOW_ONLY !== 'true'
+    || !isManagerPilotWorker(user.id)) return false;
+  res.status(409).json({ error: 'Checklist completion is paused while APTLSS is in shadow mode. Report the completed work through Work guidance; the task remains open until it is verified.' });
+  return true;
+}
+
+async function workerCompletionLabelsForUpdate(req: Request, res: Response) {
+  const user = requestUser(req)!;
+  if (user.role !== 'worker' || !Array.isArray(req.body?.idLabels)) return undefined;
+
+  const completionLabels = await getCompletionLabels(user.id);
+  const isShadowPilot = process.env.APTLSS_MANAGER_SHADOW_ONLY === 'true' && isManagerPilotWorker(user.id);
+  if (isShadowPilot && req.body.idLabels.some((label: unknown) =>
+    typeof label === 'string' && completionLabels.includes(label))) {
+    res.status(409).json({ error: 'Applying a configured completion label is paused while APTLSS is in shadow mode. Report completed work through Work guidance; the task remains open until it is verified.' });
+    return undefined;
+  }
+
+  return completionLabels;
+}
 
 function cardContainsChecklistItem(
   card: { checklists?: unknown },
@@ -68,6 +124,7 @@ async function requireAssignedCard(
   res: Response,
   cardId: string,
   checklistItem?: ChecklistItemReference,
+  completionLabelsToPreserve?: string[],
 ) {
   const user = requestUser(req)!;
   if (user.role === 'admin' && !checklistItem) return true;
@@ -96,27 +153,41 @@ async function requireAssignedCard(
       return false;
     }
   }
-  const apiKey = process.env.TRELLO_API_KEY;
-  const apiToken = process.env.TRELLO_TOKEN;
-  if (!apiKey || !apiToken) {
+  const credentials = getTrelloCredentials();
+  if (!credentials) {
     res.status(503).json({ error: 'Trello credentials not configured' });
     return false;
   }
-  const query = new URLSearchParams({ key: apiKey, token: apiToken, fields: 'idMembers' });
-  if (checklistItem) query.set('checklists', 'all');
-  const response = await fetchWithRetry(
-    `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}?${query.toString()}`,
-    undefined,
-    { maxRetries: 0 },
-  );
+  const preserveCompletionLabels = Boolean(completionLabelsToPreserve?.length);
+  const params: Record<string, string> = { fields: preserveCompletionLabels ? 'idMembers,idLabels' : 'idMembers' };
+  if (checklistItem) params.checklists = 'all';
+  const response = await trelloRequest(trelloApiUrl(credentials, `cards/${encodeURIComponent(cardId)}`, params));
   if (!response.ok) {
     res.status(response.status === 404 ? 404 : 502).json({ error: response.status === 404 ? 'Trello card not found' : 'Could not verify Trello card access' });
     return false;
   }
-  const card = await response.json() as { idMembers?: unknown; checklists?: unknown };
-  if (memberId && (!Array.isArray(card.idMembers) || !card.idMembers.includes(memberId))) {
-    res.status(403).json({ error: 'This Trello card is not assigned to your linked member account' });
-    return false;
+  const card = await response.json() as { idMembers?: unknown; idLabels?: unknown; checklists?: unknown };
+  if (memberId) {
+    if (!Array.isArray(card.idMembers) || !card.idMembers.every((id) => typeof id === 'string')) {
+      res.status(502).json({ error: 'Could not verify Trello card access' });
+      return false;
+    }
+    if (!card.idMembers.includes(memberId)) {
+      res.status(403).json({ error: 'This Trello card is not assigned to your linked member account' });
+      return false;
+    }
+  }
+  if (preserveCompletionLabels) {
+    if (!Array.isArray(card.idLabels) || !Array.isArray(req.body?.idLabels)) {
+      res.status(502).json({ error: 'Could not verify Trello completion label protection' });
+      return false;
+    }
+
+    const currentLabels = new Set(card.idLabels.filter((label): label is string => typeof label === 'string'));
+    const retainedCompletionLabels = completionLabelsToPreserve!.filter((label) => currentLabels.has(label));
+    // Trello treats idLabels as a replacement list, so keep existing completion
+    // markers while allowing workers to edit the card's ordinary labels.
+    req.body.idLabels = [...new Set([...req.body.idLabels, ...retainedCompletionLabels])];
   }
   if (checklistItem && !cardContainsChecklistItem(card, checklistItem.checklistId, checklistItem.checkItemId)) {
     res.status(403).json({ error: 'The checklist item does not belong to the selected Trello card' });
@@ -127,9 +198,20 @@ async function requireAssignedCard(
 
 router.param('cardId', async (req, res, next, cardId) => {
   try {
-    if (await requireAssignedCard(req, res, cardId)) next();
+    const user = requestUser(req)!;
+    const mutationPath = req.path.replace(/\/+$/, '').toLowerCase();
+    if (req.method === 'PUT' && mutationPath.endsWith('/members') && user.role !== 'admin') {
+      res.status(403).json({ error: 'Only an admin can change Trello card membership' });
+      return;
+    }
+    if (req.method === 'PUT' && mutationPath.endsWith('/status') && rejectShadowPilotCompletion(req, res)) return;
+    const completionLabels = req.method === 'PUT' && mutationPath.endsWith('/update')
+      ? await workerCompletionLabelsForUpdate(req, res)
+      : undefined;
+    if (res.headersSent) return;
+    if (await requireAssignedCard(req, res, cardId, undefined, completionLabels)) next();
   } catch (error) {
-    console.error('[Trello] Card authorization failed:', error);
+    console.error('[Trello] Card authorization failed');
     if (!res.headersSent) res.status(502).json({ error: 'Could not verify Trello card access' });
   }
 });
@@ -140,39 +222,41 @@ router.param('cardId', async (req, res, next, cardId) => {
  */
 router.get('/labels', requireAdmin, async (req: Request, res: Response) => {
   try {
-    const apiKey = process.env.TRELLO_API_KEY;
-    const apiToken = process.env.TRELLO_TOKEN;
+    const credentials = getTrelloCredentials();
+    if (!credentials) return res.status(503).json({ error: 'Trello credentials not configured' });
 
-    if (!apiKey || !apiToken) {
-      return res.status(500).json({ error: 'Trello credentials not configured' });
-    }
-
-    // Get the first board (assuming single board setup)
-    const boardsUrl = `https://api.trello.com/1/members/me/boards?key=${apiKey}&token=${apiToken}`;
-    const boardsResponse = await fetchWithRetry(boardsUrl, undefined, { maxRetries: 0 });
-    const boards = await boardsResponse.json();
-
-    if (!boards || boards.length === 0) {
+    const boardsResponse = await trelloRequest(trelloApiUrl(credentials, 'members/me/boards'));
+    if (!boardsResponse.ok) return res.status(502).json({ error: 'Could not fetch Trello boards' });
+    const boards = await boardsResponse.json() as unknown;
+    if (!Array.isArray(boards)) return res.status(502).json({ error: 'Could not verify Trello boards' });
+    if (boards.length === 0) {
       return res.json({ labels: [] });
     }
 
-    // Get labels from the first board
-    const boardId = boards[0].id;
-    const labelsUrl = `https://api.trello.com/1/boards/${boardId}/labels?key=${apiKey}&token=${apiToken}`;
-    const labelsResponse = await fetchWithRetry(labelsUrl, undefined, { maxRetries: 0 });
-    const labels = await labelsResponse.json();
+    const firstBoard = boards[0];
+    if (!isRecord(firstBoard) || typeof firstBoard.id !== 'string' || !firstBoard.id) {
+      return res.status(502).json({ error: 'Could not verify Trello boards' });
+    }
+    const labelsResponse = await trelloRequest(trelloApiUrl(
+      credentials,
+      `boards/${encodeURIComponent(firstBoard.id)}/labels`,
+    ));
+    if (!labelsResponse.ok) return res.status(502).json({ error: 'Could not fetch Trello labels' });
+    const labels = await labelsResponse.json() as unknown;
+    if (!Array.isArray(labels) || !labels.every((label) => isRecord(label) && typeof label.id === 'string')) {
+      return res.status(502).json({ error: 'Could not verify Trello labels' });
+    }
 
-    // Transform labels to include only necessary fields
-    const transformedLabels = labels.map((label: any) => ({
+    const transformedLabels = labels.map((label) => ({
       id: label.id,
-      name: label.name || 'Untitled',
-      color: label.color || '#cccccc',
+      name: typeof label.name === 'string' && label.name ? label.name : 'Untitled',
+      color: typeof label.color === 'string' && label.color ? label.color : '#cccccc',
     }));
 
     res.json({ labels: transformedLabels });
   } catch (error) {
-    console.error('[Trello] Error fetching labels:', error);
-    res.status(500).json({ error: 'Failed to fetch Trello labels' });
+    console.error('[Trello] Error fetching labels');
+    res.status(502).json({ error: 'Failed to fetch Trello labels' });
   }
 });
 
@@ -190,7 +274,7 @@ router.get('/completion-labels', async (req: Request, res: Response) => {
       lastUpdated: new Date().toISOString(),
     });
   } catch (error) {
-    console.error('[Trello] Error fetching completion labels config:', error);
+    console.error('[Trello] Error fetching completion labels config');
     res.status(500).json({ error: 'Failed to fetch configuration' });
   }
 });
@@ -203,7 +287,7 @@ router.post('/completion-labels', async (req: Request, res: Response) => {
   try {
     const user = requestUser(req)!;
 
-    const { labels } = req.body;
+    const labels = req.body?.labels;
 
     if (!Array.isArray(labels)) {
       return res.status(400).json({ error: 'Labels must be an array' });
@@ -214,6 +298,14 @@ router.post('/completion-labels', async (req: Request, res: Response) => {
       .map((value) => value.trim())
       .filter(Boolean)
       .slice(0, 50);
+
+    if (process.env.APTLSS_MANAGER_SHADOW_ONLY === 'true' && isManagerPilotWorker(user.id)) {
+      const currentLabels = await getCompletionLabels(user.id);
+      if (currentLabels.some((label) => !normalizedLabels.includes(label))) {
+        return res.status(409).json({ error: 'Completion label protection cannot be weakened while APTLSS is in shadow mode' });
+      }
+    }
+
     await saveCompletionLabels(user.id, normalizedLabels);
 
     res.json({
@@ -222,7 +314,7 @@ router.post('/completion-labels', async (req: Request, res: Response) => {
       message: 'Completion labels configuration saved successfully',
     });
   } catch (error) {
-    console.error('[Trello] Error saving completion labels config:', error);
+    console.error('[Trello] Error saving completion labels config');
     res.status(500).json({ error: 'Failed to save configuration' });
   }
 });
@@ -242,19 +334,18 @@ router.put('/tasks/:taskId/complete', async (req: Request, res: Response) => {
     if (typeof isCompleted !== 'boolean') {
       return res.status(400).json({ error: 'isCompleted must be a boolean' });
     }
+    if (rejectShadowPilotCompletion(req, res)) return;
     if (!await requireAssignedCard(req, res, cardId, { checklistId, checkItemId })) return;
 
-    const apiKey = process.env.TRELLO_API_KEY;
-    const apiToken = process.env.TRELLO_TOKEN;
-
-    if (!apiKey || !apiToken) {
-      return res.status(500).json({ error: 'Trello credentials not configured' });
-    }
+    const credentials = getTrelloCredentials();
+    if (!credentials) return res.status(503).json({ error: 'Trello credentials not configured' });
 
     // Update the checklist item state
-    const updateUrl = `https://api.trello.com/1/checklists/${encodeURIComponent(checklistId)}/checkItems/${encodeURIComponent(checkItemId)}?key=${apiKey}&token=${apiToken}`;
-    
-    const updateResponse = await fetchWithRetry(updateUrl, {
+    const updateUrl = trelloApiUrl(
+      credentials,
+      `checklists/${encodeURIComponent(checklistId)}/checkItems/${encodeURIComponent(checkItemId)}`,
+    );
+    const updateResponse = await trelloRequest(updateUrl, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -262,17 +353,14 @@ router.put('/tasks/:taskId/complete', async (req: Request, res: Response) => {
       body: JSON.stringify({
         state: isCompleted ? 'complete' : 'incomplete',
       }),
-    }, { maxRetries: 0, timeoutMs: 15_000 });
+    });
 
     if (!updateResponse.ok) {
-      const errorText = await updateResponse.text();
-      console.error('[Trello] Failed to update checklist item:', errorText);
-      
-      // Provide better error messages
+      console.error('[Trello] Failed to update checklist item', updateResponse.status);
       let userFriendlyError = 'Failed to update task in Trello';
-      if (updateResponse.status === 401 || errorText.includes('unauthorized')) {
+      if (updateResponse.status === 401) {
         userFriendlyError = 'Permission denied: You do not have access to this card or checklist.';
-      } else if (updateResponse.status === 404 || errorText.includes('invalid')) {
+      } else if (updateResponse.status === 404) {
         userFriendlyError = 'Task not found: The checklist item may have been deleted.';
       }
       
@@ -280,8 +368,6 @@ router.put('/tasks/:taskId/complete', async (req: Request, res: Response) => {
         error: userFriendlyError,
       });
     }
-
-    const result = await updateResponse.json();
 
     res.json({
       success: true,
@@ -291,8 +377,8 @@ router.put('/tasks/:taskId/complete', async (req: Request, res: Response) => {
       message: `Task marked as ${isCompleted ? 'complete' : 'incomplete'} in Trello`,
     });
   } catch (error) {
-    console.error('[Trello] Error updating task completion:', error);
-    res.status(500).json({ error: 'Failed to update task completion' });
+    console.error('[Trello] Error updating task completion');
+    res.status(502).json({ error: 'Failed to update task completion' });
   }
 });
 
@@ -312,34 +398,25 @@ router.put('/cards/:cardId/status', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'isCompleted must be a boolean' });
     }
 
-    const apiKey = process.env.TRELLO_API_KEY;
-    const apiToken = process.env.TRELLO_TOKEN;
-
-    if (!apiKey || !apiToken) {
-      return res.status(500).json({ error: 'Trello credentials not configured' });
-    }
+    const credentials = getTrelloCredentials();
+    if (!credentials) return res.status(503).json({ error: 'Trello credentials not configured' });
 
     // Fetch the card to get its current labels
-    const cardUrl = `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}?key=${apiKey}&token=${apiToken}&fields=labels,idLabels`;
-    const cardResponse = await fetchWithRetry(cardUrl, undefined, { maxRetries: 0, timeoutMs: 15_000 });
+    const cardUrl = trelloApiUrl(credentials, `cards/${encodeURIComponent(cardId)}`, { fields: 'labels,idLabels' });
+    const cardResponse = await trelloRequest(cardUrl);
 
     if (!cardResponse.ok) {
-      const errorText = await cardResponse.text();
-      console.error('[Trello] Failed to fetch card:', errorText);
-      
-      // Provide better error messages based on the HTTP status
-      let userFriendlyError = 'Failed to fetch card';
-      if (cardResponse.status === 401 || errorText.includes('unauthorized')) {
-        userFriendlyError = 'Permission denied: You do not have access to this card. Check your Trello token permissions or board access.';
-      } else if (cardResponse.status === 404 || errorText.includes('invalid id')) {
-        userFriendlyError = 'Card not found: This card may have been deleted or archived.';
-      }
-      
-      return res.status(cardResponse.status === 404 ? 404 : 502).json({ error: userFriendlyError });
+      console.error('[Trello] Failed to fetch card', cardResponse.status);
+      return res.status(cardResponse.status === 404 ? 404 : 502).json({
+        error: cardResponse.status === 404 ? 'Card not found: This card may have been deleted or archived.' : 'Could not verify Trello card access',
+      });
     }
 
-    const card = await cardResponse.json();
-    const currentLabels = card.idLabels || [];
+    const card = await cardResponse.json() as unknown;
+    if (!isRecord(card) || !Array.isArray(card.idLabels) || !card.idLabels.every((label) => typeof label === 'string')) {
+      return res.status(502).json({ error: 'Could not verify Trello card labels' });
+    }
+    const currentLabels = card.idLabels as string[];
     
     // Get the completion label ID from user config
     const user = requestUser(req)!;
@@ -365,20 +442,17 @@ router.put('/cards/:cardId/status', async (req: Request, res: Response) => {
     }
 
     // Update the card with new labels
-    const updateUrl = `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}?key=${apiKey}&token=${apiToken}`;
-    const updateResponse = await fetchWithRetry(updateUrl, {
+    const updateUrl = trelloApiUrl(credentials, `cards/${encodeURIComponent(cardId)}`);
+    const updateResponse = await trelloRequest(updateUrl, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        idLabels: newLabels,
-      }),
-    }, { maxRetries: 0, timeoutMs: 15_000 });
+      body: JSON.stringify({ idLabels: newLabels }),
+    });
 
     if (!updateResponse.ok) {
-      const errorText = await updateResponse.text();
-      console.error('[Trello] Failed to update card status:', errorText);
+      console.error('[Trello] Failed to update card status', updateResponse.status);
       return res.status(updateResponse.status === 404 ? 404 : 502).json({
         error: updateResponse.status === 404 ? 'Trello card not found' : 'Trello did not accept the card status update',
       });
@@ -391,7 +465,7 @@ router.put('/cards/:cardId/status', async (req: Request, res: Response) => {
       message: `Card status updated to ${isCompleted ? 'complete' : 'incomplete'}`,
     });
   } catch (error) {
-    console.error('[Trello] Error updating card status:', error);
+    console.error('[Trello] Error updating card status');
     res.status(502).json({ error: 'Could not update the Trello card status' });
   }
 });
@@ -411,28 +485,22 @@ router.put('/cards/:cardId/due', async (req: Request, res: Response) => {
     if (dueDate && Number.isNaN(new Date(dueDate).getTime())) {
       return res.status(400).json({ error: 'dueDate must be a valid ISO date string' });
     }
-    const apiKey = process.env.TRELLO_API_KEY;
-    const apiToken = process.env.TRELLO_TOKEN;
-    if (!apiKey || !apiToken) return res.status(503).json({ error: 'Trello credentials not configured' });
+    const credentials = getTrelloCredentials();
+    if (!credentials) return res.status(503).json({ error: 'Trello credentials not configured' });
 
-    const response = await fetchWithRetry(
-      `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}?key=${apiKey}&token=${apiToken}`,
-      {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ due: dueDate }),
-      },
-      { maxRetries: 0 },
-    );
+    const response = await trelloRequest(trelloApiUrl(credentials, `cards/${encodeURIComponent(cardId)}`), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ due: dueDate }),
+    });
     if (!response.ok) {
       return res.status(response.status === 404 ? 404 : 502).json({
         error: response.status === 404 ? 'Trello card not found' : 'Trello did not accept the due date update',
       });
     }
-    const card = await response.json() as { id?: string; name?: string; due?: string | null };
-    return res.json({ success: true, cardId, dueDate, trelloCard: card });
+    return res.json({ success: true, cardId, dueDate });
   } catch (error) {
-    console.error('[Trello] Due date update failed:', error);
+    console.error('[Trello] Due date update failed');
     return res.status(502).json({ error: 'Could not update the Trello due date' });
   }
 });
@@ -443,32 +511,30 @@ router.put('/cards/:cardId/due', async (req: Request, res: Response) => {
  */
 router.get('/boards/list', requireAdmin, async (req: Request, res: Response) => {
   try {
-    const apiKey = process.env.TRELLO_API_KEY;
-    const apiToken = process.env.TRELLO_TOKEN;
+    const credentials = getTrelloCredentials();
+    if (!credentials) return res.status(503).json({ error: 'Trello credentials not configured' });
 
-    if (!apiKey || !apiToken) {
-      return res.status(500).json({ error: 'Trello credentials not configured' });
+    const boardsResponse = await trelloRequest(trelloApiUrl(credentials, 'members/me/boards'));
+    if (!boardsResponse.ok) return res.status(502).json({ error: 'Could not fetch Trello boards' });
+    const boards = await boardsResponse.json() as unknown;
+    if (!Array.isArray(boards) || !boards.every((board) => isRecord(board) && typeof board.id === 'string' && typeof board.name === 'string')) {
+      return res.status(502).json({ error: 'Could not verify Trello boards' });
     }
-
-    const boardsUrl = `https://api.trello.com/1/members/me/boards?key=${apiKey}&token=${apiToken}`;
-    const boardsResponse = await fetchWithRetry(boardsUrl, undefined, { maxRetries: 0 });
-    const boards = await boardsResponse.json();
-
-    if (!boards || boards.length === 0) {
+    if (boards.length === 0) {
       return res.json({ boards: [] });
     }
 
-    const transformedBoards = boards.map((board: any) => ({
+    const transformedBoards = boards.map((board) => ({
       id: board.id,
       name: board.name,
-      url: board.url,
-      closed: board.closed,
+      ...(typeof board.url === 'string' ? { url: board.url } : {}),
+      ...(typeof board.closed === 'boolean' ? { closed: board.closed } : {}),
     }));
 
     res.json({ boards: transformedBoards });
   } catch (error) {
-    console.error('[Trello] Error fetching boards:', error);
-    res.status(500).json({ error: 'Failed to fetch Trello boards' });
+    console.error('[Trello] Error fetching boards');
+    res.status(502).json({ error: 'Failed to fetch Trello boards' });
   }
 });
 
@@ -479,7 +545,7 @@ router.get('/boards/list', requireAdmin, async (req: Request, res: Response) => 
 router.put('/cards/:cardId/update', async (req: Request, res: Response) => {
   try {
     const { cardId } = req.params;
-    const { name, desc, idLabels } = req.body;
+    const { name, desc, idLabels } = req.body ?? {};
     if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
       return res.status(400).json({ error: 'name must be a non-empty string when provided' });
     }
@@ -493,38 +559,38 @@ router.put('/cards/:cardId/update', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Provide at least one card field to update' });
     }
     
-    const apiKey = process.env.TRELLO_API_KEY;
-    const apiToken = process.env.TRELLO_TOKEN;
+    const credentials = getTrelloCredentials();
+    if (!credentials) return res.status(503).json({ error: 'Trello credentials not configured' });
 
-    if (!apiKey || !apiToken) {
-      return res.status(500).json({ error: 'Trello credentials not configured' });
-    }
-
-    const updateUrl = new URL(`https://api.trello.com/1/cards/${encodeURIComponent(cardId)}`);
-    updateUrl.searchParams.append('key', apiKey);
-    updateUrl.searchParams.append('token', apiToken);
+    const updateUrl = trelloApiUrl(credentials, `cards/${encodeURIComponent(cardId)}`);
 
     if (name) updateUrl.searchParams.append('name', name);
     if (desc !== undefined) updateUrl.searchParams.append('desc', desc);
     if (idLabels) updateUrl.searchParams.append('idLabels', idLabels.join(','));
 
-    const response = await fetchWithRetry(updateUrl.toString(), {
+    const response = await trelloRequest(updateUrl, {
       method: 'PUT',
-    }, { maxRetries: 1, timeoutMs: 15_000 });
+    });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error('[Trello] Failed to update card:', errorText);
+      console.error('[Trello] Failed to update card', response.status);
       return res.status(response.status === 404 ? 404 : 502).json({
         error: response.status === 404 ? 'Trello card not found' : 'Trello did not accept the card update',
       });
     }
 
-    const updatedCard = await response.json();
-    res.json({ success: true, card: updatedCard });
+    res.json({
+      success: true,
+      card: {
+        id: cardId,
+        ...(name !== undefined ? { name } : {}),
+        ...(desc !== undefined ? { desc } : {}),
+        ...(idLabels !== undefined ? { idLabels } : {}),
+      },
+    });
   } catch (error) {
-    console.error('[Trello] Error updating card:', error);
-    res.status(500).json({ error: 'Failed to update Trello card' });
+    console.error('[Trello] Error updating card');
+    res.status(502).json({ error: 'Failed to update Trello card' });
   }
 });
 
@@ -543,35 +609,27 @@ router.put('/cards/:cardId/members', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'idMembers must be an array of strings' });
     }
     
-    const apiKey = process.env.TRELLO_API_KEY;
-    const apiToken = process.env.TRELLO_TOKEN;
+    const credentials = getTrelloCredentials();
+    if (!credentials) return res.status(503).json({ error: 'Trello credentials not configured' });
 
-    if (!apiKey || !apiToken) {
-      return res.status(500).json({ error: 'Trello credentials not configured' });
-    }
-
-    const updateUrl = new URL(`https://api.trello.com/1/cards/${encodeURIComponent(cardId)}`);
-    updateUrl.searchParams.set('key', apiKey);
-    updateUrl.searchParams.set('token', apiToken);
+    const updateUrl = trelloApiUrl(credentials, `cards/${encodeURIComponent(cardId)}`);
     updateUrl.searchParams.set('idMembers', idMembers.join(','));
 
-    const response = await fetchWithRetry(updateUrl.toString(), {
+    const response = await trelloRequest(updateUrl, {
       method: 'PUT',
-    }, { maxRetries: 1, timeoutMs: 15_000 });
+    });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error('[Trello] Failed to update card members:', errorText);
+      console.error('[Trello] Failed to update card members', response.status);
       return res.status(response.status === 404 ? 404 : 502).json({
         error: response.status === 404 ? 'Trello card not found' : 'Trello did not accept the card member update',
       });
     }
 
-    const updatedCard = await response.json();
-    res.json({ success: true, card: updatedCard });
+    res.json({ success: true, card: { id: cardId, idMembers } });
   } catch (error) {
-    console.error('[Trello] Error updating card members:', error);
-    res.status(500).json({ error: 'Failed to update Trello card members' });
+    console.error('[Trello] Error updating card members');
+    res.status(502).json({ error: 'Failed to update Trello card members' });
   }
 });
 

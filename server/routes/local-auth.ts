@@ -14,6 +14,7 @@ import * as db from '../db';
 import { isLocalRegistrationAllowed } from '../_core/localRegistration';
 import { PASSWORD_MIN_LENGTH, validatePassword } from '../passwordPolicy';
 import { selectWorkerProfile } from '../workerOperatorContext';
+import { DatabaseUnavailableError, isDatabaseUnavailable, respondDatabaseUnavailable } from '../databaseAvailability';
 
 const router = express.Router();
 const TRELLO_LOGIN_REQUEST_TIMEOUT_MS = 15_000;
@@ -79,7 +80,7 @@ async function getPendingOwnerBootstrap() {
   const config = ownerBootstrapConfig();
   if (!config.openId || !config.token || config.token.length < 24) return null;
   const database = await db.getDb();
-  if (!database) return null;
+  if (!database) throw new DatabaseUnavailableError();
   const [owner] = await database.select({ id: users.id, openId: users.openId, name: users.name })
     .from(users)
     .where(and(eq(users.openId, config.openId), eq(users.role, 'admin'), isNull(users.passwordHash)))
@@ -90,7 +91,8 @@ async function getPendingOwnerBootstrap() {
 router.get('/owner-bootstrap/status', async (_req: Request, res: Response) => {
   try {
     return res.json({ available: Boolean(await getPendingOwnerBootstrap()) });
-  } catch {
+  } catch (error) {
+    if (isDatabaseUnavailable(error)) return respondDatabaseUnavailable(res);
     return res.json({ available: false });
   }
 });
@@ -109,7 +111,7 @@ router.post('/owner-bootstrap', async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Owner setup is unavailable or the setup token is invalid' });
     }
     const database = await db.getDb();
-    if (!database) return res.status(503).json({ error: 'Database not available' });
+    if (!database) return respondDatabaseUnavailable(res);
     const passwordHash = await bcrypt.hash(password, 12);
     await database.update(users)
       .set({ passwordHash, loginMethod: 'local', lastSignedIn: new Date() })
@@ -124,7 +126,8 @@ router.post('/owner-bootstrap', async (req: Request, res: Response) => {
     console.info('[LocalAuth] One-time owner access configured');
     return res.json({ success: true, message: 'Owner access configured' });
   } catch (error) {
-    console.error('[LocalAuth] Owner bootstrap error:', error);
+    if (isDatabaseUnavailable(error)) return respondDatabaseUnavailable(res);
+    console.error('[LocalAuth] Owner bootstrap failed');
     return res.status(500).json({ error: 'Owner setup failed' });
   }
 });
@@ -186,6 +189,7 @@ router.post('/register', async (req: Request, res: Response) => {
 
     // Store password hash
     const dbInstance = await (await import('../db')).getDb();
+    if (!dbInstance) return respondDatabaseUnavailable(res);
     if (dbInstance) {
       const { users } = await import('../../drizzle/schema');
       const { eq } = await import('drizzle-orm');
@@ -209,7 +213,8 @@ router.post('/register', async (req: Request, res: Response) => {
     console.log('[LocalAuth] Registration complete');
     return res.json({ success: true, message: 'Account created successfully' });
   } catch (error) {
-    console.error('[LocalAuth] Register error:', error);
+    if (isDatabaseUnavailable(error)) return respondDatabaseUnavailable(res);
+    console.error('[LocalAuth] Registration failed');
     return res.status(500).json({ error: 'Registration failed' });
   }
 });
@@ -263,7 +268,8 @@ router.post('/login', async (req: Request, res: Response) => {
 
     return res.json({ success: true, message: 'Logged in successfully' });
   } catch (error) {
-    console.error('[LocalAuth] Login error:', error);
+    if (isDatabaseUnavailable(error)) return respondDatabaseUnavailable(res);
+    console.error('[LocalAuth] Login failed');
     return res.status(500).json({ error: 'Login failed' });
   }
 });
@@ -299,7 +305,7 @@ router.post('/trello/login-token', async (req: Request, res: Response) => {
 
     const dbInstance = await db.getDb();
     if (!dbInstance) {
-      return res.status(503).json({ error: 'Database not available' });
+      return respondDatabaseUnavailable(res);
     }
 
     // Look up VA profile by trelloMemberId
@@ -341,7 +347,8 @@ router.post('/trello/login-token', async (req: Request, res: Response) => {
 
     return res.json({ success: true, message: 'Logged in successfully via Trello' });
   } catch (error) {
-    console.error('[LocalAuth] Trello login error:', error);
+    if (isDatabaseUnavailable(error)) return respondDatabaseUnavailable(res);
+    console.error('[LocalAuth] Trello login failed');
     return res.status(500).json({ error: 'Trello login failed' });
   }
 });

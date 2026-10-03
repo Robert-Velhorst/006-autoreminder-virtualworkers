@@ -4,7 +4,7 @@ services:
   app:
     image: ${PILOT_IMAGE:-va-dashboard:joyce-shadow-pilot}
     environment:
-      APTLSS_MANAGER_PILOT_WORKER_IDS: "2"
+      APTLSS_MANAGER_PILOT_WORKER_IDS: "${APTLSS_MANAGER_PILOT_WORKER_IDS:?Set exactly one positive numeric worker ID for the APTLSS pilot}"
       APTLSS_MANAGER_SHADOW_ONLY: "true"
       APTLSS_MANAGER_SCHEDULER: "true"
       APTLSS_SAFETY_ATTESTATION: /app/pilot-proof/aptlss-safety.json

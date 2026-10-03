@@ -217,3 +217,40 @@ An explicitly authorized rollback uses
 `node scripts/aptlss-pilot-compose.mjs rollback` to restore the captured previous
 application image only. It retains additive database changes and later history.
 Do not restore SQL over a running database as an automatic rollback.
+
+### Current Compatibility Warning, 2026-10-01
+
+The command above documents the historical September rollout, not a verified
+rollback path for the current consolidated application. The historical
+`rollback` branch selected the captured pre-pilot image and skipped the
+image-proof gate, without checking compact-history materialization or current
+RBAC/data boundaries. The current helper now refuses `rollback` before reading
+runtime credentials or invoking Docker. Neither environment flags nor supplied
+proof claims can override that refusal. Do not use `deploy` with an older image
+to work around the missing compatibility gate; explicit authorization alone does
+not establish compatibility.
+
+For the current release, first complete a separate owned, full-data application
+rollback rehearsal. Preserve migration 0053 and every full run/check. Disable
+compaction and verify a new full run with a cleared current-check pointer for
+every affected worker. The current implementation explicitly materializes a
+compact head even on identical input; changing the flag without verifying the
+stored result is insufficient. See [assessment history storage](APTLSS_HISTORY_STORAGE.md).
+Independently inspect source and target image identities
+and their source/bundle/collector seals. Check sessions, CSRF, founder/worker
+scope, realtime rooms, all timer-start paths and record preservation through the
+switch backward and forward. Measure materialization separately from application
+switch/readiness time. Keep all failed reports and prior containers.
+
+Use a dedicated full-data-safe runner, not the synthetic configured-runtime or
+ordinary SQL fixture runners: those intentionally have different inventory and
+cleanup boundaries. Provider credentials/calls, public endpoints and production
+mounts must be absent. Network restrictions alone do not stop local background
+writes: both binaries' Manus, maintenance and other scheduled workers require
+explicit isolation before either starts on the restored data. A successful SQL
+restore or migration/rerun does not establish any of these application checks.
+
+The [full-data checkpoint component](FULL_DATA_ROLLBACK_CHECKPOINT.md) provides
+an all-column, all-history read-only baseline for that dedicated runner. It does
+not launch or approve rollback and does not replace the remaining application
+compatibility checks.

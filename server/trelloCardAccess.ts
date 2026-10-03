@@ -1,7 +1,7 @@
-import { eq } from 'drizzle-orm';
-import { vaProfiles, type User } from '../drizzle/schema';
+import type { User } from '../drizzle/schema';
 import { getDb } from './db';
 import { fetchWithRetry } from './utils/retry';
+import { resolveWorkerOperatorContext } from './workerOperatorContext';
 
 export class TrelloAccessError extends Error {
   constructor(public readonly status: number, message: string) {
@@ -24,13 +24,11 @@ function credentials() {
 async function workerMemberId(user: User) {
   const db = await getDb();
   if (!db) throw new TrelloAccessError(503, 'Database not available');
-  const [profile] = await db
-    .select({ trelloMemberId: vaProfiles.trelloMemberId })
-    .from(vaProfiles)
-    .where(eq(vaProfiles.userId, user.id))
-    .limit(1);
-  const memberId = profile?.trelloMemberId?.trim();
-  if (!memberId) throw new TrelloAccessError(403, 'Your worker profile is not linked to a Trello member');
+  const worker = await resolveWorkerOperatorContext(user, db);
+  const memberId = worker.trelloMemberId?.trim();
+  if (!memberId) {
+    throw new TrelloAccessError(403, 'Your worker profile must have one unambiguous linked Trello member');
+  }
   return memberId;
 }
 

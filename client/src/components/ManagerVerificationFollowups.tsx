@@ -57,7 +57,7 @@ function CaseFile({ evidence, loading, error, timeZone }: { evidence: Evidence[]
           <p className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-muted/40 p-3">{item.content}</p>
         </details> : <p className="mt-1 text-xs text-muted-foreground">No additional text is saved here.</p>}
         {item.contentNote && <p className="mt-2 text-xs text-muted-foreground">{item.contentNote}</p>}
-        {item.sourceUrl && <a href={item.sourceUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-primary underline underline-offset-2">Open original <ExternalLink className="size-3.5" /></a>}
+        {item.sourceUrl && <a href={item.sourceUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-blue-700 underline underline-offset-2 dark:text-blue-300">Open original <ExternalLink className="size-3.5" /></a>}
       </article>;
       })}
     </div>}
@@ -91,7 +91,7 @@ function VerificationFollowup({ followup, evidence, evidenceUnavailable, refresh
       void utils.operator.getManagerStatus.invalidate();
       void utils.operator.getWorkQueueContext.invalidate();
     },
-    onError: error => toast.error(error.message),
+    onError: () => toast.error("We couldn't save the verification update. Your note is still here; try again or contact your supervisor."),
   });
   return <form className="min-w-0 space-y-3 border-l-2 border-amber-500 pl-3" aria-label={followup.title} onSubmit={event => {
     event.preventDefault();
@@ -104,10 +104,10 @@ function VerificationFollowup({ followup, evidence, evidenceUnavailable, refresh
       <div className="space-y-1"><Label htmlFor={`${prefix}-source`}>Which original source confirms it?</Label><select id={`${prefix}-source`} value={sourceId} onChange={event => { setSourceId(event.target.value); setQuote(""); }} disabled={resolve.isPending || evidenceUnavailable} className="h-10 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm text-foreground"><option value="">Choose a source record</option>{sources.map(item => <option key={item.id} value={item.evidenceId!}>{sourceLabel(item.source)}: {item.title}</option>)}</select></div>
       <Button type="button" size="sm" variant="outline" disabled={evidenceUnavailable || resolve.isPending} onClick={refreshEvidence}><RefreshCw className="size-4" />Reload sources</Button>
       {!sources.length && <p className="text-xs text-muted-foreground">No original source is linked to this task. The issue will stay open until the source is checked.</p>}
-      {source && <div className="space-y-1 text-xs"><p className="font-medium">Saved text from this source</p><p className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words">{sourceText || "No source text was saved."}</p><p className="text-muted-foreground">Received or saved: <ManagerTimestamp value={source.observedAt} />{source.modifiedAt ? <> · Changed: <ManagerTimestamp value={source.modifiedAt} /></> : null}</p>{source.sourceUrl && <a href={source.sourceUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-primary underline">Open original <ExternalLink className="size-3" /></a>}</div>}
+      {source && <div className="space-y-1 text-xs"><p className="font-medium">Saved text from this source</p><p className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words">{sourceText || "No source text was saved."}</p><p className="text-muted-foreground">Received or saved: <ManagerTimestamp value={source.observedAt} />{source.modifiedAt ? <> · Changed: <ManagerTimestamp value={source.modifiedAt} /></> : null}</p>{source.sourceUrl && <a href={source.sourceUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-blue-700 underline dark:text-blue-300">Open original <ExternalLink className="size-3" /></a>}</div>}
       <div className="space-y-1"><Label htmlFor={`${prefix}-quote`}>Exact sentence from the source</Label><Textarea id={`${prefix}-quote`} value={quote} onChange={event => setQuote(event.target.value)} maxLength={4000} disabled={!source || resolve.isPending} aria-describedby={`${prefix}-proof-status`} /><p id={`${prefix}-proof-status`} className="text-xs text-muted-foreground">{quoted && !sourceText.includes(quoted) ? "This wording does not match the saved source text." : "We check the selected source and wording before closing this issue."}</p></div>
     </>}
-    {resolve.error && <p role="alert" className="text-sm text-destructive">{resolve.error.message}</p>}
+    {resolve.error && <p role="alert" className="text-sm text-destructive">We couldn't save this update. Your note is still here. Try again, or contact your supervisor if the problem continues.</p>}
     <div className="flex flex-wrap gap-2"><Button type="submit" size="sm" disabled={resolve.isPending || resolution.trim().length < 3 || (conflict && !proofReady)}>{resolve.isPending ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}{conflict ? "Save verification and close" : "Save and close follow-up"}</Button>{conflict && <Button type="button" variant="outline" size="sm" disabled={resolve.isPending || resolution.trim().length < 3} onClick={() => resolve.mutate({ followupId: followup.id, resolution: resolution.trim() })}>Save note; keep open</Button>}</div>
   </form>;
 }

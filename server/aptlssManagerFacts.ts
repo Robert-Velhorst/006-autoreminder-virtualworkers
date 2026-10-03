@@ -14,7 +14,7 @@ type Evidence = ManagerEvidence & { metadata?: ManagerEvidenceMetadata };
 export const unsafeManagerText =
   /ignore\s+(?:all\s+|previous\s+|prior\s+)?instructions|system\s*:|developer\s*:|\b(?:exfiltrate|bypass|override safeguards)\b|<\s*script|javascript\s*:|[\u200b-\u200f\u202a-\u202e\u2066-\u2069]/i;
 const uncertain =
-  /\?|\b(?:if|unless|perhaps|maybe|might|could|would|will|whether|unknown|unclear|unsure|probably|apparently|reportedly|allegedly|supposedly|said|says|don't know|do not know|not sure|als|indien|misschien|wellicht|onbekend|onduidelijk|zal|zou|zegt|zei)\b|\b(?:not|niet)\s+(?:only|alleen)\b/i;
+  /\?|\b(?:if|unless|perhaps|maybe|may|might|can|could|would|will|shall|should|must|need(?:s)?\s+to|expected\s+to|scheduled\s+to|whether|unknown|unclear|unsure|probably|apparently|reportedly|allegedly|supposedly|said|says|don't know|do not know|not sure|als|indien|misschien|wellicht|onbekend|onduidelijk|zal|zou|zegt|zei)\b|\b(?:not|niet)\s+(?:only|alleen)\b/i;
 
 export function managerFact(
   e: Evidence,
@@ -55,12 +55,13 @@ export function managerFact(
     truthClass:
       support === "unknown"
         ? "unknown"
-        : (m?.truthClass ??
-          (e.kind === "worker"
-            ? "worker_report"
-            : e.kind === "decision"
-              ? "human_decision"
-              : "source_record")),
+        : e.kind === "worker"
+          ? "worker_report"
+          : e.kind === "decision"
+            ? m?.truthClass ?? "human_decision"
+            : m?.truthClass === "human_decision"
+              ? "source_record"
+              : m?.truthClass ?? "source_record",
     support,
   };
 }
@@ -197,8 +198,12 @@ export function extractManagerFacts(e: Evidence): ManagerFact[] {
       (quote.match(
         /\b(?:invoice|factuur|project|order|ticket|revision|revisie)\b/gi
       )?.length ?? 0) > 1;
+    const statedEffectiveDate = quote.match(
+      /\b(?:as of|on|per|vanaf|op)\s+(\d{4}-\d{2}-\d{2})\b/i
+    )?.[1];
     if (
       uncertain.test(quote) ||
+      (!!statedEffectiveDate && !validManagerDate(statedEffectiveDate)) ||
       ambiguousPolarity ||
       multipleSubjects ||
       /["\u201c\u201d]/.test(quote) ||
@@ -226,7 +231,7 @@ export function extractManagerFacts(e: Evidence): ManagerFact[] {
     add(
       "paid",
       /\b(paid|betaald)\b/,
-      /\b(?:not|never|niet|nooit)\b[^.!?;]{0,35}\b(?:paid|betaald)\b|\bunpaid\b/
+      /\b(?:not|never|niet|nooit)\b[^.!?;]{0,35}\b(?:paid|betaald)\b|\bunpaid\b|\b(?:no|geen)\s+(?:(?:single|any|one|other|enkele|enkel)\s+)?(?:invoice|invoices|factuur|facturen|payment|payments|betaling|betalingen)\b[^.!?;]{0,35}\b(?:paid|betaald)\b/
     );
     add(
       "approved",
@@ -236,7 +241,7 @@ export function extractManagerFacts(e: Evidence): ManagerFact[] {
     add(
       "completed",
       /\b(completed|finished|afgerond|klaar)\b/,
-      /\b(?:not|never|niet|nooit)\b[^.!?;]{0,35}\b(?:completed|finished|afgerond|klaar)\b|\bincomplete\b/
+      /\b(?:not|never|niet|nooit)\b[^.!?;]{0,35}\b(?:completed|finished|afgerond|klaar)\b|\bincomplete\b|\b(?:no|geen)\s+(?:(?:single|any|one|other|enkele|enkel)\s+)?(?:task|tasks|work|item|items|taak|taken|werk)\b[^.!?;]{0,35}\b(?:completed|finished|afgerond|klaar)\b/
     );
     const state = quote.match(
       /\bstatus\s*:\s*(on[- ]?hold|doing|to[- ]?do)\b/i
@@ -285,7 +290,8 @@ function validMetadata(e: Evidence, now: number) {
     return false;
   if (
     m &&
-    Object.prototype.hasOwnProperty.call(m, "sourceDate") &&
+    (m.essential === true ||
+      Object.prototype.hasOwnProperty.call(m, "sourceDate")) &&
     !validManagerDate(m.sourceDate)
   )
     return false;
@@ -308,6 +314,8 @@ function supersedes(newer: Evidence, older: Evidence, now: number) {
     n.authority === "authoritative" &&
     !!n.sender?.trim();
   const sameSourceRecordRevision =
+    newer.kind === "source" &&
+    older.kind === "source" &&
     newer.source === older.source &&
     !!n.sourceRecordId?.trim() &&
     n.sourceRecordId === o?.sourceRecordId &&
@@ -315,8 +323,7 @@ function supersedes(newer: Evidence, older: Evidence, now: number) {
     !!n.sourceRevision?.trim() &&
     !!o?.sourceRevision?.trim() &&
     n.sourceRevision !== o.sourceRevision &&
-    n.authority !== "reported" &&
-    n.authority !== "unverified";
+    n.authority === "authoritative";
   const olderClaims = extractManagerFacts(older).filter(
     f => f.support === "explicit" && f.topic !== "context"
   );
@@ -350,6 +357,55 @@ function supersedes(newer: Evidence, older: Evidence, now: number) {
   );
 }
 
+function deduplicateSourceRevisionClaims(
+  evidence: Evidence[],
+  facts: ManagerFact[]
+): ManagerFact[] {
+  const evidenceById = new Map<string, Evidence[]>();
+  for (const item of evidence) {
+    const matching = evidenceById.get(item.id) ?? [];
+    matching.push(item);
+    evidenceById.set(item.id, matching);
+  }
+
+  const seen = new Set<string>();
+  return facts.filter(fact => {
+    const matchingEvidence = evidenceById.get(fact.evidenceId);
+    // An ambiguous evidence ID is already treated as a conflict; do not use it
+    // to merge claims whose source provenance cannot be identified uniquely.
+    if (matchingEvidence?.length !== 1) return true;
+
+    const item = matchingEvidence[0];
+    const sourceRecordId = item.metadata?.sourceRecordId?.trim();
+    const sourceRevision = item.metadata?.sourceRevision?.trim();
+    if (!sourceRecordId || !sourceRevision) return true;
+
+    const statementIdentity =
+      fact.support === "explicit"
+        ? null
+        : fact.quote.trim().replace(/\s+/g, " ");
+    const key = JSON.stringify([
+      item.cardId,
+      item.source,
+      item.kind,
+      sourceRecordId,
+      sourceRevision,
+      fact.subject,
+      fact.topic,
+      fact.value,
+      fact.effectiveFrom,
+      fact.effectiveTo,
+      fact.sourceField ?? null,
+      fact.truthClass,
+      fact.support,
+      statementIdentity,
+    ]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function assessManagerEvidence(
   card: ManagerCard,
   input: Evidence[],
@@ -378,6 +434,8 @@ export function assessManagerEvidence(
       e.text.trim(), e.metadata?.sender ?? null, e.metadata?.sourceDate ?? null,
       e.metadata?.effectiveFrom ?? null, e.metadata?.effectiveTo ?? null,
       e.metadata?.truthClass ?? null, e.metadata?.authority ?? null,
+      e.metadata?.contentScope ?? null, e.metadata?.essential ?? null,
+      [...(e.metadata?.supersedesEvidenceIds ?? [])].sort(),
     ]) : JSON.stringify([e.cardId, e.source, e.kind, e.text.trim(), e.metadata ?? null, e.observedAt]);
     if (seen.has(key)) return false;
     seen.add(key);
@@ -483,7 +541,9 @@ export function assessManagerEvidence(
       e =>
         !validMetadata(e, now) ||
         extractManagerFacts(e).some(
-          f => f.sourceField === "$.due" && f.support === "unknown"
+          f =>
+            (f.sourceField === "$.due" && f.support === "unknown") ||
+            (!!f.effectiveFrom && !validManagerDate(f.effectiveFrom))
         )
     ) ||
     (!!card.dueAt && !validManagerDate(card.dueAt));
@@ -504,8 +564,7 @@ export function assessManagerEvidence(
     extractManagerFacts(e).some(
       f =>
         !!f.effectiveFrom &&
-        (!validManagerDate(f.effectiveFrom) ||
-          Date.parse(f.effectiveFrom) > now)
+        validManagerDate(f.effectiveFrom) && Date.parse(f.effectiveFrom) > now
     )
   );
   const unknown =
@@ -567,7 +626,7 @@ export function assessManagerEvidence(
   };
   return {
     evidence,
-    facts,
+    facts: deduplicateSourceRevisionClaims(evidence, facts),
     conflictIds: [...conflicts].sort(),
     unresolved,
     reliability,

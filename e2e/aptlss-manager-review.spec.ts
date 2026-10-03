@@ -78,6 +78,8 @@ for (const viewport of [
       adminId = 0,
       evidenceId = 0,
       uncertain = false;
+    let uncertainMutation: string | undefined;
+    let uncertainCause: unknown;
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
     const rows = async (query: string, values: unknown[] = []) =>
@@ -120,7 +122,11 @@ for (const viewport of [
         await action();
         return await completion;
       } catch (error) {
-        if (!settled) uncertain = true;
+        if (!settled) {
+          uncertain = true;
+          uncertainMutation = method;
+          uncertainCause = error;
+        }
         throw error;
       }
     };
@@ -515,7 +521,8 @@ for (const viewport of [
       }
       if (uncertain)
         throw new Error(
-          `Fixture ${prefix} retained because an API mutation did not settle. Stop the dedicated test server before cleanup.`
+          `Fixture ${prefix} retained because ${uncertainMutation} did not settle. Stop the dedicated test server before cleanup.`,
+          { cause: uncertainCause }
         );
     }
   });

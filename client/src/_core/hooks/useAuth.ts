@@ -15,6 +15,8 @@ export function useAuth(options?: UseAuthOptions) {
   const meQuery = trpc.auth.me.useQuery(undefined, {
     retry: false,
     refetchOnWindowFocus: false,
+    // Retry only the read-only session check; never repeat a submitted action.
+    refetchInterval: query => query.state.error ? 5_000 : query.state.data ? 60_000 : false,
   });
 
   const logoutMutation = trpc.auth.logout.useMutation({
@@ -24,26 +26,32 @@ export function useAuth(options?: UseAuthOptions) {
   });
 
   const logout = useCallback(async () => {
+    let shouldReturnToLogin = false;
     try {
       await logoutMutation.mutateAsync();
+      shouldReturnToLogin = true;
     } catch (error: unknown) {
       if (
         error instanceof TRPCClientError &&
         error.data?.code === "UNAUTHORIZED"
       ) {
-        return;
+        shouldReturnToLogin = true;
+      } else {
+        throw error;
       }
-      throw error;
     } finally {
       utils.auth.me.setData(undefined, null);
       await utils.auth.me.invalidate();
     }
+    if (shouldReturnToLogin) window.location.replace("/");
   }, [logoutMutation, utils]);
 
   const state = useMemo(() => {
     return {
       user: meQuery.data ?? null,
       loading: meQuery.isLoading || logoutMutation.isPending,
+      checking: meQuery.isFetching,
+      verificationUnavailable: Boolean(meQuery.error),
       error: meQuery.error ?? logoutMutation.error ?? null,
       isAuthenticated: Boolean(meQuery.data),
     };
@@ -51,6 +59,7 @@ export function useAuth(options?: UseAuthOptions) {
     meQuery.data,
     meQuery.error,
     meQuery.isLoading,
+    meQuery.isFetching,
     logoutMutation.error,
     logoutMutation.isPending,
   ]);

@@ -1,11 +1,13 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import {
   timeEntries,
+  vaProfiles,
   type User,
   type VAProfile,
   type TimeEntry,
 } from '../drizzle/schema';
 import type { getDb } from './db';
+import { selectWorkerProfile } from './workerOperatorContext';
 
 type Database = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 type Account = Pick<User, 'id' | 'role'>;
@@ -29,8 +31,21 @@ export async function loadAccountTimeEntries(
   const query = db.select().from(timeEntries);
   const scope = timeEntryAccountScope(user);
   if (scope.kind === 'all') return query;
-  if (scope.kind === 'worker')
-    return query.where(eq(timeEntries.vaId, scope.userId));
+  if (scope.kind === 'worker') {
+    const profiles = await db.select({
+      id: vaProfiles.id,
+      status: vaProfiles.status,
+      founderId: vaProfiles.founderId,
+    }).from(vaProfiles).where(eq(vaProfiles.userId, scope.userId)).orderBy(vaProfiles.id);
+    const profile = selectWorkerProfile(profiles);
+    if (!profile) return [];
+
+    const identities = Array.from(new Set([scope.userId, profile.id]));
+    return query.where(and(
+      eq(timeEntries.founderId, profile.founderId),
+      inArray(timeEntries.vaId, identities),
+    ));
+  }
   return query.where(eq(timeEntries.founderId, scope.founderId));
 }
 

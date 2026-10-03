@@ -9,6 +9,8 @@ describe('webhook auto-registration provider boundary', () => {
     );
 
     expect(source).toContain('const TRELLO_REQUEST_TIMEOUT_MS = 15_000');
-    expect(source.match(/signal: AbortSignal\.timeout\(TRELLO_REQUEST_TIMEOUT_MS\)/g)).toHaveLength(3);
+    expect(source).toContain('const timeout = AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS)');
+    expect(source.match(/signal: requestSignal\(context\)/g)).toHaveLength(3);
+    expect(source).toContain('AbortSignal.any([context.signal, timeout])');
   });
 });

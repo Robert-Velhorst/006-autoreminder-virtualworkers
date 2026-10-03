@@ -34,4 +34,19 @@ describe("cache warming", () => {
     releaseFirstQuery?.([]);
     await Promise.all([first, second]);
   });
+
+  it("clears a failed shared preload without an unhandled cleanup rejection", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.getDb.mockRejectedValueOnce(new Error("Synthetic database outage"));
+    const first = warmUpCache();
+    expect(warmUpCache()).toBe(first);
+    await expect(first).rejects.toThrow("Synthetic database outage");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    mocks.getDb.mockResolvedValue({ select: () => ({
+      from: () => Object.assign(Promise.resolve([]), { limit: async () => [] }),
+    }) });
+    const recovered = warmUpCache();
+    expect(recovered).not.toBe(first);
+    await expect(recovered).resolves.toMatchObject({ mode: "database_buffer_preload" });
+  });
 });

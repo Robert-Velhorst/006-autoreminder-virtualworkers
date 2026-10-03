@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Timeline } from "@/components/Timeline";
 import { OverflowTasks } from "@/components/OverflowTasks";
@@ -47,6 +47,10 @@ export default function Home() {
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isLoadingTasks, setIsLoadingTasks] = useState(true);
+  const [hasLoadedTasks, setHasLoadedTasks] = useState(false);
+  const [taskLoadFailed, setTaskLoadFailed] = useState(false);
+  const taskRequestInFlight = useRef(false);
+  const taskSourceAvailable = useRef(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -74,6 +78,7 @@ export default function Home() {
   // Listen for conversation dialog events from TaskCard
   useEffect(() => {
     const handleOpenConversations = (e: CustomEvent<{ cardId: string; cardName: string }>) => {
+      if (!taskSourceAvailable.current) return;
       setConversationCard(e.detail);
     };
     window.addEventListener('openConversations', handleOpenConversations as EventListener);
@@ -210,7 +215,7 @@ export default function Home() {
   });
 
   const applyReschedule = async () => {
-    if (isRescheduling) return;
+    if (!taskSourceAvailable.current || isRescheduling) return;
 
     setIsRescheduling(true);
     try {
@@ -234,9 +239,15 @@ export default function Home() {
     }
   };
 
-  const fetchTasks = useCallback(async () => {
+  const fetchTasks = useCallback(async (forceRefresh = false) => {
+    if (taskRequestInFlight.current) return;
+    taskRequestInFlight.current = true;
+    taskSourceAvailable.current = false;
+    setConversationCard(null);
+    setInterviewTask(null);
     setIsLoadingTasks(true);
     try {
+      if (forceRefresh) taskCache.invalidate(CACHE_KEYS.TIMELINE_TASKS);
       // Check cache first
       const cachedTasks = taskCache.get(CACHE_KEYS.TIMELINE_TASKS);
       if (cachedTasks) {
@@ -245,7 +256,9 @@ export default function Home() {
         setClients(cachedTasks.clients);
         setStats(cachedTasks.stats);
         setOverflowTasks(cachedTasks.overflowTasks);
-        setIsLoadingTasks(false);
+        setHasLoadedTasks(true);
+        setTaskLoadFailed(false);
+        taskSourceAvailable.current = true;
         return;
       }
 
@@ -253,12 +266,15 @@ export default function Home() {
         credentials: 'include',
       });
       if (!atisResponse.ok) {
-        const errorData = await atisResponse.json().catch(() => ({ error: atisResponse.statusText }));
-        throw new Error(errorData.error || 'Failed to load the ATIS work queue');
+        await atisResponse.arrayBuffer();
+        throw new Error('Failed to load the ATIS work queue');
       }
       const atisData = await atisResponse.json();
-      const scheduledTasks = atisData.scheduled || atisData.tasks || [];
-      const overflowTasks = atisData.overflow || [];
+      const scheduledTasks = atisData?.scheduled ?? atisData?.tasks;
+      const overflowTasks = atisData?.overflow ?? [];
+      if (!Array.isArray(scheduledTasks) || !Array.isArray(overflowTasks)) {
+        throw new Error('Invalid work queue response');
+      }
       const atisTasks: Task[] = scheduledTasks.map((t: any) => ({
             id: `atis-${t.id}`,
             cardId: t.trelloId,
@@ -290,8 +306,6 @@ export default function Home() {
             memberIds: t.memberIds || [],
             synced: false,
       }));
-      setTasks(atisTasks);
-
       const clientCounts = new Map<string, number>();
       atisTasks.forEach(t => {
         if (t.client) {
@@ -301,15 +315,12 @@ export default function Home() {
       const clientsList = Array.from(clientCounts.entries())
         .map(([client, count]) => ({ client, count }))
         .sort((a, b) => b.count - a.count);
-      setClients(clientsList);
-
       const metrics = atisData.metrics || {};
       const totalTasksCount = metrics.totalScheduled || atisData.total || atisTasks.length;
       const completedTasks = atisTasks.filter(t => t.isCompleted).length;
       const totalHours = (metrics.totalScheduledMinutes || 0) / 60;
       const completedHours = atisTasks.filter(t => t.isCompleted).reduce((acc, t) => acc + t.durationHours, 0);
 
-      setOverflowTasks(overflowTasks && overflowTasks.length > 0 ? overflowTasks : []);
       const stats = {
         totalTasks: totalTasksCount,
         completedTasks,
@@ -317,8 +328,6 @@ export default function Home() {
         completedHours,
         accuracy: 100
       };
-      setStats(stats);
-
       // Cache the fetched data for 5 minutes
       const cacheData = {
         tasks: atisTasks,
@@ -327,6 +336,13 @@ export default function Home() {
         overflowTasks: overflowTasks && overflowTasks.length > 0 ? overflowTasks : [],
       };
       taskCache.set(CACHE_KEYS.TIMELINE_TASKS, cacheData);
+      setTasks(atisTasks);
+      setClients(clientsList);
+      setOverflowTasks(cacheData.overflowTasks);
+      setStats(stats);
+      setHasLoadedTasks(true);
+      setTaskLoadFailed(false);
+      taskSourceAvailable.current = true;
       console.log('[TaskCache] Cached tasks for 5 minutes');
 
       // Auto-refresh when background AI analysis completes for cards missing breakdowns
@@ -353,22 +369,13 @@ export default function Home() {
         console.error('Failed to fetch task types:', e);
       }
       return;
-    } catch (error) {
-      let errorMessage = 'Unknown error';
-      if (error instanceof Error) {
-        errorMessage = error.message;
-        console.error('Error fetching tasks:', error.message, error.stack);
-      } else if (typeof error === 'object' && error !== null) {
-        // Handle object errors (like response errors)
-        errorMessage = JSON.stringify(error);
-        console.error('Error fetching tasks:', errorMessage);
-      } else {
-        errorMessage = String(error);
-        console.error('Error fetching tasks:', errorMessage);
-      }
-      setTasks([]);
-      toast.error(`Failed to load tasks: ${errorMessage}`);
+    } catch {
+      taskCache.invalidate(CACHE_KEYS.TIMELINE_TASKS);
+      taskSourceAvailable.current = false;
+      setTaskLoadFailed(true);
+      toast.error('Work queue unavailable. Please try again.');
     } finally {
+      taskRequestInFlight.current = false;
       setIsLoadingTasks(false);
     }
   }, []);
@@ -380,6 +387,7 @@ export default function Home() {
   }, [fetchTasks, isAuthenticated, user]);
 
   const syncFromTrello = useCallback(async () => {
+    if (!taskSourceAvailable.current) return;
     setIsSyncing(true);
     try {
       const res = await fetch('/api/atis/sync', {
@@ -434,10 +442,12 @@ export default function Home() {
   }, [fetchTasks]);
 
   const handleOpenInterview = (task: Task) => {
+    if (!taskSourceAvailable.current) return;
     setInterviewTask(task);
   };
 
   const handleInterviewComplete = async (finalGoal: any) => {
+    if (!taskSourceAvailable.current) return;
     if (!interviewTask) {
       return;
     }
@@ -508,6 +518,7 @@ export default function Home() {
   };
 
   const handleToggleTask = async (id: string) => {
+    if (!taskSourceAvailable.current) return;
     const task = tasks.find(t => t.id === id);
     if (!task) return;
 
@@ -589,7 +600,9 @@ export default function Home() {
                 {new Date().getHours() < 12 ? 'Good Morning' : new Date().getHours() < 17 ? 'Good Afternoon' : 'Good Evening'}, {user?.name?.split(' ')[0] || 'there'}! {new Date().getHours() < 12 ? '☀️' : new Date().getHours() < 17 ? '🌤️' : '🌙'}
               </h2>
               <p className="text-xs text-muted-foreground">
-                You have <span className="font-bold text-primary">{tasks.filter(t => !t.isCompleted).length} tasks</span> remaining.
+                {hasLoadedTasks ? (
+                  <>You have <span className="font-bold text-primary">{tasks.filter(t => !t.isCompleted).length} tasks</span> remaining.{taskLoadFailed && ' Last successful result; may be out of date.'}</>
+                ) : isLoadingTasks ? 'Loading work queue...' : 'Task count unavailable.'}
               </p>
             </div>
             <Button
@@ -691,6 +704,20 @@ export default function Home() {
       </header>
 
       <main className="flex-1 container py-4 md:py-8">
+        {taskLoadFailed && (
+          <section role="alert" aria-labelledby="work-queue-error-heading" className="mb-4 border border-destructive/40 rounded-lg p-4 space-y-2">
+            <h2 id="work-queue-error-heading" className="text-lg font-semibold">Work queue unavailable</h2>
+            <p className="text-sm text-muted-foreground">
+              {hasLoadedTasks
+                ? 'Refresh failed. The last successfully loaded work queue and metrics may be out of date. Task actions are paused until access is checked again.'
+                : 'We could not load your work queue. Task counts and completion metrics are unavailable.'}
+            </p>
+            <Button variant="outline" size="sm" onClick={() => void fetchTasks(true)} disabled={isLoadingTasks}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${isLoadingTasks ? 'animate-spin' : ''}`} />
+              {isLoadingTasks ? 'Retrying...' : 'Try again'}
+            </Button>
+          </section>
+        )}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 md:gap-8">
           {/* Left Sidebar - Stats - Collapsible */}
           <div className={`transition-all duration-300 ${sidebarOpen ? 'lg:col-span-4' : 'lg:col-span-0'} ${sidebarOpen ? 'block' : 'hidden'} space-y-4 md:space-y-8 order-2 lg:order-1`}>
@@ -706,7 +733,7 @@ export default function Home() {
                 variant="outline" 
                 className="w-full"
                 onClick={applyReschedule}
-                disabled={isRescheduling}
+                disabled={isRescheduling || isLoadingTasks || taskLoadFailed || !hasLoadedTasks}
               >
                 {isRescheduling ? (
                   <RefreshCw className="h-4 w-4 animate-spin" />
@@ -717,10 +744,10 @@ export default function Home() {
               </Button>
             </div>
             
-            <StatsPanel stats={stats} />
+            {hasLoadedTasks && <StatsPanel stats={stats} />}
             
             {/* Weekly Progress Dashboard */}
-            <WeeklyProgressDashboard />
+            {hasLoadedTasks && <WeeklyProgressDashboard />}
             
 
           </div>
@@ -728,7 +755,7 @@ export default function Home() {
           {/* Main Content - Timeline */}
           <div className={`transition-all duration-300 ${sidebarOpen ? 'lg:col-span-8' : 'lg:col-span-12'} order-1 lg:order-2`}>
             <div className="timeline-section bg-card rounded-2xl shadow-sm border min-h-[400px] md:min-h-[600px] relative overflow-hidden">
-              <div className="absolute top-0 left-0 right-0 h-20 md:h-32 bg-[url('https://files.manuscdn.com/user_upload_by_module/session_file/90835377/juXmFpmTtEuXvBVT.png')] bg-cover opacity-20" />
+              <div aria-hidden="true" className="absolute top-0 left-0 right-0 h-20 md:h-32 bg-muted/20" />
               <div className="relative z-10 p-4 md:p-6">
                 <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-2 md:gap-4 mb-4">
                   <h2 className="text-lg md:text-xl font-bold">Workload Timeline</h2>
@@ -763,7 +790,7 @@ export default function Home() {
 
 
                 {/* Original Task Filters */}
-                <div className="mb-4">
+                {hasLoadedTasks && <div className="mb-4">
                   <TaskFilters
                     filters={filters}
                     onFiltersChange={setFilters}
@@ -772,10 +799,10 @@ export default function Home() {
                     totalTasks={tasks.length}
                     filteredCount={filteredTasks.length}
                   />
-                </div>
+                </div>}
                 
                 {/* Search results info */}
-                {searchQuery && (
+                {hasLoadedTasks && searchQuery && (
                   <div className="mb-4 p-3 bg-secondary/50 rounded-lg flex items-center justify-between">
                     <span className="text-sm">
                       {filteredTasks.length === 0 
@@ -790,7 +817,7 @@ export default function Home() {
                 )}
                 
                 {/* Overflow Tasks Alert */}
-                {overflowTasks.length > 0 && (
+                {!taskLoadFailed && !isLoadingTasks && overflowTasks.length > 0 && (
                   <div className="mb-4">
                     <OverflowTasks tasks={overflowTasks} />
                   </div>
@@ -820,18 +847,26 @@ export default function Home() {
                   </div>
                 )}
                 
-                <Timeline 
+                {isLoadingTasks && hasLoadedTasks && <p role="status" className="mb-4 text-sm text-muted-foreground">Refreshing work queue...</p>}
+                {hasLoadedTasks && (taskLoadFailed || isLoadingTasks) && <section aria-label="Last loaded work" className="border-t py-4">
+                  <h3 className="text-sm font-medium">Last loaded work (read-only)</h3>
+                  <ul className="mt-2 divide-y text-sm text-muted-foreground">
+                    {filteredTasks.map(task => <li key={task.id} className="py-2 break-words">{task.cardName}</li>)}
+                    {overflowTasks.map((task, index) => <li key={`overflow-${index}`} className="py-2 break-words">{task.name || task.cardName}</li>)}
+                  </ul>
+                </section>}
+                {!taskLoadFailed && !isLoadingTasks && hasLoadedTasks && <Timeline
                   tasks={filteredTasks} 
                   onToggleTask={handleToggleTask} 
-                  isLoading={isLoadingTasks}
-                  onRefresh={() => void fetchTasks()}
+                  isLoading={isLoadingTasks && !hasLoadedTasks}
+                  onRefresh={() => void fetchTasks(true)}
                   onSync={() => void syncFromTrello()}
                   isSyncing={isSyncing}
                   allExpanded={allExpanded}
                   onExpandChange={(expanded: boolean) => setAllExpanded(expanded)}
                   onStartInterview={handleOpenInterview}
                   viewMode={viewMode}
-                />
+                />}
               </div>
             </div>
           </div>

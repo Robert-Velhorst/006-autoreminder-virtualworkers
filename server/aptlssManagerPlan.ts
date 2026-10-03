@@ -122,7 +122,21 @@ export function reconcileManagerPlan(args: {
   const workingDay = worker.workingDays.includes(
     dayOfWeekInTimeZone(now, worker.timezone)
   );
-  const todayBlocks = existing?.dateKey === dateKey ? existing.blocks : [];
+  const sameDayBaseline = existing?.dateKey === dateKey ? existing : null;
+  const todayBlocks = sameDayBaseline?.blocks ?? [];
+  const storedTimezone = sameDayBaseline?.planningImpact?.timezone;
+  const baselineTimezone =
+    typeof storedTimezone === "string" && storedTimezone.length > 0
+      ? storedTimezone
+      : null;
+  const timezoneChanged =
+    !!sameDayBaseline &&
+    baselineTimezone !== null &&
+    baselineTimezone !== worker.timezone;
+  const baselineTimezoneUnknown =
+    !!sameDayBaseline &&
+    sameDayBaseline.blocks.length > 0 &&
+    baselineTimezone === null;
   const timerCandidates =
     !activeTimer?.planBlockId && activeTimer?.cardId
       ? todayBlocks.filter(
@@ -146,6 +160,17 @@ export function reconcileManagerPlan(args: {
       [...timerCandidates].sort(
         (a, b) => minutes(a.startTime) - minutes(b.startTime)
       )[0]);
+  const timerStart = timerBlock ? minutes(timerBlock.startTime) : Number.NaN;
+  const timerEnd = timerBlock ? minutes(timerBlock.endTime) : Number.NaN;
+  const timerMappingUnresolved =
+    activeTimer !== null &&
+    (!timerBlock ||
+      (activeTimer.cardId !== null && timerBlock.cardId !== activeTimer.cardId) ||
+      timerBlock.status === "skipped" ||
+      !Number.isFinite(timerStart) ||
+      !Number.isFinite(timerEnd) ||
+      timerEnd <= timerStart ||
+      timerStart > currentMinute);
   const preserved = todayBlocks
     .filter(
       b =>
@@ -157,9 +182,11 @@ export function reconcileManagerPlan(args: {
   const matches = (
     a: Pick<ManagerAction, "id" | "cardId" | "stepIds">,
     b: OperatorPlanBlock
-  ) =>
-    a.id === b.id ||
-    (a.cardId === b.cardId && a.stepIds.some(id => b.stepIds.includes(id)));
+  ) => {
+    if (a.cardId === b.cardId && a.stepIds.length && b.stepIds.length)
+      return a.stepIds.some(id => b.stepIds.includes(id));
+    return a.id === b.id;
+  };
   const occupied = preserved.map(b => ({
     start: minutes(b.startTime),
     end: minutes(b.endTime),
@@ -175,13 +202,15 @@ export function reconcileManagerPlan(args: {
       result.actions.find(a => a.id === activeBlock.id) ??
       result.actions.find(a => matches(a, activeBlock));
     const estimate = action?.minutes.likely;
+    const hasValidEstimate =
+      estimate !== undefined && Number.isFinite(estimate) && estimate > 0;
     const reservation = {
       start: nowMinute,
       end: Math.min(
         minutes(worker.workEndTime),
         nowMinute +
-          (estimate !== undefined && Number.isFinite(estimate)
-            ? Math.max(5, Math.round(estimate))
+          (hasValidEstimate
+            ? Math.max(5, Math.ceil(estimate))
             : 30)
       ),
     };
@@ -190,10 +219,9 @@ export function reconcileManagerPlan(args: {
       blockId: activeBlock.id,
       startTime: time(reservation.start),
       endTime: time(reservation.end),
-      basis:
-        estimate !== undefined && Number.isFinite(estimate)
-          ? "action_likely_estimate"
-          : "planner_fallback_30_minutes",
+      basis: hasValidEstimate
+        ? "action_likely_estimate"
+        : "planner_fallback_30_minutes",
     });
   }
   const { windows, breaks, availableMinutes } = freeWindows(
@@ -213,22 +241,48 @@ export function reconcileManagerPlan(args: {
       b => b.cardId === cardId && b.stepIds.includes(stepId)
     );
   const actionComplete = (a: ManagerAction) =>
-    completedBlocks.some(b => b.id === a.id) ||
+    completedBlocks.some(
+      b =>
+        b.id === a.id &&
+        (!a.stepIds.length ||
+          a.stepIds.every(id => b.stepIds.includes(id)))
+    ) ||
     (a.stepIds.length > 0 && a.stepIds.every(id => stepComplete(a.cardId, id)));
   const dependencyComplete = (ref: string, cardId: string) => {
     const target = actionsById.get(ref);
     if (target) return actionComplete(target);
-    if (completedBlocks.some(b => b.id === ref)) return true;
     const colon = ref.lastIndexOf(":");
     const stepRef = colon < 0 ? ref : ref.slice(colon + 1);
-    return (
-      /^-?\d+$/.test(stepRef) &&
-      stepComplete(colon < 0 ? cardId : ref.slice(0, colon), Number(stepRef))
-    );
+    if (/^-?\d+$/.test(stepRef))
+      return stepComplete(
+        colon < 0 ? cardId : ref.slice(0, colon),
+        Number(stepRef)
+      );
+    return completedBlocks.some(b => b.id === ref);
   };
-  const candidates = result.actions.filter(
-    a => !preserved.some(b => matches(a, b)) && !actionComplete(a)
-  );
+  const candidates = result.actions.flatMap(a => {
+    if (actionComplete(a)) return [];
+    if (!a.stepIds.length)
+      return preserved.some(b => matches(a, b)) ? [] : [a];
+
+    const remainingStepIds = a.stepIds.filter(
+      id =>
+        !stepComplete(a.cardId, id) &&
+        !preserved.some(
+          b => b.cardId === a.cardId && b.stepIds.includes(id)
+        )
+    );
+    if (!remainingStepIds.length) return [];
+    if (remainingStepIds.length === a.stepIds.length) return [a];
+
+    return [
+      {
+        ...a,
+        id: `${a.id}::remaining::${remainingStepIds.join(",")}`,
+        stepIds: remainingStepIds,
+      },
+    ];
+  });
   const blocks: OperatorPlanBlock[] = [...preserved];
   const unscheduled: OperatorDailyPlanPayload["unscheduledCards"] = [];
   const reject = (a: ManagerAction, reason: string) =>
@@ -237,17 +291,46 @@ export function reconcileManagerPlan(args: {
       cardName: cardMap.get(a.cardId)?.name ?? a.title,
       reason,
     });
-  const instantCache = new Map<number, number | null>();
-  const instantAt = (minute: number) => {
-    if (instantCache.has(minute)) return instantCache.get(minute)!;
+  const instantCache = new Map<string, number | null>();
+  const dayOffsetCache = new Map<string, number[]>();
+  const offsetsForDate = (timezone: string) => {
+    const key = `${timezone}:${dateKey}`;
+    const cached = dayOffsetCache.get(key);
+    if (cached) return cached;
+    const utcMidnight = Date.parse(`${dateKey}T00:00:00.000Z`);
+    const offsets = new Set<number>();
+    for (let hour = -36; hour <= 36; hour += 6) {
+      const sample = utcMidnight + hour * 60 * 60 * 1000;
+      const localDate = dateKeyInTimeZone(sample, timezone);
+      const localTime = timeKeyInTimeZone(sample, timezone);
+      const localAsUtc = Date.parse(`${localDate}T${localTime}:00.000Z`);
+      offsets.add(Math.round((localAsUtc - sample) / 60000));
+    }
+    const result = [...offsets];
+    dayOffsetCache.set(key, result);
+    return result;
+  };
+  const instantAt = (minute: number, timezone = worker.timezone) => {
+    const key = `${timezone}:${minute}`;
+    if (instantCache.has(key)) return instantCache.get(key)!;
     if (minute < 0 || minute >= 1440 || !Number.isInteger(minute)) return null;
-    const value = zonedDateTimeToUtc(dateKey, time(minute), worker.timezone);
-    const instant =
-      dateKeyInTimeZone(value, worker.timezone) === dateKey &&
-      timeKeyInTimeZone(value, worker.timezone) === time(minute)
-        ? value.getTime()
-        : null;
-    instantCache.set(minute, instant);
+    const value = zonedDateTimeToUtc(dateKey, time(minute), timezone);
+    const localTimeIsValid =
+      dateKeyInTimeZone(value, timezone) === dateKey &&
+      timeKeyInTimeZone(value, timezone) === time(minute);
+    const wallClockUtc = Date.parse(`${dateKey}T${time(minute)}:00.000Z`);
+    const ambiguous =
+      localTimeIsValid &&
+      offsetsForDate(timezone).some(offset => {
+        const alternate = wallClockUtc - offset * 60000;
+        return (
+          alternate !== value.getTime() &&
+          dateKeyInTimeZone(alternate, timezone) === dateKey &&
+          timeKeyInTimeZone(alternate, timezone) === time(minute)
+        );
+      });
+    const instant = localTimeIsValid && !ambiguous ? value.getTime() : null;
+    instantCache.set(key, instant);
     return instant;
   };
   let orderCursor = nowMinute;
@@ -267,6 +350,13 @@ export function reconcileManagerPlan(args: {
     // filling may turn that order into a different execution sequence.
     for (const a of candidates) {
       if (blocks.some(b => matches(a, b))) continue;
+      if (timerMappingUnresolved) {
+        reject(
+          a,
+          "The active timer is not linked to a current or already-started plan block. Verify its task before scheduling additional work."
+        );
+        continue;
+      }
       const card = cardMap.get(a.cardId);
       const blockedCard =
         !!card &&
@@ -317,11 +407,11 @@ export function reconcileManagerPlan(args: {
         }
         earliestInstant = Math.max(earliestInstant, notBefore);
       }
-      if (!Number.isFinite(a.minutes.likely)) {
-        reject(a, "Invalid duration estimate must be verified.");
+      if (!Number.isFinite(a.minutes.likely) || a.minutes.likely <= 0) {
+        reject(a, "Invalid duration estimate; the value must be positive before scheduling.");
         continue;
       }
-      const duration = Math.max(5, Math.round(a.minutes.likely));
+      const duration = Math.max(5, Math.ceil(a.minutes.likely));
       const fits = (start: number) => {
         const end = start + duration;
         if (
@@ -329,8 +419,8 @@ export function reconcileManagerPlan(args: {
           !windows.some(w => start >= w.start && end <= w.end)
         )
           return false;
-        const startInstant = instantAt(start),
-          endInstant = instantAt(end);
+        const startInstant = instantAt(start, worker.timezone),
+          endInstant = instantAt(end, worker.timezone);
         // HH:mm blocks cannot describe missing clock times or a duration that
         // straddles a DST transition. Move to a whole-duration slot instead.
         return (
@@ -462,16 +552,42 @@ export function reconcileManagerPlan(args: {
     auditTrail: [],
     planningImpact: undefined,
   });
+  const baseline = sameDayBaseline;
+  const previousDeadlineByCard = new Map(
+    (baseline?.planningImpact?.deadlines ?? []).map(deadline => [
+      deadline.cardId,
+      deadline.dueAt,
+    ])
+  );
+  const deadlineChanges = new Map<
+    string,
+    { before: string | null; after: string | null }
+  >();
+  for (const [cardId, before] of previousDeadlineByCard) {
+    const card = cardMap.get(cardId);
+    if (!card) continue;
+    const after = card.dueAt;
+    const beforeInstant = before ? notBeforeInstant(before) : null;
+    const afterInstant = after ? notBeforeInstant(after) : null;
+    const sameDeadline =
+      before === after ||
+      (beforeInstant !== null && beforeInstant === afterInstant);
+    if (!sameDeadline) deadlineChanges.set(cardId, { before, after });
+  }
   const unchanged =
     !!existing &&
     existing.dateKey === dateKey &&
+    !timezoneChanged &&
+    !baselineTimezoneUnknown &&
+    deadlineChanges.size === 0 &&
     isDeepStrictEqual(comparable(existing), comparable(plan));
 
   // Compare the candidate before returning it to any caller that can persist it.
   // Neither a slot nor a linked action citation proves real-world completion.
-  const baseline = existing?.dateKey === dateKey ? existing : null;
   const scheduleChanged =
     !baseline ||
+    timezoneChanged ||
+    baselineTimezoneUnknown ||
     !isDeepStrictEqual(baseline.blocks, blocks) ||
     !isDeepStrictEqual(baseline.constraints, constraints);
   const previousById = new Map((baseline?.blocks ?? []).map(block => [block.id, block]));
@@ -480,14 +596,39 @@ export function reconcileManagerPlan(args: {
   const planChanges: NonNullable<ManagerPlanImpact["planChanges"]> = [];
   for (const block of blocks) {
     const before = previousById.get(block.id);
-    const kind = !before ? "added" : before.startTime !== block.startTime || before.endTime !== block.endTime
-      ? "moved" : !isDeepStrictEqual(before, block) ? "updated" : null;
+    const timezoneContextChanged =
+      (timezoneChanged || baselineTimezoneUnknown) &&
+      !preserved.some(item => item.id === block.id);
+    const kind = !before
+      ? "added"
+      : before.startTime !== block.startTime || before.endTime !== block.endTime
+        ? "moved"
+        : !isDeepStrictEqual(before, block) || timezoneContextChanged
+          ? "updated"
+          : null;
     if (!kind) continue;
     const action = result.actions.find(item => item.id === block.id);
-    planChanges.push({ kind, blockId: block.id, cardName: block.cardName,
-      before: before ? slot(before) : null, after: slot(block),
-      reason: action?.reason || "No specific reason was recorded for this proposed change.",
-      assumptionIds: ["baseline", "worker", ...(action ? [`action:${action.id}`] : [])] });
+    const timezoneReason = timezoneChanged
+      ? `Worker timezone changed from ${baselineTimezone} to ${worker.timezone}; the same clock time now represents a different instant.`
+      : baselineTimezoneUnknown
+        ? "The retained plan has no recorded timezone, so its clock time cannot be compared safely with the current schedule."
+        : null;
+    planChanges.push({
+      kind,
+      blockId: block.id,
+      cardName: block.cardName,
+      before: before ? slot(before) : null,
+      after: slot(block),
+      reason: timezoneContextChanged
+        ? timezoneReason!
+        : action?.reason ||
+          "No specific reason was recorded for this proposed change.",
+      assumptionIds: [
+        "baseline",
+        "worker",
+        ...(action ? [`action:${action.id}`] : []),
+      ],
+    });
   }
   for (const block of baseline?.blocks ?? []) {
     if (proposedById.has(block.id)) continue;
@@ -524,6 +665,7 @@ export function reconcileManagerPlan(args: {
         ? {
             dateKey: existing.dateKey,
             generatedAt: existing.generatedAt,
+            timezone: existing.planningImpact?.timezone ?? null,
             constraints: existing.constraints,
             blocks: existing.blocks.map(
               ({ id, cardId, startTime, endTime, status, stepIds }) => ({
@@ -538,7 +680,7 @@ export function reconcileManagerPlan(args: {
           }
         : null,
       limitation:
-        "Retained schedule and recorded statuses, not independently verified completion. Other-day blocks are not today's alternative.",
+        "Retained schedule and recorded statuses, not independently verified completion. The prior timezone is required to compare real instants; other-day blocks are not today's alternative.",
     },
     {
       id: "timer",
@@ -587,24 +729,40 @@ export function reconcileManagerPlan(args: {
     assumptionIds: string[],
     requiresReview = false
   ) => risks.push({ code, subjectId, detail, assumptionIds, requiresReview });
-  if (
-    activeTimer &&
-    (activeTimer.cardId || activeTimer.planBlockId) &&
-    !timerBlock
-  )
+  if (timezoneChanged && baseline?.blocks.length)
+    risk(
+      "timezone_changed",
+      "worker-timezone",
+      `The worker timezone changed from ${baselineTimezone} to ${worker.timezone}; retained clock times now represent different instants.`,
+      ["baseline", "worker", "clock"],
+      true
+    );
+  if (baselineTimezoneUnknown)
+    risk(
+      "baseline_timezone_unknown",
+      "worker-timezone",
+      "The retained same-day plan has no recorded timezone, so its clock times cannot be compared safely with the current schedule.",
+      ["baseline", "worker", "clock"],
+      true
+    );
+  if (timerMappingUnresolved)
     risk(
       "active_timer_unmapped",
-      activeTimer.planBlockId ?? activeTimer.cardId!,
-      "The running timer has no matching retained block; its occupied time cannot be established.",
+      activeTimer?.planBlockId ?? activeTimer?.cardId ?? "active-timer",
+      "The active timer has no valid same-day plan block starting by now; its task and occupied time cannot be established.",
       ["baseline", "timer"],
-      scheduleChanged
+      true
     );
   const validClock = (value: string) =>
     /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
   const blockInstant = (
     block: OperatorPlanBlock,
-    key: "startTime" | "endTime"
-  ) => (validClock(block[key]) ? instantAt(minutes(block[key])) : null);
+    key: "startTime" | "endTime",
+    timezone: string | null = worker.timezone
+  ) =>
+    timezone && validClock(block[key])
+      ? instantAt(minutes(block[key]), timezone)
+      : null;
   for (const block of blocks) {
     const start = blockInstant(block, "startTime"),
       end = blockInstant(block, "endTime");
@@ -625,12 +783,13 @@ export function reconcileManagerPlan(args: {
   }
   const deadlinePosition = (
     list: OperatorPlanBlock[],
-    cardId: string
+    cardId: string,
+    timezone: string | null
   ): ManagerDeadlinePosition => {
     const matching = list.filter(
       b => b.cardId === cardId && b.status !== "skipped"
     );
-    const ends = matching.map(b => blockInstant(b, "endTime"));
+    const ends = matching.map(b => blockInstant(b, "endTime", timezone));
     const end =
       ends.length && ends.every(value => value !== null)
         ? Math.max(...(ends as number[]))
@@ -672,8 +831,8 @@ export function reconcileManagerPlan(args: {
       ...todayBlocks.flatMap(b => (b.cardId ? [b.cardId] : [])),
     ]),
   ].map(cardId => {
-    const before = deadlinePosition(todayBlocks, cardId),
-      after = deadlinePosition(blocks, cardId);
+    const before = deadlinePosition(todayBlocks, cardId, baselineTimezone),
+      after = deadlinePosition(blocks, cardId, worker.timezone);
     const refs = [
       "baseline",
       "clock",
@@ -684,9 +843,11 @@ export function reconcileManagerPlan(args: {
       newEnd = after.latestScheduledEndAt;
     const due = cardMap.get(cardId)?.dueAt;
     const dueInstant = due ? notBeforeInstant(due) : null;
+    // The timestamp's written date can differ from its date for this worker.
     const dueTodayOrEarlier =
       dueInstant !== null &&
       dateKeyInTimeZone(dueInstant, worker.timezone) <= dateKey;
+    const deadlineChanged = deadlineChanges.has(cardId);
     const unfinished =
       result.actions.some(a => a.cardId === cardId && !actionComplete(a)) ||
       cardMap.get(cardId)?.steps.some(step => !step.complete) === true;
@@ -719,7 +880,17 @@ export function reconcileManagerPlan(args: {
         before.status !== "after_deadline" ||
           (before.slackMinutes !== null &&
             after.slackMinutes !== null &&
-            after.slackMinutes < before.slackMinutes)
+            after.slackMinutes < before.slackMinutes) ||
+          (deadlineChanged && dueTodayOrEarlier && unfinished)
+      );
+    if (deadlineChanged)
+      risk(
+        "deadline_changed",
+        cardId,
+        "The task deadline changed since the previous assessment; review its timing and priority.",
+        refs,
+        after.status === "after_deadline" ||
+          (after.status === "unscheduled" && dueTodayOrEarlier && unfinished)
       );
     if (after.status === "unscheduled")
       risk(
@@ -800,12 +971,13 @@ export function reconcileManagerPlan(args: {
     ])) {
       const complete = dependencyComplete(ref, a.cardId);
       const position = (
-        list: OperatorPlanBlock[]
+        list: OperatorPlanBlock[],
+        timezone: string | null
       ): ManagerDependencyPosition => {
         const own = list.filter(b => matches(a, b) && b.status !== "skipped");
-        const starts = own.map(b => blockInstant(b, "startTime"));
+        const starts = own.map(b => blockInstant(b, "startTime", timezone));
         const ends = predecessorBlocks(ref, a.cardId, list).map(b =>
-          blockInstant(b, "endTime")
+          blockInstant(b, "endTime", timezone)
         );
         const start =
           starts.length && starts.every(n => n !== null)
@@ -842,8 +1014,8 @@ export function reconcileManagerPlan(args: {
           .map(id => `card:${id}`),
         ...(actionsById.has(ref) ? [`action:${ref}`] : []),
       ];
-      const before = position(todayBlocks),
-        after = position(blocks);
+      const before = position(todayBlocks, baselineTimezone),
+        after = position(blocks, worker.timezone);
       dependencies.push({
         actionId: a.id,
         dependency: ref,
@@ -900,6 +1072,7 @@ export function reconcileManagerPlan(args: {
         !Number.isFinite(a.minutes.high) ||
         !Number.isFinite(a.minutes.likely) ||
         !Number.isFinite(a.minutes.low) ||
+        a.minutes.likely <= 0 ||
         a.minutes.low < 0 ||
         a.minutes.low > a.minutes.likely ||
         a.minutes.high < a.minutes.likely
@@ -995,7 +1168,11 @@ export function reconcileManagerPlan(args: {
     scheduleChanged,
     requiresReview: risks.some(risk => risk.requiresReview),
     planChanges,
-    availabilityChanged: !!baseline && !isDeepStrictEqual(baseline.constraints, constraints),
+    availabilityChanged:
+      !!baseline &&
+      (timezoneChanged ||
+        baselineTimezoneUnknown ||
+        !isDeepStrictEqual(baseline.constraints, constraints)),
     assumptions: structuredClone(assumptions),
     deadlines,
     dependencies,
@@ -1037,6 +1214,11 @@ export function reconcileManagerPlan(args: {
       "No historical deadline values, external calendar commitments, or minimum buffer policy were supplied.",
       "Capacity uses configured wall-clock windows; high-estimate stress totals do not prove the extra minutes fit before each individual deadline or break.",
       "Recorded step and block completion is accepted as supplied, not independently verified; absence of a dependency declaration does not prove independence.",
+      ...(baselineTimezoneUnknown
+        ? [
+            "The same-day baseline has no recorded timezone; its prior clock labels have no verified real-instant interpretation.",
+          ]
+        : []),
       ...result.sourceGaps,
     ],
   };
@@ -1046,10 +1228,29 @@ export function reconcileManagerPlan(args: {
   for (const change of planChanges) {
     if (change.kind === "added") changes.push(`Scheduled ${change.cardName} at ${change.after!.startTime}.`);
     else if (change.kind === "moved") changes.push(`Moved ${change.cardName} from ${change.before!.startTime} to ${change.after!.startTime}.`);
+    else if (change.kind === "updated" && timezoneChanged)
+      changes.push(
+        `Updated the timing context for ${change.cardName}: timezone changed from ${baselineTimezone} to ${worker.timezone}; the same clock time now represents a different instant.`
+      );
+    else if (change.kind === "updated" && baselineTimezoneUnknown)
+      changes.push(
+        `Updated the timing context for ${change.cardName}: the saved plan has no recorded timezone, so the clock time cannot be compared safely.`
+      );
     else if (change.kind === "updated") changes.push(`Updated the proposed work for ${change.cardName} at ${change.after!.startTime}.`);
     else changes.push(`No longer scheduled: ${change.cardName} at ${change.before!.startTime}. This does not mark the work complete. ${change.reason}`);
   }
-  if (planningImpact.availabilityChanged) changes.push("Worker availability changed; review the proposed working slots.");
+  if (planningImpact.availabilityChanged)
+    changes.push(
+      timezoneChanged || baselineTimezoneUnknown
+        ? "Worker timezone context changed or is unknown; review the proposed working slots."
+        : "Worker availability changed; review the proposed working slots."
+    );
+  for (const [cardId, deadline] of deadlineChanges) {
+    const cardName = cardMap.get(cardId)?.name ?? cardId;
+    changes.push(
+      `Deadline changed for ${cardName}: ${deadline.before ?? "none"} to ${deadline.after ?? "none"}. Review its timing and priority.`
+    );
+  }
   for (const u of unscheduled) {
     const action = result.actions.find(a => a.cardId === u.cardId);
     changes.push(

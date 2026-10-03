@@ -26,6 +26,15 @@ describe("additive shadow manager UI integration", () => {
     expect(worker).not.toContain("compareManagerWork");
   });
 
+  it("explains that the pilot agenda is protected and hides plan-edit controls", () => {
+    const worker = client("pages/worker/WorkerOperator.tsx");
+    expect(worker).toContain("getDailyPlanEditingPolicy.useQuery");
+    expect(worker).toContain("const canEditPlan = editingPolicy.data?.editable === true");
+    expect(worker).toContain("Agenda changes are paused");
+    expect(worker).toContain("Suggested changes above are not applied");
+    expect(worker).toContain("Contact ${founderName} to set today's schedule.");
+  });
+
   it("refreshes manager data over the existing identity-bound websocket", () => {
     const socket = client("hooks/useWebSocket.ts");
     expect(socket).toContain("aptlss:manager-updated");

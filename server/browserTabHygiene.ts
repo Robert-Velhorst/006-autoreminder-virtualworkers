@@ -16,13 +16,16 @@ import {
 import { dateKeyInTimeZone } from "../shared/workerTime";
 import { getDb } from "./db";
 import { resolveWorkerOperatorContextById } from "./workerOperatorContext";
+import { MAX_BROWSER_TAB_CAPTURE_SEQUENCE } from "../shared/browserTabProtocol";
 
 const POLICY_KEY = "browserTabPolicy";
 const COLLECTOR_TOKEN_KEY = "browserTabCollectorToken";
 const MAX_STORED_TABS = 250;
-const MAX_CAPTURE_SEQUENCE = 4_294_967_295;
 const COLLECTOR_TOKEN_HASH_PREFIX = "sha256:";
 const LEGACY_COLLECTOR_TOKEN_HASH_PREFIX = "sha256hex:";
+// Keep a one-day margin around MySQL TIMESTAMP bounds for driver/session timezone conversion.
+const MIN_BROWSER_TAB_CAPTURE_TIME = Date.parse("1970-01-02T00:00:00.000Z");
+const MAX_BROWSER_TAB_CAPTURE_TIME = Date.parse("2038-01-18T00:00:00.000Z");
 
 export interface BrowserTabInventoryItem {
   id: string;
@@ -129,6 +132,13 @@ export function hashBrowserTabCollectorToken(token: string) {
   return `${COLLECTOR_TOKEN_HASH_PREFIX}${createHash("sha256").update(token).digest("base64url")}`;
 }
 
+export function isBrowserTabCaptureTimestampSupported(value: string) {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp)
+    && timestamp >= MIN_BROWSER_TAB_CAPTURE_TIME
+    && timestamp <= MAX_BROWSER_TAB_CAPTURE_TIME;
+}
+
 export function browserTabCollectorTokenMatches(stored: string | null | undefined, candidate: string | null | undefined) {
   if (!stored || !candidate) return false;
   const expected = stored.startsWith(COLLECTOR_TOKEN_HASH_PREFIX)
@@ -147,24 +157,21 @@ function tokenMatches(expected: string | null | undefined, candidate: string | n
   return browserTabCollectorTokenMatches(expected, candidate);
 }
 
-async function legacyCollectorOwnerId() {
-  const db = await getDb();
-  if (!db) return null;
-  const [profile] = await db.select({ userId: vaProfiles.userId }).from(vaProfiles)
+async function legacyCollectorOwnerId(db: NonNullable<Awaited<ReturnType<typeof getDb>>>) {
+  const profiles = await db.select({ userId: vaProfiles.userId, status: vaProfiles.status }).from(vaProfiles)
     .where(eq(vaProfiles.status, "active"))
     .orderBy(vaProfiles.id)
-    .limit(1)
     .catch((error: unknown) => {
       if (typeof error === "object" && error !== null && "code" in error
         && (error as { code?: string }).code === "ER_NO_SUCH_TABLE") return [];
       throw error;
     });
-  if (profile) return profile.userId;
-  const [worker] = await db.select({ id: users.id }).from(users)
-    .where(eq(users.role, "worker"))
-    .orderBy(users.id)
-    .limit(1);
-  return worker?.id ?? null;
+  return profiles.length === 1 ? profiles[0].userId : null;
+}
+
+async function activeCollectorOwnerId(userId: number, db: NonNullable<Awaited<ReturnType<typeof getDb>>>) {
+  const worker = await resolveWorkerOperatorContextById(userId, db);
+  return worker.profileId === null ? null : userId;
 }
 
 export async function resolveBrowserTabCollectorWorker(candidate: string | null | undefined) {
@@ -174,11 +181,21 @@ export async function resolveBrowserTabCollectorWorker(candidate: string | null 
   const rows = await db.select({ vaId: appSettings.vaId, value: appSettings.value })
     .from(appSettings)
     .where(like(appSettings.key, `${COLLECTOR_TOKEN_KEY}:%`));
-  for (const row of rows) {
-    if (row.vaId && tokenMatches(row.value, candidate)) return row.vaId;
+  const matches = Array.from(new Set(rows
+    .filter((row) => row.vaId && tokenMatches(row.value, candidate))
+    .map((row) => row.vaId as number)));
+  if (matches.length === 1) {
+    return activeCollectorOwnerId(matches[0], db);
   }
+  if (matches.length > 1) return null;
+  // A scoped token supersedes the legacy shared credential. Never let the old
+  // global bearer token survive an individual worker token rotation.
+  if (rows.length > 0) return null;
+
   const legacy = await readSetting(COLLECTOR_TOKEN_KEY);
-  return tokenMatches(legacy, candidate) ? legacyCollectorOwnerId() : null;
+  if (!tokenMatches(legacy, candidate)) return null;
+  const legacyOwnerId = await legacyCollectorOwnerId(db);
+  return legacyOwnerId === null ? null : activeCollectorOwnerId(legacyOwnerId, db);
 }
 
 export async function resolveBrowserTabCollectorUserOpenId(vaId: number) {
@@ -222,11 +239,13 @@ export async function ingestBrowserTabInventory(vaId: number, input: BrowserTabI
   const db = await getDb();
   if (!db) throw new Error("Database is required to ingest browser-tab state");
   if (input.protocolVersion !== 2 || !Number.isSafeInteger(input.captureSequence)
-    || input.captureSequence < 1 || input.captureSequence > MAX_CAPTURE_SEQUENCE) {
+    || input.captureSequence < 1 || input.captureSequence > MAX_BROWSER_TAB_CAPTURE_SEQUENCE) {
     throw new Error("Unsupported browser collector report version");
   }
+  if (!isBrowserTabCaptureTimestampSupported(input.sourceCapturedAt)) {
+    throw new Error("Invalid browser collector capture time");
+  }
   const sourceCapturedAt = new Date(input.sourceCapturedAt);
-  if (Number.isNaN(sourceCapturedAt.getTime())) throw new Error("Invalid browser collector capture time");
   const tabs = input.tabs.slice(0, MAX_STORED_TABS).map(sanitizeTab);
   const collectorId = input.collectorId.trim().slice(0, 128);
   const worker = await resolveWorkerOperatorContextById(vaId);

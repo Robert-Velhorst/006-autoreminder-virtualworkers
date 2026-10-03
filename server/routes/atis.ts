@@ -21,6 +21,7 @@ import { createChecklistSyncService } from '../services/trello-checklist-sync';
 import { createAttachmentExtractor } from '../services/attachment-extractor';
 import { createChatbotExtractor } from '../services/chatbot-extractor';
 import { fetchWithRetry } from '../utils/retry';
+import { fetchVerifiedTrelloBoardIds, TrelloBoardInventoryUnavailableError } from '../trelloBoardInventory';
 import { atisRateLimiter } from '../middleware/rate-limiter';
 import { parseLimitOffset } from '../utils/pagination';
 import { normalizeChecklistSyncCardIds, toChecklistSyncCards } from '../atisChecklistSyncRows';
@@ -57,84 +58,6 @@ function isInactiveListName(listName?: string | null) {
 
 function sendAtisFailure(res: Response, operation: string) {
   return res.status(500).json({ error: `Failed to ${operation}. Check the server logs or retry.` });
-}
-
-async function fetchUserWorkspaceBoardIds(apiKey: string, token: string) {
-  const boardIds = new Set<string>();
-
-  // 1. Fetch ALL boards the token owner can access (personal + workspace)
-  try {
-    const allBoardsResponse = await fetchWithRetry(
-      `https://api.trello.com/1/members/me/boards?filter=open&fields=id&key=${apiKey}&token=${token}`,
-      undefined,
-      { maxRetries: 3, initialDelayMs: 1000, maxDelayMs: 10000 }
-    );
-    if (allBoardsResponse.ok) {
-      const allBoards = await allBoardsResponse.json();
-      if (Array.isArray(allBoards)) {
-        for (const board of allBoards) {
-          if (board?.id) boardIds.add(board.id);
-        }
-      }
-    }
-  } catch {
-    // non-fatal — fall through to workspace-based fetch
-  }
-
-  // 2. Also fetch organization-scoped boards (in case token is a workspace admin)
-  try {
-    const workspacesResponse = await fetchWithRetry(
-      `https://api.trello.com/1/members/me/organizations?key=${apiKey}&token=${token}`,
-      undefined,
-      { maxRetries: 3, initialDelayMs: 1000, maxDelayMs: 10000 }
-    );
-
-    if (workspacesResponse.ok) {
-      const workspaces = await workspacesResponse.json();
-      if (Array.isArray(workspaces)) {
-        for (const workspace of workspaces) {
-          try {
-            const boardsResponse = await fetchWithRetry(
-              `https://api.trello.com/1/organizations/${workspace.id}/boards?filter=open&key=${apiKey}&token=${token}`,
-              undefined,
-              { maxRetries: 2, initialDelayMs: 1000, maxDelayMs: 10000 }
-            );
-            if (boardsResponse.ok) {
-              const boards = await boardsResponse.json();
-              if (Array.isArray(boards)) {
-                for (const board of boards) {
-                  if (board?.id && board.prefs?.isTemplate !== true) {
-                    boardIds.add(board.id);
-                  }
-                }
-              }
-            }
-          } catch {
-            // non-fatal
-          }
-        }
-      }
-    }
-  } catch {
-    // non-fatal
-  }
-
-  // 3. If Trello API returned no boards at all, fall back to all boards in DB
-  if (boardIds.size === 0) {
-    try {
-      const db = await getDb();
-      if (db) {
-        const dbBoards = await db.select({ trelloId: atisBoards.trelloId }).from(atisBoards);
-        for (const b of dbBoards) {
-          if (b.trelloId) boardIds.add(b.trelloId);
-        }
-      }
-    } catch {
-      // non-fatal
-    }
-  }
-
-  return Array.from(boardIds);
 }
 
 /**
@@ -935,13 +858,13 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
         return res.status(500).json({ error: 'Database not available' });
       }
 
-      const apiKey = process.env.TRELLO_API_KEY;
-      const token = process.env.TRELLO_TOKEN;
+      const apiKey = process.env.TRELLO_API_KEY?.trim();
+      const token = process.env.TRELLO_TOKEN?.trim();
       if (!apiKey || !token) {
-        return res.status(500).json({ error: 'Trello credentials not configured' });
+        throw new TrelloBoardInventoryUnavailableError();
       }
 
-      const allowedTrelloBoardIds = await fetchUserWorkspaceBoardIds(apiKey, token);
+      const allowedTrelloBoardIds = await fetchVerifiedTrelloBoardIds(apiKey, token);
       if (allowedTrelloBoardIds.length === 0) {
         return res.json({
           scheduled: [],
@@ -1226,7 +1149,7 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
     // Get total count for pagination
     const [totalResult] = await db.select({ count: sql<number>`count(*)` })
       .from(atisCards)
-      .where(eq(atisCards.isArchived, 0));
+      .where(and(...conditions));
 
     // For now, all tasks are considered scheduled (no overflow logic in ATIS endpoint)
     // The overflow logic will be applied when scheduling is triggered
@@ -1266,6 +1189,14 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
     });
       return; // Success - exit retry loop
     } catch (error: any) {
+      if (error instanceof TrelloBoardInventoryUnavailableError) {
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Retry-After', '5');
+        return res.status(503).json({
+          error: 'Trello work queue is unavailable. Retry after checking the Trello connection.',
+          code: 'TRELLO_BOARD_ACCESS_UNAVAILABLE',
+        });
+      }
       lastError = error;
       console.error(`[ATIS] Timeline tasks error (attempt ${attempt}/${maxRetries}):`, error);
       

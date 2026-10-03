@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
-  aptlssManagerRuns, aptlssManagerState, aptlssManagerUpdates, aptlssManagerCorrections, aptlssPlans, aptlssSteps,
+  aptlssManagerRuns, aptlssManagerChecks, aptlssManagerState, aptlssManagerUpdates, aptlssManagerCorrections, aptlssPlans, aptlssSteps,
   aptlssWaitingReasons, cardStates, communicationEvidence, dailyPlans, decisionOutcomes,
   emailTasks, priorityScores, timeEntries, trelloCachedCards, users, workspaceEvidenceItems,
   workspaceEvidenceLinks, aptlssEvidenceSubjectLinks, aptlssEvidenceRevisions, aptlssEvidenceConflicts, timeEntryEvents,
 } from "../drizzle/schema";
-import type { ManagerAction, ManagerCard, ManagerEvidence, ManagerInput, ManagerPolicy, ManagerSnapshot } from "../shared/aptlssManager";
+import type { ManagerAction, ManagerCard, ManagerEvidence, ManagerInput, ManagerPolicy, ManagerSnapshot, ManagerSchedulerStatus } from "../shared/aptlssManager";
 import { dateKeyInTimeZone } from "../shared/workerTime";
 import { gmailContentScope } from "../shared/gmailContentScope";
 import { getDb } from "./db";
@@ -24,12 +24,16 @@ import { assertManagerUpdateSource, managerUpdateEvidenceText, normalizeManagerU
 import { assertManagerExecutionAllowed, ManagerExecutionPausedError, managerPlanVersion, managerReviewProposalIdentity, selectApplicableManagerCorrections } from "./aptlssManagerReviewService";
 import { managerSafetyDigest } from "./aptlssManagerSafety";
 import { websocketService } from "./services/websocket";
-import { assertManagerQueueLease, createManagerQueueRunner, enqueueManagerTask, ManagerQueueLeaseLostError, type ManagerQueueLease } from "./aptlssManagerQueue";
+import { assertManagerQueueLease, createManagerQueueRunner, enqueueManagerTask, managerQueueEventHash, ManagerQueueLeaseLostError, type ManagerQueueLease } from "./aptlssManagerQueue";
 import { aptlssManagerQueue } from "../drizzle/aptlssManagerQueueSchema";
+import { aptlssManagerQueueEvents } from "../drizzle/aptlssManagerQueueSchema";
 import { finishManagerSemanticReview, reserveManagerSemanticReview, managerSemanticRetryReady } from "./aptlssManagerSemanticRuntime";
 import { assertManagerPilotWorker, assertManagerPlanMutationAllowed, managerPilotEnabled } from "./aptlssManagerPilot";
-import { aggregateManagerTimeSamples } from "./aptlssManagerTiming";
+import { aggregateManagerTimeSamples, managerTimingPredictions } from "./aptlssManagerTiming";
 import { assessManagerAssignmentCoverage, readManagerAssignmentState } from "./aptlssManagerAssignments";
+import { managerHistoryHash, managerHistoryPatch } from "./aptlssManagerHistory";
+import { readCurrentManagerHistory } from "./aptlssManagerHistoryDb";
+export { loadManagerHistoryCheck } from "./aptlssManagerHistoryDb";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 export const DEFAULT_MANAGER_POLICY: ManagerPolicy = { enabled: true, intervalMinutes: 5, mode: "shadow" };
@@ -65,6 +69,15 @@ async function requireDb() {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable; the project manager cannot retain its decisions.");
   return db;
+}
+
+export async function loadManagerTimingHistory(db: Db, vaId: number) {
+  const history = await db.select({
+    actionsJson: sql<unknown>`CASE WHEN JSON_VALID(${aptlssManagerRuns.snapshotJson}) THEN JSON_EXTRACT(${aptlssManagerRuns.snapshotJson}, '$.actions') ELSE NULL END`,
+    createdAt: aptlssManagerRuns.createdAt,
+  }).from(aptlssManagerRuns).where(eq(aptlssManagerRuns.vaId, vaId))
+    .orderBy(desc(aptlssManagerRuns.id)).limit(100);
+  return history.map(row => ({ createdAt: row.createdAt, actions: managerTimingPredictions(row.actionsJson) }));
 }
 
 /** Only explicit source links are joined. Text similarity alone never grants data access. */
@@ -251,16 +264,14 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
 }
 
 async function stateAndSnapshot(db: Db, vaId: number) {
-  const [state] = await db.select().from(aptlssManagerState).where(eq(aptlssManagerState.vaId, vaId)).limit(1);
-  const [run] = await db.select().from(aptlssManagerRuns).where(eq(aptlssManagerRuns.vaId, vaId)).orderBy(desc(aptlssManagerRuns.id)).limit(1);
+  const { state, run, snapshot } = await readCurrentManagerHistory(db, vaId);
   const policy: ManagerPolicy = state ? { enabled: state.enabled, intervalMinutes: state.intervalMinutes, mode: "shadow" } : DEFAULT_MANAGER_POLICY;
-  const snapshot = json<ManagerSnapshot | null>(run?.snapshotJson, null);
   if (snapshot) {
     snapshot.runId = run.id;
     snapshot.policy = policy;
-    snapshot.nextCheckAt = policy.enabled ? new Date((state?.checkedAt?.getTime() ?? Date.now()) + policy.intervalMinutes * 60_000).toISOString() : null;
+    snapshot.nextCheckAt = policy.enabled ? snapshot.nextCheckAt : null;
   }
-  return { state, snapshot, policy, error: state?.lastError ?? undefined };
+  return { state, snapshot, run, policy, error: state?.lastError ?? undefined };
 }
 
 export async function getManagerStatus(vaId: number) {
@@ -272,7 +283,7 @@ export async function getManagerStatus(vaId: number) {
     lastError: aptlssManagerQueue.lastError, completedAt: aptlssManagerQueue.completedAt,
   }).from(aptlssManagerQueue).where(eq(aptlssManagerQueue.vaId, vaId)).limit(1);
   // Acceptance history belongs to the review inbox, not the worker's polling path.
-  return { snapshot, policy, error, queue: queue ?? null, checkedAt: state?.checkedAt ?? null, lastSuccessfulAt: state?.lastSuccessfulAt ?? null };
+  return { snapshot, policy, error, queue: queue ?? null, scheduler: getManagerSchedulerStatus(), checkedAt: state?.checkedAt ?? null, lastSuccessfulAt: state?.lastSuccessfulAt ?? null };
 }
 
 export async function updateManagerPolicy(vaId: number, policy: Pick<ManagerPolicy, "enabled" | "intervalMinutes">) {
@@ -288,30 +299,147 @@ export async function updateManagerPolicy(vaId: number, policy: Pick<ManagerPoli
   });
 }
 
-export async function submitManagerUpdate(vaId: number, cardId: string, detail: string, interventionId?: string, fields: ManagerUpdateFields = {}) {
+type ManagerUpdateSubmissionFields = ManagerUpdateFields & { expectedRunId?: number; requestKey?: string };
+
+export type ManagerUpdateSubmissionResult = {
+  reportId: number;
+  alreadyRecorded: boolean;
+  applied: boolean;
+  assessment?: ManagerSnapshot;
+};
+
+export class ManagerUpdateSubmissionError extends Error {
+  constructor(public readonly code: "BAD_REQUEST" | "CONFLICT", message: string) {
+    super(message);
+  }
+}
+
+const managerUpdateRequestKeyPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const managerUpdateRequestNamespace = Buffer.from("6ba7b8109dad11d180b400c04fd430c8", "hex");
+
+function workerUpdateRequestKey(vaId: number, payload: unknown, requestKey?: string) {
+  if (requestKey !== undefined) {
+    if (typeof requestKey !== "string" || !managerUpdateRequestKeyPattern.test(requestKey)) {
+      throw new ManagerUpdateSubmissionError("BAD_REQUEST", "Refresh the update form and try again.");
+    }
+    return requestKey.toLowerCase();
+  }
+
+  // Older dashboard clients omit a key; a stable content key keeps their exact retry idempotent.
+  const digest = createHash("sha1").update(managerUpdateRequestNamespace).update(JSON.stringify({ vaId, payload })).digest();
+  digest[6] = (digest[6] & 0x0f) | 0x50;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+  const hex = digest.subarray(0, 16).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function isDuplicateManagerUpdateKeyError(error: unknown) {
+  const visited = new Set<unknown>();
+  let current = error;
+  while (typeof current === "object" && current !== null && !visited.has(current)) {
+    visited.add(current);
+    const candidate = current as { code?: unknown; errno?: unknown; cause?: unknown };
+    if (candidate.code === "ER_DUP_ENTRY" || candidate.errno === 1062) return true;
+    current = candidate.cause;
+  }
+  return false;
+}
+
+function resolveWorkerUpdateReplay(
+  row: typeof aptlssManagerUpdates.$inferSelect,
+  payload: { cardId: string; detail: string; interventionId: string | null; outcome: ManagerWorkerOutcome; deadlineDate: string | null; sourceEvidenceId: string | null; sourceDescription: string | null },
+): ManagerUpdateSubmissionResult {
+  if (row.reportKind !== "update" || row.cardId !== payload.cardId || row.detail !== payload.detail
+    || row.interventionId !== payload.interventionId || row.outcome !== payload.outcome
+    || row.deadlineDate !== payload.deadlineDate || row.sourceEvidenceId !== payload.sourceEvidenceId
+    || row.sourceDescription !== payload.sourceDescription) {
+    throw new ManagerUpdateSubmissionError("CONFLICT", "This update key was already used for different information. Refresh the form and submit the changed update again.");
+  }
+  return { reportId: row.id, alreadyRecorded: true, applied: false };
+}
+
+async function workerAssertionQueueReceiptExists(tx: Db, vaId: number, cardId: string, detail: string) {
+  const title = "Worker reality update";
+  const contentHash = createHash("sha256").update(`${title}\n${detail.trim()}`).digest("hex");
+  const sourceId = `worker-assertion:${vaId}:${contentHash}`;
+  const [evidence] = await tx.select({ id: workspaceEvidenceItems.id }).from(workspaceEvidenceItems)
+    .where(and(eq(workspaceEvidenceItems.vaId, vaId), eq(workspaceEvidenceItems.sourceId, sourceId))).limit(1);
+  if (!evidence) return false;
+  const eventKey = JSON.stringify(["evidence", evidence.id, contentHash, cardId, "worker_assertion"]);
+  const eventHash = managerQueueEventHash(vaId, "source_ingested", eventKey);
+  const [receipt] = await tx.select({ eventHash: aptlssManagerQueueEvents.eventHash })
+    .from(aptlssManagerQueueEvents).where(eq(aptlssManagerQueueEvents.eventHash, eventHash)).limit(1);
+  return !!receipt;
+}
+
+async function assertWorkerUpdateAssessmentCurrent(tx: Db, vaId: number, expectedRunId: number) {
+  const [state] = await tx.select({ inputHash: aptlssManagerState.inputHash }).from(aptlssManagerState)
+    .where(eq(aptlssManagerState.vaId, vaId)).limit(1).for("update");
+  const [latestRun] = await tx.select({ id: aptlssManagerRuns.id }).from(aptlssManagerRuns)
+    .where(eq(aptlssManagerRuns.vaId, vaId)).orderBy(desc(aptlssManagerRuns.id)).limit(1).for("update");
+  if (state?.inputHash === null || !latestRun || latestRun.id !== expectedRunId) {
+    throw new ManagerUpdateSubmissionError("CONFLICT", "Work guidance changed before your update was saved. Refresh the current instruction and submit again.");
+  }
+}
+
+export async function submitManagerUpdate(vaId: number, cardId: string, detail: string, interventionId?: string, fields: ManagerUpdateSubmissionFields = {}): Promise<ManagerUpdateSubmissionResult> {
   assertManagerPilotWorker(vaId);
-  const db = await requireDb();
-  await assertManagerExecutionAllowed(db, vaId);
+  if (!Number.isSafeInteger(fields.expectedRunId) || fields.expectedRunId! < 1 || fields.expectedRunId! > 2_147_483_647) {
+    throw new ManagerUpdateSubmissionError("BAD_REQUEST", "Refresh the current work guidance before submitting your update.");
+  }
   const text = managerSafeText(detail.trim(), 8000);
   if (text.length < 3 || detail.length > 8000) throw new Error("Provide an update between 3 and 8000 characters.");
   const normalized = normalizeManagerUpdateFields(fields);
   if (normalized.sourceDescription) normalized.sourceDescription = managerSafeText(normalized.sourceDescription, 512);
-  await db.transaction(async tx => {
-    await tx.select().from(users).where(eq(users.id, vaId)).for("update");
-    await assertManagerExecutionAllowed(tx as unknown as Db, vaId);
-    const freshInput = await collectManagerInput(tx as unknown as Db, vaId, new Date());
-    if (!freshInput.cards.some(c => c.id === cardId)) throw new Error("This work item is outside your assigned scope.");
-    assertManagerUpdateSource(freshInput.evidence, cardId, normalized.sourceEvidenceId);
-    if (interventionId) {
-      const current = await stateAndSnapshot(tx as unknown as Db, vaId);
-      if (!current.snapshot?.interventions.some(i => i.id === interventionId && i.cardId === cardId)) throw new Error("This question has changed. Refresh and review the current context.");
-    }
-    const evidenceText = managerSafeText(managerUpdateEvidenceText(text, normalized), 8000);
-    if (!cardId.startsWith("email:")) await recordWorkerEvidenceAssertion({ vaId, cardId, title: "Worker reality update", detail: evidenceText, recordedBy: String(vaId), database: tx as unknown as Db });
-    const [update] = await tx.insert(aptlssManagerUpdates).values({ vaId, cardId, detail: text, interventionId: interventionId ?? null, ...normalized }).$returningId();
-    await enqueueManagerTask(tx, { vaId, eventKey: `worker-update:${update.id}`, trigger: "worker_update", urgent: !!interventionId });
-  });
-  return runManager(vaId, "worker_update");
+  const payload = {
+    cardId, detail: text, interventionId: interventionId ?? null,
+    outcome: normalized.outcome, deadlineDate: normalized.deadlineDate,
+    sourceEvidenceId: normalized.sourceEvidenceId, sourceDescription: normalized.sourceDescription,
+  };
+  const requestKey = workerUpdateRequestKey(vaId, payload, fields.requestKey);
+  const db = await requireDb();
+  await assertManagerExecutionAllowed(db, vaId);
+  let persisted: ManagerUpdateSubmissionResult;
+  try {
+    persisted = await db.transaction(async tx => {
+      await tx.select().from(users).where(eq(users.id, vaId)).for("update");
+      await assertManagerExecutionAllowed(tx as unknown as Db, vaId);
+      const [duplicate] = await tx.select().from(aptlssManagerUpdates).where(and(
+        eq(aptlssManagerUpdates.vaId, vaId), eq(aptlssManagerUpdates.requestKey, requestKey),
+      )).limit(1);
+      if (duplicate) return resolveWorkerUpdateReplay(duplicate, payload);
+      const freshInput = await collectManagerInput(tx as unknown as Db, vaId, new Date());
+      if (!freshInput.cards.some(c => c.id === cardId)) throw new Error("This work item is outside your assigned scope.");
+      await assertWorkerUpdateAssessmentCurrent(tx as unknown as Db, vaId, fields.expectedRunId!);
+      assertManagerUpdateSource(freshInput.evidence, cardId, normalized.sourceEvidenceId);
+      if (interventionId) {
+        const current = await stateAndSnapshot(tx as unknown as Db, vaId);
+        if (!current.snapshot?.interventions.some(i => i.id === interventionId && i.cardId === cardId)) throw new Error("This question has changed. Refresh and review the current context.");
+      }
+      const evidenceText = managerSafeText(managerUpdateEvidenceText(text, normalized), 8000);
+      const isEmailUpdate = cardId.startsWith("email:");
+      const assertionReceiptExists = !isEmailUpdate && await workerAssertionQueueReceiptExists(tx as unknown as Db, vaId, cardId, evidenceText);
+      if (!isEmailUpdate) await recordWorkerEvidenceAssertion({ vaId, cardId, title: "Worker reality update", detail: evidenceText, recordedBy: String(vaId), database: tx as unknown as Db });
+      const [update] = await tx.insert(aptlssManagerUpdates).values({ vaId, cardId, detail: text, interventionId: interventionId ?? null, requestKey, ...normalized }).$returningId();
+      // The evidence graph already queues newly recorded assertions. Queue a worker-update
+      // receipt only when that assertion event is an old receipt, or for email updates
+      // which do not create a graph assertion.
+      if (isEmailUpdate || assertionReceiptExists) {
+        await enqueueManagerTask(tx, { vaId, eventKey: `worker-update:${update.id}`, trigger: "worker_update", urgent: !!interventionId });
+      }
+      return { reportId: update.id, alreadyRecorded: false, applied: false };
+    });
+  } catch (error) {
+    if (!isDuplicateManagerUpdateKeyError(error)) throw error;
+    const [raced] = await db.select().from(aptlssManagerUpdates).where(and(
+      eq(aptlssManagerUpdates.vaId, vaId), eq(aptlssManagerUpdates.requestKey, requestKey),
+    )).limit(1);
+    if (!raced) throw error;
+    persisted = resolveWorkerUpdateReplay(raced, payload);
+  }
+  if (persisted.alreadyRecorded) return persisted;
+  const assessment = await runManager(vaId, "worker_update");
+  return { ...persisted, applied: assessment.applied === true, assessment };
 }
 
 export type ManagerCompletionReport = {
@@ -457,7 +585,20 @@ async function executionScope(db: Db, vaId: number, now: Date) {
   } };
 }
 
-async function executeManager(vaId: number, trigger: string, lease?: ManagerQueueLease): Promise<ManagerSnapshot> {
+type ManagerFailureStateVersion = string | null;
+
+async function persistManagerFailureIfCurrent(db: Db, vaId: number, expectedVersion: ManagerFailureStateVersion, message: string) {
+  await db.transaction(async tx => {
+    // Successful assessment writes take this same lock before updating state.
+    await tx.select({ id: users.id }).from(users).where(eq(users.id, vaId)).for("update");
+    const [latest] = await tx.select().from(aptlssManagerState).where(eq(aptlssManagerState.vaId, vaId)).limit(1).for("update");
+    if ((latest ? hash(latest) : null) !== expectedVersion) return;
+    await tx.insert(aptlssManagerState).values({ vaId, lastError: message, checkedAt: new Date() })
+      .onDuplicateKeyUpdate({ set: { lastError: message, checkedAt: new Date() } });
+  });
+}
+
+async function executeManager(vaId: number, trigger: string, lease?: ManagerQueueLease, onAssessmentStart?: (state: typeof aptlssManagerState.$inferSelect | undefined) => void): Promise<ManagerSnapshot> {
   assertManagerPilotWorker(vaId);
   if (lease && lease.vaId !== vaId) throw new ManagerQueueLeaseLostError();
   const db = await requireDb();
@@ -465,13 +606,18 @@ async function executeManager(vaId: number, trigger: string, lease?: ManagerQueu
   let now = new Date();
   let scope = await executionScope(db, vaId, now);
   const { worker, dateKey, timer, state: current } = scope;
+  onAssessmentStart?.(current.state);
   let input = await collectManagerInput(db, vaId, now);
   let fingerprint = managerInputFingerprint(input, scope.fingerprintScope);
   let semanticReview = current.snapshot?.semanticReview;
   const manualRefresh = trigger === "manual" || trigger === "founder_review";
   const semanticDue = !semanticReview || (semanticReview.provider ?? "openai-api") !== managerSemanticProvider() || (managerSemanticRetryReady(semanticReview, manualRefresh, now.getTime())
     && (!semanticReview.success || manualRefresh || semanticReview.sourceHash !== fingerprint.sourceHash));
-  if (managerCoverageMatchesSnapshot(current.snapshot, input.executionCoverageComplete) && current.state?.inputHash === fingerprint.inputHash && !semanticDue) {
+  const needsFullHistory = (state: typeof aptlssManagerState.$inferSelect | undefined) =>
+    process.env.APTLSS_MANAGER_COMPACT_HISTORY === "false" && state?.currentCheckId != null;
+  // Disabling compact history must also leave the identical-input fast path.
+  // Reassess locally; do not refresh evidence or semantic-review timestamps.
+  if (!needsFullHistory(current.state) && managerCoverageMatchesSnapshot(current.snapshot, input.executionCoverageComplete) && current.state?.inputHash === fingerprint.inputHash && !semanticDue) {
     await db.transaction(async tx => {
       await tx.select({ id: users.id }).from(users).where(eq(users.id, vaId)).for("update");
       await assertManagerExecutionAllowed(tx as unknown as Db, vaId);
@@ -525,7 +671,7 @@ async function executeManager(vaId: number, trigger: string, lease?: ManagerQueu
     const latestState = await stateAndSnapshot(tx as unknown as Db, vaId);
     // An actual retry outcome must replace the cached failure. A concurrent caller
     // without a reservation must not overwrite a completed semantic assessment.
-    if (latestState.state?.inputHash === fingerprint.inputHash && managerCoverageMatchesSnapshot(latestState.snapshot, input.executionCoverageComplete) && !semanticAttempt) return latestState.snapshot!;
+    if (!needsFullHistory(latestState.state) && latestState.state?.inputHash === fingerprint.inputHash && managerCoverageMatchesSnapshot(latestState.snapshot, input.executionCoverageComplete) && !semanticAttempt) return latestState.snapshot!;
     if (semanticAttempt) semanticReview = await finishManagerSemanticReview(tx as unknown as Db, vaId, semanticAttempt.runtime, semanticAttempt.success, semanticAttempt.failureKind, semanticAttempt.attempts);
     const [latestPlan] = await tx.select().from(dailyPlans).where(and(eq(dailyPlans.vaId, vaId), eq(dailyPlans.dateKey, dateKey))).for("update");
     if (managerPlanVersion(latestPlan?.scheduleJson) !== scope.fingerprintScope.planVersion) throw new Error("Source context changed during assessment. A fresh cycle is required.");
@@ -540,8 +686,7 @@ async function executeManager(vaId: number, trigger: string, lease?: ManagerQueu
     const completedSamples = input.timeSamples.filter(s => s.completed && !s.interrupted && s.startedAt);
     // No timing observations means there is nothing to calibrate. Avoid loading
     // hundreds of megabytes of historical source dossiers on every idle poll.
-    const history = completedSamples.length ? await tx.select({ snapshotJson: aptlssManagerRuns.snapshotJson, createdAt: aptlssManagerRuns.createdAt }).from(aptlssManagerRuns).where(eq(aptlssManagerRuns.vaId, vaId)).orderBy(desc(aptlssManagerRuns.id)).limit(100) : [];
-    const predictions = history.map(h => ({ createdAt: h.createdAt, actions: json<ManagerSnapshot | null>(h.snapshotJson, null)?.actions ?? [] }));
+    const predictions = completedSamples.length ? await loadManagerTimingHistory(tx as unknown as Db, vaId) : [];
     const errors: number[] = []; let withinRange = 0;
     for (const sample of completedSamples) {
       const prior = predictions.filter(h => h.createdAt < new Date(sample.startedAt!)).flatMap(h => h.actions).find(a => a.cardId === sample.cardId && a.stepIds.includes(sample.stepId!));
@@ -553,15 +698,31 @@ async function executeManager(vaId: number, trigger: string, lease?: ManagerQueu
     if (Buffer.byteLength(JSON.stringify(snapshot)) > 4 * 1024 * 1024) throw new Error("The manager context exceeds safe storage capacity. Narrow assigned work.");
     if (lease) await assertManagerQueueLease(tx, lease);
     const appliedPlan = snapshot.applied ? reconciled?.plan : undefined;
-    const [created] = await tx.insert(aptlssManagerRuns).values({ vaId, inputHash: fingerprint.inputHash, trigger, snapshotJson: JSON.stringify(snapshot), createdAt: now, mode: policy.mode, proposalHash: snapshot.proposalHash, previousPlanJson: snapshot.applied ? latestPlan?.scheduleJson ?? null : null, appliedPlanHash: appliedPlan ? managerPlanVersion(JSON.stringify(appliedPlan)) : null }).$returningId();
-    snapshot.runId = created.id;
+    const { minute: _historyMinute, ...historyScope } = scope.fingerprintScope;
+    const historyScopeHash = managerHistoryHash({ version: 1, scope: historyScope });
+    const patch = process.env.APTLSS_MANAGER_COMPACT_HISTORY !== "false" && latestState.snapshot && latestState.run
+      && latestState.state?.inputHash !== null
+      && latestState.state?.sourceHash === fingerprint.sourceHash
+      && latestState.state?.historyScopeHash === historyScopeHash
+      ? managerHistoryPatch(latestState.snapshot, snapshot) : null;
+    let currentCheckId: number | null = null;
+    if (patch && latestState.run) {
+      snapshot.runId = latestState.run.id;
+      const [check] = await tx.insert(aptlssManagerChecks).values({ vaId, runId: snapshot.runId,
+        ...fingerprint, baseSnapshotHash: managerHistoryHash(JSON.parse(latestState.run.snapshotJson)),
+        snapshotHash: managerHistoryHash(snapshot), snapshotPatchJson: patch, createdAt: now }).$returningId();
+      currentCheckId = check.id;
+    } else {
+      const [created] = await tx.insert(aptlssManagerRuns).values({ vaId, inputHash: fingerprint.inputHash, trigger, snapshotJson: JSON.stringify(snapshot), createdAt: now, mode: policy.mode, proposalHash: snapshot.proposalHash, previousPlanJson: snapshot.applied ? latestPlan?.scheduleJson ?? null : null, appliedPlanHash: appliedPlan ? managerPlanVersion(JSON.stringify(appliedPlan)) : null }).$returningId();
+      snapshot.runId = created.id;
+    }
     if (snapshot.applied && appliedPlan) {
       assertManagerPlanMutationAllowed(vaId);
       const planToApply = appliedPlan!;
       const values = { vaId, dateKey, scheduleJson: JSON.stringify(planToApply), dailySummary: reconciled!.changes.join(" ").slice(0, 4000), topPriority: planToApply.blocks[0]?.cardName ?? null, totalScheduledMinutes: planToApply.planHealth.scheduledMinutes, robertItemsCount: planToApply.robertItems.length, autoGenerated: true, generatedAt: now };
       await tx.insert(dailyPlans).values(values).onDuplicateKeyUpdate({ set: values });
     }
-    await tx.insert(aptlssManagerState).values({ vaId, ...policy, ...fingerprint, checkedAt: now, lastSuccessfulAt: now, lastError: null }).onDuplicateKeyUpdate({ set: { ...fingerprint, mode: policy.mode, checkedAt: now, lastSuccessfulAt: now, lastError: null } });
+    await tx.insert(aptlssManagerState).values({ vaId, ...policy, ...fingerprint, currentCheckId, historyScopeHash, checkedAt: now, lastSuccessfulAt: now, lastError: null }).onDuplicateKeyUpdate({ set: { ...fingerprint, currentCheckId, historyScopeHash, mode: policy.mode, checkedAt: now, lastSuccessfulAt: now, lastError: null } });
     return snapshot;
   }, { isolationLevel: "serializable" });
   const [user] = await db.select({ openId: users.openId }).from(users).where(eq(users.id,vaId)).limit(1);
@@ -573,8 +734,10 @@ export function runManager(vaId: number, trigger = "manual", lease?: ManagerQueu
   try { assertManagerPilotWorker(vaId); } catch (error) { return Promise.reject(error); }
   const pending = inflight.get(vaId);
   if (pending) return lease || trigger === "worker_update" ? pending.catch(() => null).then(() => runManager(vaId, trigger, lease)) : pending;
-  const task = executeManager(vaId, trigger, lease).catch(error => {
-    if (error instanceof Error && error.message.startsWith("Source context changed")) return executeManager(vaId, trigger, lease);
+  let failureStateVersion: ManagerFailureStateVersion | undefined;
+  const captureAssessmentStart = (state: typeof aptlssManagerState.$inferSelect | undefined) => { failureStateVersion = state ? hash(state) : null; };
+  const task = executeManager(vaId, trigger, lease, captureAssessmentStart).catch(error => {
+    if (error instanceof Error && error.message.startsWith("Source context changed")) return executeManager(vaId, trigger, lease, captureAssessmentStart);
     throw error;
   }).catch(async error => {
     // A leased failure belongs to the durable queue; a stale owner must not
@@ -582,7 +745,7 @@ export function runManager(vaId: number, trigger = "manual", lease?: ManagerQueu
     if (lease || error instanceof ManagerQueueLeaseLostError || error instanceof ManagerExecutionPausedError) throw error;
     const message = error instanceof Error && /Source context changed|safe storage capacity/.test(error.message) ? error.message : "Project manager assessment failed. Check database migrations and integration health; the previous plan remains available.";
     const db = await getDb();
-    if (db) await db.insert(aptlssManagerState).values({ vaId, lastError: message, checkedAt: new Date() }).onDuplicateKeyUpdate({ set: { lastError: message, checkedAt: new Date() } }).catch(() => undefined);
+    if (db && failureStateVersion !== undefined) await persistManagerFailureIfCurrent(db, vaId, failureStateVersion, message).catch(() => undefined);
     throw new Error(message);
   }).finally(() => inflight.delete(vaId));
   inflight.set(vaId, task);
@@ -592,6 +755,15 @@ export function runManager(vaId: number, trigger = "manual", lease?: ManagerQueu
 let interval: ReturnType<typeof setInterval> | null = null;
 let runner: ReturnType<typeof createManagerQueueRunner> | null = null;
 let starting: Promise<ReturnType<typeof createManagerQueueRunner>> | null = null;
+let initializationFailed = false;
+export function getManagerSchedulerStatus(): ManagerSchedulerStatus {
+  const scope = "current_process" as const;
+  if (!interval) return { scope, state: "stopped" };
+  if (!runner) return { scope, state: initializationFailed ? "unavailable" : "checking" };
+  const status = runner.getStatus();
+  if (!status.started) return { scope, state: "checking" };
+  return { scope, state: status.healthy ? "responding" : status.failed || (status.observed && !status.busy) ? "unavailable" : "checking" };
+}
 async function managerQueueRunner() {
   if (runner) return runner;
   if (starting) return starting;
@@ -608,7 +780,8 @@ export async function tickManagerScheduler() {
 }
 export function startManagerScheduler() {
   if (interval || !managerPilotEnabled() || process.env.APTLSS_MANAGER_SCHEDULER === "false") return;
-  const start = () => { void managerQueueRunner().then(current => { if (interval) current.start(); }).catch(() => console.warn("[APTLSS manager] Queue unavailable; initialization will retry.")); };
+  initializationFailed = false;
+  const start = () => { void managerQueueRunner().then(current => { initializationFailed = false; if (interval) current.start(); }).catch(() => { initializationFailed = true; console.warn("[APTLSS manager] Queue unavailable; initialization will retry."); }); };
   interval = setInterval(start, 30_000);
   interval.unref();
   start();

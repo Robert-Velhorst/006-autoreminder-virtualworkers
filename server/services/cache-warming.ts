@@ -38,9 +38,10 @@ export function warmUpCache(): Promise<CacheWarmingStats> {
 
   const operation = runCacheWarmUp();
   warmUpInFlight = operation;
-  void operation.finally(() => {
+  const clearInFlight = () => {
     if (warmUpInFlight === operation) warmUpInFlight = null;
-  });
+  };
+  void operation.then(clearInFlight, clearInFlight);
   return operation;
 }
 

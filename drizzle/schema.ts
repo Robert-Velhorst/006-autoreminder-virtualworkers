@@ -2635,6 +2635,8 @@ export const aptlssManagerState = mysqlTable("aptlss_manager_state", {
   checkedAt: timestamp("checkedAt"),
   inputHash: varchar("inputHash", { length: 64 }),
   sourceHash: varchar("sourceHash", { length: 64 }),
+  currentCheckId: int("currentCheckId"),
+  historyScopeHash: varchar("historyScopeHash", { length: 64 }),
   lastError: varchar("lastError", { length: 512 }),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
@@ -2676,6 +2678,22 @@ export const aptlssManagerRuns = mysqlTable("aptlss_manager_runs", {
   index("aptlss_manager_runs_worker_created_idx").on(table.vaId, table.createdAt, table.id),
   index("aptlss_manager_runs_proposal_idx").on(table.vaId, table.proposalHash, table.createdAt, table.id),
   index("aptlss_manager_runs_review_idx").on(table.vaId, table.reviewDigest, table.proposalHash, table.mode, table.createdAt, table.id, table.reviewUrgent),
+]);
+
+export const aptlssManagerChecks = mysqlTable("aptlss_manager_checks", {
+  id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId").notNull(),
+  runId: int("runId").notNull(),
+  inputHash: varchar("inputHash", { length: 64 }).notNull(),
+  sourceHash: varchar("sourceHash", { length: 64 }).notNull(),
+  baseSnapshotHash: varchar("baseSnapshotHash", { length: 64 }).notNull(),
+  snapshotHash: varchar("snapshotHash", { length: 64 }).notNull(),
+  snapshotPatchJson: longtext("snapshotPatchJson").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("aptlss_manager_checks_worker_idx").on(table.vaId, table.id),
+  index("aptlss_manager_checks_run_idx").on(table.runId, table.id),
+  foreignKey({ columns: [table.runId], foreignColumns: [aptlssManagerRuns.id], name: "manager_check_run_fk" }),
 ]);
 
 export const aptlssManagerReviews = mysqlTable("aptlss_manager_reviews", {

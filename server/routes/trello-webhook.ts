@@ -59,6 +59,39 @@ export function verifyTrelloWebhook(input: {
   return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
 }
 
+function unconfirmedTrelloSend(res: Response, item: 'comment' | 'check-in') {
+  return res.status(409).json({
+    success: false,
+    deliveryStatus: 'unknown',
+    retryAllowed: false,
+    error: `Trello did not confirm whether the ${item} was posted; it may already be on the card.`,
+    nextStep: 'Open the Trello card and verify whether the comment is already there. Do not send it again until you have checked.',
+  });
+}
+
+async function persistSendHistory(record: Parameters<typeof storeConversation>[0], item: 'comment' | 'check-in') {
+  try {
+    return (await storeConversation(record)) != null;
+  } catch (error) {
+    console.error(`[TrelloWebhook] ${item} was posted but its history could not be saved:`, error);
+    return false;
+  }
+}
+
+function sendConfirmedResponse(res: Response, historySaved: boolean, item: 'comment' | 'check-in') {
+  if (!historySaved) {
+    return res.status(200).json({
+      success: true,
+      posted: true,
+      historySaved: false,
+      retryAllowed: false,
+      warning: `The ${item} was posted to Trello, but the dashboard could not save its history. Do not retry the send; check the Trello card. Dashboard history may be incomplete.`,
+    });
+  }
+
+  return res.json({ success: true, posted: true, historySaved: true });
+}
+
 /**
  * Normalise a raw Trello API webhook object into the same shape as our DB row.
  * Fix #7: the /list endpoint was returning raw Trello objects (idModel, active)
@@ -326,31 +359,94 @@ router.post('/', async (req: any, res: Response) => {
     if (!rawBody || !signature || !verifyTrelloWebhook({ rawBody, signature, callbackUrl: registeredCallback, secret })) {
       return res.status(401).json({ error: 'Invalid Trello webhook signature' });
     }
-    const action = req.body;
-    const actionType: string = action?.type ?? 'unknown';
+    const payload = req.body;
+    const action = payload?.action ?? payload;
+    const actionData = action?.data && typeof action.data === 'object' ? action.data : {};
+    const actionType: string = typeof action?.type === 'string' ? action.type : 'unknown';
+    const actionId = typeof action?.id === 'string' && action.id.trim().length > 0
+      ? action.id.trim()
+      : null;
+    if (!actionId) {
+      return res.status(400).json({ error: 'Trello action ID is required' });
+    }
+    const boardTrelloId = actionData?.board?.id ?? payload?.model?.id ?? null;
+    const registeredModelId = payload?.model?.id ?? actionData?.board?.id ?? null;
+    const sourceDate = typeof action?.date === 'string' ? action.date : null;
 
     console.log('[TrelloWebhook] Received callback:', actionType);
 
     const db = await getDb();
-    if (db) {
-      await db
-        .insert(chatbotConversations)
-        .values({
-          cardTrelloId: action?.data?.card?.id ?? 'unknown',   // Fix #8 — correct column name
-          cardName: action?.data?.card?.name ?? null,
-          boardTrelloId: action?.data?.board?.id ?? null,
-          command: actionType,                                  // Fix #8 — required NOT NULL column
-          commandArgs: JSON.stringify(action?.data ?? {}),
-          authorTrelloId: action?.memberCreator?.id ?? null,
-          authorName: action?.memberCreator?.fullName ?? null,
-          responseStatus: 'pending',                           // Fix #8 — required NOT NULL column
-        })
-        .catch((err: any) =>
-          console.error('[TrelloWebhook] Error storing conversation:', err)
-        );
+    if (!db) {
+      return res.status(503).json({ error: 'Trello webhook storage is unavailable' });
     }
 
-    res.json({ success: true });
+    const conversation = {
+      cardTrelloId: actionData?.card?.id ?? 'unknown',
+      cardName: actionData?.card?.name ?? null,
+      boardTrelloId,
+      command: actionType,
+      commandArgs: JSON.stringify({
+        ...actionData,
+        _trelloWebhook: { actionId, sourceDate },
+      }),
+      authorTrelloId: action?.memberCreator?.id ?? null,
+      authorName: action?.memberCreator?.fullName ?? null,
+      responseStatus: 'pending' as const,
+    };
+
+    if (!registeredModelId) {
+      return res.status(503).json({ error: 'Trello webhook replay protection is unavailable' });
+    }
+
+    const archiveResult = await db.transaction(async (tx: any): Promise<'inserted' | 'duplicate' | 'unregistered'> => {
+        // All model registrations share this short-lived lock. A single Trello
+        // action may be delivered through both board and workspace webhooks,
+        // so locking only the incoming model row leaves a cross-model replay race.
+        const replayLockResult = await tx.execute(sql`
+          SELECT id FROM chatbot_webhooks
+          ORDER BY id
+          LIMIT 1
+          FOR UPDATE
+        `);
+        const replayLockRows = (replayLockResult as any)?.[0] ?? [];
+        if (!replayLockRows.length) {
+          return 'unregistered';
+        }
+
+        // Keep the matching registration locked until commit as well, so a
+        // concurrent removal cannot invalidate registration during archiving.
+        const registeredWebhookResult = await tx.execute(sql`
+          SELECT id FROM chatbot_webhooks
+          WHERE modelId = ${registeredModelId}
+          ORDER BY id
+          LIMIT 1
+          FOR UPDATE
+        `);
+        const registeredWebhookRows = (registeredWebhookResult as any)?.[0] ?? [];
+        if (!registeredWebhookRows.length) {
+          return 'unregistered';
+        }
+
+        const existingResult = await tx.execute(sql`
+          SELECT id FROM chatbot_conversations
+          WHERE CASE
+            WHEN JSON_VALID(commandArgs)
+              THEN JSON_UNQUOTE(JSON_EXTRACT(commandArgs, '$._trelloWebhook.actionId'))
+            ELSE NULL
+          END = ${actionId}
+          LIMIT 1
+        `);
+        const existingRows = (existingResult as any)?.[0] ?? [];
+        if (existingRows.length) return 'duplicate';
+
+        await tx.insert(chatbotConversations).values(conversation);
+        return 'inserted';
+    });
+
+    if (archiveResult === 'unregistered') {
+      return res.status(503).json({ error: 'Trello webhook replay protection is unavailable' });
+    }
+    return res.json(archiveResult === 'duplicate' ? { success: true, duplicate: true } : { success: true });
   } catch (error: unknown) {
     console.error('[TrelloWebhook] Error processing callback:', error);
     res.status(500).json({ error: 'Trello webhook processing failed' });
@@ -669,13 +765,19 @@ router.post('/send', requireAdmin, async (req: any, res: Response) => {
       return res.status(409).json({ error: TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE });
     }
 
-    const posted = await postTrelloComment(cardId, message);
+    let posted: boolean;
+    try {
+      posted = await postTrelloComment(cardId, message);
+    } catch (error) {
+      console.error('[TrelloWebhook] Manual comment outcome is unconfirmed:', error);
+      return unconfirmedTrelloSend(res, 'comment');
+    }
     if (!posted) {
-      return res.status(500).json({ error: 'Failed to post comment to Trello' });
+      return unconfirmedTrelloSend(res, 'comment');
     }
 
     // Save to chatbot_conversations history
-    await storeConversation({
+    const historySaved = await persistSendHistory({
       cardTrelloId: cardId,
       command: 'manual_message',
       responseText: message,
@@ -683,12 +785,12 @@ router.post('/send', requireAdmin, async (req: any, res: Response) => {
       responseStatus: 'success',
       receivedAt: new Date(),
       respondedAt: new Date(),
-    });
+    }, 'comment');
 
-    res.json({ success: true });
+    return sendConfirmedResponse(res, historySaved, 'comment');
   } catch (error: any) {
     console.error('[TrelloWebhook] Error sending message:', error);
-    res.status(500).json({ error: 'Could not post the Trello message' });
+    return res.status(500).json({ error: 'Could not post the Trello message' });
   }
 });
 
@@ -710,13 +812,19 @@ router.post('/checkin', requireAdmin, async (req: any, res: Response) => {
       return res.status(409).json({ error: TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE });
     }
 
-    const success = await sendScheduledCheckin(cardId);
+    let success: boolean;
+    try {
+      success = await sendScheduledCheckin(cardId);
+    } catch (error) {
+      console.error('[TrelloWebhook] Check-in outcome is unconfirmed:', error);
+      return unconfirmedTrelloSend(res, 'check-in');
+    }
     if (!success) {
-      return res.status(500).json({ error: 'Failed to send checkin comment to Trello' });
+      return unconfirmedTrelloSend(res, 'check-in');
     }
 
     // Save to chatbot_conversations history
-    await storeConversation({
+    const historySaved = await persistSendHistory({
       cardTrelloId: cardId,
       command: 'checkin',
       responseText: 'Check-in request sent',
@@ -724,12 +832,12 @@ router.post('/checkin', requireAdmin, async (req: any, res: Response) => {
       responseStatus: 'success',
       receivedAt: new Date(),
       respondedAt: new Date(),
-    });
+    }, 'check-in');
 
-    res.json({ success: true });
+    return sendConfirmedResponse(res, historySaved, 'check-in');
   } catch (error: any) {
     console.error('[TrelloWebhook] Error triggering checkin:', error);
-    res.status(500).json({ error: 'Could not send the Trello check-in' });
+    return res.status(500).json({ error: 'Could not send the Trello check-in' });
   }
 });
 

@@ -123,6 +123,19 @@ describe("assessManagerContext", () => {
     expect(result.interventions).toEqual([]);
   });
 
+  it("keeps an open founder-decision step non-executable until an outcome is recorded", () => {
+    const result = assessManagerContext(input({
+      cards: [card("a", { steps: [step(1, { requiresDecision: true })] })],
+    }));
+
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]).toMatchObject({
+      kind: "decision",
+      blocked: true,
+      reason: "This step is waiting for the founder's decision. Do not start it until the decision is recorded.",
+    });
+  });
+
   it("keeps work blocked when a completed founder decision was rejected", () => {
     const result = assessManagerContext(input({
       cards: [card("a", { steps: [
@@ -419,6 +432,32 @@ describe("assessManagerContext", () => {
     expect(action.kind).toBe("draft");
     expect(action.draft).toBeTruthy();
     expect(action.completionCriteria).toMatch(/review/i);
+  });
+
+  it("keeps an external action in completion criteria review-gated when the step title is neutral", () => {
+    const action = assessManagerContext(
+      input({
+        cards: [
+          card("a", {
+            steps: [
+              step(1, {
+                title: "Handle the client request",
+                completionCriteria: "Send the reply to the client.",
+              }),
+            ],
+          }),
+        ],
+      })
+    ).actions.find(candidate => candidate.stepIds.includes(1))!;
+
+    expect(action).toMatchObject({
+      kind: "draft",
+      title: "Prepare for review: Handle the client request",
+      blocked: false,
+      completionCriteria:
+        "A worker has reviewed the draft and explicitly sends or submits it.",
+    });
+    expect(action.draft).toContain("not sent");
   });
 
   it("exposes absent and stale evidence without inventing calibrated confidence", () => {

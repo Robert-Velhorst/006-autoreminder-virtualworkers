@@ -566,6 +566,8 @@ export function createManagerQueueRunner(options: {
     fallbackTimer: ReturnType<typeof setInterval> | undefined;
   const lanes = new Set<Promise<void>>();
   let fallback: Promise<number> | null = null;
+  let lastPollAt: number | null = null, lastFallbackAt: number | null = null;
+  let pollFailed = false, fallbackFailed = false;
   const report = () =>
     options.onError?.(
       new Error(
@@ -612,6 +614,8 @@ export function createManagerQueueRunner(options: {
           concurrency,
           leaseMs,
         });
+        lastPollAt = Date.now();
+        pollFailed = false;
         if (!lease) break;
         await perform(lease);
       }
@@ -619,7 +623,7 @@ export function createManagerQueueRunner(options: {
     // A later poll refills free lanes even while another worker is still running.
     while (lanes.size < concurrency) {
       const lane = worker()
-        .catch(report)
+        .catch(() => { pollFailed = true; report(); })
         .finally(() => {
           lanes.delete(lane);
         });
@@ -630,17 +634,33 @@ export function createManagerQueueRunner(options: {
   const pollFallback = (): Promise<number> => {
     if (fallback) return fallback;
     if (stopped) return Promise.resolve(0);
-    fallback = enqueueManagerFallback(options.db).finally(() => {
-      fallback = null;
-    });
+    fallback = enqueueManagerFallback(options.db)
+      .then(count => { lastFallbackAt = Date.now(); fallbackFailed = false; return count; })
+      .catch(error => { fallbackFailed = true; throw error; })
+      .finally(() => { fallback = null; });
     return fallback;
   };
   return {
     drain,
     pollFallback,
+    // Process-local loop evidence, not a promise that every worker assessment succeeded.
+    getStatus(now = Date.now()) {
+      const recent = (at: number | null, maxAge: number) => at !== null && now >= at && now - at <= maxAge;
+      return {
+        started: !!interval && !stopped,
+        healthy: !!interval && !stopped && !pollFailed && !fallbackFailed
+          && recent(lastPollAt, Math.max(10_000, pollMs * 3))
+          && recent(lastFallbackAt, fallbackMs * 2),
+        failed: pollFailed || fallbackFailed,
+        observed: lastPollAt !== null && lastFallbackAt !== null,
+        busy: lanes.size > 0 || fallback !== null,
+      };
+    },
     start() {
       if (interval) return;
       stopped = false;
+      lastPollAt = lastFallbackAt = null;
+      pollFailed = fallbackFailed = false;
       interval = setInterval(() => {
         void drain();
       }, pollMs);

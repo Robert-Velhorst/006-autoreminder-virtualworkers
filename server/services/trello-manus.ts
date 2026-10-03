@@ -552,16 +552,44 @@ export interface TrelloWebhook {
   firstConsecutiveFailDate: string | null;
 }
 
+export type TrelloWebhookStatus =
+  | { state: "active" | "inactive"; active: boolean; count: number }
+  | { state: "unconfigured" | "unavailable"; active: null; count: null };
+
+async function fetchRegisteredWebhooks(apiKey: string, apiToken: string): Promise<unknown> {
+  const response = await axios.get(
+    `${TRELLO_API_BASE}/tokens/${encodeURIComponent(apiToken)}/webhooks`,
+    {
+      timeout: TRELLO_REQUEST_TIMEOUT_MS,
+      params: { key: apiKey, token: apiToken },
+    }
+  );
+  return response.data;
+}
+
+// Health reads must distinguish an empty provider result from a failed lookup.
+export async function getRegisteredWebhookStatus(apiKey?: string, apiToken?: string): Promise<TrelloWebhookStatus> {
+  if (!apiKey?.trim() || !apiToken?.trim()) {
+    return { state: "unconfigured", active: null, count: null };
+  }
+  try {
+    const webhooks = await fetchRegisteredWebhooks(apiKey, apiToken);
+    if (!Array.isArray(webhooks) || webhooks.some(webhook =>
+      !webhook || typeof webhook !== "object" || typeof webhook.active !== "boolean"
+    )) {
+      throw new Error("Invalid Trello webhook response");
+    }
+    const active = webhooks.some(webhook => webhook.active === true);
+    return { state: active ? "active" : "inactive", active, count: webhooks.length };
+  } catch (error) {
+    logTrelloFailure("Registered webhook status unavailable", error);
+    return { state: "unavailable", active: null, count: null };
+  }
+}
+
 export async function getRegisteredWebhooks(apiKey: string, apiToken: string): Promise<TrelloWebhook[]> {
   try {
-    const response = await axios.get(
-      `${TRELLO_API_BASE}/tokens/${encodeURIComponent(apiToken)}/webhooks`,
-      {
-        timeout: TRELLO_REQUEST_TIMEOUT_MS,
-        params: { key: apiKey, token: apiToken },
-      }
-    );
-    return response.data as TrelloWebhook[];
+    return await fetchRegisteredWebhooks(apiKey, apiToken) as TrelloWebhook[];
   } catch (error) {
     logTrelloFailure("Failed to fetch registered webhooks", error);
     return [];

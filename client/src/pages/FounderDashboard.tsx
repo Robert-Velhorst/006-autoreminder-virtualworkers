@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { z } from 'zod';
 import { Link } from 'wouter';
 import { 
   ArrowLeft, Plus, Users, Clock, CheckCircle, AlertTriangle, Loader2, Copy,
@@ -73,23 +74,23 @@ interface WorkloadItem {
 }
 
 interface TaskAssignment {
-  id: number;
+  id: number | string;
   taskId: string;
   taskTitle: string;
   cardName: string;
   cardId: string;
   workerId: number | null;
-  workerName: string | null;
-  priority: 'critical' | 'urgent' | 'high' | 'normal';
+  workerName?: string | null;
+  priority: 'drop_everything' | 'critical' | 'urgent' | 'high' | 'normal';
   isPriorityOverride: boolean;
-  status: 'assigned' | 'in_progress' | 'completed' | 'blocked';
+  status: 'unassigned' | 'assigned' | 'in_progress' | 'completed' | 'blocked';
   estimatedMinutes: number;
-  scheduledStart?: string;
-  scheduledEnd?: string;
+  scheduledStart?: string | null;
+  scheduledEnd?: string | null;
   blockedBy: string[];
   blocks: string[];
-  clientProject?: string;
-  clientName?: string;
+  clientProject?: string | null;
+  clientName?: string | null;
   clientPriority?: 'standard' | 'priority' | 'vip';
   labels: string[];
   description?: string | null;
@@ -97,6 +98,39 @@ interface TaskAssignment {
   deliverable?: string | null;
   checklist?: Array<{ step: string; timeMinutes: number; aptlssType: string }> | null;
 }
+
+const taskAssignmentSchema = z.object({
+  id: z.union([z.number().int(), z.string().min(1)]),
+  taskId: z.string().min(1),
+  taskTitle: z.string(),
+  cardName: z.string(),
+  cardId: z.string().min(1),
+  workerId: z.number().int().nullable(),
+  workerName: z.string().nullish(),
+  priority: z.enum(['drop_everything', 'critical', 'urgent', 'high', 'normal']),
+  isPriorityOverride: z.boolean(),
+  status: z.enum(['unassigned', 'assigned', 'in_progress', 'completed', 'blocked']),
+  estimatedMinutes: z.number().nonnegative(),
+  scheduledStart: z.string().nullish(),
+  scheduledEnd: z.string().nullish(),
+  blockedBy: z.array(z.string()),
+  blocks: z.array(z.string()).default([]),
+  clientProject: z.string().nullish(),
+  clientName: z.string().nullish(),
+  clientPriority: z.enum(['standard', 'priority', 'vip']).optional(),
+  labels: z.array(z.string()),
+  description: z.string().nullish(),
+  goal: z.string().nullish(),
+  deliverable: z.string().nullish(),
+  checklist: z.array(z.object({
+    step: z.string(), timeMinutes: z.number().nonnegative(), aptlssType: z.string(),
+  }).passthrough()).nullish(),
+}).passthrough();
+const assignmentsPayloadSchema = z.union([
+  z.array(taskAssignmentSchema),
+  z.object({ assignments: z.array(taskAssignmentSchema) }),
+]);
+const assignmentsUnavailableMessage = 'Trello assignments are unavailable. Retry after checking the Trello connection.';
 
 
 interface CommunicationEntry {
@@ -130,6 +164,10 @@ export default function FounderDashboard() {
     || item.escalation === 'task_overdue' || item.escalation === 'task_due_soon') ?? [];
   const [workload, setWorkload] = useState<WorkloadItem[]>([]);
   const [assignments, setAssignments] = useState<TaskAssignment[]>([]);
+  const [assignmentsLoading, setAssignmentsLoading] = useState(true);
+  const [assignmentsError, setAssignmentsError] = useState<string | null>(null);
+  const assignmentsRequest = useRef({ pending: false, available: false, version: 0, refreshAfterPending: false });
+  const assignmentsAvailable = !assignmentsLoading && !assignmentsError;
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
 
   const toggleTaskExpanded = (taskId: string) => {
@@ -237,15 +275,36 @@ export default function FounderDashboard() {
     }
   };
 
-  const fetchAssignments = async () => {
+  const fetchAssignments = async (revalidateAfterPending = false): Promise<void> => {
+    if (assignmentsRequest.current.pending) {
+      if (revalidateAfterPending) assignmentsRequest.current.refreshAfterPending = true;
+      return;
+    }
+    assignmentsRequest.current.pending = true;
+    assignmentsRequest.current.available = false;
+    assignmentsRequest.current.version++;
+    setAssignmentsLoading(true);
     try {
       const res = await fetch('/api/va/assignments', { credentials: 'include' });
-      if (res.ok) {
-        const data = await res.json();
-        setAssignments(Array.isArray(data) ? data : data.assignments || []);
+      if (!res.ok) {
+        await res.arrayBuffer();
+        throw new Error('Assignments request failed');
       }
-    } catch (error) {
-      console.error('Error fetching assignments:', error);
+      const payload = assignmentsPayloadSchema.parse(await res.json());
+      setAssignments(Array.isArray(payload) ? payload : payload.assignments);
+      setAssignmentsError(null);
+      assignmentsRequest.current.available = true;
+    } catch {
+      setAssignments([]);
+      setExpandedTasks(new Set());
+      setAssignmentsError(assignmentsUnavailableMessage);
+    } finally {
+      assignmentsRequest.current.pending = false;
+      setAssignmentsLoading(false);
+      if (assignmentsRequest.current.refreshAfterPending) {
+        assignmentsRequest.current.refreshAfterPending = false;
+        await fetchAssignments();
+      }
     }
   };
 
@@ -364,6 +423,8 @@ export default function FounderDashboard() {
   };
 
   const handleAssignTask = async (taskId: string, workerId: number) => {
+    if (!assignmentsRequest.current.available) return;
+    const version = assignmentsRequest.current.version;
     try {
       const res = await fetch(`/api/va/assignments`, {
         method: 'POST',
@@ -373,8 +434,14 @@ export default function FounderDashboard() {
       });
 
       if (res.ok) {
+        // A refresh invalidates callbacks and mutations tied to the previous snapshot.
+        if (!assignmentsRequest.current.available || version !== assignmentsRequest.current.version) {
+          toast.info('Task assignment saved. Rechecking assignments.');
+          await fetchAssignments(true);
+          return;
+        }
         const worker = workload.find(w => w.worker.id === workerId)?.worker;
-        setAssignments(assignments.map(a => 
+        setAssignments(current => current.map(a =>
           a.taskId === taskId 
             ? { ...a, workerId, workerName: worker?.name || null, status: 'assigned' }
             : a
@@ -390,6 +457,8 @@ export default function FounderDashboard() {
   };
 
   const handlePriorityOverride = async (taskId: string, priority: string) => {
+    if (!assignmentsRequest.current.available) return;
+    const version = assignmentsRequest.current.version;
     try {
       const res = await fetch(`/api/va/priority-override`, {
         method: 'POST',
@@ -399,7 +468,12 @@ export default function FounderDashboard() {
       });
 
       if (res.ok) {
-        setAssignments(assignments.map(a => 
+        if (!assignmentsRequest.current.available || version !== assignmentsRequest.current.version) {
+          toast.info('Priority saved. Rechecking assignments.');
+          await fetchAssignments(true);
+          return;
+        }
+        setAssignments(current => current.map(a =>
           a.taskId === taskId 
             ? { ...a, priority: priority as any, isPriorityOverride: true }
             : a
@@ -575,6 +649,7 @@ export default function FounderDashboard() {
 
   const getPriorityColor = (priority: string) => {
     switch (priority) {
+      case 'drop_everything':
       case 'critical': return 'bg-red-500 text-white';
       case 'urgent': return 'bg-orange-500 text-white';
       case 'high': return 'bg-yellow-500 text-black';
@@ -590,8 +665,12 @@ export default function FounderDashboard() {
         return <Badge className="bg-blue-100 text-blue-700"><Timer className="h-3 w-3 mr-1" />In Progress</Badge>;
       case 'blocked':
         return <Badge className="bg-red-100 text-red-700"><AlertCircle className="h-3 w-3 mr-1" />Blocked</Badge>;
-      default:
+      case 'unassigned':
+        return <Badge variant="outline">Unassigned</Badge>;
+      case 'assigned':
         return <Badge className="bg-gray-100 text-gray-700"><Clock className="h-3 w-3 mr-1" />Assigned</Badge>;
+      default:
+        return <Badge variant="outline">Status unavailable</Badge>;
     }
   };
 
@@ -609,6 +688,22 @@ export default function FounderDashboard() {
     completed: acc.completed + item.statusCounts.completed,
     blocked: acc.blocked + item.statusCounts.blocked,
   }), { totalTasks: 0, inProgress: 0, completed: 0, blocked: 0 });
+
+  const assignmentsUnavailableNotice = (
+    <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/30 p-4">
+      <div className="flex items-start gap-2">
+        <AlertTriangle aria-hidden="true" className="h-5 w-5 shrink-0 text-destructive" />
+        <div>
+          <h3 className="font-medium">Assignments unavailable</h3>
+          <p className="text-sm text-muted-foreground">{assignmentsError}</p>
+        </div>
+      </div>
+      <Button variant="outline" size="sm" onClick={() => void fetchAssignments()} disabled={assignmentsLoading}>
+        <RefreshCw aria-hidden="true" className={`h-4 w-4 mr-2 ${assignmentsLoading ? 'animate-spin' : ''}`} />
+        {assignmentsLoading ? 'Retrying...' : 'Retry assignments'}
+      </Button>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-background">
@@ -630,7 +725,7 @@ export default function FounderDashboard() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="outline" size="sm" onClick={fetchAllData}>
+            <Button variant="outline" size="sm" onClick={fetchAllData} disabled={loading || assignmentsLoading}>
               <RefreshCw className="h-4 w-4 mr-2" />
               Refresh
             </Button>
@@ -1245,7 +1340,7 @@ export default function FounderDashboard() {
 
             {/* Task List */}
             <div className="space-y-3">
-              {loading ? (
+              {assignmentsError ? assignmentsUnavailableNotice : assignmentsLoading ? (
                 Array(5).fill(0).map((_, i) => (
                   <Skeleton key={i} className="h-24 w-full" />
                 ))
@@ -1281,7 +1376,7 @@ export default function FounderDashboard() {
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-2 mb-1 flex-wrap cursor-pointer" onClick={() => toggleTaskExpanded(task.taskId)}>
                                 <Badge className={getPriorityColor(task.priority)}>
-                                  {task.priority.toUpperCase()}
+                                  {task.priority.replaceAll('_', ' ').toUpperCase()}
                                 </Badge>
                                 {task.isPriorityOverride && (
                                   <Badge variant="outline" className="text-xs">
@@ -1353,6 +1448,7 @@ export default function FounderDashboard() {
                           <div className="flex flex-col items-end gap-2 flex-shrink-0">
                             {/* VA Assignment */}
                             <Select
+                              disabled={!assignmentsAvailable}
                               value={task.workerId?.toString() || 'unassigned'}
                               onValueChange={(v) => v !== 'unassigned' && handleAssignTask(task.taskId, parseInt(v))}
                             >
@@ -1375,7 +1471,7 @@ export default function FounderDashboard() {
                             {/* Priority Override */}
                             <DropdownMenu>
                               <DropdownMenuTrigger asChild>
-                                <Button variant="outline" size="sm">
+                                <Button variant="outline" size="sm" disabled={!assignmentsAvailable}>
                                   <Flag className="h-4 w-4 mr-2" />
                                   Priority
                                 </Button>
@@ -1406,6 +1502,7 @@ export default function FounderDashboard() {
                             <Button
                               variant="ghost"
                               size="sm"
+                              disabled={!assignmentsAvailable}
                               onClick={() => window.open(`https://trello.com/c/${task.cardId}`, '_blank')}
                             >
                               <ExternalLink className="h-4 w-4 mr-2" />
@@ -1509,7 +1606,12 @@ export default function FounderDashboard() {
 
           {/* Dependencies Tab */}
           <TabsContent value="dependencies" className="space-y-6">
-            <DependencyGraph
+            {assignmentsError ? assignmentsUnavailableNotice : assignmentsLoading ? (
+              <div role="status" className="space-y-3">
+                <span className="sr-only">Loading assignments...</span>
+                <Skeleton className="h-64 w-full" />
+              </div>
+            ) : <DependencyGraph
               tasks={assignments.map(a => ({
                 id: a.id.toString(),
                 title: a.taskTitle,
@@ -1519,7 +1621,7 @@ export default function FounderDashboard() {
                 blocks: a.blocks || [],
               }))}
               onRefresh={fetchAssignments}
-            />
+            />}
           </TabsContent>
 
           {/* Communications Tab */}

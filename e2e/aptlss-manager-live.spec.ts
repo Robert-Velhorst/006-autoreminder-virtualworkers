@@ -1,5 +1,6 @@
 import { expect, test, type ConsoleMessage, type Locator, type Page, type TestInfo } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
+import { isDisabledProviderResponse, UNLINKED_TRELLO_MESSAGE, UNLINKED_TRELLO_PATH } from "./disabled-provider-response.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import {
@@ -12,11 +13,12 @@ import superjson from "superjson";
 import type { ManagerSnapshot } from "../shared/aptlssManager";
 import { dateKeyInTimeZone } from "../shared/workerTime";
 
-// LIVE acceptance: real login, persisted evidence and real business APIs.
-// No routes are intercepted; providers must be disabled by the test server.
+// Isolated application acceptance: real login, persisted evidence and business APIs.
+// No routes are intercepted. Providers are disabled; this is not live-provider proof.
 const PASSWORD = "Aptlss-browser-fixture-only-2026!";
 type MutationState = { pending: Set<Promise<void>>; uncertain: boolean };
 const mutationsByPage = new WeakMap<Page, MutationState>();
+const controlledRealtimeOutages = new WeakSet<Page>();
 
 async function bounded<T>(operation: Promise<T>, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -100,6 +102,7 @@ const errorsByPage = new WeakMap<
     providerChecks: Promise<void>[];
     verifiedProviderUrls: Set<string>;
     resourceErrors: { text: string; url: string }[];
+    unlinkedQueryErrors: string[];
   }
 >();
 
@@ -124,30 +127,40 @@ function isolatedDatabaseUrl() {
 
 async function openLogin(page: Page) {
   const startupErrors: string[] = [];
+  const failedRequests: string[] = [];
   const onPageError = (error: Error) => startupErrors.push(error.message);
+  const onRequestFailed = (request: Request) => {
+    if (/\/api\//.test(new URL(request.url()).pathname))
+      failedRequests.push(`${request.method()} ${request.url()}: ${request.failure()?.errorText ?? "unknown failure"}`);
+  };
   const onConsole = (message: ConsoleMessage) => {
     if (message.type() === "error") startupErrors.push(message.text());
   };
   page.on("pageerror", onPageError);
   page.on("console", onConsole);
+  page.on("requestfailed", onRequestFailed);
   let documentStatus: number | undefined;
   let contentSecurityPolicy: string | null = null;
   try {
-    const document = await page.goto("/");
-    documentStatus = document?.status();
-    contentSecurityPolicy = await document?.headerValue("content-security-policy") ?? null;
-    expect(document?.ok(), "Login document must load successfully").toBe(true);
+    const loginForm = page.getByLabel("Username", { exact: true });
+    if (!(await loginForm.isVisible().catch(() => false))) {
+      const document = await page.goto("/");
+      documentStatus = document?.status();
+      contentSecurityPolicy = await document?.headerValue("content-security-policy") ?? null;
+      expect(document?.ok(), "Login document must load successfully").toBe(true);
+    }
     await expect(page).toHaveTitle("VA Task Dashboard");
-    await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
+    await expect(loginForm).toBeVisible();
     await expect(page.getByLabel("Password", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Sign in", exact: true })).toBeEnabled();
     await expect(page.locator("vite-error-overlay")).toHaveCount(0);
     expect(startupErrors, "Login must render without browser errors").toEqual([]);
   } catch (cause) {
-    throw new Error(`Login startup failed: ${JSON.stringify({ url: page.url(), documentStatus, contentSecurityPolicy, startupErrors })}`, { cause });
+    throw new Error(`Login startup failed: ${JSON.stringify({ url: page.url(), documentStatus, contentSecurityPolicy, startupErrors, failedRequests })}`, { cause });
   } finally {
     page.off("pageerror", onPageError);
     page.off("console", onConsole);
+    page.off("requestfailed", onRequestFailed);
   }
 }
 
@@ -155,12 +168,42 @@ async function login(page: Page, username: string, role: "worker" | "admin") {
   await openLogin(page);
   await page.getByLabel("Username", { exact: true }).fill(username);
   await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
+  const signIn = page.getByRole("button", { name: "Sign in", exact: true });
+  const hitTest = await signIn.evaluate(button => {
+    const rect = button.getBoundingClientRect();
+    const targets = document.elementsFromPoint(
+      rect.left + rect.width / 2,
+      rect.top + rect.height / 2
+    );
+    return {
+      url: location.href,
+      body: {
+        inlinePointerEvents: document.body.style.pointerEvents,
+        computedPointerEvents: getComputedStyle(document.body).pointerEvents,
+        inert: document.body.inert,
+        ariaHidden: document.body.getAttribute("aria-hidden"),
+      },
+      htmlPointerEvents: getComputedStyle(document.documentElement).pointerEvents,
+      receivesPointer: targets.some(target => button.contains(target)),
+      targets: targets.slice(0, 6).map(target => ({
+        tag: target.tagName,
+        id: target.id,
+        className: typeof target.className === "string" ? target.className : "",
+        role: target.getAttribute("role"),
+        pointerEvents: getComputedStyle(target).pointerEvents,
+      })),
+      openDialogs: Array.from(document.querySelectorAll("[role=dialog], [data-slot=sheet-overlay]"))
+        .map(target => ({ tag: target.tagName, className: (target as HTMLElement).className })),
+    };
+  });
+  if (!hitTest.receivesPointer)
+    throw new Error(`Sign-in is covered by another page layer: ${JSON.stringify(hitTest)}`);
   const response = page.waitForResponse(
     response =>
       response.url().endsWith("/api/auth/login") &&
       response.request().method() === "POST"
   );
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await signIn.click();
   const loginResponse = await response;
   expect(loginResponse.ok()).toBeTruthy();
   expect(await loginResponse.json()).toMatchObject({ success: true });
@@ -234,22 +277,29 @@ test.beforeEach(async ({ page }) => {
     providerChecks: [] as Promise<void>[],
     verifiedProviderUrls: new Set<string>(),
     resourceErrors: [] as { text: string; url: string }[],
+    unlinkedQueryErrors: [] as string[],
   };
   errorsByPage.set(page, errors);
+  page.on("request", request => {
+    const resource = new URL(request.url());
+    const dashboard = new URL(test.info().project.use.baseURL!);
+    if (/^https?:$/.test(resource.protocol) && resource.origin !== dashboard.origin)
+      errors.unexpected.push(`Unexpected external browser resource: ${resource.origin}${resource.pathname}`);
+  });
   page.on("pageerror", error => errors.unexpected.push(error.message));
   page.on("response", response => {
     if (
-      !disabledProviderPaths.has(new URL(response.url()).pathname) ||
-      response.status() !== 500
+      !(disabledProviderPaths.has(new URL(response.url()).pathname) || new URL(response.url()).pathname === UNLINKED_TRELLO_PATH) ||
+      ![412, 500, 503].includes(response.status())
     )
       return;
     errors.providerChecks.push(
       (async () => {
         try {
           const body = await response.json();
-          if (body.error === "Trello credentials not configured") {
+          if (isDisabledProviderResponse(new URL(response.url()).pathname, response.status(), body)) {
             errors.verifiedProviderUrls.add(response.url());
-            errors.expected.push(`${response.url()}: ${body.error}`);
+            errors.expected.push(`${response.url()}: verified fixture integration precondition`);
           } else
             errors.unexpected.push(
               `${response.url()} failed: ${JSON.stringify(body)}`
@@ -264,14 +314,14 @@ test.beforeEach(async ({ page }) => {
   });
   page.on("console", message => {
     if (message.type() !== "error") return;
+    if (controlledRealtimeOutages.has(page) && /^\[WebSocket\] (?:Connection|Reconnection) error: Error: timeout(?:\n|$)/.test(message.text())) {
+      errors.expected.push(message.text());
+      return;
+    }
     if (
-      message
-        .text()
-        .includes(
-          "Failed to load resource: the server responded with a status of 500"
-        ) &&
+      /Failed to load resource: the server responded with a status of (412|500|503)\b/.test(message.text()) &&
       message.location().url &&
-      disabledProviderPaths.has(new URL(message.location().url).pathname)
+      (disabledProviderPaths.has(new URL(message.location().url).pathname) || new URL(message.location().url).pathname === UNLINKED_TRELLO_PATH)
     ) {
       errors.resourceErrors.push({
         text: message.text(),
@@ -279,12 +329,11 @@ test.beforeEach(async ({ page }) => {
       });
       return;
     }
-    // Keep explicitly expected disabled-provider errors in the report.
-    const expected =
-      /Trello (?:API )?credentials not configured|Failed to load resource: the server responded with a status of 412/.test(
-        message.text()
-      );
-    (expected ? errors.expected : errors.unexpected).push(message.text());
+    if (message.text().startsWith(`[API Query Error] TRPCClientError: ${UNLINKED_TRELLO_MESSAGE}\n`)) {
+      errors.unlinkedQueryErrors.push(message.text());
+      return;
+    }
+    errors.unexpected.push(message.text());
   });
 });
 
@@ -301,6 +350,8 @@ test.afterEach(async ({ page }, testInfo) => {
   const errors = errorsByPage.get(page)!;
   await page.waitForLoadState("networkidle");
   await Promise.all(errors.providerChecks);
+  const unlinkedResponseVerified = [...errors.verifiedProviderUrls].some(url => new URL(url).pathname === UNLINKED_TRELLO_PATH);
+  (unlinkedResponseVerified ? errors.expected : errors.unexpected).push(...errors.unlinkedQueryErrors);
   for (const error of errors.resourceErrors) {
     (errors.verifiedProviderUrls.has(error.url)
       ? errors.expected
@@ -553,12 +604,14 @@ for (const scenario of [
         try {
           // Only this fixture's exact source ID and this fixture user's assertions.
           const evidence = await rows(
-            "SELECT id FROM workspace_evidence_items WHERE sourceId = ? OR sourceId LIKE ?",
-            [`${prefix}-source`, `worker-assertion:${workerId}:%`]
+            "SELECT id FROM workspace_evidence_items WHERE sourceId IN (?,?) OR sourceId LIKE ? OR sourceId LIKE ?",
+            [`${prefix}-source`, `${prefix}-conflict-source`, `worker-assertion:${workerId}:%`, `verified-conflict-resolution:${workerId}:%`]
           );
           for (const table of [
             "aptlss_verification_followups",
             "aptlss_evidence_conflicts",
+            "founder_decision_deadlines",
+            "decision_outcomes",
           ])
             await db.execute(`DELETE FROM ${table} WHERE vaId IN (?,?)`, [
               workerId,
@@ -617,7 +670,14 @@ for (const scenario of [
           throw error;
         }
       } finally {
-        await db.end();
+        try {
+          const { stopManagerScheduler } = await import("../server/aptlssManagerService");
+          await stopManagerScheduler();
+          const { closeDb } = await import("../server/db");
+          await closeDb();
+        } finally {
+          await db.end();
+        }
       }
     });
 
@@ -633,6 +693,18 @@ for (const scenario of [
     test("new evidence and worker update retain a shadow proposal and unchanged daily plan", async ({
       page,
     }, testInfo) => {
+      const managerEvents: Array<{ runId: number; urgent: boolean }> = [];
+      let authenticatedConnections = 0;
+      page.on("websocket", socket => {
+        if (!/^\/ws\/?$/.test(new URL(socket.url()).pathname)) return;
+        socket.on("framereceived", frame => {
+          const payload = String(frame.payload);
+          if (!payload.startsWith("42[")) return;
+          const event = JSON.parse(payload.slice(2));
+          if (event[0] === "aptlss:manager-updated") managerEvents.push(event[1]);
+          if (event[0] === "authenticated" && event[1]?.success === true) authenticatedConnections++;
+        });
+      });
       await login(page, `${prefix}-worker`, "worker");
       const manager = page.getByRole("region", { name: "APTLSS work manager" });
       await expect(manager.getByRole("alert").getByText("Wait before starting a task", { exact: true })).toBeVisible();
@@ -712,6 +784,9 @@ for (const scenario of [
         sourced.evidence.some(item => item.text.includes(sourceText))
       ).toBe(true);
       expect(sourced.interventions).toHaveLength(0);
+      await expect.poll(() => managerEvents.some(event => event.runId === sourced.runId && event.urgent === false), {
+        message: "The authenticated worker receives the persisted assessment over the real websocket",
+      }).toBe(true);
       const semanticGap = /^Semantic review (?:unavailable\b|is waiting for its bounded retry window; changed source context has not been semantically reviewed\.$)/;
       expect(sourced.semanticReview?.success).toBe(false);
       expect(sourced.sourceGaps).toContainEqual(expect.stringMatching(semanticGap));
@@ -753,6 +828,38 @@ for (const scenario of [
       const updated = (await latest())!;
       expect(updated.runId).toBeGreaterThan(sourced.runId);
       expect(updatedResponse.applied).toBe(false);
+      await expect.poll(() => managerEvents.some(event => event.runId === updated.runId), {
+        message: "The worker update produces a realtime notification for its new persisted assessment",
+      }).toBe(true);
+      if (process.env.APTLSS_TEST_TRANSPORT_RECOVERY === "true") {
+        const beforeReconnect = authenticatedConnections;
+        expect(beforeReconnect).toBeGreaterThan(0);
+        const refreshed = page.waitForResponse(response =>
+          response.ok() && decodeURIComponent(new URL(response.url()).pathname)
+            .split("/api/trpc/")[1]?.split(",").includes("operator.getManagerStatus"),
+          { timeout: 30_000 });
+        const disconnect = await page.request.post("/__fixture__/disconnect-websockets", {
+          headers: { "x-fixture-control": "owned-loopback" },
+        });
+        expect(disconnect.ok()).toBe(true);
+        expect((await disconnect.json()).disconnected).toBeGreaterThan(0);
+        await expect.poll(() => authenticatedConnections, { timeout: 30_000,
+          message: "The real worker websocket reauthenticates after transport interruption",
+        }).toBeGreaterThan(beforeReconnect);
+        const recoveredResponse = await refreshed;
+        expect(await recoveredResponse.finished()).toBeNull();
+        const recoveredBody = await recoveredResponse.json();
+        const recoveredMethods = decodeURIComponent(new URL(recoveredResponse.url()).pathname)
+          .split("/api/trpc/")[1].split(",");
+        const recoveredEnvelope = Array.isArray(recoveredBody)
+          ? recoveredBody[recoveredMethods.indexOf("operator.getManagerStatus")]
+          : recoveredBody;
+        expect(recoveredEnvelope.error).toBeUndefined();
+        const recoveredStatus = superjson.deserialize<{ expectedRunId?: number }>(recoveredEnvelope.result.data);
+        expect(recoveredStatus.expectedRunId).toBe(updated.runId);
+        expect((await latest())!.runId).toBe(updated.runId);
+        await assertUnchanged();
+      }
       expect(updated.semanticReview?.success).toBe(false);
       expect(updated.sourceGaps).toContainEqual(expect.stringMatching(semanticGap));
       await expect(
@@ -828,23 +935,36 @@ for (const scenario of [
       await expect(
         managerSchedule.getByText("Suggestions only", { exact: true })
       ).toBeVisible();
-      await page.getByLabel("Assessment interval").fill("9");
-      await mutateThroughUi(page, "operator.updateManagerPolicy", () =>
-        page.getByRole("button", { name: "Save manager schedule" }).click()
-      );
       await expect(
-        page.getByText("APTLSS manager schedule saved")
+        managerSchedule.getByText("Configured check interval: 5 minutes.", { exact: true })
       ).toBeVisible();
+      await expect(managerSchedule.getByRole("status")).toHaveText(
+        "Automatic checks are not running on this server. Contact your supervisor."
+      );
+      await expect(managerSchedule.getByText("Checks run every 5 minutes.", { exact: true })).toHaveCount(0);
+      await expect(page.getByLabel("Assessment interval")).toHaveCount(0);
+      const forbiddenPolicyUpdate = await page.request.post(
+        "/api/trpc/operator.updateManagerPolicy",
+        {
+          data: superjson.serialize({
+            vaId: workerId,
+            enabled: false,
+            intervalMinutes: 9,
+          }),
+        }
+      );
+      expect(forbiddenPolicyUpdate.status()).toBe(403);
       const [own] = await rows(
-        "SELECT intervalMinutes,mode FROM aptlss_manager_state WHERE vaId = ?",
+        "SELECT enabled,intervalMinutes,mode FROM aptlss_manager_state WHERE vaId = ?",
         [workerId]
       );
       const [other] = await rows(
         "SELECT enabled,intervalMinutes,mode FROM aptlss_manager_state WHERE vaId = ?",
         [otherId]
       );
-      expect({ intervalMinutes: own.intervalMinutes, mode: own.mode }).toEqual({
-        intervalMinutes: 9,
+      expect({ enabled: Number(own.enabled), intervalMinutes: own.intervalMinutes, mode: own.mode }).toEqual({
+        enabled: 1,
+        intervalMinutes: 5,
         mode: "shadow",
       });
       expect({
@@ -924,6 +1044,241 @@ for (const scenario of [
         { params: { input: JSON.stringify(superjson.serialize({ vaId: otherId })) } }
       );
       expect(outsidePilot.status()).toBe(403);
+    });
+
+    test("founder approval unlocks the follow-up on worker reassessment without changing the plan", async ({
+      page,
+    }, testInfo) => {
+      const [prerequisite] = await rows(
+        "SELECT id FROM aptlss_steps WHERE vaId = ? AND cardId = ? AND stepNumber = 1",
+        [workerId, cardId]
+      );
+      expect(prerequisite).toBeDefined();
+      const decisionTitle = `Approve the source-checked follow-up (${scenario.name})`;
+      const followUpTitle = `Prepare approved follow-up (${scenario.name})`;
+      const followUpCriteria = "The follow-up is prepared for worker review";
+      await db!.beginTransaction();
+      let followUpId = 0;
+      try {
+        await db!.execute(
+          "UPDATE aptlss_steps SET title = ?, requiresRobert = 1, recommendedDecision = ? WHERE id = ? AND vaId = ?",
+          [decisionTitle, "Approve the source-checked follow-up", prerequisite.id, workerId]
+        );
+        followUpId = await insert(
+          "INSERT INTO aptlss_steps (vaId,cardId,stepNumber,title,estimatedMinutes,category,blockedBy,completionCriteria) VALUES (?,?,2,?,15,?,?,?)",
+          [workerId, cardId, followUpTitle, "internal_work", "Step 1", followUpCriteria]
+        );
+        await db!.commit();
+      } catch (error) {
+        await db!.rollback();
+        throw error;
+      }
+
+      await login(page, `${prefix}-worker`, "worker");
+      const manager = page.getByRole("region", { name: "APTLSS work manager" });
+      const initialResponse = await mutateThroughUi<{ applied: boolean }>(
+        page,
+        "operator.runManager",
+        () => manager.getByRole("button", { name: "Reassess now" }).click()
+      );
+      const before = (await latest())!;
+      expect(initialResponse.applied).toBe(false);
+      const heldAction = before.actions.find(action => action.stepIds.includes(followUpId));
+      expect(heldAction).toMatchObject({ blocked: true });
+      expect(await rows(
+        "SELECT status,requiresRobert FROM aptlss_steps WHERE id = ? AND vaId = ?",
+        [prerequisite.id, workerId]
+      )).toMatchObject([{ status: "open", requiresRobert: 1 }]);
+      await assertUnchanged();
+
+      if (page.viewportSize()!.width < 768)
+        await page.getByRole("button", { name: "Open navigation" }).click();
+      await page.getByRole("button", { name: "Sign out" }).click();
+      await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
+      await login(page, `${prefix}-admin`, "admin");
+      await page.getByRole("tab", { name: "Decisions" }).click();
+      const inbox = page.getByRole("region", { name: "Founder decision inbox" });
+      const decisionItem = inbox
+        .getByRole("button")
+        .filter({ hasText: decisionTitle });
+      await expect(decisionItem).toHaveCount(1);
+      await decisionItem.click();
+      const finalDecision = inbox.getByRole("group", { name: "Final decision" });
+      await finalDecision.getByRole("button", { name: "Approve", exact: true }).click();
+      await inbox.getByLabel("Reason and source checked").fill(
+        "Approved after reviewing the linked source in this isolated test."
+      );
+      const outcome = await mutateThroughUi<{ reassessmentQueued: boolean }>(
+        page,
+        "operator.recordFounderDecisionOutcome",
+        () => inbox.getByRole("button", { name: "Record approval" }).click()
+      );
+      expect(outcome.reassessmentQueued).toBe(true);
+      await expect(inbox.getByText("No founder decisions are waiting.")).toBeVisible();
+
+      const [queued] = await rows(
+        "SELECT state,`trigger` FROM aptlss_manager_queue WHERE vaId = ?",
+        [workerId]
+      );
+      expect(queued).toMatchObject({ state: "pending", trigger: "decision_outcome" });
+      await assertUnchanged();
+
+      if (page.viewportSize()!.width < 768)
+        await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+      await page.getByText(`${prefix} Admin`, { exact: true }).click();
+      await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
+      await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
+      await login(page, `${prefix}-worker`, "worker");
+      await page.goto("/worker");
+      const workerManager = page.getByRole("region", { name: "APTLSS work manager" });
+      const reassessment = await mutateThroughUi<{ applied: boolean }>(
+        page,
+        "operator.runManager",
+        () => workerManager.getByRole("button", { name: "Reassess now" }).click()
+      );
+      const after = (await latest())!;
+      expect(reassessment.applied).toBe(false);
+      expect(after.runId).toBeGreaterThan(before.runId);
+      expect(after.applied).toBe(false);
+      expect(after.policy.mode).toBe("shadow");
+      expect(after.actions.some(action => action.stepIds.includes(Number(prerequisite.id)))).toBe(false);
+      expect(after.actions.find(action => action.stepIds.includes(followUpId))).toMatchObject({
+        blocked: false,
+        completionCriteria: followUpCriteria,
+      });
+      expect(await rows(
+        "SELECT status FROM aptlss_steps WHERE id = ? AND vaId = ?",
+        [prerequisite.id, workerId]
+      )).toMatchObject([{ status: "complete" }]);
+      await assertUnchanged();
+
+      await expect(
+        workerManager.getByText("Continue the recorded work step", { exact: true })
+      ).toBeVisible();
+      await expect(workerManager.getByText(/technical assessment|AI review|semantic review/i)).toHaveCount(0);
+      await expect(page.getByText(`Next step: ${followUpTitle}`, { exact: true })).toBeVisible();
+      await expect(page.getByText(followUpCriteria, { exact: false }).first()).toBeVisible();
+      await page.getByRole("button", { name: "Open details", exact: true }).click();
+      const inspector = page.getByRole("dialog");
+      const approvedStep = inspector.getByRole("group", { name: `Step 1: ${decisionTitle}`, exact: true });
+      await expect(approvedStep.getByText("Done", { exact: true })).toBeVisible();
+      await expect(approvedStep.getByText(/Waiting for founder decision|Deferred/)).toHaveCount(0);
+      await expect(approvedStep.getByText("Decision", { exact: true })).toHaveCount(0);
+      const nextSection = inspector.getByText("Exactly next", { exact: true }).locator("..");
+      await expect(nextSection).toContainText(followUpTitle);
+      await assertAccessibility(page, testInfo, `${scenario.name}-worker-after-founder-decision`);
+      await capture(page, testInfo, `${scenario.name}-worker-after-founder-decision`);
+      await assertUnchanged();
+    });
+
+    test("a retained invoice conflict produces an urgent worker notification and blocks dependent work", async ({ page }, testInfo) => {
+      const missedEvent = process.env.APTLSS_TEST_MISSED_EVENT === "true";
+      if (missedEvent) test.setTimeout(150_000);
+      let authenticatedConnections = 0;
+      const events: Array<{ runId: number; urgent: boolean }> = [];
+      page.on("websocket", socket => {
+        if (!/^\/ws\/?$/.test(new URL(socket.url()).pathname)) return;
+        socket.on("framereceived", frame => {
+          const payload = String(frame.payload);
+          if (!payload.startsWith("42[")) return;
+          const event = JSON.parse(payload.slice(2));
+          if (event[0] === "aptlss:manager-updated") events.push(event[1]);
+          if (event[0] === "authenticated" && event[1]?.success === true) authenticatedConnections++;
+        });
+      });
+      await login(page, `${prefix}-worker`, "worker");
+      if (missedEvent) {
+        await expect.poll(() => authenticatedConnections).toBeGreaterThan(0);
+        controlledRealtimeOutages.add(page);
+        const paused = await page.request.post("/__fixture__/pause-realtime", { headers: { "x-fixture-control": "owned-loopback" } });
+        expect(paused.ok()).toBe(true);
+        expect(await paused.json()).toMatchObject({ paused: true });
+      }
+      const retained: number[] = [];
+      let conflictId = 0;
+      let followupId = 0;
+      const verificationTitle = `${prefix} Verify invoice A-12`;
+      const observed = new Date(Date.now() - 60_000);
+      await db!.beginTransaction();
+      try {
+        for (const [index, content] of ["Invoice A-12 is unpaid.", "Invoice A-12 is paid."].entries()) {
+          const contentHash = createHash("sha256").update(content).digest("hex");
+          const metadata = JSON.stringify({ sourceDate: observed.toISOString() });
+          const evidenceId = await insert(
+            "INSERT INTO workspace_evidence_items (vaId,source,sourceId,kind,title,content,sourceUrl,observedAt,modifiedAt,contentHash,metadataJson,active) VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
+            [workerId, "trello", index ? `worker-assertion:${workerId}:${prefix}-conflict-${index}` : `${prefix}-conflict-source`, index ? "worker_assertion" : "record", "Retained invoice status", content, "https://example.invalid/invoice", observed, observed, contentHash, metadata]);
+          retained.push(evidenceId);
+          await insert("INSERT INTO aptlss_evidence_revisions (evidenceId,truthClass,content,contentHash,observedAt,metadataJson) VALUES (?,?,?,?,?,?)",
+            [evidenceId, index ? "worker_assertion" : "source_record", content, contentHash, observed, metadata]);
+          await insert("INSERT INTO aptlss_evidence_subject_links (evidenceId,vaId,subjectType,subjectId,relevanceScore,linkMethod,matchReason) VALUES (?,?,?, ?,100,?,?)",
+            [evidenceId, workerId, "card", cardId, "confirmed", "Owned contradictory invoice fixture"]);
+          await insert("INSERT INTO workspace_evidence_links (evidenceId,cardId,relevanceScore,linkMethod,matchReason) VALUES (?,?,100,?,?)",
+            [evidenceId, cardId, "manual", "Owned contradictory invoice fixture"]);
+        }
+        conflictId = await insert("INSERT INTO aptlss_evidence_conflicts (vaId,sourceEvidenceId,assertedEvidenceId,status) VALUES (?,?,?,?)",
+          [workerId, retained[0], retained[1], "needs_verification"]);
+        followupId = await insert("INSERT INTO aptlss_verification_followups (vaId,cardId,conflictId,title,question,status) VALUES (?,?,?,?,?,?)",
+          [workerId, cardId, conflictId, verificationTitle, "Is invoice A-12 paid or unpaid? Check the original record.", "open"]);
+        if (process.env.APTLSS_TEST_AUTOMATIC_WORKFLOW === "true") {
+          await db!.execute("INSERT INTO aptlss_manager_queue (vaId,state,generation,priority,`trigger`) VALUES (?,'pending',1,100,'conflict') ON DUPLICATE KEY UPDATE generation=generation+1, priority=100, `trigger`='conflict', state=IF(state='leased','leased','pending'), availableAt=CURRENT_TIMESTAMP(3)", [workerId]);
+        }
+        await db!.commit();
+      } catch (error) { await db!.rollback(); throw error; }
+      const manager = page.getByRole("region", { name: "APTLSS work manager" });
+      if (process.env.APTLSS_TEST_AUTOMATIC_WORKFLOW === "true") {
+        await expect.poll(async () => (await latest())?.interventions.some(item => item.cardId === cardId && item.severity === "urgent"), { timeout: 30_000 }).toBe(true);
+      } else {
+        await mutateThroughUi(page, "operator.runManager", () => activateByKeyboard(page, manager.getByRole("button", { name: "Reassess now" })));
+      }
+      const assessed = (await latest())!;
+      expect(assessed.interventions).toEqual(expect.arrayContaining([
+        expect.objectContaining({ cardId, severity: "urgent" }),
+      ]));
+      const dependent = assessed.actions.filter(action => action.cardId === cardId && action.kind === "work");
+      expect(dependent.length).toBeGreaterThan(0);
+      expect(dependent.every(action => action.blocked)).toBe(true);
+      if (missedEvent) {
+        expect(events.some(event => event.runId === assessed.runId)).toBe(false);
+        await expect(manager.getByRole("alert").first()).toContainText("Conflicting facts", { timeout: 75_000 });
+        expect(events.some(event => event.runId === assessed.runId)).toBe(false);
+        const beforeRecovery = authenticatedConnections;
+        const resumed = await page.request.post("/__fixture__/resume-realtime", { headers: { "x-fixture-control": "owned-loopback" } });
+        expect(resumed.ok()).toBe(true);
+        await resumed.json();
+        await expect.poll(() => authenticatedConnections, { timeout: 30_000 }).toBeGreaterThan(beforeRecovery);
+        controlledRealtimeOutages.delete(page);
+      } else {
+        await expect.poll(() => events.some(event => event.runId === assessed.runId && event.urgent)).toBe(true);
+        await expect(manager.getByRole("alert").first()).toBeVisible();
+      }
+      await expect(manager.getByText(/Full technical assessment|AI review|semantic review/i)).toHaveCount(0);
+      expect(assessed.applied).toBe(false);
+      latestRunId = assessed.runId;
+      await assertUnchanged();
+      await capture(page, testInfo, `${scenario.name}-urgent-retained-conflict`);
+      await page.getByRole("button", { name: "Open related task", exact: true }).click();
+      const inspector = page.getByRole("dialog");
+      const verification = inspector.getByRole("form", { name: verificationTitle, exact: true });
+      await expect(verification).toBeVisible();
+      await verification.getByLabel("What did you find?", { exact: true }).fill("I think it is unpaid, but have not verified the source yet.");
+      await expect(verification.getByRole("button", { name: "Save verification and close", exact: true })).toBeDisabled();
+      await mutateThroughUi(page, "operator.resolveVerificationFollowup", () => verification.getByRole("button", { name: "Save note; keep open", exact: true }).click());
+      expect(await rows("SELECT status FROM aptlss_evidence_conflicts WHERE id = ? AND vaId = ?", [conflictId, workerId])).toMatchObject([{ status: "needs_verification" }]);
+      expect(await rows("SELECT status FROM aptlss_verification_followups WHERE id = ? AND vaId = ?", [followupId, workerId])).toMatchObject([{ status: "open" }]);
+      await assertUnchanged();
+      await verification.getByLabel("What did you find?", { exact: true }).fill("The original retained record confirms invoice A-12 is unpaid.");
+      await verification.getByLabel("Which original source confirms it?", { exact: true }).selectOption(String(retained[0]));
+      await verification.getByLabel("Exact sentence from the source", { exact: true }).fill("Invoice A-12 is unpaid.");
+      await mutateThroughUi(page, "operator.resolveVerificationFollowup", () => verification.getByRole("button", { name: "Save verification and close", exact: true }).click());
+      expect(await rows("SELECT status FROM aptlss_evidence_conflicts WHERE id = ? AND vaId = ?", [conflictId, workerId])).toMatchObject([{ status: "resolved" }]);
+      expect(await rows("SELECT status FROM aptlss_verification_followups WHERE id = ? AND vaId = ?", [followupId, workerId])).toMatchObject([{ status: "resolved" }]);
+      const resolved = (await latest())!;
+      expect(resolved.runId).toBeGreaterThan(assessed.runId);
+      expect(resolved.policy.mode).toBe("shadow");
+      expect(resolved.applied).toBe(false);
+      await expect(verification).toHaveCount(0);
+      await assertUnchanged();
+      await capture(page, testInfo, `${scenario.name}-verified-conflict-resolved`);
     });
   });
 }

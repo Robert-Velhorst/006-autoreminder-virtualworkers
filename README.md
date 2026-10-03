@@ -377,7 +377,7 @@ No provider response should be converted into fake success. If a provider is una
 
 - Windows PowerShell or a compatible shell.
 - Node.js 20 or newer.
-- `pnpm` 11.19.0, or use `npx.cmd pnpm@11.19.0 ...` on Windows.
+- `pnpm` 11.28.0 (matching `packageManager`), or use `npx.cmd pnpm@11.28.0 ...` on Windows.
 - Docker Desktop for MySQL, Redis, app container, and optional ngrok.
 - MySQL 8.4 when not using Docker Compose.
 - Optional Redis 7.
@@ -393,7 +393,7 @@ No provider response should be converted into fake success. If a provider is una
    - `TRELLO_TOKEN`
    - `OWNER_OPEN_ID`
    - `OWNER_NAME`
-3. Add `OPENAI_API_KEY` when AI-backed features are used, and always in production.
+3. APTLSS defaults to `APTLSS_MANAGER_PROVIDER=codex-subscription` and does not require `OPENAI_API_KEY`. Add that key only for the explicitly selected `openai-api` provider or legacy API-backed features.
 4. Add Google OAuth values only when Gmail/Drive evidence is needed:
    - `GOOGLE_CLIENT_ID`
    - `GOOGLE_CLIENT_SECRET`
@@ -414,7 +414,7 @@ The development server binds to `127.0.0.1` by default. If the configured port i
 On Windows, if PowerShell cannot resolve `pnpm`, use:
 
 ```powershell
-npx.cmd pnpm@11.19.0 dev
+npx.cmd pnpm@11.28.0 dev
 ```
 
 ## Running With Docker Compose
@@ -541,9 +541,23 @@ Optional fallbacks:
 
 Never store a normal Gmail password.
 
-## OpenAI Setup
+## AI Setup
 
-OpenAI is the production model provider for AI-backed features. Configure:
+APTLSS uses the separate, ChatGPT-authenticated Codex host runner by default:
+
+- `APTLSS_MANAGER_PROVIDER=codex-subscription`
+- `APTLSS_CODEX_QUEUE_DIR`, shared with the separately running host runner
+
+No API key is needed for this manager route, including production startup.
+The runner must actually be signed in and responding; configuration alone does
+not prove model availability. If it is unavailable, the manager retains its
+deterministic checks and evidence holds, without a paid API fallback.
+
+The optional `APTLSS_MANAGER_PROVIDER=openai-api` route and legacy platform AI
+features use the paid OpenAI API. Subscription mode does not convert those
+legacy features into subscription-backed features. Without an API key, they
+remain unavailable rather than using a fabricated success. Configure only when
+that paid route is intentionally enabled:
 
 - `OPENAI_API_KEY`
 - Optional `OPENAI_MODEL`
@@ -583,14 +597,19 @@ Developer identity, worker assignment, authentication, scheduling, ATIS, and ARE
 
 ## Verification
 
+Current release evidence and unresolved cutover gates are recorded in
+[the 2026-09-30 production verification](docs/PRODUCTION_VERIFICATION_20260930.md).
+Historical completion percentages and earlier test runs are not release acceptance
+for changed source.
+
 Useful local checks:
 
 ```powershell
-npx.cmd pnpm@11.19.0 check
-npx.cmd pnpm@11.19.0 test
-npx.cmd pnpm@11.19.0 build
-npx.cmd pnpm@11.19.0 test:e2e
-npx.cmd pnpm@11.19.0 audit:prod
+npx.cmd pnpm@11.28.0 check
+npx.cmd pnpm@11.28.0 test
+npx.cmd pnpm@11.28.0 build
+npx.cmd pnpm@11.28.0 test:e2e
+npx.cmd pnpm@11.28.0 audit:prod
 pnpm run db:verify-parity
 pnpm run doctor
 ```
@@ -604,6 +623,44 @@ What these checks cover:
 - Dependency audit for production dependencies.
 - Schema parity between Drizzle expectations and database state.
 - Local app health and configuration checks.
+
+The ordinary suite skips real MySQL tests when `APTLSS_TEST_DATABASE_URL` is
+missing. Release verification additionally requires `pnpm test:mysql` with an
+explicit loopback MySQL 8 test database named `aptlss_test` or `recovery_test`.
+Run the canonical migrations first. In the disposable MySQL service only, disable
+the database event scheduler and grant
+the test user read access to `performance_schema.data_locks` and
+`performance_schema.data_lock_waits` for the concurrency assertions. Do not
+grant these permissions in production. Run the full suite, database gate, and
+browser acceptance sequentially; do not share fixtures between parallel runs.
+The database gate now requires all assertions in nine suites, including shared
+scheduled-job ownership across separate processes and streaming
+record-preservation fingerprints and full-data read-only rollback checkpoints,
+with no skips. Use a fresh isolated database for
+the gate. A retained worker or uncertain fixture from browser acceptance must not
+be deleted merely to make the queue tests pass; keep that evidence and provision a
+separate test database.
+
+Operational and rehearsal preservation checks stream table rows and retain
+per-record digests rather than whole source payloads. The original checkpoint
+format remains compatible. SQL backup verification/import is also streamed and
+requires an isolated, startup-disabled event scheduler. The current migration
+lineage was tested against a restored September 5 backup without changing its
+original records. A separate full-size restore of the September 30 operational
+backup also passed for the previous 53-identity lineage. The new additive
+`0053_manager_history_checks` migration makes the current journal 54 identities;
+its full-size migration and idempotent rerun passed on October 1 with all 11
+native rehearsal assertions passing and no skips. The restored database retains
+56 historical migration identities; a fresh canonical database has 54. Existing
+record preservation was checked separately. Full-data application rollback
+remains a cutover gate. [Assessment history storage](docs/APTLSS_HISTORY_STORAGE.md) explains
+lossless equivalent checks, retained full runs and older-binary compatibility.
+The separate [full-data checkpoint](docs/FULL_DATA_ROLLBACK_CHECKPOINT.md)
+includes every column and migration-ledger row for that pending application
+rehearsal. Its versioned receipts do not replace the older checkpoint format or
+claim that rollback has passed.
+See the [dated verification record](docs/PRODUCTION_VERIFICATION_20260930.md)
+for observed results and remaining release gates.
 
 What they do not prove by themselves:
 
@@ -701,6 +758,7 @@ If an existing admin has no usable password:
 | [docs/CONSOLIDATION_LEDGER.md](docs/CONSOLIDATION_LEDGER.md) | Source ownership, preserved branches, imported capabilities |
 | [docs/BRANCH_CONSOLIDATION.md](docs/BRANCH_CONSOLIDATION.md) | Branch disposition and cutover rules |
 | [docs/PRODUCTION_CUTOVER.md](docs/PRODUCTION_CUTOVER.md) | Production runtime, secrets, cutover, rollback |
+| [docs/BACKGROUND_STARTUP_ISOLATION.md](docs/BACKGROUND_STARTUP_ISOLATION.md) | Standby worker suppression without weakening authentication; not read-only mode |
 | [docs/OPERATOR_RUNBOOK.md](docs/OPERATOR_RUNBOOK.md) | Day-to-day operation and incident checks |
 | [docs/GOOGLE_EVIDENCE_SETUP.md](docs/GOOGLE_EVIDENCE_SETUP.md) | Google OAuth setup for worker evidence |
 | [docs/SECURITY.md](docs/SECURITY.md) | Security boundaries and operating rules |

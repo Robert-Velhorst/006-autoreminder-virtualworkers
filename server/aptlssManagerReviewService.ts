@@ -315,15 +315,18 @@ function correctionSourceSupported(
   e: ManagerEvidence | undefined,
   now: number
 ): e is ManagerEvidence {
-  const metadata = e?.metadata;
+  const metadata = e?.metadata,
+    source = e?.source.trim().toLowerCase().replace(/[\s-]+/g, "_");
   return (
     !!e &&
+    !/^(?:virtual_)?worker(?:_|$)/.test(source ?? "") &&
     ["source", "decision"].includes(e.kind) &&
     !!e.text.trim() &&
     (e.kind === "decision"
       ? metadata?.truthClass === "human_decision" && metadata.authority === "authoritative"
-      : metadata?.truthClass === undefined || metadata.truthClass === "source_record") &&
-    !(e.source === "gmail" && (metadata?.contentScope === "portal_notice" || gmailContentScope("", e.text) === "portal_notice")) &&
+      : metadata?.truthClass === "source_record" &&
+        (metadata.authority === undefined || metadata.authority === "authoritative")) &&
+    !(source === "gmail" && (metadata?.contentScope === "portal_notice" || gmailContentScope("", e.text) === "portal_notice")) &&
     validManagerTimestamp(e.observedAt) &&
     Number.isFinite(now) &&
     Date.parse(e.observedAt) <= now &&
@@ -331,6 +334,45 @@ function correctionSourceSupported(
     (metadata?.effectiveFrom == null || (validManagerDate(metadata.effectiveFrom) && Date.parse(metadata.effectiveFrom) <= now)) &&
     (metadata?.effectiveTo == null || (validManagerDate(metadata.effectiveTo) && Date.parse(metadata.effectiveTo) > now))
   );
+}
+function isAuthoritativeSourceRevisionOf(
+  pinned: ManagerEvidence | undefined,
+  candidate: ManagerEvidence,
+  now: number
+) {
+  const previous = pinned?.metadata,
+    current = candidate.metadata,
+    supersedes = current?.supersedesEvidenceIds;
+  if (
+    !pinned ||
+    candidate.id === pinned.id ||
+    candidate.kind !== "source" ||
+    !correctionSourceSupported(candidate, now) ||
+    current?.authority !== "authoritative" ||
+    !Array.isArray(supersedes) ||
+    !supersedes.includes(pinned.id) ||
+    !previous?.sourceRecordId ||
+    current.sourceRecordId !== previous.sourceRecordId ||
+    !previous.sender ||
+    !current.sender ||
+    previous.sender.trim().toLowerCase() !== current.sender.trim().toLowerCase() ||
+    !previous.sourceRevision ||
+    !current.sourceRevision ||
+    previous.sourceRevision === current.sourceRevision ||
+    pinned.source.trim().toLowerCase() !== candidate.source.trim().toLowerCase() ||
+    typeof previous.sourceDate !== "string" ||
+    !validManagerDate(previous.sourceDate) ||
+    typeof current.sourceDate !== "string" ||
+    !validManagerDate(current.sourceDate) ||
+    typeof previous.effectiveFrom !== "string" ||
+    !validManagerDate(previous.effectiveFrom) ||
+    typeof current.effectiveFrom !== "string" ||
+    !validManagerDate(current.effectiveFrom) ||
+    Date.parse(current.sourceDate) <= Date.parse(previous.sourceDate) ||
+    Date.parse(current.effectiveFrom) < Date.parse(previous.effectiveFrom)
+  )
+    return false;
+  return true;
 }
 export function prepareManagerCorrection(args: {
   knowledge: ManagerCorrectionInput;
@@ -465,6 +507,13 @@ function applicableCorrection(
           records.length !== 1 ||
           !correctionSourceSupported(records[0], ctx.now.getTime()) ||
           (row.scope === "card" && records[0].cardId !== ctx.card.id) ||
+          ctx.evidence.some(candidate =>
+            isAuthoritativeSourceRevisionOf(
+              records.length === 1 ? records[0] : undefined,
+              candidate,
+              ctx.now.getTime()
+            )
+          ) ||
           (records[0].metadata?.sourceRevision ?? null) !==
             pin.sourceRevision ||
           evidenceFingerprint(records[0]) !== pin.fingerprint
@@ -578,17 +627,25 @@ async function database() {
   if (!db) throw new Error("Database unavailable");
   return db;
 }
-export async function requireManagerReviewer(actorId: number, db: Db) {
-  const [actor] = await db
+async function checkManagerReviewer(actorId: number, db: Db, lock: boolean) {
+  const query = db
     .select()
     .from(users)
     .where(eq(users.id, actorId))
     .limit(1);
+  const [actor] = lock ? await query.for("update") : await query;
   // The canonical platform represents the founder through the admin role.
   if (actor?.role !== "admin")
     throw new Error(
       "Founder/admin access is required for manager reviews and activation."
     );
+}
+async function assertManagerReviewer(actorId: number, db: Db) {
+  return checkManagerReviewer(actorId, db, false);
+}
+/** Must be called inside the transaction that performs the reviewer-authorized write. */
+export async function requireManagerReviewer(actorId: number, db: Db) {
+  return checkManagerReviewer(actorId, db, true);
 }
 
 type TrialScope = {
@@ -789,7 +846,7 @@ export async function getManagerReviewInbox(
   const pilotWorkerIds = managerPilotWorkerIds();
   assertManagerPilotWorker(vaId ?? pilotWorkerIds[0]);
   const db = await database();
-  await requireManagerReviewer(actorId, db);
+  await assertManagerReviewer(actorId, db);
   const workers = await db
     .select({ id: users.id, name: users.name })
     .from(users)
@@ -899,7 +956,6 @@ export async function recordManagerReview(
   input = managerReviewInputSchema.parse(input);
   assertManagerPilotWorker(input.vaId);
   const db = await database();
-  await requireManagerReviewer(actorId, db);
   const correction = input.correction.trim(),
     source = input.source.trim();
   if (
@@ -923,6 +979,7 @@ export async function recordManagerReview(
       .from(aptlssManagerControl)
       .where(eq(aptlssManagerControl.id, 1))
       .for("update");
+    await requireManagerReviewer(actorId, tx as unknown as Db);
     await tx.select().from(users).where(eq(users.id, input.vaId)).for("update");
     const [run] = await tx
       .select()
@@ -1036,7 +1093,6 @@ async function transitionManagerTrial(
   input = managerTrialInputSchema.parse(input);
   assertManagerPilotWorker(input.vaId);
   const db = await database();
-  await requireManagerReviewer(actorId, db);
   return db.transaction(async tx => {
     await tx
       .insert(aptlssManagerControl)
@@ -1047,6 +1103,7 @@ async function transitionManagerTrial(
       .from(aptlssManagerControl)
       .where(eq(aptlssManagerControl.id, 1))
       .for("update");
+    await requireManagerReviewer(actorId, tx as unknown as Db);
     await tx.select().from(users).where(eq(users.id, input.vaId)).for("update");
     await resolveWorkerOperatorContextById(input.vaId, tx as unknown as Db);
     const [state] = await tx
@@ -1133,8 +1190,8 @@ export async function revokeManagerCorrection(
   input = managerCorrectionRevokeInputSchema.parse(input);
   assertManagerPilotWorker(input.vaId);
   const db = await database();
-  await requireManagerReviewer(actorId, db);
   return db.transaction(async tx => {
+    await requireManagerReviewer(actorId, tx as unknown as Db);
     await tx.select().from(users).where(eq(users.id, input.vaId)).for("update");
     const [row] = await tx
       .select()
@@ -1176,7 +1233,6 @@ export async function setManagerMode(
   assertManagerPilotWorker(vaId);
   if (mode !== "shadow") assertManagerPlanMutationAllowed(vaId);
   const db = await database();
-  await requireManagerReviewer(actorId, db);
   return db.transaction(async tx => {
     await tx
       .insert(aptlssManagerControl)
@@ -1187,6 +1243,7 @@ export async function setManagerMode(
       .from(aptlssManagerControl)
       .where(eq(aptlssManagerControl.id, 1))
       .for("update");
+    await requireManagerReviewer(actorId, tx as unknown as Db);
     await tx.select().from(users).where(eq(users.id, vaId)).for("update");
     await resolveWorkerOperatorContextById(vaId, tx as unknown as Db);
     await tx
@@ -1215,7 +1272,6 @@ export async function restoreManagerPlan(
 ) {
   assertManagerPlanMutationAllowed(vaId);
   const db = await database();
-  await requireManagerReviewer(actorId, db);
   return db.transaction(
     async tx => {
       await tx
@@ -1227,6 +1283,7 @@ export async function restoreManagerPlan(
         .from(aptlssManagerControl)
         .where(eq(aptlssManagerControl.id, 1))
         .for("update");
+      await requireManagerReviewer(actorId, tx as unknown as Db);
       await tx.select().from(users).where(eq(users.id, vaId)).for("update");
       const [run] = await tx
         .select()

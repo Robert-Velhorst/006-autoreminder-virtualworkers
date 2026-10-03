@@ -10,6 +10,10 @@ export function staticAssetCacheControl(requestPath: string) {
     : "no-cache";
 }
 
+export function staticAssetResourcePolicy(requestPath: string) {
+  return requestPath === "/icons/va-dashboard.png" ? "cross-origin" : "same-origin";
+}
+
 export function serveStatic(app: Express) {
   const distPath =
     process.env.NODE_ENV === "development"
@@ -25,6 +29,7 @@ export function serveStatic(app: Express) {
     setHeaders(res, filePath) {
       const requestPath = `/${path.relative(distPath, filePath).replace(/\\/g, "/")}`;
       res.setHeader("Cache-Control", staticAssetCacheControl(requestPath));
+      res.setHeader("Cross-Origin-Resource-Policy", staticAssetResourcePolicy(requestPath));
     },
   }));
 

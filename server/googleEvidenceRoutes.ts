@@ -2,15 +2,23 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { parse as parseCookies } from "cookie";
 import express, { type Request, type Response } from "express";
 import { getSessionCookieOptions } from "./_core/cookies";
+import { requireActiveWorkerProfile } from "./middleware/auth";
 import {
   clearGoogleMailDeliveryConnection,
   clearGoogleRefreshToken,
+  consumeGoogleOAuthState,
   getGoogleMailDeliveryStatus,
+  saveGoogleOAuthState,
   saveGoogleMailDeliveryConnection,
   saveGoogleRefreshToken,
 } from "./googleEvidence";
 
 const router = express.Router();
+router.use((req: Request & { user?: { id: number; role: string } | null }, res, next) => {
+  const isOAuthCallback = req.path === "/callback" || req.path === "/mail-delivery/callback";
+  if (isOAuthCallback && !req.user) return next();
+  return requireActiveWorkerProfile(req, res, next);
+});
 const OAUTH_COOKIE = "google_evidence_oauth";
 const MAIL_DELIVERY_OAUTH_COOKIE = "google_mail_delivery_oauth";
 const OAUTH_MAX_AGE_MS = 10 * 60 * 1_000;
@@ -98,7 +106,7 @@ function googleClient() {
 }
 
 function clearOauthCookie(req: Request, res: Response) {
-  res.clearCookie(OAUTH_COOKIE, { ...getSessionCookieOptions(req), maxAge: -1 });
+  res.clearCookie(OAUTH_COOKIE, getSessionCookieOptions(req));
 }
 
 function redirectSettings(res: Response, result: "connected" | "error") {
@@ -156,7 +164,7 @@ async function exchangeAuthorizationCode(input: {
   return { refreshToken: body.refresh_token, accessToken: body.access_token };
 }
 
-router.get("/connect", (req: Request & { user?: { id: number; role: string } | null }, res: Response) => {
+router.get("/connect", async (req: Request & { user?: { id: number; role: string } | null }, res: Response) => {
   try {
     if (!requireRole(req, res, "worker")) return;
     const { clientId } = googleClient();
@@ -171,6 +179,7 @@ router.get("/connect", (req: Request & { user?: { id: number; role: string } | n
     const codeVerifier = randomBytes(48).toString("base64url");
     const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
     const cookie: OAuthCookie = { ...statePayload, state, codeVerifier };
+    await saveGoogleOAuthState("worker", statePayload.vaId, statePayload.nonce, statePayload.expiresAt);
     res.cookie(OAUTH_COOKIE, encodeSignedJson(cookie), { ...getSessionCookieOptions(req), maxAge: OAUTH_MAX_AGE_MS });
 
     const authorization = new URL(GOOGLE_AUTHORIZE_URL);
@@ -180,7 +189,6 @@ router.get("/connect", (req: Request & { user?: { id: number; role: string } | n
       response_type: "code",
       access_type: "offline",
       prompt: "consent",
-      include_granted_scopes: "true",
       code_challenge: codeChallenge,
       code_challenge_method: "S256",
       state,
@@ -190,8 +198,8 @@ router.get("/connect", (req: Request & { user?: { id: number; role: string } | n
       ].join(" "),
     }).toString();
     return res.redirect(authorization.toString());
-  } catch (error) {
-    console.error("[GoogleEvidence] Unable to start OAuth", error);
+  } catch {
+    console.error("[GoogleEvidence] Unable to start OAuth");
     return res.status(500).json({ error: "Unable to start the Google connection. Check the server OAuth configuration." });
   }
 });
@@ -213,14 +221,17 @@ router.get("/callback", async (req: Request & { user?: { id: number; role: strin
       || !req.user || req.user.role !== "worker" || req.user.id !== state.vaId) {
       return clearAndError();
     }
+    if (!await consumeGoogleOAuthState("worker", state.vaId, state.nonce, state.expiresAt)) {
+      return clearAndError();
+    }
     const { clientId, clientSecret } = googleClient();
     const redirectUri = `${redirectBaseUrl(req)}/api/google-evidence/callback`;
     const tokens = await exchangeAuthorizationCode({ code, clientId, clientSecret, redirectUri, codeVerifier: stored.codeVerifier });
     await saveGoogleRefreshToken(state.vaId, tokens.refreshToken);
     clearOauthCookie(req, res);
     return redirectSettings(res, "connected");
-  } catch (error) {
-    console.error("[GoogleEvidence] OAuth callback failed", error);
+  } catch {
+    console.error("[GoogleEvidence] OAuth callback failed");
     return clearAndError();
   }
 });
@@ -229,13 +240,13 @@ router.get("/mail-delivery/status", async (req: Request & { user?: { id: number;
   try {
     if (!requireRole(req, res, "admin")) return;
     return res.json(await getGoogleMailDeliveryStatus());
-  } catch (error) {
-    console.error("[GoogleMailDelivery] Unable to read status", error);
+  } catch {
+    console.error("[GoogleMailDelivery] Unable to read status");
     return res.status(500).json({ error: "Unable to read Gmail delivery status" });
   }
 });
 
-router.get("/mail-delivery/connect", (req: Request & { user?: { id: number; role: string } | null }, res: Response) => {
+router.get("/mail-delivery/connect", async (req: Request & { user?: { id: number; role: string } | null }, res: Response) => {
   try {
     if (!requireRole(req, res, "admin")) return;
     const { clientId } = googleClient();
@@ -250,6 +261,7 @@ router.get("/mail-delivery/connect", (req: Request & { user?: { id: number; role
     const codeVerifier = randomBytes(48).toString("base64url");
     const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
     const cookie: MailDeliveryOAuthCookie = { ...statePayload, state, codeVerifier };
+    await saveGoogleOAuthState("mail-delivery", statePayload.userId, statePayload.nonce, statePayload.expiresAt);
     res.cookie(MAIL_DELIVERY_OAUTH_COOKIE, encodeSignedJson(cookie), { ...getSessionCookieOptions(req), maxAge: OAUTH_MAX_AGE_MS });
 
     const authorization = new URL(GOOGLE_AUTHORIZE_URL);
@@ -259,22 +271,21 @@ router.get("/mail-delivery/connect", (req: Request & { user?: { id: number; role
       response_type: "code",
       access_type: "offline",
       prompt: "consent",
-      include_granted_scopes: "true",
       code_challenge: codeChallenge,
       code_challenge_method: "S256",
       state,
-      scope: "https://www.googleapis.com/auth/gmail.send",
+      scope: ["openid", "email", "https://www.googleapis.com/auth/gmail.send"].join(" "),
     }).toString();
     return res.redirect(authorization.toString());
-  } catch (error) {
-    console.error("[GoogleMailDelivery] Unable to start OAuth", error);
+  } catch {
+    console.error("[GoogleMailDelivery] Unable to start OAuth");
     return res.status(500).json({ error: "Unable to start Gmail delivery setup. Check the server OAuth configuration." });
   }
 });
 
 router.get("/mail-delivery/callback", async (req: Request & { user?: { id: number; role: string } | null }, res: Response) => {
   const clearAndError = () => {
-    res.clearCookie(MAIL_DELIVERY_OAUTH_COOKIE, { ...getSessionCookieOptions(req), maxAge: -1 });
+    res.clearCookie(MAIL_DELIVERY_OAUTH_COOKIE, getSessionCookieOptions(req));
     redirectMailSettings(res, "error");
   };
   try {
@@ -289,20 +300,25 @@ router.get("/mail-delivery/callback", async (req: Request & { user?: { id: numbe
       || !isAdmin(req) || req.user!.id !== state.userId) {
       return clearAndError();
     }
+    if (!await consumeGoogleOAuthState("mail-delivery", state.userId, state.nonce, state.expiresAt)) {
+      return clearAndError();
+    }
     const { clientId, clientSecret } = googleClient();
     const redirectUri = `${redirectBaseUrl(req)}/api/google-evidence/mail-delivery/callback`;
     const tokens = await exchangeAuthorizationCode({ code, clientId, clientSecret, redirectUri, codeVerifier: stored.codeVerifier });
-    const profileResponse = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/profile", {
+    const profileResponse = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
       headers: { authorization: `Bearer ${tokens.accessToken}` },
       signal: AbortSignal.timeout(15_000),
     });
-    const profile = await profileResponse.json().catch(() => null) as { emailAddress?: unknown } | null;
-    if (!profileResponse.ok || typeof profile?.emailAddress !== "string" || !profile.emailAddress) return clearAndError();
-    await saveGoogleMailDeliveryConnection(tokens.refreshToken, profile.emailAddress);
-    res.clearCookie(MAIL_DELIVERY_OAUTH_COOKIE, { ...getSessionCookieOptions(req), maxAge: -1 });
+    const profile = await profileResponse.json().catch(() => null) as { email?: unknown; email_verified?: unknown } | null;
+    if (!profileResponse.ok || typeof profile?.email !== "string" || !profile.email || profile.email_verified !== true) {
+      return clearAndError();
+    }
+    await saveGoogleMailDeliveryConnection(tokens.refreshToken, profile.email);
+    res.clearCookie(MAIL_DELIVERY_OAUTH_COOKIE, getSessionCookieOptions(req));
     return redirectMailSettings(res, "connected");
-  } catch (error) {
-    console.error("[GoogleMailDelivery] OAuth callback failed", error);
+  } catch {
+    console.error("[GoogleMailDelivery] OAuth callback failed");
     return clearAndError();
   }
 });
@@ -312,8 +328,8 @@ router.post("/mail-delivery/disconnect", async (req: Request & { user?: { id: nu
     if (!requireRole(req, res, "admin")) return;
     await clearGoogleMailDeliveryConnection();
     return res.json({ success: true });
-  } catch (error) {
-    console.error("[GoogleMailDelivery] Unable to disconnect", error);
+  } catch {
+    console.error("[GoogleMailDelivery] Unable to disconnect");
     return res.status(500).json({ error: "Unable to remove Gmail delivery access" });
   }
 });
@@ -323,8 +339,8 @@ router.post("/disconnect", async (req: Request & { user?: { id: number; role: st
     if (!requireRole(req, res, "worker")) return;
     await clearGoogleRefreshToken(req.user.id);
     return res.json({ success: true });
-  } catch (error) {
-    console.error("[GoogleEvidence] Unable to disconnect OAuth", error);
+  } catch {
+    console.error("[GoogleEvidence] Unable to disconnect OAuth");
     return res.status(500).json({ error: "Unable to remove the Google connection" });
   }
 });

@@ -1,31 +1,61 @@
 import { Router, type Request } from 'express';
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { getDb } from '../db';
 import { taskAssignments, vaProfiles, timeEntries } from '../../drizzle/schema';
-import { requireAuthenticated, requestUser } from '../middleware/auth';
+import { requireActiveWorkerProfile, requireAuthenticated, requestUser } from '../middleware/auth';
 import { attributeTimeEntriesToProfiles, loadAccountTimeEntries } from '../timeEntryOwnership';
+import { selectWorkerProfile } from '../workerOperatorContext';
 
 const router = Router();
 router.use(requireAuthenticated);
+const supportedAnalyticsRoles = new Set(['admin', 'user', 'worker']);
+router.use((req, res, next) => {
+  const user = requestUser(req);
+  if (!user || !supportedAnalyticsRoles.has(String(user.role))) {
+    res.status(user ? 403 : 401).json({ error: user ? 'Forbidden' : 'Unauthorized' });
+    return;
+  }
+  next();
+});
+router.use(requireActiveWorkerProfile);
 
 type Database = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
 async function getScopedOperationalData(req: Request, db: Database) {
   const user = requestUser(req)!;
-  const profiles = user.role === 'admin'
+  const allProfiles = user.role === 'admin'
     ? await db.select().from(vaProfiles)
     : user.role === 'worker'
       ? await db.select().from(vaProfiles).where(eq(vaProfiles.userId, user.id))
       : await db.select().from(vaProfiles).where(eq(vaProfiles.founderId, user.id));
+  const activeProfile = user.role === 'worker' ? selectWorkerProfile(allProfiles) : null;
+  const profiles = user.role === 'worker'
+    ? activeProfile ? [activeProfile] : []
+    : allProfiles;
   const profileIds = profiles.map(profile => profile.id);
+  const taskFounderId = user.role === 'worker' ? activeProfile?.founderId : user.id;
   const tasks = user.role === 'admin'
     ? await db.select().from(taskAssignments)
-    : profileIds.length > 0
-      ? await db.select().from(taskAssignments).where(inArray(taskAssignments.vaId, profileIds))
+    : profileIds.length > 0 && taskFounderId != null
+      ? await db.select().from(taskAssignments).where(and(
+        inArray(taskAssignments.vaId, profileIds),
+        eq(taskAssignments.founderId, taskFounderId),
+      ))
       : [];
+  const founderProfiles = user.role === 'worker' && activeProfile
+    ? await db.select({ id: vaProfiles.id, userId: vaProfiles.userId, founderId: vaProfiles.founderId })
+      .from(vaProfiles)
+      .where(eq(vaProfiles.founderId, activeProfile.founderId))
+    : profiles;
+  const attributionProfiles = user.role === 'worker' && activeProfile
+    ? [
+      ...founderProfiles.filter(profile => profile.userId !== user.id),
+      { id: activeProfile.id, userId: activeProfile.userId, founderId: activeProfile.founderId },
+    ]
+    : profiles;
   const times = await loadAccountTimeEntries(db, user);
 
-  return { profiles, tasks, times };
+  return { profiles, attributionProfiles, tasks, times };
 }
 
 function trackedMinutes(entry: typeof timeEntries.$inferSelect) {
@@ -69,8 +99,9 @@ router.get('/worker-productivity', async (req, res) => {
   if (!db) return res.status(503).json({ error: 'Database unavailable' });
 
   try {
-    const { profiles, tasks, times } = await getScopedOperationalData(req, db);
-    const attribution = attributeTimeEntriesToProfiles(profiles, times);
+    const user = requestUser(req)!;
+    const { profiles, attributionProfiles, tasks, times } = await getScopedOperationalData(req, db);
+    const attribution = attributeTimeEntriesToProfiles(attributionProfiles, times);
     const productivity = profiles.map(profile => {
       const workerTasks = tasks.filter(task => task.vaId === profile.id);
       const completed = workerTasks.filter(task => task.status === 'completed').length;
@@ -90,7 +121,9 @@ router.get('/worker-productivity', async (req, res) => {
 
     const unattributedMinutes = attribution.unattributed.reduce((sum, entry) => sum + trackedMinutes(entry), 0);
     res.json({ success: true, productivity,
-      unattributedTimeEntries: { count: attribution.unattributed.length, minutes: Math.round(unattributedMinutes) },
+      ...(user.role === 'worker' ? {} : {
+        unattributedTimeEntries: { count: attribution.unattributed.length, minutes: Math.round(unattributedMinutes) },
+      }),
       source: 'task_assignments+time_entries' });
   } catch (error) {
     console.error('[Analytics] Failed to get productivity data', error);
@@ -103,9 +136,10 @@ router.get('/team-capacity', async (req, res) => {
   if (!db) return res.status(503).json({ error: 'Database unavailable' });
 
   try {
-    const { profiles, times } = await getScopedOperationalData(req, db);
-    const attribution = attributeTimeEntriesToProfiles(profiles, times);
-    const attributedTimes = [...attribution.entriesByProfileId.values()].flat();
+    const user = requestUser(req)!;
+    const { profiles, attributionProfiles, times } = await getScopedOperationalData(req, db);
+    const attribution = attributeTimeEntriesToProfiles(attributionProfiles, times);
+    const attributedTimes = profiles.flatMap(profile => attribution.entriesByProfileId.get(profile.id) ?? []);
     const periodStart = startOfDay(new Date());
     periodStart.setDate(periodStart.getDate() - 6);
     const periodEnd = new Date();
@@ -138,10 +172,12 @@ router.get('/team-capacity', async (req, res) => {
       expectedMinutes,
       trackedMinutes: actualMinutes,
       overtimeMinutes: Math.max(0, actualMinutes - expectedMinutes),
-      unattributedTimeEntries: {
-        count: attribution.unattributed.filter(entry => entry.startTime >= periodStart && entry.startTime <= periodEnd).length,
-        minutes: Math.round(unattributedMinutes),
-      },
+      ...(user.role === 'worker' ? {} : {
+        unattributedTimeEntries: {
+          count: attribution.unattributed.filter(entry => entry.startTime >= periodStart && entry.startTime <= periodEnd).length,
+          minutes: Math.round(unattributedMinutes),
+        },
+      }),
       workers,
       source: 'worker_schedules+time_entries',
     });
@@ -156,9 +192,10 @@ router.get('/trends', async (req, res) => {
   if (!db) return res.status(503).json({ error: 'Database unavailable' });
 
   try {
-    const { profiles, tasks, times } = await getScopedOperationalData(req, db);
-    const attribution = attributeTimeEntriesToProfiles(profiles, times);
-    const attributedTimes = [...attribution.entriesByProfileId.values()].flat();
+    const user = requestUser(req)!;
+    const { profiles, attributionProfiles, tasks, times } = await getScopedOperationalData(req, db);
+    const attribution = attributeTimeEntriesToProfiles(attributionProfiles, times);
+    const attributedTimes = profiles.flatMap(profile => attribution.entriesByProfileId.get(profile.id) ?? []);
     const periodStart = startOfDay(new Date());
     periodStart.setDate(periodStart.getDate() - 13);
     const trends = Array.from({ length: 14 }, (_, index) => {
@@ -171,12 +208,14 @@ router.get('/trends', async (req, res) => {
         trackedMinutes: Math.round(attributedTimes
           .filter(entry => entry.startTime >= dayStart && entry.startTime < dayEnd)
           .reduce((sum, entry) => sum + trackedMinutes(entry), 0)),
-        unattributedTimeEntries: {
-          count: attribution.unattributed.filter(entry => entry.startTime >= dayStart && entry.startTime < dayEnd).length,
-          minutes: Math.round(attribution.unattributed
-            .filter(entry => entry.startTime >= dayStart && entry.startTime < dayEnd)
-            .reduce((sum, entry) => sum + trackedMinutes(entry), 0)),
-        },
+        ...(user.role === 'worker' ? {} : {
+          unattributedTimeEntries: {
+            count: attribution.unattributed.filter(entry => entry.startTime >= dayStart && entry.startTime < dayEnd).length,
+            minutes: Math.round(attribution.unattributed
+              .filter(entry => entry.startTime >= dayStart && entry.startTime < dayEnd)
+              .reduce((sum, entry) => sum + trackedMinutes(entry), 0)),
+          },
+        }),
         completedTasks: tasks.filter(task =>
           task.status === 'completed' && task.updatedAt >= dayStart && task.updatedAt < dayEnd
         ).length,

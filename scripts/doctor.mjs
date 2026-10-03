@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { parse } from "dotenv";
 
 const asJson = process.argv.includes("--json");
 const root = process.cwd();
@@ -10,17 +11,12 @@ function add(name, status, detail) {
   checks.push({ name, status, detail });
 }
 
-async function readEnvNames(file) {
+async function readEnv(file) {
   try {
     const content = await readFile(path.join(root, file), "utf8");
-    return new Set(
-      content
-        .split(/\r?\n/)
-        .map(line => line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/)?.[1])
-        .filter(Boolean),
-    );
+    return parse(content);
   } catch {
-    return new Set();
+    return {};
   }
 }
 
@@ -33,16 +29,20 @@ async function checkUrl(name, url) {
   }
 }
 
-const envNames = await readEnvNames(".env");
+const env = { ...await readEnv(".env"), ...process.env };
+const managerProvider = env.APTLSS_MANAGER_PROVIDER?.trim() || "codex-subscription";
+const providerValid = managerProvider === "codex-subscription" || managerProvider === "openai-api";
+add("config:APTLSS_MANAGER_PROVIDER", providerValid ? "ok" : "error",
+  providerValid ? managerProvider : "must be codex-subscription or openai-api");
 const required = [
   ["DATABASE_URL"],
   ["JWT_SECRET"],
   ["TRELLO_API_KEY", "TrelloAPIKey"],
   ["TRELLO_TOKEN", "TrelloAPIToken"],
-  ["OPENAI_API_KEY"],
+  ...(managerProvider === "openai-api" ? [["OPENAI_API_KEY"]] : []),
 ];
 for (const aliases of required) {
-  const configured = aliases.some(name => envNames.has(name) || Boolean(process.env[name]));
+  const configured = aliases.some(name => Boolean(env[name]?.trim()));
   add(`config:${aliases[0]}`, configured ? "ok" : "error", configured ? "configured" : "missing");
 }
 

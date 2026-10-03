@@ -14,6 +14,22 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["server/**/*.test.ts", "server/**/*.spec.ts", "scripts/operator-data-transfer-ownership.test.mjs"],
+    include: [
+      "server/**/*.test.ts",
+      "server/**/*.spec.ts",
+      "scripts/operator-data-transfer-ownership.test.mjs",
+      "scripts/aptlss-pilot-validation.test.mjs",
+      "scripts/run-mysql-integration.test.mjs",
+      "scripts/operational-record-fingerprint.test.mjs",
+      "scripts/operational-record-fingerprint.integration.test.mjs",
+      "scripts/full-data-rollback-checkpoint.test.mjs",
+      "scripts/full-data-rollback-checkpoint.integration.test.mjs",
+      "scripts/verify-production-image.test.mjs",
+      "scripts/verify-generated-records.test.mjs",
+      "scripts/pilot-backup-restore.test.mjs",
+      "scripts/pilot-backup-restore.integration.test.mjs",
+      "scripts/pilot-database-backup.test.mjs",
+      "scripts/pilot-migration-ledger.test.mjs",
+    ],
   },
 });

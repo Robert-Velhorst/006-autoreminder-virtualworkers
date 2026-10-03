@@ -11,6 +11,14 @@ import aptlssRoutes from './routes/aptlss';
 import trelloBoardsRoutes from './routes/trello-boards';
 import performanceRoutes from './routes/performance-optimization';
 import { readFileSync } from 'node:fs';
+import { vaProfiles } from '../drizzle/schema';
+import { vi } from 'vitest';
+
+const dbMocks = vi.hoisted(() => ({ getDb: vi.fn() }));
+vi.mock('./db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./db')>();
+  return { ...actual, getDb: dbMocks.getDb };
+});
 
 const worker = {
   id: 42,
@@ -35,6 +43,22 @@ function appWithUser(user?: typeof worker | { id: number; openId: string; role: 
   app.use('/trello-boards', trelloBoardsRoutes);
   app.use('/performance', performanceRoutes);
   return app;
+}
+
+function activeWorkerDatabase() {
+  const profiles = [{ id: 7, status: 'active', userId: worker.id }];
+  return {
+    select: vi.fn(() => {
+      let table: unknown;
+      const query: any = {
+        from: (value: unknown) => { table = value; return query; },
+        where: () => query,
+        orderBy: () => Promise.resolve(table === vaProfiles ? profiles : []),
+        limit: () => Promise.resolve(table === vaProfiles ? profiles : []),
+      };
+      return query;
+    }),
+  };
 }
 
 describe('legacy API hardening', () => {
@@ -69,11 +93,14 @@ describe('legacy API hardening', () => {
   });
 
   it('describes supported report exports instead of fabricating a PDF', async () => {
+    dbMocks.getDb.mockResolvedValue(activeWorkerDatabase());
     const app = appWithUser(worker);
     const response = await request(app)
       .get('/reports/export?format=pdf&type=task-summary')
       .expect(400);
     expect(response.body.supported).toEqual(['csv/time-entries', 'csv/task-summary']);
+    expect(dbMocks.getDb).toHaveBeenCalledOnce();
+    dbMocks.getDb.mockReset();
   });
 
   it('keeps founder VA APIs separate from worker self-service APIs', async () => {

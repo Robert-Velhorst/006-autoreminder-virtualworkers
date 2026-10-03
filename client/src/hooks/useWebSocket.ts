@@ -98,21 +98,27 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     });
 
     // Reconnection events
-    socket.on('reconnect', (attemptNumber: number) => {
+    const onReconnect = (attemptNumber: number) => {
       console.log(`[WebSocket] Reconnected after ${attemptNumber} attempts`);
-    });
+    };
 
-    socket.on('reconnect_error', (error: Error) => {
+    const onReconnectError = (error: Error) => {
       console.error('[WebSocket] Reconnection error:', error);
-    });
+    };
 
-    socket.on('reconnect_failed', () => {
+    const onReconnectFailed = () => {
       console.error('[WebSocket] Reconnection failed');
-    });
+    };
+    socket.io.on('reconnect', onReconnect);
+    socket.io.on('reconnect_error', onReconnectError);
+    socket.io.on('reconnect_failed', onReconnectFailed);
 
     // Never retain a socket authenticated for a previous identity.
     return () => {
       console.log('[WebSocket] Disconnecting');
+      socket.io.off('reconnect', onReconnect);
+      socket.io.off('reconnect_error', onReconnectError);
+      socket.io.off('reconnect_failed', onReconnectFailed);
       socket.disconnect();
       socketRef.current = null;
     };

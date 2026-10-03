@@ -1,6 +1,6 @@
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import { protectedProcedure, router } from "./_core/trpc";
+import { operatorAccountProcedure, router } from "./_core/trpc";
 import {
   approveAndSendReminder,
   closeCommitment,
@@ -11,12 +11,7 @@ import {
   updateReminderPolicy,
 } from "./reminderOrchestration";
 
-const reminderProcedure = protectedProcedure.use(async ({ ctx, next }) => {
-  if (ctx.user.role !== "admin" && ctx.user.role !== "worker") {
-    throw new TRPCError({ code: "FORBIDDEN", message: "Reminder access requires an admin or worker role" });
-  }
-  return next({ ctx });
-});
+const reminderProcedure = operatorAccountProcedure;
 
 const reminderAdminProcedure = reminderProcedure.use(async ({ ctx, next }) => {
   if (ctx.user.role !== "admin") {
@@ -59,8 +54,11 @@ export const reminderRouter = router({
     requireApproval: z.boolean().default(false),
   })).mutation(async ({ ctx, input }) => {
     try {
-      const result = await createReminder(ctx.user, input);
-      await processDueReminders();
+      const reminderInput = ctx.user.role === "worker"
+        ? { ...input, assignedUserId: ctx.user.id }
+        : input;
+      const result = await createReminder(ctx.user, reminderInput);
+      if (ctx.user.role === "admin") await processDueReminders(new Date(), 50, ctx.user.id);
       return result;
     } catch (error) {
       operationalError(error);
@@ -115,5 +113,6 @@ export const reminderRouter = router({
     }
   }),
 
-  runDueNow: reminderAdminProcedure.mutation(async () => processDueReminders()),
+  runDueNow: reminderAdminProcedure.mutation(async ({ ctx }) =>
+    processDueReminders(new Date(), 50, ctx.user.id)),
 });

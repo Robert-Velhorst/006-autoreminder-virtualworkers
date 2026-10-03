@@ -17,17 +17,18 @@ let _pubClient: Redis | null = null;
 let _subClient: Redis | null = null;
 let _initialized = false;
 
-function createClient(url: string): Redis {
+function createClient(url: string, subscriptionsOnly = false): Redis {
   const client = new Redis(url, {
-    // Retry with exponential backoff, max 3 attempts
+    // Recover after sustained outages without queuing application commands.
     retryStrategy: (times: number) => {
-      if (times > 3) return null; // stop retrying, let it fail gracefully
       return Math.min(times * 200, 2000);
     },
     // Don't throw on connection failure — emit error event instead
     lazyConnect: true,
-    enableOfflineQueue: false,
-    maxRetriesPerRequest: 1,
+    // Only the dedicated Socket.IO subscriber retains its fixed channel
+    // subscriptions. Cache reads and published application events never queue.
+    enableOfflineQueue: subscriptionsOnly,
+    maxRetriesPerRequest: subscriptionsOnly ? null : 1,
   });
 
   client.on('connect', () => console.log('[Redis] Connected'));
@@ -53,33 +54,36 @@ export async function initializeRedis(): Promise<void> {
     return;
   }
 
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   try {
-    _pubClient = createClient(url);
-    _subClient = createClient(url);
+    const pubClient = _pubClient = createClient(url);
+    const subClient = _subClient = createClient(url, true);
 
     // Attempt connection with a 2-second timeout guard — if Redis hangs, proceed without blocking
-    const timeout = new Promise((resolve) => setTimeout(resolve, 2000));
+    const timeout = new Promise(resolve => { timeoutHandle = setTimeout(resolve, 2000); });
     await Promise.race([
       Promise.all([
-        _pubClient.connect().catch((err: any) => {
-          console.warn('[Redis] Pub client failed to connect:', err.message);
-          _pubClient = null;
+        pubClient.connect().catch(() => {
+          console.warn('[Redis] Pub client is reconnecting after initial connection failure');
         }),
-        _subClient.connect().catch((err: any) => {
-          console.warn('[Redis] Sub client failed to connect:', err.message);
-          _subClient = null;
+        subClient.connect().catch(() => {
+          console.warn('[Redis] Sub client is reconnecting after initial connection failure');
         }),
       ]),
       timeout,
     ]);
 
-    if (_pubClient && _subClient) {
+    if (_pubClient === pubClient && _subClient === subClient && isRedisAvailable()) {
       console.log('[Redis] Both pub/sub clients connected successfully');
     }
-  } catch (err: any) {
-    console.warn('[Redis] Initialization failed (non-fatal):', err.message);
+  } catch {
+    console.warn('[Redis] Initialization failed (non-fatal)');
+    _pubClient?.disconnect();
+    _subClient?.disconnect();
     _pubClient = null;
     _subClient = null;
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   }
 }
 
@@ -106,10 +110,10 @@ export function getRedisSubClient(): Redis | null {
 }
 
 /**
- * Returns true if Redis is configured and connected.
+ * Returns true only when both realtime Redis connections are ready.
  */
 export function isRedisAvailable(): boolean {
-  return _pubClient !== null && _pubClient.status === 'ready';
+  return _pubClient?.status === 'ready' && _subClient?.status === 'ready';
 }
 
 /**
@@ -117,9 +121,25 @@ export function isRedisAvailable(): boolean {
  */
 export async function closeRedis(): Promise<void> {
   const clients = [_pubClient, _subClient].filter(Boolean) as Redis[];
-  await Promise.all(clients.map((c) => c.quit().catch(() => {})));
   _pubClient = null;
   _subClient = null;
   _initialized = false;
+  await Promise.all(clients.map(async client => {
+    if (client.status !== 'ready') {
+      client.disconnect();
+      return;
+    }
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        client.quit(),
+        new Promise(resolve => { timeoutHandle = setTimeout(resolve, 2000); }),
+      ]);
+    } catch { /* A broken connection must not prevent shutdown. */ }
+    finally {
+      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+      client.disconnect();
+    }
+  }));
   console.log('[Redis] Connections closed');
 }

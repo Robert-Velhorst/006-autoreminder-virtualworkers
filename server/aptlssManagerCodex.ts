@@ -45,7 +45,7 @@ export const codexReplySchema = z.object({
 });
 export const codexInputHash = (text: string) => createHash("sha256").update(text).digest("hex");
 export function managerSemanticProvider() {
-  const provider = process.env.APTLSS_MANAGER_PROVIDER?.trim() || "openai-api";
+  const provider = process.env.APTLSS_MANAGER_PROVIDER?.trim() || "codex-subscription";
   if (provider !== "openai-api" && provider !== "codex-subscription") throw new Error("Unknown APTLSS manager provider");
   return provider;
 }

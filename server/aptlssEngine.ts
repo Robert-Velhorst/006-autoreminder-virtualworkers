@@ -20,6 +20,7 @@ import {
   countDependentCards,
 } from "./aptlssStepsDb";
 import { InsertCardState, InsertPriorityScore } from "../drizzle/schema";
+import { getAptlssChecklistWriteAuthorization } from "./services/trello-checklist-sync";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -476,6 +477,26 @@ export async function computeAndSavePriorityScore(
 const CHECKLIST_NAME = "APTLSS Execution Checklist";
 const TRELLO_API = "https://api.trello.com/1";
 const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
+const checklistCardLocks = new Map<string, Promise<void>>();
+
+async function withChecklistCardLock<T>(cardId: string, work: () => Promise<T>): Promise<T> {
+  const previous = checklistCardLocks.get(cardId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  checklistCardLocks.set(cardId, current);
+
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+    if (checklistCardLocks.get(cardId) === current) {
+      checklistCardLocks.delete(cardId);
+    }
+  }
+}
 
 function trelloHeaders() {
   return { "Content-Type": "application/json" };
@@ -504,11 +525,44 @@ async function getAptlssChecklist(
   );
 }
 
+/** Read the latest checklist state after acquiring the per-card lock. */
+async function fetchCardChecklists(
+  cardId: string
+): Promise<TrelloCardContext["checklists"]> {
+  const res = await trelloRequest(
+    `${TRELLO_API}/cards/${encodeURIComponent(cardId)}/checklists?${trelloAuth()}`
+  );
+  if (!res.ok) throw new Error(`Trello fetchCardChecklists failed: ${res.status}`);
+
+  const checklists: unknown = await res.json();
+  if (
+    !Array.isArray(checklists) ||
+    checklists.some((checklist) =>
+      !checklist ||
+      typeof checklist.id !== "string" ||
+      typeof checklist.name !== "string" ||
+      !Array.isArray(checklist.checkItems)
+    )
+  ) {
+    throw new Error("Trello fetchCardChecklists returned an invalid response");
+  }
+
+  return checklists as TrelloCardContext["checklists"];
+}
+
+async function assertChecklistWriteAllowed(cardId: string): Promise<void> {
+  const authorization = await getAptlssChecklistWriteAuthorization(cardId);
+  if (!authorization.allowed) {
+    throw new Error(authorization.reason || "Trello checklist write is not authorized.");
+  }
+}
+
 /** Create a new APTLSS checklist on a card and add all steps. Returns checklist ID. */
 async function createChecklist(
   cardId: string,
   steps: AptlssStepInput[]
 ): Promise<string> {
+  await assertChecklistWriteAllowed(cardId);
   const res = await trelloRequest(
     `${TRELLO_API}/checklists?${trelloAuth()}`,
     {
@@ -521,17 +575,7 @@ async function createChecklist(
   const checklist = await res.json();
 
   for (const step of steps) {
-    const itemResponse = await trelloRequest(
-      `${TRELLO_API}/checklists/${checklist.id}/checkItems?${trelloAuth()}`,
-      {
-        method: "POST",
-        headers: trelloHeaders(),
-        body: JSON.stringify({ name: step.title }),
-      }
-    );
-    if (!itemResponse.ok) {
-      throw new Error(`Trello createChecklist item failed: ${itemResponse.status}`);
-    }
+    await addCheckItem(checklist.id, step.title, cardId);
   }
 
   return checklist.id;
@@ -540,8 +584,10 @@ async function createChecklist(
 /** Add a new check item to an existing checklist. Returns check item ID. */
 async function addCheckItem(
   checklistId: string,
-  title: string
+  title: string,
+  cardId: string,
 ): Promise<string> {
+  await assertChecklistWriteAllowed(cardId);
   const res = await trelloRequest(
     `${TRELLO_API}/checklists/${checklistId}/checkItems?${trelloAuth()}`,
     {
@@ -561,6 +607,7 @@ async function deleteCheckItem(
   checklistId: string,
   checkItemId: string
 ): Promise<void> {
+  await assertChecklistWriteAllowed(cardId);
   const res = await trelloRequest(
     `${TRELLO_API}/cards/${cardId}/checkItem/${checkItemId}?${trelloAuth()}`,
     { method: "DELETE" }
@@ -574,6 +621,7 @@ async function renameCheckItem(
   checkItemId: string,
   newName: string
 ): Promise<void> {
+  await assertChecklistWriteAllowed(cardId);
   const res = await trelloRequest(
     `${TRELLO_API}/cards/${cardId}/checkItem/${checkItemId}?${trelloAuth()}`,
     {
@@ -595,64 +643,68 @@ export async function writeChecklistToTrello(
   ctx: TrelloCardContext,
   newSteps: AptlssStepInput[]
 ): Promise<{ checklistId: string; stepCheckItemIds: Record<number, string> }> {
-  const existing = await getAptlssChecklist(cardId, ctx.checklists);
+  return withChecklistCardLock(cardId, async () => {
+    await assertChecklistWriteAllowed(cardId);
+    const currentChecklists = await fetchCardChecklists(cardId);
+    const existing = await getAptlssChecklist(cardId, currentChecklists);
 
-  const stepCheckItemIds: Record<number, string> = {};
+    const stepCheckItemIds: Record<number, string> = {};
 
-  if (!existing) {
-    // No checklist yet — create fresh
-    const checklistId = await createChecklist(cardId, newSteps);
-    // Fetch the newly created checklist to get check item IDs
-    const res = await trelloRequest(
-      `${TRELLO_API}/checklists/${checklistId}/checkItems?${trelloAuth()}`
-    );
-    if (!res.ok) {
-      throw new Error(`Trello fetchChecklistItems failed: ${res.status}`);
+    if (!existing) {
+      // No checklist yet — create fresh
+      const checklistId = await createChecklist(cardId, newSteps);
+      // Fetch the newly created checklist to get check item IDs
+      const res = await trelloRequest(
+        `${TRELLO_API}/checklists/${checklistId}/checkItems?${trelloAuth()}`
+      );
+      if (!res.ok) {
+        throw new Error(`Trello fetchChecklistItems failed: ${res.status}`);
+      }
+      const items: { id: string; name: string }[] = await res.json();
+      newSteps.forEach((step, idx) => {
+        if (items[idx]) stepCheckItemIds[step.stepNumber] = items[idx].id;
+      });
+      return { checklistId, stepCheckItemIds };
     }
-    const items: { id: string; name: string }[] = await res.json();
-    newSteps.forEach((step, idx) => {
-      if (items[idx]) stepCheckItemIds[step.stepNumber] = items[idx].id;
-    });
+
+    // Checklist exists — smart merge
+    const checklistId = existing.id;
+    const existingItems = existing.checkItems;
+
+    // Load manual (human-added) steps from DB so we never mark them as [REPLACED]
+    const manualSteps = await getManualStepsForCard(vaId, cardId);
+    const manualCheckItemIds = new Set(
+      manualSteps.map((s) => s.trelloCheckItemId).filter(Boolean)
+    );
+
+    // Build sets for comparison
+    const newTitles = new Set(newSteps.map((s) => s.title.trim()));
+    const completedItems = existingItems.filter((i) => i.state === "complete");
+    const completedTitles = new Set(completedItems.map((i) => i.name.trim()));
+
+    // Mark obsolete AI items (not in newTitles, not completed, not manually added)
+    for (const item of existingItems) {
+      if (item.state === "complete") continue; // never touch completed
+      if (newTitles.has(item.name.trim())) continue; // still relevant
+      if (manualCheckItemIds.has(item.id)) continue; // human-added: preserve
+      if (!item.name.startsWith("[REPLACED]")) {
+        await renameCheckItem(cardId, item.id, `[REPLACED] ${item.name}`);
+      }
+    }
+
+    // Add new steps that don't already exist
+    for (const step of newSteps) {
+      const alreadyExists = existingItems.find(
+        (i) => i.name.trim() === step.title.trim()
+      );
+      if (alreadyExists) {
+        stepCheckItemIds[step.stepNumber] = alreadyExists.id;
+      } else if (!completedTitles.has(step.title.trim())) {
+        const newId = await addCheckItem(checklistId, step.title, cardId);
+        stepCheckItemIds[step.stepNumber] = newId;
+      }
+    }
+
     return { checklistId, stepCheckItemIds };
-  }
-
-  // Checklist exists — smart merge
-  const checklistId = existing.id;
-  const existingItems = existing.checkItems;
-
-  // Load manual (human-added) steps from DB so we never mark them as [REPLACED]
-  const manualSteps = await getManualStepsForCard(vaId, cardId);
-  const manualCheckItemIds = new Set(
-    manualSteps.map((s) => s.trelloCheckItemId).filter(Boolean)
-  );
-
-  // Build sets for comparison
-  const newTitles = new Set(newSteps.map((s) => s.title.trim()));
-  const completedItems = existingItems.filter((i) => i.state === "complete");
-  const completedTitles = new Set(completedItems.map((i) => i.name.trim()));
-
-  // Mark obsolete AI items (not in newTitles, not completed, not manually added)
-  for (const item of existingItems) {
-    if (item.state === "complete") continue; // never touch completed
-    if (newTitles.has(item.name.trim())) continue; // still relevant
-    if (manualCheckItemIds.has(item.id)) continue; // human-added: preserve
-    if (!item.name.startsWith("[REPLACED]")) {
-      await renameCheckItem(cardId, item.id, `[REPLACED] ${item.name}`);
-    }
-  }
-
-  // Add new steps that don't already exist
-  for (const step of newSteps) {
-    const alreadyExists = existingItems.find(
-      (i) => i.name.trim() === step.title.trim()
-    );
-    if (alreadyExists) {
-      stepCheckItemIds[step.stepNumber] = alreadyExists.id;
-    } else if (!completedTitles.has(step.title.trim())) {
-      const newId = await addCheckItem(checklistId, step.title);
-      stepCheckItemIds[step.stepNumber] = newId;
-    }
-  }
-
-  return { checklistId, stepCheckItemIds };
+  });
 }

@@ -1,8 +1,8 @@
 # Multi-stage build for VA Dashboard. Dependencies are installed once and the
 # resulting layer is shared by build, migration, and production-prune stages.
-FROM node:22-alpine AS dependencies
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS dependencies
 
-RUN npm install -g pnpm@11.19.0
+RUN npm install -g pnpm@11.28.0
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY patches ./patches
@@ -15,7 +15,8 @@ RUN pnpm build
 FROM dependencies AS production-dependencies
 RUN pnpm prune --prod
 
-FROM node:22-alpine AS production
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS production
+ENV NODE_ENV=production
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 WORKDIR /app

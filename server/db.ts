@@ -5,6 +5,7 @@ import { InsertUser, users } from "../drizzle/schema";
 import * as schema from "../drizzle/schema";
 import { ENV } from './_core/env';
 import { parseDateKey } from "./utils/date-only";
+import { DatabaseUnavailableError } from "./databaseAvailability";
 
 let _db: MySql2Database<typeof schema> | null = null;
 let _pool: mysql2.Pool | null = null;
@@ -34,13 +35,14 @@ export async function getDb() {
       } else {
         _pool = mysql2.createPool(process.env.DATABASE_URL);
         _db = drizzleMySQL(_pool, { schema, mode: 'default' });
-        console.log("[Database] Connected to MySQL");
+        console.log("[Database] MySQL pool initialized; connectivity checked by readiness probes");
       }
-    } catch (error) {
+    } catch {
       const pool = _pool;
       _pool = null;
       if (pool) await pool.end().catch(() => undefined);
-      console.warn("[Database] Failed to connect:", error);
+      // Driver errors can contain credentials, SQL values and user data.
+      console.warn("[Database] Failed to initialize connection pool");
       _db = null;
     }
   }
@@ -65,6 +67,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   const db = await getDb();
   if (!db) {
     console.warn("[Database] Cannot upsert user: database not available");
+    if (process.env.DATABASE_URL || process.env.NODE_ENV === "production") throw new DatabaseUnavailableError();
     return;
   }
 
@@ -111,7 +114,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
       set: updateSet,
     });
   } catch (error) {
-    console.error("[Database] Failed to upsert user:", error);
+    console.error("[Database] Failed to upsert user");
     throw error;
   }
 }
@@ -120,6 +123,7 @@ export async function getUserByOpenId(openId: string) {
   const db = await getDb();
   if (!db) {
     console.warn("[Database] Cannot get user: database not available");
+    if (process.env.DATABASE_URL || process.env.NODE_ENV === "production") throw new DatabaseUnavailableError();
     return undefined;
   }
 

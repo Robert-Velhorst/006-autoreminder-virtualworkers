@@ -40,8 +40,10 @@ timeout. These prevent stuck processes, not an hourly usage allowance.
 
 1. Install the official Codex CLI and sign in with ChatGPT on the host computer.
 2. From this recovery checkout run `scripts/Start-ManagerCodex.ps1` in PowerShell.
-3. Select `APTLSS_MANAGER_PROVIDER=codex-subscription` and set
-   `APTLSS_CODEX_QUEUE_DIR` to the private transport queue.
+3. Set `APTLSS_MANAGER_PROVIDER=codex-subscription` and
+   `APTLSS_CODEX_QUEUE_DIR` to the private transport queue. The manager defaults
+   to this provider and never uses the OpenAI API as a fallback. The separate
+   OpenAI key used by legacy platform AI remains governed by production startup.
 4. For the verified Docker pilot, use `PILOT_CODEX_SUBSCRIPTION=true` with
    `scripts/aptlss-pilot-compose.mjs`. Its optional deployment overlay mounts
    only `.local/pilot/codex-queue` at `/app/codex-queue`.
@@ -51,6 +53,85 @@ Windows startup task: start it again after reboot. The host machine and its
 Docker dashboard must both be available. No external Codex listener is exposed.
 The launcher rejects duplicate runners and waits for a readiness heartbeat.
 Metadata-only logs are under `.local/pilot/codex-private`.
+
+An optional host supervisor is available in `scripts/manager-codex-supervisor.mjs`.
+With `APTLSS_CODEX_EXECUTABLE` configured, run it with Node from this checkout.
+It refuses to take over an existing runner, exclusively leases `supervisor.lock`,
+and restarts only its own exited child with exponential backoff capped at one
+minute. Launch errors are surfaced instead of retried indefinitely. A stale
+supervisor lease requires operator inspection; it is never silently stolen.
+Stopping the supervisor sends a private IPC stop message to its owned runner.
+The runner aborts its assessment loop and removes its lease through the existing
+cleanup path; loss of the parent IPC channel also requests shutdown. A shutdown
+not confirmed within fifteen seconds fails closed without a replacement child.
+Non-IPC fixture children use SIGTERM. This does not install
+Windows startup, provide reboot recovery, guarantee recovery of an unresponsive child or
+prove target-host service acceptance. The operational runner has not been
+replaced by this supervisor. Eight local tests cover crash backoff, shutdown,
+launch errors, real isolated child exits, real IPC shutdown and unconfirmed
+shutdown rejection without provider access. TypeScript checking passed after
+the runner entry-point changes on 2026-10-02. The real runner's active Codex
+process-tree cleanup still requires isolated acceptance; the IPC fixture is not
+proof that all real CLI descendants have exited. Two additional tests start the
+real runner in isolated temporary directories with an empty queue and a
+non-executable provider placeholder. Both IPC stop and parent disconnect exit
+successfully and remove the runner lease. No provider request executes.
+
+The initial real disconnect test exposed that invoking the tsx CLI created an
+intermediate process which did not propagate disconnect to the runner. That
+test timed out and its owned fixture processes were explicitly stopped. The
+supervisor now starts Node directly with `--import tsx`; the corrected eight-test
+run passed on Windows. This change applies to the new supervisor, not the
+already-running operational launcher. A real active CLI descendant and abrupt
+supervisor process termination remain separate acceptance cases.
+
+The runner's acquired-lease cleanup now covers initialization as well as its
+assessment loop. A schema-file initialization failure no longer leaves the
+runner lease behind. Cleanup checks ownership and preserves a replaced lease.
+The 41 bridge tests and eight supervisor tests passed after this change on
+2026-10-02. These source changes are not deployed to the existing host runner.
+
+The supervisor tests are exposed as `pnpm test:codex-supervisor` and are required
+by the existing Linux CI job and a dedicated Node 22 Windows CI job. The combined
+18 local Node tests (diagnostics, browser error classification and supervisor)
+passed. The edited workflow has not been pushed or run remotely; local execution
+is not evidence of a successful GitHub job.
+
+Heartbeat supervision was added on 2026-10-02. After a fifteen-second startup
+grace period, the supervisor checks the queue heartbeat every five seconds. It
+requires the fixed model/route/efforts, a timestamp from the current start, an
+age no greater than fifteen seconds and no more than five seconds into the
+future. Missing, invalid or stale heartbeats request graceful shutdown of the
+owned runner; restart is allowed only after actual child exit. A runner which
+cannot confirm shutdown fails closed rather than spawning another instance.
+Ten supervisor tests passed, including heartbeat validation and exit-before-
+replacement. These checks detect missing heartbeats, not semantic AI failure;
+a fresh heartbeat alone is not proof of accepted assessments. No operational
+runner or Windows task was replaced or installed for this change.
+
+Active-assessment cancellation was checked with the real runner and Node as a
+local CLI fixture on 2026-10-02. Fixture login/exec scripts live only in owned
+temporary directories, use no account and make no network request. A valid
+empty-card context reaches the active fixture process. Aborting the runner
+terminates that process before lease release, writes no result and retains
+the queued request. All 42 bridge tests passed. The initial fixture used an
+invalid context and was correctly rejected before execution; it was corrected
+to exercise the intended path. This proves direct-child cancellation, not
+cleanup of additional descendants created by the official CLI, or completion
+of a real provider assessment.
+
+`scripts/Prepare-ManagerCodexStartup.ps1` prepares, but does not register, a
+Windows task XML in the existing private directory. Its action invokes
+`Start-ManagerCodexSupervisor.ps1` at the current user's logon, with least
+privilege, `IgnoreNew` duplicate policy and no execution time limit. It stores
+no password and changes no directory ACL. PowerShell syntax and actual XML
+generation were checked on 2026-10-02; the XML properties were read back with
+an XML parser. No task was registered or started. Windows task-level failure
+restart is deliberately not enabled: stale supervisor lease recovery and
+owned process-tree shutdown still need implementation and acceptance before
+unattended failure recovery can be claimed. Logon startup is not pre-logon
+boot availability. Registering a task and switching the operational runner
+require explicit host-change approval and a controlled handover.
 
 ## Boundaries
 
@@ -63,8 +144,10 @@ Metadata-only logs are under `.local/pilot/codex-private`.
   action capabilities disabled. Tool events and unknown errors reject the result.
 - Existing source-quote and semantic validators remain authoritative. Model
   output cannot complete work, resolve conflicts or invent evidence by itself.
-- The pilot remains shadow-only for worker 2. No external messages or Trello
-  mutations are added. Existing production authentication stays enabled.
+- The pilot remains shadow-only for exactly one explicitly selected worker
+  profile. Its numeric ID is deployment configuration, not a person-specific
+  rule. No external messages or Trello mutations are added. Existing
+  production authentication stays enabled.
 - Transport files are temporary and private. Only matching request files are
   removed; application evidence and history are retained.
 

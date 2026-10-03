@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import { eq } from "drizzle-orm";
 import { vaProfiles, type User } from "../../drizzle/schema";
 import { getDb } from "../db";
+import { getActiveWorkerProfileId, selectWorkerProfile } from "../workerOperatorContext";
 
 export function requestUser(req: Request) {
   return (req as Request & { user?: User | null }).user ?? null;
@@ -28,6 +29,34 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+export async function requireActiveWorkerProfile(req: Request, res: Response, next: NextFunction) {
+  const user = requestUser(req);
+  if (!user) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  if (user.role !== "worker") {
+    next();
+    return;
+  }
+
+  try {
+    const db = await getDb();
+    if (!db) {
+      res.status(503).json({ error: "Worker access could not be verified" });
+      return;
+    }
+    const profileId = await getActiveWorkerProfileId(user.id, db);
+    if (profileId === null) {
+      res.status(403).json({ error: "An active worker profile is required" });
+      return;
+    }
+    next();
+  } catch {
+    res.status(503).json({ error: "Worker access could not be verified" });
+  }
+}
+
 export async function resolveWorkerProfileId(req: Request, requestedWorkerId?: unknown) {
   const user = requestUser(req);
   if (!user) return null;
@@ -41,11 +70,11 @@ export async function resolveWorkerProfileId(req: Request, requestedWorkerId?: u
   const db = await getDb();
   if (!db) return null;
 
-  const [profile] = await db
-    .select({ id: vaProfiles.id })
+  const profiles = await db
+    .select({ id: vaProfiles.id, status: vaProfiles.status })
     .from(vaProfiles)
     .where(eq(vaProfiles.userId, user.id))
-    .limit(1);
+    .orderBy(vaProfiles.id);
 
-  return profile?.id ?? null;
+  return selectWorkerProfile(profiles)?.id ?? null;
 }

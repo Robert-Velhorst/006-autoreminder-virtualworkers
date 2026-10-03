@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   managerQueueEventHash,
   queueEnqueued,
@@ -8,9 +8,78 @@ import {
   queueRetryDelay,
   retryQueueTransaction,
   type QueueState,
+  createManagerQueueRunner,
+  type ManagerQueueDatabase,
 } from "./aptlssManagerQueue";
 
 const now = new Date("2026-09-05T10:00:00Z");
+
+describe("manager queue loop observations", () => {
+  let runner: ReturnType<typeof createManagerQueueRunner> | undefined;
+  afterEach(async () => { await runner?.stop(); runner = undefined; vi.useRealTimers(); vi.unstubAllEnvs(); });
+  const setup = () => {
+    vi.stubEnv("APTLSS_MANAGER_PILOT_WORKER_IDS", "2");
+    vi.stubEnv("APTLSS_MANAGER_SHADOW_ONLY", "true");
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(now);
+    const failures = { poll: false, fallback: false };
+    const select = () => {
+      const chain: any = { from: () => chain, where: () => chain, orderBy: () => chain,
+        leftJoin: () => chain, limit: () => chain, for: () => chain,
+        then: (resolve: any, reject: any) => Promise.resolve([]).then(resolve, reject),
+      };
+      return chain;
+    };
+    const db = {
+      select: () => { if (failures.fallback) throw new Error("private fallback failure"); return select(); },
+      transaction: async (work: any) => {
+        if (failures.poll) throw new Error("private poll failure");
+        return work({ select, execute: async () => [[{ nowMs: Date.now() }]] });
+      },
+    } as unknown as ManagerQueueDatabase;
+    runner = createManagerQueueRunner({ db, execute: vi.fn(), concurrency: 1 });
+    return failures;
+  };
+  const settle = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+  it("does not equate configured or one-off checks with a running loop", async () => {
+    setup();
+    expect(runner!.getStatus()).toMatchObject({ started: false, healthy: false, observed: false });
+    await runner!.drain();
+    expect(runner!.getStatus()).toMatchObject({ started: false, healthy: false, observed: false });
+    await runner!.pollFallback();
+    expect(runner!.getStatus()).toMatchObject({ started: false, observed: true });
+  });
+  it("requires successful queue and fallback reads and expires stale observations", async () => {
+    setup(); runner!.start(); await settle();
+    expect(runner!.getStatus()).toMatchObject({ started: true, healthy: true, failed: false, observed: true });
+    vi.setSystemTime(new Date(now.getTime() + 10_001));
+    expect(runner!.getStatus().healthy).toBe(false);
+    await runner!.drain();
+    expect(runner!.getStatus().healthy).toBe(true);
+    vi.setSystemTime(new Date(now.getTime() + 120_001)); await runner!.drain();
+    expect(runner!.getStatus().healthy).toBe(false);
+    await runner!.pollFallback();
+    expect(runner!.getStatus().healthy).toBe(true);
+    await runner!.stop(); expect(runner!.getStatus().started).toBe(false);
+  });
+  it("does not let a successful poll hide a failed fallback, and recovers after both succeed", async () => {
+    const failures = setup(); runner!.start(); await settle();
+    failures.fallback = true;
+    await expect(runner!.pollFallback()).rejects.toThrow(); await runner!.drain();
+    expect(runner!.getStatus()).toMatchObject({ healthy: false, failed: true });
+    failures.fallback = false; await runner!.pollFallback();
+    expect(runner!.getStatus()).toMatchObject({ healthy: true, failed: false });
+    failures.poll = true; await runner!.drain();
+    expect(runner!.getStatus()).toMatchObject({ healthy: false, failed: true });
+    await runner!.pollFallback(); expect(runner!.getStatus().failed).toBe(true);
+    failures.poll = false; await runner!.drain();
+    expect(runner!.getStatus()).toMatchObject({ healthy: true, failed: false });
+  });
+  it("does not accept future-dated observations after clock rollback", async () => {
+    setup(); runner!.start(); await settle();
+    vi.setSystemTime(new Date(now.getTime() - 1));
+    expect(runner!.getStatus().healthy).toBe(false);
+  });
+});
 const state = (patch: Partial<QueueState> = {}): QueueState => ({
   state: "idle",
   generation: 0,
