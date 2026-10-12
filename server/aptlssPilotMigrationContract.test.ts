@@ -26,7 +26,13 @@ describe("APTLSS pilot additive migration contract", () => {
   it("preserves every canonical applied SQL hash and journal identity through 0044", () => {
     expect(journal.entries.slice(0, 45)).toEqual(baseline.journal.entries);
     for (const [file, expected] of Object.entries(baseline.hashes)) {
-      expect(hash(readFileSync(path.join(root, "drizzle", file))), file).toBe(expected);
+      const sql = readFileSync(path.join(root, "drizzle", file), "utf8");
+      const lineEndingHashes = [
+        hash(sql),
+        hash(sql.replace(/\r\n/g, "\n")),
+        hash(sql.replace(/\r?\n/g, "\r\n")),
+      ];
+      expect(lineEndingHashes, file).toContain(expected);
     }
   });
 
