@@ -27,5 +27,7 @@ overrides:
   tar: 7.5.22
   uuid: 13.0.2
   ws: 8.21.1
+  proxy-addr: 2.0.8
+  source-map-js: 1.2.2
 patchedDependencies:
   wouter@3.7.1: patches/wouter@3.7.1.patch
