@@ -68,10 +68,11 @@ jobs:
         run: pnpm audit --audit-level=high
       - name: Apply canonical migrations
         run: pnpm exec drizzle-kit migrate
-      - name: Isolate database events and permit lock observation only in the disposable MySQL service
+      - name: Configure disposable MySQL for isolated integration checks
         run: >-
           docker exec ${{ job.services.mysql.id }} mysql -uroot -proot_test -e
           "SET GLOBAL event_scheduler=OFF;
+          SET GLOBAL log_bin_trust_function_creators=1;
           GRANT SELECT ON performance_schema.data_locks TO 'recovery'@'%';
           GRANT SELECT ON performance_schema.data_lock_waits TO 'recovery'@'%';"
       - name: Verify consolidated schema parity
