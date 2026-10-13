@@ -251,17 +251,26 @@ async function login(page: Page, username: string, role: "worker" | "admin") {
 }
 
 async function focusByTab(page: Page, control: Locator) {
-  await page.evaluate(() => {
-    document.body.tabIndex = -1;
-    document.body.focus();
+  const selector =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  const candidates = page.locator(selector);
+  const { firstTabStop, tabStops } = await candidates.evaluateAll(elements => {
+    let firstTabStop = -1;
+    let tabStops = 0;
+    for (const [index, element] of elements.entries()) {
+      const style = getComputedStyle(element);
+      if (!(element instanceof HTMLElement) || element.tabIndex < 0 ||
+          style.visibility === "hidden" || style.display === "none" ||
+          element.getClientRects().length === 0 || element.matches(":disabled") ||
+          element.closest("[inert], [aria-hidden='true']")) continue;
+      if (firstTabStop < 0) firstTabStop = index;
+      tabStops += 1;
+    }
+    return { firstTabStop, tabStops };
   });
-  const tabStops = await page.locator(
-    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-  ).evaluateAll(elements => elements.filter(element => {
-    const style = getComputedStyle(element);
-    return style.visibility !== "hidden" && style.display !== "none" &&
-      !(element instanceof HTMLElement && element.hidden);
-  }).length);
+  if (firstTabStop < 0) throw new Error("The page has no visible keyboard tab stops");
+  await candidates.nth(firstTabStop).focus();
+  if (await control.evaluate(element => element === document.activeElement)) return;
   const maxAttempts = Math.max(80, tabStops * 3);
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     if (await control.evaluate(element => element === document.activeElement)) return;
