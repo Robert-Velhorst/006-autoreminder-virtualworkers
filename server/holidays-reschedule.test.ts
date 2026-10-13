@@ -2,7 +2,7 @@ import express from 'express';
 import request from 'supertest';
 import { describe, it, expect } from 'vitest';
 import holidayRouter, { SUPPORTED_HOLIDAY_COUNTRIES } from './routes/holidays';
-import rescheduleRouter from './routes/reschedule';
+import rescheduleRouter, { extractCachedTasks } from './routes/reschedule';
 
 describe('Holiday Integration and Bulk Rescheduling', () => {
   const app = express();
@@ -41,6 +41,13 @@ describe('Holiday Integration and Bulk Rescheduling', () => {
   });
 
   describe('Bulk Rescheduling', () => {
+    it('uses the task list from a cached schedule response', () => {
+      const tasks = [{ id: 'task-1', date: '2026-08-15' }];
+      expect(extractCachedTasks({ tasks, overflow: [], timezone: 'UTC' })).toEqual(tasks);
+      expect(extractCachedTasks(tasks)).toEqual(tasks);
+      expect(extractCachedTasks({ tasks: 'not-an-array' })).toEqual([]);
+    });
+
     it('should have reschedule endpoints registered', async () => {
       const preview = await request(app).post('/api/reschedule/preview').send({});
       const apply = await request(app).post('/api/reschedule/apply').send({});

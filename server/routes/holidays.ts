@@ -3,12 +3,18 @@ import type { Request, Response } from 'express';
 import { getDb } from '../db';
 import { holidays, vaProfiles } from '../../drizzle/schema';
 import { eq, and } from 'drizzle-orm';
+import { requireAdmin } from '../middleware/auth';
 
 const router = Router();
+router.use((req, res, next) => {
+  if (req.method === 'GET' && req.path === '/countries') return next();
+  return requireAdmin(req, res, next);
+});
 
 // Nager.Date API - Free public holiday API (no auth required)
 // Documentation: https://date.nager.at/Api
 const HOLIDAY_API_BASE = 'https://date.nager.at/api/v3';
+const HOLIDAY_REQUEST_TIMEOUT_MS = 10_000;
 
 export const SUPPORTED_HOLIDAY_COUNTRIES = [
   { countryCode: 'US', name: 'United States' },
@@ -46,7 +52,9 @@ router.get('/fetch/:country/:year', async (req: any, res: Response) => {
     }
 
     // Fetch holidays from Nager.Date API
-    const response = await fetch(`${HOLIDAY_API_BASE}/PublicHolidays/${year}/${country}`);
+    const response = await fetch(`${HOLIDAY_API_BASE}/PublicHolidays/${year}/${country}`, {
+      signal: AbortSignal.timeout(HOLIDAY_REQUEST_TIMEOUT_MS),
+    });
     
     if (!response.ok) {
       if (response.status === 404) {
@@ -413,7 +421,9 @@ router.get('/by-timezone/:timezone/:year', async (req: any, res: Response) => {
 
     // Fetch holidays from Nager.Date API
     console.log('[Holidays] Fetching from API for year:', year, 'country:', countryCode);
-    const response = await fetch(`${HOLIDAY_API_BASE}/PublicHolidays/${year}/${countryCode}`);
+    const response = await fetch(`${HOLIDAY_API_BASE}/PublicHolidays/${year}/${countryCode}`, {
+      signal: AbortSignal.timeout(HOLIDAY_REQUEST_TIMEOUT_MS),
+    });
     
     console.log('[Holidays] API response status:', response.status);
     if (!response.ok) {
@@ -523,7 +533,7 @@ router.get('/by-timezone/:timezone/:year', async (req: any, res: Response) => {
   } catch (error: any) {
     console.error('[Holidays] Error fetching holidays by timezone:', error);
     console.error('[Holidays] Error stack:', error?.stack);
-    return res.status(500).json({ error: error?.message || 'Failed to fetch holidays' });
+    return res.status(500).json({ error: 'Failed to fetch holidays' });
   }
 });
 

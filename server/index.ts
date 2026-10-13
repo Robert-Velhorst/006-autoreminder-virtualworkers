@@ -1,45 +1,4 @@
-import express from "express";
-import { createServer } from "http";
-import path from "path";
-import { fileURLToPath } from "url";
-import aptlssRoutes from "./routes/aptlss.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-async function startServer() {
-  const app = express();
-  const server = createServer(app);
-
-  // Middleware
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
-
-  // API routes
-  app.use('/api', aptlssRoutes);
-
-  // Serve static files from dist/public in production
-  const staticPath =
-    process.env.NODE_ENV === "production"
-      ? path.resolve(__dirname, "public")
-      : path.resolve(__dirname, "..", "dist", "public");
-
-  app.use(express.static(staticPath));
-
-  // Handle client-side routing - serve index.html for non-API routes
-  app.get("*", (req, res, next) => {
-    // Skip API routes
-    if (req.path.startsWith('/api')) {
-      return next();
-    }
-    res.sendFile(path.join(staticPath, "index.html"));
-  });
-
-  const port = process.env.PORT || 3000;
-
-  server.listen(port, () => {
-    console.log(`Server running on http://localhost:${port}/`);
-  });
-}
-
-startServer().catch(console.error);
+// Compatibility entrypoint for old deployment commands. The application has
+// one canonical bootstrap so every API, auth boundary, scheduler and connector
+// is registered consistently.
+import "./_core/index.js";

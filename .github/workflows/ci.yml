@@ -6,14 +6,19 @@ on:
     branches:
       - main
       - "recovery/**"
+      - "codex/aptlss-shadow-pilot-2026-09-25"
 
 permissions:
   contents: read
 
+concurrency:
+  group: recovery-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     services:
       mysql:
         image: mysql:8.4
@@ -33,11 +38,11 @@ jobs:
       CI: "true"
       DATABASE_URL: mysql://recovery:recovery_test@127.0.0.1:3306/recovery_test
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@a15d269cd4658e1107c09f1fabf4cbd7bd1f308a # v4.4.0
         with:
           run_install: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
           cache: pnpm
@@ -47,24 +52,121 @@ jobs:
         run: |
           set +e
           docker run --rm -v "$PWD:/repo" zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
-            dir /repo --no-banner --redact --report-format json --report-path /repo/gitleaks-report.json
+            --gitleaks-ignore-path /repo/.gitleaksignore dir /repo --no-banner --redact --report-format json --report-path /repo/gitleaks-report.json
           status=$?
           if test -s gitleaks-report.json; then
             jq -r '.[] | "gitleaks: \(.RuleID) \(.File):\(.StartLine)"' gitleaks-report.json
           fi
           rm -f gitleaks-report.json
           exit "$status"
+      - name: Require the release test runtime
+        run: node scripts/verify-release-test-runtime.mjs
+      - name: Verify runtime mismatch detection
+        run: node --test scripts/verify-release-test-runtime.test.mjs
+      - name: Reject unsafe full-data rehearsal connections
+        run: node --test scripts/rehearsal-connection.test.mjs scripts/rehearsal-readonly.test.mjs scripts/verify-rehearsal-reader.test.mjs scripts/rehearsal-reader-account.test.mjs
+      - name: Keep private runtime state outside Git publication
+        run: node --test scripts/publication-ignore.test.mjs
       - run: pnpm check
+      - name: Audit dependencies
+        run: pnpm audit --audit-level=high
       - name: Apply canonical migrations
         run: pnpm exec drizzle-kit migrate
+      - name: Configure disposable MySQL for isolated integration checks
+        run: >-
+          docker exec ${{ job.services.mysql.id }} mysql -uroot -proot_test -e
+          "SET GLOBAL event_scheduler=OFF;
+          SET GLOBAL log_bin_trust_function_creators=1;
+          GRANT SELECT ON performance_schema.data_locks TO 'recovery'@'%';
+          GRANT SELECT ON performance_schema.data_lock_waits TO 'recovery'@'%';"
       - name: Verify consolidated schema parity
         run: pnpm db:verify-parity
       - run: pnpm test
+      - name: Verify setup diagnostics and browser error classification
+        run: node --test scripts/doctor.test.mjs e2e/disabled-provider-response.test.mjs
+      - name: Verify private Codex host process lifecycle without provider access
+        run: pnpm test:codex-supervisor
+      - name: Require real MySQL integration evidence (no skipped suites)
+        env:
+          APTLSS_TEST_DATABASE_URL: mysql://recovery:recovery_test@127.0.0.1:3306/recovery_test
+        run: pnpm test:mysql
       - run: pnpm build
+      - name: Install browser engines for the portal smoke matrix
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+      - name: Run the worker portal browser smoke matrix
+        shell: bash
+        env:
+          PORT: "3025"
+          HOST: "127.0.0.1"
+          NODE_ENV: development
+          REMINDER_WORKER_ENABLED: "false"
+          BRIEFING_SCHEDULER_ENABLED: "false"
+          APTLSS_TEST_DATABASE_URL: mysql://recovery:recovery_test@127.0.0.1:3306/recovery_test
+          APTLSS_TEST_DISABLE_BACKGROUND_JOBS: "true"
+          APTLSS_TEST_PILOT_WORKER_IDS: >-
+            150000000,150000100,150000200,150000300,150000400,150000500,150000600,
+            150000700,150000800,150000900,150001000,150001100,150001200,150001300,150001400
+          APTLSS_TEST_PORT: "3025"
+          NOTIFICATIONS_ENABLED: "false"
+          E2E_BASE_URL: http://127.0.0.1:3025
+        run: |
+          set -euo pipefail
+          pnpm exec tsx scripts/start-aptlss-test-server.ts > server.log 2>&1 &
+          app_pid=$!
+          cleanup() {
+            kill "$app_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3025/api/health/ready >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if ! curl --fail --silent http://127.0.0.1:3025/api/health/ready >/dev/null; then
+            cat server.log
+            exit 1
+          fi
+          pnpm test:e2e
+      - name: Run isolated APTLSS browser acceptance with real storage
+        env:
+          APTLSS_TEST_DATABASE_URL: mysql://recovery:recovery_test@127.0.0.1:3306/recovery_test
+        run: pnpm exec playwright test --config playwright.aptlss.config.ts
+      - name: Preserve release verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-verification-${{ github.run_id }}
+          path: |
+            artifacts/mysql-integration-*/results.json
+            test-results/
+            playwright-report/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Build the production container
         run: docker build --tag va-dashboard:ci .
+      - name: Verify the actual production image without provider access
+        run: node scripts/verify-production-image.mjs va-dashboard:ci
       - name: Verify migration metadata matches the schema
         shell: bash
         run: |
           pnpm exec drizzle-kit generate --name ci-drift
           test -z "$(git status --porcelain -- drizzle)"
+
+  codex-host-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@a15d269cd4658e1107c09f1fabf4cbd7bd1f308a # v4.4.0
+        with:
+          run_install: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Require the release test runtime
+        run: node scripts/verify-release-test-runtime.mjs
+      - name: Verify runner and supervisor shutdown without accounts or provider access
+        run: pnpm test:codex-supervisor

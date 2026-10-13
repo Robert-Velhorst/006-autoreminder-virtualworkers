@@ -1,7 +1,8 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { z } from 'zod';
 import { Link } from 'wouter';
 import { 
-  ArrowLeft, Plus, Users, Clock, CheckCircle, AlertTriangle, Loader2, 
+  ArrowLeft, Plus, Users, Clock, CheckCircle, AlertTriangle, Loader2, Copy,
   MoreVertical, Mail, Globe, DollarSign, Search, Flag, ExternalLink,
   Star, MessageSquare, Calendar, Send, RefreshCw, Filter, Briefcase,
   Timer, AlertCircle, CheckSquare, XCircle, ArrowUpCircle,
@@ -28,6 +29,9 @@ import { LabelAutocompleteSearch } from '@/components/LabelAutocompleteSearch';
 import TIMEZONES from '@/data/timezones';
 import CURRENCIES from '@/data/currencies';
 import WeeklyPayCalculator from './manus/WeeklyPayCalculator';
+import AptlssManagerReview from '@/components/AptlssManagerReview';
+import FounderDecisionInbox from '@/components/FounderDecisionInbox';
+import { trpc } from '@/lib/trpc';
 
 interface VirtualWorker {
   id: number;
@@ -70,23 +74,23 @@ interface WorkloadItem {
 }
 
 interface TaskAssignment {
-  id: number;
+  id: number | string;
   taskId: string;
   taskTitle: string;
   cardName: string;
   cardId: string;
   workerId: number | null;
-  workerName: string | null;
-  priority: 'critical' | 'urgent' | 'high' | 'normal';
+  workerName?: string | null;
+  priority: 'drop_everything' | 'critical' | 'urgent' | 'high' | 'normal';
   isPriorityOverride: boolean;
-  status: 'assigned' | 'in_progress' | 'completed' | 'blocked';
+  status: 'unassigned' | 'assigned' | 'in_progress' | 'completed' | 'blocked';
   estimatedMinutes: number;
-  scheduledStart?: string;
-  scheduledEnd?: string;
+  scheduledStart?: string | null;
+  scheduledEnd?: string | null;
   blockedBy: string[];
   blocks: string[];
-  clientProject?: string;
-  clientName?: string;
+  clientProject?: string | null;
+  clientName?: string | null;
   clientPriority?: 'standard' | 'priority' | 'vip';
   labels: string[];
   description?: string | null;
@@ -94,6 +98,39 @@ interface TaskAssignment {
   deliverable?: string | null;
   checklist?: Array<{ step: string; timeMinutes: number; aptlssType: string }> | null;
 }
+
+const taskAssignmentSchema = z.object({
+  id: z.union([z.number().int(), z.string().min(1)]),
+  taskId: z.string().min(1),
+  taskTitle: z.string(),
+  cardName: z.string(),
+  cardId: z.string().min(1),
+  workerId: z.number().int().nullable(),
+  workerName: z.string().nullish(),
+  priority: z.enum(['drop_everything', 'critical', 'urgent', 'high', 'normal']),
+  isPriorityOverride: z.boolean(),
+  status: z.enum(['unassigned', 'assigned', 'in_progress', 'completed', 'blocked']),
+  estimatedMinutes: z.number().nonnegative(),
+  scheduledStart: z.string().nullish(),
+  scheduledEnd: z.string().nullish(),
+  blockedBy: z.array(z.string()),
+  blocks: z.array(z.string()).default([]),
+  clientProject: z.string().nullish(),
+  clientName: z.string().nullish(),
+  clientPriority: z.enum(['standard', 'priority', 'vip']).optional(),
+  labels: z.array(z.string()),
+  description: z.string().nullish(),
+  goal: z.string().nullish(),
+  deliverable: z.string().nullish(),
+  checklist: z.array(z.object({
+    step: z.string(), timeMinutes: z.number().nonnegative(), aptlssType: z.string(),
+  }).passthrough()).nullish(),
+}).passthrough();
+const assignmentsPayloadSchema = z.union([
+  z.array(taskAssignmentSchema),
+  z.object({ assignments: z.array(taskAssignmentSchema) }),
+]);
+const assignmentsUnavailableMessage = 'Trello assignments are unavailable. Retry after checking the Trello connection.';
 
 
 interface CommunicationEntry {
@@ -117,9 +154,20 @@ interface TimezoneOverlap {
 }
 
 export default function FounderDashboard() {
-  const [activeTab, setActiveTab] = useState('overview');
+  const [activeTab, setActiveTab] = useState(() =>
+    new URLSearchParams(window.location.search).get('tab') === 'founder-decisions' ? 'founder-decisions' : 'overview');
+  const founderDecisions = trpc.operator.getFounderDecisionInbox.useQuery(undefined, {
+    retry: false, staleTime: 30_000, refetchInterval: 30_000,
+  });
+  const urgentDecisions = founderDecisions.data?.items.filter(item =>
+    item.escalation === 'decision_overdue' || item.escalation === 'decision_due_soon'
+    || item.escalation === 'task_overdue' || item.escalation === 'task_due_soon') ?? [];
   const [workload, setWorkload] = useState<WorkloadItem[]>([]);
   const [assignments, setAssignments] = useState<TaskAssignment[]>([]);
+  const [assignmentsLoading, setAssignmentsLoading] = useState(true);
+  const [assignmentsError, setAssignmentsError] = useState<string | null>(null);
+  const assignmentsRequest = useRef({ pending: false, available: false, version: 0, refreshAfterPending: false });
+  const assignmentsAvailable = !assignmentsLoading && !assignmentsError;
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
 
   const toggleTaskExpanded = (taskId: string) => {
@@ -141,7 +189,6 @@ export default function FounderDashboard() {
   const [newWorker, setNewWorker] = useState({
     name: '',
     email: '',
-    password: '',
     timezone: 'Asia/Manila',
     hourlyRate: '',
     currency: 'USD',
@@ -156,6 +203,7 @@ export default function FounderDashboard() {
     dinnerDuration: '45',
     trelloMemberId: '',
   });
+  const [createdInvitation, setCreatedInvitation] = useState<{ inviteUrl: string; emailSent: boolean; expiresAt: string } | null>(null);
   const [showEditWorker, setShowEditWorker] = useState(false);
   const [editingWorker, setEditingWorker] = useState<VirtualWorker | null>(null);
   const [editWorkerPassword, setEditWorkerPassword] = useState('');
@@ -184,7 +232,9 @@ export default function FounderDashboard() {
   // Set default worker once workload is loaded
   useEffect(() => {
     if (workload.length > 0 && selectedWorkerId === null) {
-      const firstActiveWorker = workload.find(w => w.worker.userId !== null);
+      const firstActiveWorker = workload.find(
+        w => w.worker.userId !== null && w.worker.status === 'active',
+      );
       if (firstActiveWorker && firstActiveWorker.worker.userId) {
         setSelectedWorkerId(firstActiveWorker.worker.userId);
       } else {
@@ -225,15 +275,36 @@ export default function FounderDashboard() {
     }
   };
 
-  const fetchAssignments = async () => {
+  const fetchAssignments = async (revalidateAfterPending = false): Promise<void> => {
+    if (assignmentsRequest.current.pending) {
+      if (revalidateAfterPending) assignmentsRequest.current.refreshAfterPending = true;
+      return;
+    }
+    assignmentsRequest.current.pending = true;
+    assignmentsRequest.current.available = false;
+    assignmentsRequest.current.version++;
+    setAssignmentsLoading(true);
     try {
       const res = await fetch('/api/va/assignments', { credentials: 'include' });
-      if (res.ok) {
-        const data = await res.json();
-        setAssignments(Array.isArray(data) ? data : data.assignments || []);
+      if (!res.ok) {
+        await res.arrayBuffer();
+        throw new Error('Assignments request failed');
       }
-    } catch (error) {
-      console.error('Error fetching assignments:', error);
+      const payload = assignmentsPayloadSchema.parse(await res.json());
+      setAssignments(Array.isArray(payload) ? payload : payload.assignments);
+      setAssignmentsError(null);
+      assignmentsRequest.current.available = true;
+    } catch {
+      setAssignments([]);
+      setExpandedTasks(new Set());
+      setAssignmentsError(assignmentsUnavailableMessage);
+    } finally {
+      assignmentsRequest.current.pending = false;
+      setAssignmentsLoading(false);
+      if (assignmentsRequest.current.refreshAfterPending) {
+        assignmentsRequest.current.refreshAfterPending = false;
+        await fetchAssignments();
+      }
     }
   };
 
@@ -288,25 +359,15 @@ export default function FounderDashboard() {
       toast.error('Please enter an email');
       return;
     }
-    if (!newWorker.password.trim()) {
-      toast.error('Please enter a password');
-      return;
-    }
-    if (newWorker.password.length < 6) {
-      toast.error('Password must be at least 6 characters');
-      return;
-    }
-
     setSaving(true);
     try {
-      const res = await fetch('/api/va/vas', {
+      const res = await fetch('/api/va/vas/invite', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
           name: newWorker.name,
           email: newWorker.email,
-          password: newWorker.password,
           timezone: newWorker.timezone,
           hourlyRate: newWorker.hourlyRate ? parseInt(newWorker.hourlyRate) * 100 : null,
           currency: newWorker.currency,
@@ -323,20 +384,24 @@ export default function FounderDashboard() {
         }),
       });
 
+      const result = await res.json();
       if (res.ok) {
-        toast.success('Worker added successfully');
-        setShowAddWorker(false);
-        setNewWorker({ name: '', email: '', password: '', timezone: 'Asia/Manila', hourlyRate: '', currency: 'USD', workStartHour: '9', workEndHour: '18', workingDays: '1,2,3,4,5', breakfastTime: '7', breakfastDuration: '30', lunchTime: '12', lunchDuration: '60', dinnerTime: '19', dinnerDuration: '45', trelloMemberId: '' });
-        fetchWorkload();
+        setCreatedInvitation({ inviteUrl: result.inviteUrl, emailSent: result.emailSent, expiresAt: result.expiresAt });
+        toast.success(result.emailSent ? 'Worker invitation sent' : 'Worker created; copy the invitation link');
+        void fetchWorkload();
       } else {
-        const err = await res.json();
-        toast.error('Failed to add worker', { description: err.error });
+        toast.error('Failed to invite worker', { description: result.error });
       }
     } catch (error) {
       toast.error('Failed to add worker');
     } finally {
       setSaving(false);
     }
+  };
+
+  const resetWorkerInvitation = () => {
+    setCreatedInvitation(null);
+    setNewWorker({ name: '', email: '', timezone: 'Asia/Manila', hourlyRate: '', currency: 'USD', workStartHour: '9', workEndHour: '18', workingDays: '1,2,3,4,5', breakfastTime: '7', breakfastDuration: '30', lunchTime: '12', lunchDuration: '60', dinnerTime: '19', dinnerDuration: '45', trelloMemberId: '' });
   };
 
   const handleUpdateStatus = async (workerId: number, status: string) => {
@@ -358,6 +423,8 @@ export default function FounderDashboard() {
   };
 
   const handleAssignTask = async (taskId: string, workerId: number) => {
+    if (!assignmentsRequest.current.available) return;
+    const version = assignmentsRequest.current.version;
     try {
       const res = await fetch(`/api/va/assignments`, {
         method: 'POST',
@@ -367,8 +434,14 @@ export default function FounderDashboard() {
       });
 
       if (res.ok) {
+        // A refresh invalidates callbacks and mutations tied to the previous snapshot.
+        if (!assignmentsRequest.current.available || version !== assignmentsRequest.current.version) {
+          toast.info('Task assignment saved. Rechecking assignments.');
+          await fetchAssignments(true);
+          return;
+        }
         const worker = workload.find(w => w.worker.id === workerId)?.worker;
-        setAssignments(assignments.map(a => 
+        setAssignments(current => current.map(a =>
           a.taskId === taskId 
             ? { ...a, workerId, workerName: worker?.name || null, status: 'assigned' }
             : a
@@ -384,6 +457,8 @@ export default function FounderDashboard() {
   };
 
   const handlePriorityOverride = async (taskId: string, priority: string) => {
+    if (!assignmentsRequest.current.available) return;
+    const version = assignmentsRequest.current.version;
     try {
       const res = await fetch(`/api/va/priority-override`, {
         method: 'POST',
@@ -393,7 +468,12 @@ export default function FounderDashboard() {
       });
 
       if (res.ok) {
-        setAssignments(assignments.map(a => 
+        if (!assignmentsRequest.current.available || version !== assignmentsRequest.current.version) {
+          toast.info('Priority saved. Rechecking assignments.');
+          await fetchAssignments(true);
+          return;
+        }
+        setAssignments(current => current.map(a =>
           a.taskId === taskId 
             ? { ...a, priority: priority as any, isPriorityOverride: true }
             : a
@@ -436,8 +516,8 @@ export default function FounderDashboard() {
   const handleSaveWorkerSettings = async () => {
     if (!editingWorker) return;
     
-    if (editWorkerPassword && editWorkerPassword.length < 6) {
-      toast.error('Password must be at least 6 characters');
+    if (editWorkerPassword && editWorkerPassword.length < 12) {
+      toast.error('Password must be at least 12 characters');
       return;
     }
 
@@ -569,6 +649,7 @@ export default function FounderDashboard() {
 
   const getPriorityColor = (priority: string) => {
     switch (priority) {
+      case 'drop_everything':
       case 'critical': return 'bg-red-500 text-white';
       case 'urgent': return 'bg-orange-500 text-white';
       case 'high': return 'bg-yellow-500 text-black';
@@ -584,8 +665,12 @@ export default function FounderDashboard() {
         return <Badge className="bg-blue-100 text-blue-700"><Timer className="h-3 w-3 mr-1" />In Progress</Badge>;
       case 'blocked':
         return <Badge className="bg-red-100 text-red-700"><AlertCircle className="h-3 w-3 mr-1" />Blocked</Badge>;
-      default:
+      case 'unassigned':
+        return <Badge variant="outline">Unassigned</Badge>;
+      case 'assigned':
         return <Badge className="bg-gray-100 text-gray-700"><Clock className="h-3 w-3 mr-1" />Assigned</Badge>;
+      default:
+        return <Badge variant="outline">Status unavailable</Badge>;
     }
   };
 
@@ -604,17 +689,33 @@ export default function FounderDashboard() {
     blocked: acc.blocked + item.statusCounts.blocked,
   }), { totalTasks: 0, inProgress: 0, completed: 0, blocked: 0 });
 
+  const assignmentsUnavailableNotice = (
+    <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/30 p-4">
+      <div className="flex items-start gap-2">
+        <AlertTriangle aria-hidden="true" className="h-5 w-5 shrink-0 text-destructive" />
+        <div>
+          <h3 className="font-medium">Assignments unavailable</h3>
+          <p className="text-sm text-muted-foreground">{assignmentsError}</p>
+        </div>
+      </div>
+      <Button variant="outline" size="sm" onClick={() => void fetchAssignments()} disabled={assignmentsLoading}>
+        <RefreshCw aria-hidden="true" className={`h-4 w-4 mr-2 ${assignmentsLoading ? 'animate-spin' : ''}`} />
+        {assignmentsLoading ? 'Retrying...' : 'Retry assignments'}
+      </Button>
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
       <header className="border-b border-border/40 bg-card/50 backdrop-blur-sm sticky top-0 z-50">
-        <div className="container flex h-16 items-center justify-between">
+        <div className="container flex min-h-16 flex-wrap items-center justify-between gap-3 py-3">
           <div className="flex items-center gap-4">
-            <Link href="/">
-              <Button variant="ghost" size="icon">
-                <ArrowLeft className="h-5 w-5" />
-              </Button>
-            </Link>
+            <Button asChild variant="ghost" size="icon">
+              <Link href="/" aria-label="Back to dashboard">
+                <ArrowLeft aria-hidden="true" className="h-5 w-5" />
+              </Link>
+            </Button>
             <div>
               <h1 className="text-xl font-semibold flex items-center gap-2">
                 <Users className="h-5 w-5 text-primary" />
@@ -623,8 +724,8 @@ export default function FounderDashboard() {
               <p className="text-sm text-muted-foreground">Manage your virtual workers and workload</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={fetchAllData}>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" onClick={fetchAllData} disabled={loading || assignmentsLoading}>
               <RefreshCw className="h-4 w-4 mr-2" />
               Refresh
             </Button>
@@ -639,7 +740,10 @@ export default function FounderDashboard() {
               <ArrowUpCircle className="h-4 w-4 mr-2" />
               Re-analyze All
             </Button>
-            <Dialog open={showAddWorker} onOpenChange={setShowAddWorker}>
+            <Dialog open={showAddWorker} onOpenChange={(open) => {
+              setShowAddWorker(open);
+              if (!open) resetWorkerInvitation();
+            }}>
               <DialogTrigger asChild>
                 <Button>
                   <Plus className="h-4 w-4 mr-2" />
@@ -650,6 +754,39 @@ export default function FounderDashboard() {
                 <DialogHeader>
                   <DialogTitle>Add Virtual Worker</DialogTitle>
                 </DialogHeader>
+                {createdInvitation ? (
+                  <div className="space-y-5 py-4">
+                    <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-4">
+                      <div className="flex items-center gap-2 font-medium text-emerald-700 dark:text-emerald-300">
+                        <CheckCircle className="size-4" />
+                        {createdInvitation.emailSent ? 'Invitation sent' : 'Invitation ready'}
+                      </div>
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        {createdInvitation.emailSent
+                          ? 'The worker received a one-time setup link by email.'
+                          : 'Email delivery is not active. Share the one-time link through a trusted channel.'}
+                      </p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="worker-invitation-url">One-time invitation link</Label>
+                      <div className="flex gap-2">
+                        <Input id="worker-invitation-url" readOnly value={createdInvitation.inviteUrl} />
+                        <Button type="button" variant="outline" size="icon" aria-label="Copy invitation link" onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(createdInvitation.inviteUrl);
+                            toast.success('Invitation link copied');
+                          } catch {
+                            toast.error('Could not copy the invitation link. Select the link and copy it manually.');
+                          }
+                        }}><Copy className="size-4" /></Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">Expires {new Date(createdInvitation.expiresAt).toLocaleString()}.</p>
+                    </div>
+                    <DialogFooter>
+                      <Button onClick={() => { resetWorkerInvitation(); setShowAddWorker(false); }}>Done</Button>
+                    </DialogFooter>
+                  </div>
+                ) : <>
                 <div className="space-y-4 py-4">
                   <div className="space-y-2">
                     <Label>Name *</Label>
@@ -666,15 +803,6 @@ export default function FounderDashboard() {
                       value={newWorker.email}
                       onChange={(e) => setNewWorker({ ...newWorker, email: e.target.value })}
                       placeholder="va@example.com"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Password *</Label>
-                    <Input
-                      type="password"
-                      value={newWorker.password}
-                      onChange={(e) => setNewWorker({ ...newWorker, password: e.target.value })}
-                      placeholder="Min 6 characters"
                     />
                   </div>
                   <div className="space-y-2">
@@ -896,12 +1024,13 @@ export default function FounderDashboard() {
                   </div>
                 </div>
                 <DialogFooter>
-                  <Button variant="outline" onClick={() => setShowAddWorker(false)}>Cancel</Button>
+                  <Button variant="outline" onClick={() => { resetWorkerInvitation(); setShowAddWorker(false); }}>Cancel</Button>
                   <Button onClick={handleAddWorker} disabled={saving}>
                     {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                    Add Worker
+                    Send Invitation
                   </Button>
                 </DialogFooter>
+                </>}
               </DialogContent>
             </Dialog>
           </div>
@@ -909,8 +1038,17 @@ export default function FounderDashboard() {
       </header>
 
       <main className="container py-6">
+        {founderDecisions.error && <p role="alert" className="mb-4 border-l-2 border-red-500 px-3 py-2 text-sm">
+          Decision inbox is unavailable. Reload it before relying on the dashboard.
+        </p>}
+        {activeTab !== 'founder-decisions' && urgentDecisions.length > 0 && <button type="button"
+          onClick={() => setActiveTab('founder-decisions')}
+          className="mb-4 flex w-full items-center gap-2 border-l-2 border-amber-500 bg-amber-500/10 px-3 py-2 text-left text-sm hover:bg-amber-500/15">
+          <AlertTriangle className="size-4 shrink-0" />
+          {urgentDecisions.length} founder {urgentDecisions.length === 1 ? 'decision or task deadline needs' : 'decision or task deadlines need'} attention. Open decisions.
+        </button>}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="grid w-full grid-cols-2 md:grid-cols-7 lg:w-auto lg:inline-grid">
+          <TabsList className="grid h-auto w-full grid-cols-2 gap-1 md:grid-cols-3 xl:grid-cols-5">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="assignments">Assignments</TabsTrigger>
             <TabsTrigger value="dependencies">Dependencies</TabsTrigger>
@@ -918,7 +1056,12 @@ export default function FounderDashboard() {
             <TabsTrigger value="timezones">Timezones</TabsTrigger>
             <TabsTrigger value="briefings">Briefings</TabsTrigger>
             <TabsTrigger value="paylogs">Pay Logs</TabsTrigger>
+            <TabsTrigger value="manager-review">Manager review</TabsTrigger>
+            <TabsTrigger value="founder-decisions">Decisions{urgentDecisions.length > 0 && <Badge variant="destructive" className="ml-2">{urgentDecisions.length}</Badge>}</TabsTrigger>
           </TabsList>
+
+          <TabsContent value="manager-review"><AptlssManagerReview /></TabsContent>
+          <TabsContent value="founder-decisions"><FounderDecisionInbox /></TabsContent>
 
           {/* Overview Tab */}
           <TabsContent value="overview" className="space-y-6">
@@ -1197,7 +1340,7 @@ export default function FounderDashboard() {
 
             {/* Task List */}
             <div className="space-y-3">
-              {loading ? (
+              {assignmentsError ? assignmentsUnavailableNotice : assignmentsLoading ? (
                 Array(5).fill(0).map((_, i) => (
                   <Skeleton key={i} className="h-24 w-full" />
                 ))
@@ -1233,7 +1376,7 @@ export default function FounderDashboard() {
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-2 mb-1 flex-wrap cursor-pointer" onClick={() => toggleTaskExpanded(task.taskId)}>
                                 <Badge className={getPriorityColor(task.priority)}>
-                                  {task.priority.toUpperCase()}
+                                  {task.priority.replaceAll('_', ' ').toUpperCase()}
                                 </Badge>
                                 {task.isPriorityOverride && (
                                   <Badge variant="outline" className="text-xs">
@@ -1305,6 +1448,7 @@ export default function FounderDashboard() {
                           <div className="flex flex-col items-end gap-2 flex-shrink-0">
                             {/* VA Assignment */}
                             <Select
+                              disabled={!assignmentsAvailable}
                               value={task.workerId?.toString() || 'unassigned'}
                               onValueChange={(v) => v !== 'unassigned' && handleAssignTask(task.taskId, parseInt(v))}
                             >
@@ -1327,7 +1471,7 @@ export default function FounderDashboard() {
                             {/* Priority Override */}
                             <DropdownMenu>
                               <DropdownMenuTrigger asChild>
-                                <Button variant="outline" size="sm">
+                                <Button variant="outline" size="sm" disabled={!assignmentsAvailable}>
                                   <Flag className="h-4 w-4 mr-2" />
                                   Priority
                                 </Button>
@@ -1358,6 +1502,7 @@ export default function FounderDashboard() {
                             <Button
                               variant="ghost"
                               size="sm"
+                              disabled={!assignmentsAvailable}
                               onClick={() => window.open(`https://trello.com/c/${task.cardId}`, '_blank')}
                             >
                               <ExternalLink className="h-4 w-4 mr-2" />
@@ -1461,7 +1606,12 @@ export default function FounderDashboard() {
 
           {/* Dependencies Tab */}
           <TabsContent value="dependencies" className="space-y-6">
-            <DependencyGraph
+            {assignmentsError ? assignmentsUnavailableNotice : assignmentsLoading ? (
+              <div role="status" className="space-y-3">
+                <span className="sr-only">Loading assignments...</span>
+                <Skeleton className="h-64 w-full" />
+              </div>
+            ) : <DependencyGraph
               tasks={assignments.map(a => ({
                 id: a.id.toString(),
                 title: a.taskTitle,
@@ -1471,7 +1621,7 @@ export default function FounderDashboard() {
                 blocks: a.blocks || [],
               }))}
               onRefresh={fetchAssignments}
-            />
+            />}
           </TabsContent>
 
           {/* Communications Tab */}

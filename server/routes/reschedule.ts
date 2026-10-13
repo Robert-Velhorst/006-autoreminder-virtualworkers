@@ -1,8 +1,20 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getCachedTasks } from '../services/trello-cache';
+import { invalidateCache } from '../services/trello-cache';
+import { requireAdmin } from '../middleware/auth';
+import { normalizeReschedulePreview } from '../operational-control-validation';
 
 const router = Router();
+router.use(requireAdmin);
+
+export function extractCachedTasks(cachedData: unknown): any[] {
+  if (Array.isArray(cachedData)) return cachedData;
+  if (cachedData && typeof cachedData === 'object' && Array.isArray((cachedData as { tasks?: unknown }).tasks)) {
+    return (cachedData as { tasks: any[] }).tasks;
+  }
+  return [];
+}
 
 /**
  * POST /api/reschedule/preview
@@ -15,20 +27,20 @@ router.post('/preview', async (req: any, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { workStartHour, workEndHour, workingDays } = req.body;
+    const schedule = normalizeReschedulePreview(req.body ?? {});
+    if (!schedule.ok) {
+      return res.status(400).json({ error: schedule.error });
+    }
+    const { workStartHour, workEndHour, workingDays } = schedule.value;
 
     const cachedTasks = await getCachedTasks(user.id, user.openId);
-    const tasks = Array.isArray(cachedTasks) ? cachedTasks : [];
-    const normalizedWorkingDays = Array.isArray(workingDays)
-      ? workingDays.map((day: any) => Number(day)).filter((day: number) => Number.isFinite(day))
-      : [1, 2, 3, 4, 5];
-
+    const tasks = extractCachedTasks(cachedTasks);
     const affectedTasks = tasks.filter((task: any) => {
       if (!task.date) return false;
 
       const taskDate = new Date(task.date);
       const dayOfWeek = taskDate.getDay();
-      if (!normalizedWorkingDays.includes(dayOfWeek)) {
+      if (!workingDays.includes(dayOfWeek)) {
         return true;
       }
 
@@ -50,7 +62,7 @@ router.post('/preview', async (req: any, res: Response) => {
         newSchedule: {
           workStartHour,
           workEndHour,
-          workingDays: normalizedWorkingDays,
+          workingDays,
         },
         message: tasks.length > 0
           ? `${affectedTasks.length} task(s) would be rescheduled based on the updated working hours and days`
@@ -75,13 +87,15 @@ router.post('/apply', async (req: any, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    // The actual rescheduling happens automatically when tasks are fetched
-    // because the scheduling algorithm uses the user's current settings
-    // This endpoint just confirms the action and can trigger any cleanup if needed
+    // The task timeline is derived from current settings during the next fetch.
+    // Invalidate the durable server cache so that refresh cannot reuse an old
+    // schedule while claiming the new settings were applied.
+    await invalidateCache(user.id, user.openId, 'tasks');
 
     res.json({
       success: true,
-      message: 'Settings updated. Tasks will be rescheduled on next refresh.',
+      cacheInvalidated: true,
+      message: 'Schedule cache cleared. Tasks will be recalculated on refresh.',
     });
   } catch (error) {
     console.error('Error applying reschedule:', error);

@@ -1,13 +1,294 @@
 import { Router } from 'express';
-import type { Request, Response } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { getDb } from '../db';
-import { timeEntries } from '../../drizzle/schema';
-import { eq, and, desc, gte, lte, sql } from 'drizzle-orm';
+import { timeEntries, vaProfiles, taskAssignments, atisCards, aptlssPlans, aptlssWaitingReasons, cardStates, trelloCachedCards, users, type User } from '../../drizzle/schema';
+import { eq, and, desc, gte, lte, sql, inArray } from 'drizzle-orm';
+import { requireAuthenticated } from '../middleware/auth';
+import { isManagerPilotWorker } from '../aptlssManagerPilot';
+import { managerActionNeedsSourceVerification, managerActionSourceRequirements, managerExecutionCoverageComplete, managerIntervenesOnCard, timerExecutionBlockReason } from '../timerAccess';
+import { enqueueManagerTask } from '../aptlssManagerQueue';
+import { WORKER_EXECUTION_HOLD_MESSAGE } from '../../shared/aptlssManager';
+import { readManagerAssignmentState } from '../aptlssManagerAssignments';
+import { selectWorkerProfile } from '../workerOperatorContext';
+import { getGoogleEvidenceStatus } from '../googleEvidence';
+import { readCurrentManagerHistory } from '../aptlssManagerHistoryDb';
 
 const router = Router();
+router.use('/time-tracking', requireAuthenticated, requireActiveWorkerProfileForTimeTracking);
+
+async function requireActiveWorkerProfileForTimeTracking(req: Request & { user?: User | null }, res: Response, next: NextFunction) {
+  const user = req.user;
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  if (user.role !== 'worker') {
+    next();
+    return;
+  }
+
+  try {
+    const db = await getDb();
+    if (!db) {
+      res.status(503).json({ error: 'Worker access could not be verified' });
+      return;
+    }
+    const activeProfile = await db.transaction(async tx => {
+      const profiles = await tx.select({ id: vaProfiles.id, status: vaProfiles.status })
+        .from(vaProfiles)
+        .where(eq(vaProfiles.userId, user.id))
+        .orderBy(vaProfiles.id);
+      const activeProfiles = profiles.filter(profile => profile.status === 'active');
+      return {
+        profile: selectWorkerProfile(profiles),
+        ambiguous: activeProfiles.length > 1,
+      };
+    });
+    if (!activeProfile.profile) {
+      res.status(403).json({ error: activeProfile.ambiguous
+        ? 'Worker profile is ambiguous. Ask an administrator to resolve it before using timers.'
+        : 'An active worker profile is required' });
+      return;
+    }
+    next();
+  } catch {
+    res.status(503).json({ error: 'Worker access could not be verified' });
+  }
+}
+
+export function timeTrackingOwnership(user: User, workerFounderId?: number | null, workerVaId = user.id) {
+  return {
+    vaId: user.role === 'worker' ? workerVaId : user.id,
+    founderId: user.role === 'worker' ? workerFounderId ?? user.id : user.id,
+  };
+}
 
 function nonNegativeDurationMinutes(entry: { durationMinutes?: number | null }) {
   return Math.max(0, Number(entry.durationMinutes) || 0);
+}
+
+type WorkerTimeTrackingProfile = { id: number; founderId: number; trelloMemberId: string | null; status: string };
+
+type TimeTrackingScope = {
+  vaIds: number[];
+  candidateVaIds: number[];
+  ambiguousVaIds: number[];
+  founderId: number;
+  profile: WorkerTimeTrackingProfile | null;
+};
+
+const AMBIGUOUS_TIME_ENTRY_OWNER_ERROR = 'Worker time-entry ownership overlaps another account or profile ID. Ask an administrator to resolve the profile before using timers.';
+
+function timeEntryScopeWhere(scope: TimeTrackingScope) {
+  return and(
+    eq(timeEntries.founderId, scope.founderId),
+    inArray(timeEntries.vaId, scope.vaIds),
+  );
+}
+
+function timeEntryCandidateScopeWhere(scope: TimeTrackingScope) {
+  return and(
+    eq(timeEntries.founderId, scope.founderId),
+    inArray(timeEntries.vaId, scope.candidateVaIds),
+  );
+}
+
+function timeEntryMatchesScope(entry: { vaId: number; founderId: number }, scope: TimeTrackingScope) {
+  return entry.founderId === scope.founderId && scope.vaIds.includes(entry.vaId);
+}
+
+function timeEntryHasAmbiguousIdentity(entry: { vaId: number; founderId: number }, scope: TimeTrackingScope) {
+  return entry.founderId === scope.founderId && scope.ambiguousVaIds.includes(entry.vaId);
+}
+
+async function resolveTimeTrackingScope(tx: any, user: User, lockWorkerProfile = false): Promise<TimeTrackingScope | null> {
+  if (user.role !== 'worker') {
+    return {
+      vaIds: [user.id], candidateVaIds: [user.id], ambiguousVaIds: [],
+      founderId: user.id, profile: null,
+    };
+  }
+
+  let profileQuery = tx.select({
+    id: vaProfiles.id,
+    founderId: vaProfiles.founderId,
+    trelloMemberId: vaProfiles.trelloMemberId,
+    status: vaProfiles.status,
+  }).from(vaProfiles).where(eq(vaProfiles.userId, user.id)).orderBy(vaProfiles.id);
+  if (lockWorkerProfile) profileQuery = profileQuery.for('update');
+
+  const profileRows = await profileQuery as WorkerTimeTrackingProfile[];
+  const profile = selectWorkerProfile(profileRows);
+  if (!profile) return null;
+  const candidateIds = Array.from(new Set([user.id, profile.id]));
+  const profileCollisionRows = await tx.select({ id: vaProfiles.id, userId: vaProfiles.userId })
+    .from(vaProfiles).where(and(
+      eq(vaProfiles.founderId, profile.founderId),
+      inArray(vaProfiles.id, candidateIds),
+    ));
+  const accountCollisionRows = await tx.select({ id: users.id }).from(users)
+    .where(inArray(users.id, candidateIds));
+  const ambiguousVaIds = Array.from(new Set<number>([
+    ...profileCollisionRows
+      .filter((row: { id: number; userId: number }) => row.userId !== user.id)
+      .map((row: { id: number }) => row.id),
+    ...accountCollisionRows
+      .filter((row: { id: number }) => row.id !== user.id)
+      .map((row: { id: number }) => row.id),
+  ]));
+  return {
+    vaIds: candidateIds.filter(id => !ambiguousVaIds.includes(id)),
+    candidateVaIds: candidateIds,
+    ambiguousVaIds,
+    founderId: profile.founderId,
+    profile,
+  };
+}
+
+async function withTimeTrackingScope<T>(
+  db: any,
+  user: User,
+  read: (connection: any, scope: TimeTrackingScope) => Promise<T>,
+): Promise<{ status: 200; value: T } | { status: 403 | 409; error: string }> {
+  if (user.role !== 'worker') {
+    return { status: 200, value: await read(db, {
+      vaIds: [user.id], candidateVaIds: [user.id], ambiguousVaIds: [], founderId: user.id, profile: null,
+    }) };
+  }
+
+  return db.transaction(async (tx: any) => {
+    const scope = await resolveTimeTrackingScope(tx, user, true);
+    if (!scope) return { status: 403 as const, error: 'An active worker profile is required' };
+    if (!scope.vaIds.length) return { status: 409 as const, error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR };
+    return { status: 200 as const, value: await read(tx, scope) };
+  });
+}
+
+async function lockCurrentWorkerTaskAssignment(tx: any, workerProfileId: number, workerFounderId: number, taskId: string) {
+  // The assignment table has no task/worker index. Read candidates without a lock,
+  // then lock only the exact primary-key row and recheck ownership in a current read.
+  const candidates = await tx.select({
+    id: taskAssignments.id,
+    status: taskAssignments.status,
+    founderId: taskAssignments.founderId,
+  }).from(taskAssignments).where(and(
+    eq(taskAssignments.vaId, workerProfileId),
+    eq(taskAssignments.founderId, workerFounderId),
+    eq(taskAssignments.taskId, taskId),
+  )).limit(2);
+
+  if (candidates.length > 1) return { kind: 'ambiguous' as const };
+  const candidate = candidates[0];
+  if (!candidate) return { kind: 'missing' as const };
+  if (candidate.founderId !== workerFounderId) return { kind: 'missing' as const };
+
+  const [current] = await tx.select({
+    id: taskAssignments.id,
+    status: taskAssignments.status,
+    founderId: taskAssignments.founderId,
+  }).from(taskAssignments).where(and(
+    eq(taskAssignments.id, candidate.id),
+    eq(taskAssignments.vaId, workerProfileId),
+    eq(taskAssignments.founderId, workerFounderId),
+    eq(taskAssignments.taskId, taskId),
+  )).limit(1).for('update');
+
+  return current && current.founderId === workerFounderId
+    ? { kind: 'current' as const, assignment: current }
+    : { kind: 'changed' as const };
+}
+
+async function lockTaskAssignmentOwner(tx: any, workerFounderId: number, workerProfileId: number, taskId: string) {
+  const candidates = await tx.select({
+    id: taskAssignments.id,
+    vaId: taskAssignments.vaId,
+    status: taskAssignments.status,
+    founderId: taskAssignments.founderId,
+  }).from(taskAssignments).where(and(
+    eq(taskAssignments.founderId, workerFounderId),
+    eq(taskAssignments.taskId, taskId),
+  )).limit(2);
+
+  if (candidates.length > 1) return { kind: 'ambiguous' as const };
+  const candidate = candidates[0];
+  if (!candidate) return { kind: 'missing' as const };
+  if (candidate.vaId !== workerProfileId) return { kind: 'other' as const, assignment: candidate };
+
+  const [current] = await tx.select({
+    id: taskAssignments.id,
+    vaId: taskAssignments.vaId,
+    status: taskAssignments.status,
+    founderId: taskAssignments.founderId,
+  }).from(taskAssignments).where(and(
+    eq(taskAssignments.id, candidate.id),
+    eq(taskAssignments.founderId, workerFounderId),
+    eq(taskAssignments.taskId, taskId),
+  )).limit(1).for('update');
+
+  return current && current.founderId === workerFounderId
+    ? { kind: 'current' as const, assignment: current }
+    : { kind: 'changed' as const };
+}
+
+async function transitionActiveTimer(user: User, transition: "stop" | "pause", notes?: string | null) {
+  const db = await getDb();
+  if (!db) return { status: 503, body: { error: 'Database not available' } };
+
+  return db.transaction(async tx => {
+    const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, user.id)).for('update');
+    if (!account) return { status: 401, body: { error: 'Account no longer exists' } };
+
+    const scope = await resolveTimeTrackingScope(tx, user, true);
+    if (!scope) return { status: 403, body: { error: 'An active worker profile is required' } };
+    if (!scope.vaIds.length) return { status: 409, body: { error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR } };
+
+    const entries = await tx.select().from(timeEntries).where(and(
+      timeEntryCandidateScopeWhere(scope), sql`${timeEntries.endTime} IS NULL`
+    )).orderBy(desc(timeEntries.startTime)).for('update');
+    if (entries.some((candidate: typeof timeEntries.$inferSelect) => timeEntryHasAmbiguousIdentity(candidate, scope))) {
+      return { status: 409, body: { error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR } };
+    }
+    const entry = entries.find((candidate: typeof timeEntries.$inferSelect) => timeEntryMatchesScope(candidate, scope));
+    if (!entry) {
+      const completedEntries = await tx.select().from(timeEntries).where(and(
+        timeEntryScopeWhere(scope), sql`${timeEntries.endTime} IS NOT NULL`,
+      )).orderBy(desc(timeEntries.endTime), desc(timeEntries.id)).limit(1);
+      const completed = completedEntries.find((candidate: typeof timeEntries.$inferSelect) =>
+        timeEntryMatchesScope(candidate, scope) && candidate.endTime !== null && !candidate.isVoided,
+      );
+      const wasPaused = typeof completed?.notes === 'string' && /\(paused\)\s*$/.test(completed.notes);
+      if (completed && (transition === 'stop' || wasPaused)) {
+        return transition === 'pause'
+          ? { status: 200, body: { success: true, entry: completed, paused: true, alreadyPaused: true, taskId: completed.taskId } }
+          : { status: 200, body: { success: true, entry: completed, alreadyStopped: true } };
+      }
+      return { status: 400, body: { error: 'No active timer found' } };
+    }
+
+    const endTime = new Date();
+    const startTime = new Date(entry.startTime);
+    const durationMinutes = Math.max(0, Math.round((endTime.getTime() - startTime.getTime()) / 60000));
+    const finalNotes = transition === 'pause'
+      ? entry.notes ? `${entry.notes} (paused)` : '(paused)'
+      : notes || entry.notes;
+
+    await tx.update(timeEntries).set({ endTime, durationMinutes, notes: finalNotes })
+      .where(and(eq(timeEntries.id, entry.id), timeEntryScopeWhere(scope), sql`${timeEntries.endTime} IS NULL`));
+    if (user.role === 'worker' && isManagerPilotWorker(user.id)) {
+      await enqueueManagerTask(tx, {
+        vaId: user.id,
+        trigger: "timer_changed",
+        eventKey: `timer-${transition}:${entry.id}:${endTime.toISOString()}`,
+      });
+    }
+    const [updatedEntry] = await tx.select().from(timeEntries).where(and(
+      eq(timeEntries.id, entry.id), timeEntryScopeWhere(scope),
+    )).limit(1);
+
+    return transition === 'pause'
+      ? { status: 200, body: { success: true, entry: updatedEntry, paused: true, taskId: entry.taskId } }
+      : { status: 200, body: { success: true, entry: updatedEntry } };
+  });
 }
 
 // Get active timer for a task (if any)
@@ -23,21 +304,22 @@ router.get('/time-tracking/active', async (req: any, res: Response) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    // Find any active timer (endTime is null)
-    const activeTimer = await db.select()
-      .from(timeEntries)
-      .where(and(
-        eq(timeEntries.founderId, user.id),
-        sql`${timeEntries.endTime} IS NULL`
-      ))
-      .orderBy(desc(timeEntries.startTime))
-      .limit(1);
-
-    if (activeTimer.length === 0) {
-      return res.json({ active: false, entry: null });
+    const result = await withTimeTrackingScope(db, user, async (connection, scope) => {
+      const activeTimers = await connection.select()
+        .from(timeEntries)
+        .where(and(timeEntryCandidateScopeWhere(scope), sql`${timeEntries.endTime} IS NULL`))
+        .orderBy(desc(timeEntries.startTime));
+      if (activeTimers.some((entry: typeof timeEntries.$inferSelect) => timeEntryHasAmbiguousIdentity(entry, scope))) {
+        return { ownershipAmbiguous: true as const };
+      }
+      const activeTimer = activeTimers.find((entry: typeof timeEntries.$inferSelect) => timeEntryMatchesScope(entry, scope));
+      return activeTimer ? { active: true, entry: activeTimer } : { active: false, entry: null };
+    });
+    if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+    if ('ownershipAmbiguous' in result.value && result.value.ownershipAmbiguous) {
+      return res.status(409).json({ error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR });
     }
-
-    res.json({ active: true, entry: activeTimer[0] });
+    res.json(result.value);
   } catch (error) {
     console.error('Error fetching active timer:', error);
     res.status(500).json({ error: 'Failed to fetch active timer' });
@@ -52,9 +334,10 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { taskId, notes } = req.body;
-    if (!taskId) {
-      return res.status(400).json({ error: 'Task ID is required' });
+    const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId.trim() : '';
+    const notes = typeof req.body?.notes === 'string' ? req.body.notes : null;
+    if (!taskId || taskId.length > 128) {
+      return res.status(400).json({ error: 'A valid task ID is required' });
     }
 
     const db = await getDb();
@@ -62,39 +345,145 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    // Check if there's already an active timer
-    const existingActive = await db.select()
-      .from(timeEntries)
-      .where(and(
-        eq(timeEntries.founderId, user.id),
-        sql`${timeEntries.endTime} IS NULL`
-      ))
-      .limit(1);
-
-    if (existingActive.length > 0) {
-      return res.status(400).json({ 
-        error: 'Timer already active', 
-        activeTaskId: existingActive[0].taskId 
-      });
-    }
-
-    // Create new time entry
-    const result = await db.insert(timeEntries).values({
-      taskId,
-      vaId: user.id, // Using user.id as vaId for now
-      founderId: user.id,
-      startTime: new Date(),
-      notes: notes || null,
+    const outcome = await db.transaction(async tx => {
+      const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, user.id)).for('update');
+      if (!account) return { status: 401, body: { error: 'Account no longer exists' } };
+      const scope = await resolveTimeTrackingScope(tx, user, true);
+      if (!scope) return { status: 403, body: { error: 'An active worker profile is required' } };
+      if (!scope.vaIds.length) return { status: 409, body: { error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR } };
+      const profile = scope.profile;
+      let assignment: Pick<typeof taskAssignments.$inferSelect, 'status'> | undefined;
+      const isPilotWorker = user.role === 'worker' && isManagerPilotWorker(user.id);
+      if (user.role === 'worker') {
+        if (!profile) return { status: 403, body: { error: 'Worker profile is required for this task' } };
+        const assignmentAccess = await lockCurrentWorkerTaskAssignment(tx, profile.id, profile.founderId, taskId);
+        if (assignmentAccess.kind === 'ambiguous') {
+          return { status: 409, body: { error: 'This task has multiple assignments for your worker account. Ask an administrator to resolve them before tracking time.' } };
+        }
+        if (assignmentAccess.kind === 'changed') {
+          return { status: 409, body: { error: 'This task assignment changed while the timer was starting. Refresh your task list before trying again.' } };
+        }
+        assignment = assignmentAccess.kind === 'current' ? assignmentAccess.assignment : undefined;
+        if (!assignment && !isPilotWorker) {
+          return { status: 403, body: { error: 'This task is not assigned to your worker account' } };
+        }
+        if (!assignment && isPilotWorker) {
+          const exactOwner = await lockTaskAssignmentOwner(tx, profile.founderId, profile.id, taskId);
+          if (exactOwner.kind === 'ambiguous') {
+            return { status: 409, body: { error: 'This task has multiple assignments. Ask an administrator to resolve them before tracking time.' } };
+          }
+          if (exactOwner.kind === 'other') {
+            return { status: 403, body: { error: 'This task is assigned to a different worker. Ask the founder to update the assignment before tracking time.' } };
+          }
+          if (exactOwner.kind === 'changed') {
+            return { status: 409, body: { error: 'This task assignment changed while the timer was starting. Refresh your task list before trying again.' } };
+          }
+          if (exactOwner.kind === 'current') {
+            assignment = exactOwner.assignment;
+          }
+          const cardId = taskId.split(':')[0];
+          if (!assignment && cardId !== taskId) {
+            const cardOwner = await lockTaskAssignmentOwner(tx, profile.founderId, profile.id, cardId);
+            if (cardOwner.kind === 'ambiguous') {
+              return { status: 409, body: { error: 'This card has multiple assignments. Ask an administrator to resolve them before tracking time.' } };
+            }
+            if (cardOwner.kind === 'other') {
+              return { status: 403, body: { error: 'This task is assigned to a different worker. Ask the founder to update the assignment before tracking time.' } };
+            }
+            if (cardOwner.kind === 'changed') {
+              return { status: 409, body: { error: 'This card assignment changed while the timer was starting. Refresh your task list before trying again.' } };
+            }
+            if (cardOwner.kind === 'current') {
+              assignment = cardOwner.assignment;
+            }
+          }
+        }
+        if (assignment?.status === 'completed') return { status: 409, body: { error: 'This task is already complete' } };
+        if (assignment?.status === 'blocked') {
+          return { status: 409, body: { error: 'This task is blocked; resolve the blocker before tracking time' } };
+        }
+      }
+      if (isPilotWorker) {
+        if (!profile) return { status: 403, body: { error: 'Worker profile is required for this task' } };
+        const cardId = taskId.split(':')[0];
+        const [plan] = await tx.select({ listName: aptlssPlans.listName }).from(aptlssPlans)
+          .where(and(eq(aptlssPlans.vaId, user.id), eq(aptlssPlans.cardId, cardId))).limit(1);
+        const [card] = await tx.select({ listName: atisCards.listName, memberIds: atisCards.memberIds, isArchived: atisCards.isArchived })
+          .from(atisCards).where(eq(atisCards.trelloId, cardId)).limit(1);
+        let isCardMember = false;
+        if (profile.trelloMemberId && card?.memberIds && !card.isArchived) {
+          try {
+            const members: unknown = JSON.parse(card.memberIds);
+            isCardMember = Array.isArray(members) && members.includes(profile.trelloMemberId);
+          } catch { /* Malformed membership cannot grant timer access. */ }
+        }
+        if (!assignment && !isCardMember && !plan) return { status: 403, body: { error: 'This task is not assigned to your worker account' } };
+        const [waiting] = await tx.select({ id: aptlssWaitingReasons.id }).from(aptlssWaitingReasons)
+          .where(and(eq(aptlssWaitingReasons.vaId, user.id), eq(aptlssWaitingReasons.cardId, cardId), eq(aptlssWaitingReasons.status, 'active'))).limit(1);
+        const [cardState] = await tx.select({ state: cardStates.state }).from(cardStates)
+          .where(and(eq(cardStates.vaId, user.id), eq(cardStates.cardId, cardId))).limit(1);
+        let intervention = false;
+        let staleRequiredSource = false;
+        try {
+          const { snapshot } = await readCurrentManagerHistory(tx as unknown as NonNullable<Awaited<ReturnType<typeof getDb>>>, user.id);
+          if (!snapshot) return { status: 409, body: { error: WORKER_EXECUTION_HOLD_MESSAGE } };
+          const snapshotJson = JSON.stringify(snapshot);
+          const assignmentState = await readManagerAssignmentState(tx as unknown as NonNullable<Awaited<ReturnType<typeof getDb>>>, user.id);
+          if (!assignmentState.complete || !managerExecutionCoverageComplete(snapshotJson, assignmentState.fingerprint)) {
+            return { status: 409, body: { error: WORKER_EXECUTION_HOLD_MESSAGE } };
+          }
+          const sourceRequirements = managerActionSourceRequirements(snapshotJson, cardId);
+          let googleStatus: Awaited<ReturnType<typeof getGoogleEvidenceStatus>> | null = null;
+          if (sourceRequirements.sourceKeys.some(key => key === 'gmail' || key === 'google_drive')) {
+            try { googleStatus = await getGoogleEvidenceStatus(user.id); }
+            catch { googleStatus = null; }
+          }
+          let trelloCache: { cachedAt: string; expiresAt: string } | null = null;
+          if (sourceRequirements.sourceKeys.includes('trello')) {
+            const [cached] = await tx.select({ cachedAt: trelloCachedCards.cachedAt, expiresAt: trelloCachedCards.expiresAt })
+              .from(trelloCachedCards)
+              .where(and(eq(trelloCachedCards.userId, user.id), eq(trelloCachedCards.cardId, cardId)))
+              .orderBy(desc(trelloCachedCards.cachedAt)).limit(1);
+            if (cached) trelloCache = { cachedAt: cached.cachedAt.toISOString(), expiresAt: cached.expiresAt.toISOString() };
+          }
+          staleRequiredSource = managerActionNeedsSourceVerification(sourceRequirements, {
+            trelloCache,
+            gmail: googleStatus?.gmail ?? null,
+            drive: googleStatus?.drive ?? null,
+            googleConnectionReady: googleStatus?.credentialsReady ?? null,
+            now: Date.now(),
+          });
+          intervention = managerIntervenesOnCard(snapshotJson, cardId);
+        } catch {
+          return { status: 409, body: { error: WORKER_EXECUTION_HOLD_MESSAGE } };
+        }
+        const reason = timerExecutionBlockReason({ listName: plan?.listName ?? card?.listName ?? '',
+          hasActiveWaitingReason: Boolean(waiting),
+          actionability: cardState?.state ?? null, hasManagerIntervention: intervention, hasStaleRequiredSource: staleRequiredSource });
+        if (reason) return { status: 409, body: { error: reason } };
+      }
+      const activeEntries = await tx.select().from(timeEntries).where(and(
+        timeEntryCandidateScopeWhere(scope), sql`${timeEntries.endTime} IS NULL`
+      ));
+      if (activeEntries.some((entry: typeof timeEntries.$inferSelect) => timeEntryHasAmbiguousIdentity(entry, scope))) {
+        return { status: 409, body: { error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR } };
+      }
+      const active = activeEntries.find((entry: typeof timeEntries.$inferSelect) => timeEntryMatchesScope(entry, scope));
+      if (active) return { status: 400, body: { error: 'Timer already active', activeTaskId: active.taskId } };
+      const workerVaId = scope.vaIds.includes(user.id) ? user.id : scope.vaIds[0];
+      const ownership = timeTrackingOwnership(user, profile?.founderId, workerVaId);
+      const [result] = await tx.insert(timeEntries).values({ taskId, ...ownership, startTime: new Date(), notes });
+      if (user.role === 'worker' && isManagerPilotWorker(user.id)) {
+        await enqueueManagerTask(tx, {
+          vaId: user.id,
+          trigger: "timer_changed",
+          eventKey: `timer-start:${result.insertId}`,
+        });
+      }
+      const [entry] = await tx.select().from(timeEntries).where(eq(timeEntries.id, result.insertId)).limit(1);
+      return { status: 200, body: { success: true, entry } };
     });
-
-    // Fetch the created entry
-    const newEntry = await db.select()
-      .from(timeEntries)
-      .where(eq(timeEntries.founderId, user.id))
-      .orderBy(desc(timeEntries.id))
-      .limit(1);
-
-    res.json({ success: true, entry: newEntry[0] });
+    res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error('Error starting timer:', error);
     res.status(500).json({ error: 'Failed to start timer' });
@@ -109,48 +498,9 @@ router.post('/time-tracking/stop', async (req: any, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { notes } = req.body;
-
-    const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-
-    // Find active timer
-    const activeTimer = await db.select()
-      .from(timeEntries)
-      .where(and(
-        eq(timeEntries.founderId, user.id),
-        sql`${timeEntries.endTime} IS NULL`
-      ))
-      .limit(1);
-
-    if (activeTimer.length === 0) {
-      return res.status(400).json({ error: 'No active timer found' });
-    }
-
-    const entry = activeTimer[0];
-    const endTime = new Date();
-    const startTime = new Date(entry.startTime);
-    // Clock drift or a repaired entry must never create negative tracked time.
-    const durationMinutes = Math.max(0, Math.round((endTime.getTime() - startTime.getTime()) / 60000));
-
-    // Update the entry with end time and duration
-    await db.update(timeEntries)
-      .set({
-        endTime,
-        durationMinutes,
-        notes: notes || entry.notes,
-      })
-      .where(eq(timeEntries.id, entry.id));
-
-    // Fetch updated entry
-    const updatedEntry = await db.select()
-      .from(timeEntries)
-      .where(eq(timeEntries.id, entry.id))
-      .limit(1);
-
-    res.json({ success: true, entry: updatedEntry[0] });
+    const notes = typeof req.body?.notes === 'string' ? req.body.notes : null;
+    const outcome = await transitionActiveTimer(user, 'stop', notes);
+    res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error('Error stopping timer:', error);
     res.status(500).json({ error: 'Failed to stop timer' });
@@ -159,54 +509,14 @@ router.post('/time-tracking/stop', async (req: any, res: Response) => {
 
 // Pause timer (stop and allow resume)
 router.post('/time-tracking/pause', async (req: any, res: Response) => {
-  // Pause is essentially the same as stop - we just record the time
-  // Resume will create a new entry for the same task
   try {
     const user = req.user;
     if (!user) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-
-    // Find active timer
-    const activeTimer = await db.select()
-      .from(timeEntries)
-      .where(and(
-        eq(timeEntries.founderId, user.id),
-        sql`${timeEntries.endTime} IS NULL`
-      ))
-      .limit(1);
-
-    if (activeTimer.length === 0) {
-      return res.status(400).json({ error: 'No active timer found' });
-    }
-
-    const entry = activeTimer[0];
-    const endTime = new Date();
-    const startTime = new Date(entry.startTime);
-    // Clock drift or a repaired entry must never create negative tracked time.
-    const durationMinutes = Math.max(0, Math.round((endTime.getTime() - startTime.getTime()) / 60000));
-
-    // Update the entry with end time and duration
-    await db.update(timeEntries)
-      .set({
-        endTime,
-        durationMinutes,
-        notes: entry.notes ? `${entry.notes} (paused)` : '(paused)',
-      })
-      .where(eq(timeEntries.id, entry.id));
-
-    // Fetch updated entry
-    const updatedEntry = await db.select()
-      .from(timeEntries)
-      .where(eq(timeEntries.id, entry.id))
-      .limit(1);
-
-    res.json({ success: true, entry: updatedEntry[0], paused: true, taskId: entry.taskId });
+    const outcome = await transitionActiveTimer(user, 'pause');
+    res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error('Error pausing timer:', error);
     res.status(500).json({ error: 'Failed to pause timer' });
@@ -228,25 +538,25 @@ router.get('/time-tracking/task/:taskId', async (req: any, res: Response) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    const entries = await db.select()
-      .from(timeEntries)
-      .where(and(
-        eq(timeEntries.founderId, user.id),
-        eq(timeEntries.taskId, taskId)
-      ))
-      .orderBy(desc(timeEntries.startTime));
-
-    // Calculate total time spent
-    const totalMinutes = entries.reduce(
-      (sum: number, entry: any) => sum + nonNegativeDurationMinutes(entry),
-      0,
-    );
-
-    res.json({ 
-      entries, 
-      totalMinutes,
-      totalHours: Math.round(totalMinutes / 60 * 10) / 10
+    const result = await withTimeTrackingScope(db, user, async (connection, scope) => {
+      const rows = await connection.select()
+        .from(timeEntries)
+        .where(and(timeEntryScopeWhere(scope), eq(timeEntries.taskId, taskId)))
+        .orderBy(desc(timeEntries.startTime));
+      const entries = rows.filter((entry: typeof timeEntries.$inferSelect) => timeEntryMatchesScope(entry, scope));
+      const totalMinutes = entries.reduce(
+        (sum: number, entry: typeof timeEntries.$inferSelect) => sum + nonNegativeDurationMinutes(entry),
+        0,
+      );
+      return {
+        entries,
+        totalMinutes,
+        totalHours: Math.round(totalMinutes / 60 * 10) / 10,
+        ownershipWarning: scope.ambiguousVaIds.length ? AMBIGUOUS_TIME_ENTRY_OWNER_ERROR : null,
+      };
     });
+    if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+    res.json(result.value);
   } catch (error) {
     console.error('Error fetching task time entries:', error);
     res.status(500).json({ error: 'Failed to fetch time entries' });
@@ -268,54 +578,40 @@ router.get('/time-tracking/summary', async (req: any, res: Response) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    let query = db.select()
-      .from(timeEntries)
-      .where(eq(timeEntries.founderId, user.id));
-
-    // If date range provided, filter by it
-    if (startDate && endDate) {
-      const start = new Date(startDate as string);
-      const end = new Date(endDate as string);
-      end.setHours(23, 59, 59, 999); // Include entire end day
-      
-      query = db.select()
-        .from(timeEntries)
-        .where(and(
-          eq(timeEntries.founderId, user.id),
-          gte(timeEntries.startTime, start),
-          lte(timeEntries.startTime, end)
-        ));
-    }
-
-    const entries = await query.orderBy(desc(timeEntries.startTime));
-
-    // Calculate totals
-    const totalMinutes = entries.reduce(
-      (sum: number, entry: any) => sum + nonNegativeDurationMinutes(entry),
-      0,
-    );
-    
-    // Group by date
-    const byDate: Record<string, number> = {};
-    entries.forEach((entry: any) => {
-      const date = new Date(entry.startTime).toISOString().split('T')[0];
-      byDate[date] = (byDate[date] || 0) + nonNegativeDurationMinutes(entry);
+    const result = await withTimeTrackingScope(db, user, async (connection, scope) => {
+      const conditions = [timeEntryScopeWhere(scope)];
+      if (startDate && endDate) {
+        const start = new Date(startDate as string);
+        const end = new Date(endDate as string);
+        end.setHours(23, 59, 59, 999);
+        conditions.push(gte(timeEntries.startTime, start), lte(timeEntries.startTime, end));
+      }
+      const rows = await connection.select().from(timeEntries)
+        .where(and(...conditions)).orderBy(desc(timeEntries.startTime));
+      const entries = rows.filter((entry: typeof timeEntries.$inferSelect) => timeEntryMatchesScope(entry, scope));
+      const totalMinutes = entries.reduce(
+        (sum: number, entry: typeof timeEntries.$inferSelect) => sum + nonNegativeDurationMinutes(entry),
+        0,
+      );
+      const byDate: Record<string, number> = {};
+      const byTask: Record<string, number> = {};
+      entries.forEach((entry: typeof timeEntries.$inferSelect) => {
+        const date = new Date(entry.startTime).toISOString().split('T')[0];
+        byDate[date] = (byDate[date] || 0) + nonNegativeDurationMinutes(entry);
+        byTask[entry.taskId] = (byTask[entry.taskId] || 0) + nonNegativeDurationMinutes(entry);
+      });
+      return {
+        entries,
+        totalMinutes,
+        totalHours: Math.round(totalMinutes / 60 * 10) / 10,
+        byDate,
+        byTask,
+        entryCount: entries.length,
+        ownershipWarning: scope.ambiguousVaIds.length ? AMBIGUOUS_TIME_ENTRY_OWNER_ERROR : null,
+      };
     });
-
-    // Group by task
-    const byTask: Record<string, number> = {};
-    entries.forEach((entry: any) => {
-      byTask[entry.taskId] = (byTask[entry.taskId] || 0) + nonNegativeDurationMinutes(entry);
-    });
-
-    res.json({
-      entries,
-      totalMinutes,
-      totalHours: Math.round(totalMinutes / 60 * 10) / 10,
-      byDate,
-      byTask,
-      entryCount: entries.length
-    });
+    if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+    res.json(result.value);
   } catch (error) {
     console.error('Error fetching time summary:', error);
     res.status(500).json({ error: 'Failed to fetch time summary' });
@@ -335,91 +631,94 @@ router.get('/time-tracking/weekly-progress', async (req: any, res: Response) => 
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    // Get current week's start and end dates
-    const now = new Date();
-    const dayOfWeek = now.getDay();
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(now.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1)); // Monday
-    startOfWeek.setHours(0, 0, 0, 0);
-    
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 6); // Sunday
-    endOfWeek.setHours(23, 59, 59, 999);
+    const result = await withTimeTrackingScope(db, user, async (connection, scope) => {
+      const now = new Date();
+      const dayOfWeek = now.getDay();
+      const startOfWeek = new Date(now);
+      startOfWeek.setDate(now.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1));
+      startOfWeek.setHours(0, 0, 0, 0);
 
-    // Get time entries for this week
-    const weekEntries = await db.select()
-      .from(timeEntries)
-      .where(and(
-        eq(timeEntries.founderId, user.id),
-        gte(timeEntries.startTime, startOfWeek),
-        lte(timeEntries.startTime, endOfWeek)
-      ));
+      const endOfWeek = new Date(startOfWeek);
+      endOfWeek.setDate(startOfWeek.getDate() + 6);
+      endOfWeek.setHours(23, 59, 59, 999);
 
-    const actualMinutes = weekEntries.reduce(
-      (sum: number, entry: any) => sum + nonNegativeDurationMinutes(entry),
-      0,
-    );
-    const actualHours = Math.round(actualMinutes / 60 * 10) / 10;
+      const weekRows = await connection.select()
+        .from(timeEntries)
+        .where(and(
+          timeEntryScopeWhere(scope),
+          gte(timeEntries.startTime, startOfWeek),
+          lte(timeEntries.startTime, endOfWeek),
+        ));
+      const weekEntries = weekRows.filter((entry: typeof timeEntries.$inferSelect) => timeEntryMatchesScope(entry, scope));
 
-    // Get user's weekly hours target from settings
-    const { userWorkingHours } = await import('../../drizzle/schema');
-    const settings = await db.select()
-      .from(userWorkingHours)
-      .where(eq(userWorkingHours.userOpenId, user.openId))
-      .limit(1);
+      const actualMinutes = weekEntries.reduce(
+        (sum: number, entry: typeof timeEntries.$inferSelect) => sum + nonNegativeDurationMinutes(entry),
+        0,
+      );
+      const actualHours = Math.round(actualMinutes / 60 * 10) / 10;
 
-    let weeklyHoursMin = 55;
-    let weeklyHoursMax = 60;
-    let dailyHoursMin = 9.5;
-    let dailyHoursMax = 11.5;
+      const { userWorkingHours } = await import('../../drizzle/schema');
+      const settings = await connection.select()
+        .from(userWorkingHours)
+        .where(eq(userWorkingHours.userOpenId, user.openId))
+        .limit(1);
 
-    if (settings.length > 0) {
-      weeklyHoursMin = settings[0].weeklyHoursMin || 55;
-      weeklyHoursMax = settings[0].weeklyHoursMax || 60;
-      dailyHoursMin = parseFloat(String(settings[0].dailyHoursMin)) || 9.5;
-      dailyHoursMax = parseFloat(String(settings[0].dailyHoursMax)) || 11.5;
-    }
+      let weeklyHoursMin = 55;
+      let weeklyHoursMax = 60;
+      let dailyHoursMin = 9.5;
+      let dailyHoursMax = 11.5;
+
+      if (settings.length > 0) {
+        weeklyHoursMin = settings[0].weeklyHoursMin || 55;
+        weeklyHoursMax = settings[0].weeklyHoursMax || 60;
+        dailyHoursMin = parseFloat(String(settings[0].dailyHoursMin)) || 9.5;
+        dailyHoursMax = parseFloat(String(settings[0].dailyHoursMax)) || 11.5;
+      }
 
     // Calculate daily breakdown
-    const dailyBreakdown: Record<string, number> = {};
-    for (let i = 0; i < 7; i++) {
-      const date = new Date(startOfWeek);
-      date.setDate(startOfWeek.getDate() + i);
-      const dateStr = date.toISOString().split('T')[0];
-      dailyBreakdown[dateStr] = 0;
-    }
-
-    weekEntries.forEach((entry: any) => {
-      const date = new Date(entry.startTime).toISOString().split('T')[0];
-      if (dailyBreakdown[date] !== undefined) {
-        dailyBreakdown[date] += nonNegativeDurationMinutes(entry);
+      const dailyBreakdown: Record<string, number> = {};
+      for (let i = 0; i < 7; i++) {
+        const date = new Date(startOfWeek);
+        date.setDate(startOfWeek.getDate() + i);
+        const dateStr = date.toISOString().split('T')[0];
+        dailyBreakdown[dateStr] = 0;
       }
-    });
+
+      weekEntries.forEach((entry: typeof timeEntries.$inferSelect) => {
+        const date = new Date(entry.startTime).toISOString().split('T')[0];
+        if (dailyBreakdown[date] !== undefined) {
+          dailyBreakdown[date] += nonNegativeDurationMinutes(entry);
+        }
+      });
 
     // Convert daily breakdown to hours
-    const dailyHours: Record<string, number> = {};
-    Object.entries(dailyBreakdown).forEach(([date, minutes]) => {
-      dailyHours[date] = Math.round(minutes / 60 * 10) / 10;
-    });
+      const dailyHours: Record<string, number> = {};
+      Object.entries(dailyBreakdown).forEach(([date, minutes]) => {
+        dailyHours[date] = Math.round(minutes / 60 * 10) / 10;
+      });
 
     // Calculate progress percentage
-    const targetMidpoint = (weeklyHoursMin + weeklyHoursMax) / 2;
-    const progressPercent = Math.min(100, Math.round((actualHours / targetMidpoint) * 100));
+      const targetMidpoint = (weeklyHoursMin + weeklyHoursMax) / 2;
+      const progressPercent = Math.min(100, Math.round((actualHours / targetMidpoint) * 100));
 
-    res.json({
-      weekStart: startOfWeek.toISOString().split('T')[0],
-      weekEnd: endOfWeek.toISOString().split('T')[0],
-      actualHours,
-      actualMinutes,
-      weeklyHoursMin,
-      weeklyHoursMax,
-      dailyHoursMin,
-      dailyHoursMax,
-      dailyHours,
-      progressPercent,
-      onTrack: actualHours >= weeklyHoursMin && actualHours <= weeklyHoursMax,
-      status: actualHours < weeklyHoursMin ? 'under' : actualHours > weeklyHoursMax ? 'over' : 'on_track'
+      return {
+        weekStart: startOfWeek.toISOString().split('T')[0],
+        weekEnd: endOfWeek.toISOString().split('T')[0],
+        actualHours,
+        actualMinutes,
+        weeklyHoursMin,
+        weeklyHoursMax,
+        dailyHoursMin,
+        dailyHoursMax,
+        dailyHours,
+        progressPercent,
+        onTrack: actualHours >= weeklyHoursMin && actualHours <= weeklyHoursMax,
+        status: actualHours < weeklyHoursMin ? 'under' : actualHours > weeklyHoursMax ? 'over' : 'on_track',
+        ownershipWarning: scope.ambiguousVaIds.length ? AMBIGUOUS_TIME_ENTRY_OWNER_ERROR : null,
+      };
     });
+    if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+    res.json(result.value);
   } catch (error) {
     console.error('Error fetching weekly progress:', error);
     res.status(500).json({ error: 'Failed to fetch weekly progress' });

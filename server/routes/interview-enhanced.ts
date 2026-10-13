@@ -22,37 +22,18 @@ import {
 } from '../services/interview-persistence';
 import { analyzeCardBeforeInterview } from '../services/pre-interview-analysis';
 import { startInterview, processResponse } from '../services/conversational-interview';
+import { requireAdmin } from '../middleware/auth';
+import { fetchAuthorizedTrelloCardWithComments, TrelloAccessError } from '../trelloCardAccess';
+import type { User } from '../../drizzle/schema';
 
 const router = Router();
-
-const TRELLO_API_KEY = process.env.TRELLO_API_KEY;
-const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
+router.use(requireAdmin);
 
 /**
  * Helper to get Trello card with all details
  */
-async function getTrelloCard(cardId: string) {
-  const cardResponse = await fetch(
-    `https://api.trello.com/1/cards/${cardId}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&attachments=true&checklists=all`
-  );
-
-  if (!cardResponse.ok) {
-    throw new Error(`Failed to fetch card: ${cardResponse.statusText}`);
-  }
-
-  const card = await cardResponse.json();
-
-  // Get comments
-  const actionsResponse = await fetch(
-    `https://api.trello.com/1/cards/${cardId}/actions?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&filter=commentCard`
-  );
-
-  const comments = actionsResponse.ok ? await actionsResponse.json() : [];
-
-  return {
-    ...card,
-    comments,
-  };
+async function getTrelloCard(cardId: string, user: User) {
+  return fetchAuthorizedTrelloCardWithComments<any>(user, cardId);
 }
 
 /**
@@ -72,7 +53,7 @@ router.post('/start', async (req: Request, res: Response) => {
     }
 
     // Get card data from Trello
-    const card = await getTrelloCard(cardId);
+    const card = await getTrelloCard(cardId, user);
     if (!card) {
       return res.status(404).json({ error: 'Card not found' });
     }
@@ -111,7 +92,10 @@ router.post('/start', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[Interview] Error starting interview:', error);
-    return res.status(500).json({ error: 'Failed to start interview', details: error instanceof Error ? error.message : String(error) });
+    if (error instanceof TrelloAccessError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    return res.status(500).json({ error: 'Failed to start interview. Retry shortly or check the service configuration.' });
   }
 });
 
@@ -144,7 +128,7 @@ router.post('/:sessionId/respond', async (req: Request, res: Response) => {
     }
 
     // Get card for context
-    const card = await getTrelloCard(session.cardId);
+    const card = await getTrelloCard(session.cardId, user);
     const preAnalysis = await analyzeCardBeforeInterview(card);
 
     // Parse stored session data
@@ -207,10 +191,13 @@ router.post('/:sessionId/respond', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[Interview] Error processing response:', error);
+    if (error instanceof TrelloAccessError) {
+      return res.status(error.status).json({ error: error.message });
+    }
     if (error instanceof Error) {
       console.error('[Interview] Error stack:', error.stack);
     }
-    return res.status(500).json({ error: 'Failed to process response', details: error instanceof Error ? error.message : String(error) });
+    return res.status(500).json({ error: 'Failed to process response. Retry shortly or check the service configuration.' });
   }
 });
 
@@ -284,7 +271,7 @@ router.get('/card/:cardId/latest', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[Interview] Error fetching latest card session:', error);
-    return res.status(500).json({ error: 'Failed to fetch latest interview session', details: error instanceof Error ? error.message : String(error) });
+    return res.status(500).json({ error: 'Failed to fetch latest interview session. Retry shortly or check the service configuration.' });
   }
 });
 

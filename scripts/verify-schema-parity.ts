@@ -8,6 +8,17 @@ type SchemaTable = {
   columns: string[];
 };
 
+// Migration 0030 introduced worker-neutral names while preserving the
+// historical Joyce-specific columns for existing deployments and rollback.
+const COMPATIBILITY_COLUMNS: Record<string, readonly string[]> = {
+  reply_threads: [
+    "lastJoyceReplyAt",
+    "lastNonJoyceAuthor",
+    "lastNonJoyceMsgAt",
+    "lastNonJoyceText",
+  ],
+};
+
 function collectSchemaTables(): SchemaTable[] {
   const tables = new Map<string, SchemaTable>();
   for (const value of Object.values(schema)) {
@@ -46,6 +57,7 @@ try {
   const missingTables: string[] = [];
   const missingColumns: Array<{ table: string; columns: string[] }> = [];
   const extraColumns: Array<{ table: string; columns: string[] }> = [];
+  const compatibilityColumns: Array<{ table: string; columns: string[] }> = [];
   const schemaTables = collectSchemaTables();
 
   for (const table of schemaTables) {
@@ -55,8 +67,12 @@ try {
       continue;
     }
     const missing = table.columns.filter((column) => !actualColumns.has(column));
-    const extra = [...actualColumns].filter((column) => !table.columns.includes(column)).sort();
+    const compatibility = new Set(COMPATIBILITY_COLUMNS[table.name] ?? []);
+    const extras = [...actualColumns].filter((column) => !table.columns.includes(column));
+    const compatible = extras.filter((column) => compatibility.has(column)).sort();
+    const extra = extras.filter((column) => !compatibility.has(column)).sort();
     if (missing.length) missingColumns.push({ table: table.name, columns: missing });
+    if (compatible.length) compatibilityColumns.push({ table: table.name, columns: compatible });
     if (extra.length) extraColumns.push({ table: table.name, columns: extra });
   }
 
@@ -67,6 +83,7 @@ try {
     missingTables,
     missingColumns,
     extraColumns,
+    compatibilityColumns,
   };
   console.log(JSON.stringify(result, null, 2));
   if (!result.success) process.exitCode = 2;

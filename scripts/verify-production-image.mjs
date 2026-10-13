@@ -1,0 +1,126 @@
+import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+function docker(args) {
+  const result = spawnSync("docker", args, {
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+  if (result.error)
+    throw new Error(
+      "Production image verification could not complete a bounded Docker command."
+    );
+  return result;
+}
+
+function isolatedRun(run, args) {
+  const name = `va-dashboard-image-check-${randomUUID()}`;
+  let result;
+  let failure;
+  try {
+    result = run([
+      "run",
+      "--rm",
+      "--name",
+      name,
+      "--network",
+      "none",
+      "--memory",
+      "256m",
+      "--cpus",
+      "0.5",
+      ...args,
+    ]);
+  } catch (error) {
+    failure = error;
+  }
+  // A timed-out client can leave its request running in Docker. Clean up only
+  // this invocation's uniquely named container; never enumerate other services.
+  try {
+    const cleanup = run(["rm", "--force", name]);
+    if (
+      cleanup.status !== 0 &&
+      !String(cleanup.stderr).includes("No such container")
+    )
+      throw new Error(
+        `Could not clean up isolated image-check container ${name}.`
+      );
+  } catch (error) {
+    throw new Error(
+      `Image acceptance incomplete; cleanup not confirmed for ${name}.`,
+      { cause: failure ?? error }
+    );
+  }
+  if (failure) throw failure;
+  return result;
+}
+
+export function verifyProductionImage(image, run = docker) {
+  const inspect = run(["image", "inspect", image]);
+  if (inspect.status !== 0)
+    throw new Error("Production candidate image is unavailable.");
+  const config = JSON.parse(inspect.stdout)[0].Config;
+  if (!config.Env?.includes("NODE_ENV=production"))
+    throw new Error("Production image must default to NODE_ENV=production.");
+
+  const runtimeCheck = isolatedRun(run, [
+    "--entrypoint",
+    "node",
+    image,
+    "-e",
+    `
+    const assert = require("node:assert/strict");
+    const fs = require("node:fs");
+    const hash = file => require("node:crypto").createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    assert(process.getuid() >= 1000, "Runtime must not run as root");
+    assert(!fs.readdirSync("/app").some(name => name === ".env" || name.startsWith(".env.")), "Environment files must not enter the image");
+    const seal = JSON.parse(fs.readFileSync("dist/aptlss-build.json", "utf8"));
+    assert.equal(hash("dist/index.js"), seal.bundleHash);
+    assert.equal(hash("dist/public/downloads/worker-browser-collector.zip"), seal.collectorPackageHash);
+    const icon = fs.readFileSync("dist/public/icons/va-dashboard.png");
+    assert.equal(icon.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+    assert.equal(icon.readUInt32BE(16), 144);
+    assert.equal(icon.readUInt32BE(20), 144);
+    assert.throws(() => require.resolve("vitest"));
+  `,
+  ]);
+  if (runtimeCheck.status !== 0)
+    throw new Error(
+      "Production runtime failed its non-root, asset, build-integrity, or environment-isolation check."
+    );
+
+  // No provider credentials and no network: this must fail before starting jobs.
+  const startup = isolatedRun(run, [image]);
+  if (
+    startup.status !== 1 ||
+    !`${startup.stdout}${startup.stderr}`.includes(
+      "Invalid production configuration"
+    )
+  )
+    throw new Error(
+      "Production startup did not reject missing required configuration."
+    );
+  return {
+    passed: true,
+    checks: [
+      "production-default",
+      "non-root",
+      "no-env-files",
+      "sealed-bundle",
+      "collector-integrity",
+      "icon",
+      "no-vitest",
+      "fail-closed-startup",
+    ],
+  };
+}
+
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
+)
+  console.log(
+    JSON.stringify(verifyProductionImage(process.argv[2] || "va-dashboard:ci"))
+  );

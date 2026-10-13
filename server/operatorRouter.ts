@@ -2,18 +2,19 @@ import { TRPCError } from "@trpc/server";
 import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import { z } from "zod";
 import {
-  aptlssAssessments,
   aptlssPlans,
   aptlssSteps,
   cardStates,
   communicationEvidence,
   emailTasks,
+  founderDecisionDeadlines,
   priorityScores,
   timeEntries,
+  trelloCachedCards,
   workspaceEvidenceItems,
   workspaceEvidenceLinks,
 } from "../drizzle/schema";
-import { getActiveWaitingReason, getActiveWaitingReasons, getWaitingReasonHistory, recordAptlssWaitingReason, resolveAptlssWaitingReason } from "./aptlssWaitingReasonDb";
+import { getActiveWaitingReason, getActiveWaitingReasons, getWaitingReasonHistory, recordAptlssWaitingReason, resolveAptlssWaitingReason, WaitingReasonCardChangedError, WaitingReasonNotInQueueError } from "./aptlssWaitingReasonDb";
 import { selectWorkQueueNextAction } from "./aptlssWorkQueue";
 import {
   ensureBrowserTabCollectorToken,
@@ -24,30 +25,36 @@ import {
 } from "./browserTabHygiene";
 import { getDb } from "./db";
 import { DecisionOutcomeError, getDecisionHistory, recordDecisionOutcome } from "./decisionOutcomesDb";
-import { generateOperatorDailyPlan, getOperatorDailyPlan, updateOperatorDailyPlan, type OperatorDailyPlanPayload } from "./operatorDailyPlan";
+import { FounderDecisionDeadlineError, deferFounderDecisionDeadline, getFounderDecisionInbox, setFounderDecisionDeadline } from "./founderDecisionInbox";
+import { generateOperatorDailyPlan, getOperatorDailyPlan, OperatorDailyPlanConflictError, OperatorDailyPlanScopeError, toWorkerOperatorDailyPlan, updateOperatorDailyPlan, type OperatorDailyPlanPayload } from "./operatorDailyPlan";
+import {
+  clearGoogleRefreshToken,
+  getGoogleEvidenceStatus,
+  syncWorkerGoogleEvidence,
+  updateGoogleEvidenceSettings,
+} from "./googleEvidence";
 import {
   buildOperatorEvidenceSummary,
-  type OperatorAssessmentEvidence,
   type OperatorEvidenceSourceKey,
-  type OperatorIntelligenceSnapshot,
 } from "./operatorEvidence";
-import { protectedProcedure, router } from "./_core/trpc";
+import { activeWorkerProcedure, protectedProcedure, router } from "./_core/trpc";
+import { indexWorkQueueSteps } from "./operatorWorkQueueIndex";
 import { resolveWorkerOperatorContext } from "./workerOperatorContext";
-import { interpretWaitingReasonForWorker } from "./workerWaitingReason";
+import { bindWaitingReasonToOwnedCard, interpretWaitingReasonForWorker } from "./workerWaitingReason";
+import { canRecordWaitingReasonForCard } from "./timerAccess";
+import { getManagerStatus, ManagerCompletionReportError, ManagerUpdateSubmissionError, reportManagerActionCompletion, runManager, submitManagerUpdate, updateManagerPolicy } from "./aptlssManagerService";
+import { closeManagerTrial, getManagerReviewInbox, ManagerExecutionPausedError, managerCorrectionRevokeInputSchema, managerPlanVersion, managerReviewInboxInputSchema, managerReviewInputSchema, managerTrialInputSchema, recordManagerReview, restartManagerTrial, restoreManagerPlan, revokeManagerCorrection, setManagerMode } from "./aptlssManagerReviewService";
+import { AptlssEvidenceGraphError, createEvidenceConflict, getCardEvidence, getOpenVerificationFollowups, recordWorkerEvidenceAssertion, resolveVerificationFollowup } from "./aptlssEvidenceGraphDb";
+import { assertManagerPilotWorker, assertManagerPlanMutationAllowed, isManagerPilotWorker } from "./aptlssManagerPilot";
+import { toWorkerManagerSnapshot, toWorkerManagerStatus } from "./workerManagerResponse";
 
-const operatorProcedure = protectedProcedure.use(async ({ ctx, next }) => {
-  if (ctx.user.role !== "worker") {
-    throw new TRPCError({ code: "FORBIDDEN", message: "Operator access requires a worker role" });
-  }
+const managerReviewer = protectedProcedure.use(async ({ ctx, next }) => {
+  if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Founder/admin access is required" });
   return next({ ctx });
 });
 
-const workerMutation = operatorProcedure.use(async ({ ctx, next }) => {
-  if (ctx.user.role !== "worker") {
-    throw new TRPCError({ code: "FORBIDDEN", message: "This action must be completed by the worker" });
-  }
-  return next({ ctx });
-});
+const operatorProcedure = activeWorkerProcedure;
+const workerMutation = operatorProcedure;
 
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
   if (!value) return fallback;
@@ -114,38 +121,144 @@ const dailyPlanPayloadSchema = z.object({
   })),
 });
 
+const dailyPlanUpdatePayloadSchema = dailyPlanPayloadSchema.extend({
+  expectedPlanVersion: z.string().length(64).nullable(),
+});
+
 export const operatorRouter = router({
+  getManagerReviewInbox: managerReviewer.input(managerReviewInboxInputSchema.optional())
+    .query(({ ctx, input }) => getManagerReviewInbox(ctx.user.id, input?.vaId, input?.page)),
+  recordManagerReview: managerReviewer.input(managerReviewInputSchema)
+    .mutation(({ ctx, input }) => recordManagerReview(ctx.user.id, input)),
+  closeManagerTrial: managerReviewer.input(managerTrialInputSchema)
+    .mutation(({ ctx, input }) => closeManagerTrial(ctx.user.id, input)),
+  restartManagerTrial: managerReviewer.input(managerTrialInputSchema)
+    .mutation(({ ctx, input }) => restartManagerTrial(ctx.user.id, input)),
+  revokeManagerCorrection: managerReviewer.input(managerCorrectionRevokeInputSchema)
+    .mutation(({ ctx, input }) => revokeManagerCorrection(ctx.user.id, input)),
+  setManagerMode: managerReviewer.input(z.object({ vaId: z.number().int().positive(), mode: z.enum(["shadow", "active"]) }))
+    .mutation(({ ctx, input }) => setManagerMode(ctx.user.id, input.vaId, input.mode)),
+  restoreManagerPlan: managerReviewer.input(z.object({ vaId: z.number().int().positive(), runId: z.number().int().positive() }))
+    .mutation(({ ctx, input }) => restoreManagerPlan(ctx.user.id, input.vaId, input.runId)),
+  runManagerForReview: managerReviewer.input(z.object({ vaId: z.number().int().positive() }))
+    .mutation(({ input }) => runManager(input.vaId, "founder_review")),
+  getManagerStatus: operatorProcedure.query(async ({ ctx }) => {
+    const status = await getManagerStatus(Number(ctx.user.id));
+    return { ...toWorkerManagerStatus(status), expectedRunId: status.snapshot?.runId ?? null };
+  }),
+  runManager: workerMutation.input(z.object({ trigger: z.enum(["manual", "worker_update"]).optional() }).optional())
+    .mutation(async ({ ctx, input }) => ({ applied: (await runManager(Number(ctx.user.id), input?.trigger ?? "manual")).applied })),
+  updateManagerPolicy: managerReviewer.input(z.object({
+    vaId: z.number().int().positive(),
+    enabled: z.boolean(),
+    intervalMinutes: z.number().int().min(1).max(60),
+  }).strict())
+    .mutation(({ input }) => {
+      const { vaId, ...policy } = input;
+      return updateManagerPolicy(vaId, policy);
+    }),
+  submitManagerUpdate: workerMutation.input(z.object({
+    cardId: z.string().min(1), detail: z.string().trim().min(3).max(8000), interventionId: z.string().optional(),
+    requestKey: z.string().uuid().optional(),
+    expectedRunId: z.number().int().positive().max(2_147_483_647),
+    outcome: z.enum(["Update", "Action needed", "No action needed", "Cannot access source", "Need Robert's decision"]).optional(),
+    deadlineDate: z.string().optional(), sourceEvidenceId: z.string().optional(), sourceDescription: z.string().trim().max(512).optional(),
+  }).strict())
+    .mutation(async ({ ctx, input }) => {
+      try {
+        const result = await submitManagerUpdate(Number(ctx.user.id), input.cardId, input.detail, input.interventionId, input);
+        return { applied: result.applied, reportId: result.reportId, alreadyRecorded: result.alreadyRecorded };
+      } catch (error) {
+        if (error instanceof ManagerUpdateSubmissionError) {
+          throw new TRPCError({ code: error.code, message: error.message });
+        }
+        throw error;
+      }
+    }),
+  reportManagerActionCompletion: workerMutation.input(z.object({
+    cardId: z.string().trim().min(1).max(64), actionId: z.string().trim().min(1).max(256),
+    detail: z.string().trim().min(3).max(8000), requestKey: z.string().uuid(),
+    sourceEvidenceId: z.string().trim().min(1).max(256).optional(),
+    sourceDescription: z.string().trim().max(512).optional(),
+  }).strict()).mutation(async ({ ctx, input }) => {
+    try {
+      return await reportManagerActionCompletion(Number(ctx.user.id), input);
+    } catch (error) {
+      if (error instanceof ManagerCompletionReportError || error instanceof ManagerExecutionPausedError) {
+        throw new TRPCError({
+          code: error instanceof ManagerCompletionReportError ? error.code : "PRECONDITION_FAILED",
+          message: error.message,
+        });
+      }
+      throw error;
+    }
+  }),
+  getCardEvidence: operatorProcedure.input(z.object({ cardId: z.string().min(1), limit: z.number().int().min(1).max(100).default(30) }))
+    .query(({ ctx, input }) => getCardEvidence(ctx.user.id, input.cardId, input.limit)),
+  getVerificationFollowups: operatorProcedure.input(z.object({ cardId: z.string().min(1).optional() }).optional())
+    .query(({ ctx, input }) => getOpenVerificationFollowups(ctx.user.id, input?.cardId)),
+  recordEvidenceAssertion: workerMutation.input(z.object({ cardId: z.string().min(1).optional(), title: z.string().trim().min(3).max(512), detail: z.string().trim().min(3).max(8000) }))
+    .mutation(async ({ ctx, input }) => {
+      assertManagerPilotWorker(ctx.user.id);
+      try {
+        return await recordWorkerEvidenceAssertion({ ...input, vaId: ctx.user.id, recordedBy: ctx.user.openId });
+      } catch (error) {
+        if (error instanceof AptlssEvidenceGraphError) throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+        throw error;
+      }
+    }),
+  createEvidenceConflict: workerMutation.input(z.object({ sourceEvidenceId: z.number().int().positive(), assertedEvidenceId: z.number().int().positive(), cardId: z.string().min(1).optional(), question: z.string().trim().min(3).max(4000) }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await createEvidenceConflict({ ...input, vaId: ctx.user.id, createdBy: ctx.user.openId });
+      } catch (error) {
+        if (error instanceof AptlssEvidenceGraphError) throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+        throw error;
+      }
+    }),
+  resolveVerificationFollowup: workerMutation.input(z.object({ followupId: z.number().int().positive(), resolution: z.string().trim().min(3).max(4000), sourceEvidenceId: z.number().int().positive().optional(), sourceQuote: z.string().trim().min(3).max(4000).optional() }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        const result = await resolveVerificationFollowup({ ...input, vaId: ctx.user.id, resolvedBy: ctx.user.openId });
+        await runManager(ctx.user.id, "worker_update").catch(() => null);
+        return result;
+      } catch (error) {
+        if (error instanceof AptlssEvidenceGraphError) throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+        throw error;
+      }
+    }),
   getContext: operatorProcedure.query(async ({ ctx }) => resolveWorkerOperatorContext(ctx.user)),
 
   getWorkQueueContext: operatorProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Database unavailable" });
     const vaId = Number(ctx.user.id);
-    const [plans, states, scores, steps, waitingReasons] = await Promise.all([
+    const [plans, waitingReasons] = await Promise.all([
       db.select().from(aptlssPlans).where(eq(aptlssPlans.vaId, vaId)),
-      db.select().from(cardStates).where(eq(cardStates.vaId, vaId)),
-      db.select().from(priorityScores).where(eq(priorityScores.vaId, vaId)),
-      db.select().from(aptlssSteps).where(eq(aptlssSteps.vaId, vaId)),
       getActiveWaitingReasons(vaId),
     ]);
     const cardIds = plans.map((plan) => plan.cardId);
-    const [assessments, linkedEvidence, linkedCommunication, linkedEmails, completedTimeEntries] = cardIds.length
+    const [states, scores, steps, linkedEvidence, linkedCommunication, linkedEmails, completedTimeEntries, cachedCards, founderDeadlines] = cardIds.length
       ? await Promise.all([
-          db.select().from(aptlssAssessments)
-            .where(inArray(aptlssAssessments.cardId, cardIds))
-            .orderBy(desc(aptlssAssessments.assessedAt)),
+          db.select().from(cardStates).where(and(eq(cardStates.vaId, vaId), inArray(cardStates.cardId, cardIds))),
+          db.select().from(priorityScores).where(and(eq(priorityScores.vaId, vaId), inArray(priorityScores.cardId, cardIds))),
+          db.select().from(aptlssSteps).where(and(eq(aptlssSteps.vaId, vaId), inArray(aptlssSteps.cardId, cardIds))),
           db.select({
             cardId: workspaceEvidenceLinks.cardId,
             source: workspaceEvidenceItems.source,
           }).from(workspaceEvidenceLinks)
             .innerJoin(workspaceEvidenceItems, eq(workspaceEvidenceItems.id, workspaceEvidenceLinks.evidenceId))
             .where(and(
+              eq(workspaceEvidenceItems.vaId, vaId),
               inArray(workspaceEvidenceLinks.cardId, cardIds),
               eq(workspaceEvidenceItems.active, true),
             )),
           db.select({ cardId: communicationEvidence.linkedCardId })
             .from(communicationEvidence)
-            .where(inArray(communicationEvidence.linkedCardId, cardIds)),
+            .where(and(
+              eq(communicationEvidence.vaId, vaId),
+              inArray(communicationEvidence.linkedCardId, cardIds),
+            )),
           db.select({ cardId: emailTasks.trelloCardId })
             .from(emailTasks)
             .where(and(
@@ -160,14 +273,27 @@ export const operatorRouter = router({
               isNotNull(timeEntries.endTime),
               inArray(timeEntries.cardId, cardIds),
             )),
+          db.select({ cardId: trelloCachedCards.cardId, cardData: trelloCachedCards.cardData, cachedAt: trelloCachedCards.cachedAt, expiresAt: trelloCachedCards.expiresAt })
+            .from(trelloCachedCards)
+            .where(and(eq(trelloCachedCards.userId, vaId), inArray(trelloCachedCards.cardId, cardIds)))
+            .orderBy(desc(trelloCachedCards.cachedAt))
+            .limit(1001),
+          db.select().from(founderDecisionDeadlines)
+            .where(eq(founderDecisionDeadlines.vaId, vaId))
+            .orderBy(desc(founderDecisionDeadlines.id)),
         ])
-      : [[], [], [], [], []];
-    const latestAssessment = new Map<string, typeof assessments[number]>();
-    assessments.forEach((assessment) => {
-      if (!latestAssessment.has(assessment.cardId)) latestAssessment.set(assessment.cardId, assessment);
-    });
+      : [[], [], [], [], [], [], [], [], []];
     const stateMap = new Map(states.map((item) => [item.cardId, item]));
+    const cachedCardMap = new Map<string, typeof cachedCards[number]>();
+    cachedCards.forEach((item) => {
+      if (!cachedCardMap.has(item.cardId)) cachedCardMap.set(item.cardId, item);
+    });
     const scoreMap = new Map(scores.map((item) => [item.cardId, item]));
+    const founderDeadlineMap = new Map<number, typeof founderDeadlines[number]>();
+    founderDeadlines.forEach((item) => {
+      if (!founderDeadlineMap.has(item.stepId)) founderDeadlineMap.set(item.stepId, item);
+    });
+    const stepsByCardId = indexWorkQueueSteps(steps);
     const waitingMap = new Map(waitingReasons.map((item) => [item.cardId, item]));
     const sourceCounts = new Map<string, Partial<Record<Exclude<OperatorEvidenceSourceKey, "time">, number>>>();
     const completedTimeSamples = new Map<string, number>();
@@ -191,55 +317,56 @@ export const operatorRouter = router({
     return {
       cards: plans.map((plan) => {
         const planValue = parseJson<Record<string, unknown>>(plan.planJson, {});
+        const cachedCardRow = cachedCardMap.get(plan.cardId);
+        const cachedCard = parseJson<Record<string, unknown>>(cachedCardRow?.cardData, {});
         const state = stateMap.get(plan.cardId);
         const score = scoreMap.get(plan.cardId);
-        const assessment = latestAssessment.get(plan.cardId);
-        const cardSteps = steps.filter((step) => step.cardId === plan.cardId);
-        const assessmentEvidence = assessment
-          ? parseJson<OperatorAssessmentEvidence[]>(assessment.evidenceJson, [])
-          : [];
-        const intelligence = assessment
-          ? parseJson<OperatorIntelligenceSnapshot>(assessment.intelligenceJson, {})
-          : {};
-        const rawUncertainties = assessment
-          ? parseJson<string[]>(assessment.uncertaintiesJson, [])
-          : [];
+        const cardSteps = stepsByCardId.get(plan.cardId) ?? [];
         const openRobertStep = cardSteps.find((step) => step.requiresRobert && step.status !== "complete") ?? null;
-        const recommendations = assessment
-          ? parseJson<string[]>(assessment.recommendationsJson, [])
-          : Array.isArray(planValue.recommendations) ? planValue.recommendations.filter((item): item is string => typeof item === "string") : [];
         const nextBestAction = waitingMap.get(plan.cardId)?.nextAction ?? selectWorkQueueNextAction({
           planAction: typeof planValue.nextBestAction === "string" ? planValue.nextBestAction : typeof planValue.action === "string" ? planValue.action : null,
-          primaryState: assessment?.primaryState ?? state?.state ?? null,
-          actionability: assessment?.actionability ?? null,
-          recommendations,
+          primaryState: state?.state ?? null,
+          actionability: null,
+          recommendations: [],
           openRobertStep,
         });
+        const evidenceSummary = buildOperatorEvidenceSummary({
+          rawUncertainties: [],
+          assessmentEvidence: [],
+          intelligence: {},
+          linkedSourceCounts: sourceCounts.get(plan.cardId) ?? {},
+          completedTimeSamples: completedTimeSamples.get(plan.cardId) ?? 0,
+        });
+        const waitingReason = waitingMap.get(plan.cardId);
         return {
           cardId: plan.cardId,
           cardName: plan.cardName,
           cardUrl: plan.cardUrl,
+          trelloCache: cachedCardRow ? {
+            cachedAt: cachedCardRow.cachedAt.toISOString(),
+            expiresAt: cachedCardRow.expiresAt.toISOString(),
+          } : null,
           boardName: plan.boardName,
           listName: plan.listName,
+          dueAt: typeof cachedCard?.due === "string" ? cachedCard.due : typeof planValue.due === "string" ? planValue.due : null,
+          overdue: state?.isOverdue ?? false,
           nextBestAction,
-          planSummary: typeof planValue.summary === "string" ? planValue.summary : null,
-          primaryState: assessment?.primaryState ?? state?.state ?? null,
-          stateReason: assessment?.stateReason ?? state?.stateReason ?? null,
-          actionability: assessment?.actionability ?? null,
-          priorityScore: assessment?.priorityScore ?? score?.score ?? 0,
-          priorityTier: assessment?.priorityTier ?? score?.tier ?? "MEDIUM",
-          confidenceScore: assessment?.confidenceScore ?? (typeof planValue.confidenceScore === "number" ? planValue.confidenceScore : null),
-          confidenceReason: assessment?.confidenceReason ?? (typeof planValue.confidenceReason === "string" ? planValue.confidenceReason : null),
-          recommendations,
-          uncertainties: rawUncertainties,
-          evidenceSummary: buildOperatorEvidenceSummary({
-            rawUncertainties,
-            assessmentEvidence,
-            intelligence,
-            linkedSourceCounts: sourceCounts.get(plan.cardId) ?? {},
-            completedTimeSamples: completedTimeSamples.get(plan.cardId) ?? 0,
-          }),
-          waitingReason: waitingMap.get(plan.cardId) ?? null,
+          primaryState: state?.state ?? null,
+          actionability: null,
+          priorityScore: score?.score ?? 0,
+          priorityTier: score?.tier ?? "MEDIUM",
+          evidenceSummary: {
+            sources: evidenceSummary.sources,
+            forecast: evidenceSummary.forecast ? {
+              p50Minutes: evidenceSummary.forecast.p50Minutes,
+              p90Minutes: evidenceSummary.forecast.p90Minutes,
+            } : null,
+          },
+          waitingReason: waitingReason ? {
+            waitingOn: waitingReason.waitingOn,
+            nextAction: waitingReason.nextAction,
+            followUpAt: waitingReason.followUpAt,
+          } : null,
           steps: cardSteps.map((step) => ({
             id: step.id,
             stepNumber: step.stepNumber,
@@ -247,6 +374,8 @@ export const operatorRouter = router({
             status: step.status,
             category: step.category,
             requiresRobert: step.requiresRobert,
+            decisionDueAt: founderDeadlineMap.get(step.id)?.dueAt?.toISOString() ?? null,
+            decisionDeferred: founderDeadlineMap.get(step.id)?.source.startsWith("Deferred:") ?? false,
             completionCriteria: step.completionCriteria,
             riskIfSkipped: step.riskIfSkipped,
           })),
@@ -284,18 +413,47 @@ export const operatorRouter = router({
       due: z.string().nullable().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Database unavailable" });
+      const [plannedCard] = await db.select({
+        cardId: aptlssPlans.cardId,
+        cardName: aptlssPlans.cardName,
+        cardUrl: aptlssPlans.cardUrl,
+        boardName: aptlssPlans.boardName,
+        listName: aptlssPlans.listName,
+      }).from(aptlssPlans)
+        .where(and(eq(aptlssPlans.vaId, ctx.user.id), eq(aptlssPlans.cardId, input.cardId)))
+        .limit(1);
+      if (!canRecordWaitingReasonForCard(Boolean(plannedCard))) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "You can only record a waiting reason for a card in your work queue" });
+      }
+      const ownedCardInput = bindWaitingReasonToOwnedCard(input, plannedCard);
       const worker = await resolveWorkerOperatorContext(ctx.user);
-      const interpretation = interpretWaitingReasonForWorker(input.reason, input, {
+      const interpretation = interpretWaitingReasonForWorker(input.reason, ownedCardInput, {
         workerName: worker.displayName,
         founderName: worker.founderName,
         timeZone: worker.timezone,
       });
-      return recordAptlssWaitingReason({
-        ...input,
-        vaId: worker.userId,
-        interpretation,
-        recordedBy: String(ctx.user.openId),
-      });
+      try {
+        return await recordAptlssWaitingReason({
+          cardId: ownedCardInput.cardId,
+          cardName: ownedCardInput.cardName,
+          cardUrl: ownedCardInput.cardUrl,
+          boardName: ownedCardInput.boardName,
+          listName: ownedCardInput.listName,
+          vaId: worker.userId,
+          interpretation,
+          recordedBy: String(ctx.user.openId),
+        });
+      } catch (error) {
+        if (error instanceof WaitingReasonNotInQueueError) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "You can only record a waiting reason for a card in your work queue" });
+        }
+        if (error instanceof WaitingReasonCardChangedError) {
+          throw new TRPCError({ code: "CONFLICT", message: "This card changed. Refresh your work queue and try again." });
+        }
+        throw error;
+      }
     }),
 
   getWaitingReasons: operatorProcedure.query(({ ctx }) => getActiveWaitingReasons(ctx.user.id)),
@@ -309,13 +467,52 @@ export const operatorRouter = router({
     .input(z.object({ cardId: z.string() }))
     .mutation(({ input, ctx }) => resolveAptlssWaitingReason(ctx.user.id, input.cardId)),
 
-  recordDecisionOutcome: workerMutation
-    .input(z.object({ stepId: z.number().int().positive(), outcome: z.string().trim().min(3).max(5_000) }))
+  getFounderDecisionInbox: managerReviewer.query(() => getFounderDecisionInbox()),
+  setFounderDecisionDeadline: managerReviewer
+    .input(z.object({
+      vaId: z.number().int().positive(), stepId: z.number().int().positive(),
+      dueAt: z.string().datetime({ offset: true }).nullable(),
+      source: z.string().trim().min(3).max(1024),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      try {
+        return await setFounderDecisionDeadline({
+          ...input,
+          dueAt: input.dueAt ? new Date(input.dueAt) : null,
+          recordedBy: String(ctx.user.openId),
+        });
+      } catch (error) {
+        if (error instanceof FounderDecisionDeadlineError) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+        }
+        throw error;
+      }
+    }),
+  deferFounderDecision: managerReviewer
+    .input(z.object({
+      vaId: z.number().int().positive(), stepId: z.number().int().positive(),
+      dueAt: z.string().datetime({ offset: true }),
+      reason: z.string().trim().min(3).max(1014),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      try {
+        return await deferFounderDecisionDeadline({
+          vaId: input.vaId, stepId: input.stepId, dueAt: new Date(input.dueAt),
+          source: input.reason, recordedBy: String(ctx.user.openId),
+        });
+      } catch (error) {
+        if (error instanceof FounderDecisionDeadlineError) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+        }
+        throw error;
+      }
+    }),
+  recordFounderDecisionOutcome: managerReviewer
+    .input(z.object({ vaId: z.number().int().positive(), stepId: z.number().int().positive(), disposition: z.enum(["approved", "rejected"]), outcome: z.string().trim().min(3).max(5_000) }))
     .mutation(async ({ input, ctx }) => {
       try {
         return await recordDecisionOutcome({
           ...input,
-          vaId: ctx.user.id,
           resolvedBy: String(ctx.user.openId),
         });
       } catch (error) {
@@ -333,20 +530,48 @@ export const operatorRouter = router({
     .input(z.object({ dateKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).optional())
     .query(async ({ input, ctx }) => {
       const worker = await resolveWorkerOperatorContext(ctx.user);
-      return getOperatorDailyPlan(worker.userId, input?.dateKey, worker);
+      const plan = await getOperatorDailyPlan(worker.userId, input?.dateKey, worker);
+      return toWorkerOperatorDailyPlan(plan);
     }),
+  getDailyPlanEditingPolicy: operatorProcedure.query(({ ctx }) => ({
+    editable: !isManagerPilotWorker(Number(ctx.user.id)),
+  })),
   generateDailyPlan: workerMutation
     .input(z.object({
       dateKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
       force: z.boolean().default(false),
     }).optional())
     .mutation(async ({ input, ctx }) => {
+      if (isManagerPilotWorker(Number(ctx.user.id))) assertManagerPlanMutationAllowed(Number(ctx.user.id));
       const worker = await resolveWorkerOperatorContext(ctx.user);
-      return generateOperatorDailyPlan(worker.userId, input?.dateKey, input?.force ?? false, worker);
+      try {
+        const plan = await generateOperatorDailyPlan(worker.userId, input?.dateKey, input?.force ?? false, worker);
+        return toWorkerOperatorDailyPlan(plan);
+      } catch (error) {
+        if (error instanceof OperatorDailyPlanConflictError) {
+          throw new TRPCError({ code: "CONFLICT", message: error.message });
+        }
+        throw error;
+      }
     }),
   updateDailyPlan: workerMutation
-    .input(dailyPlanPayloadSchema)
-    .mutation(({ input, ctx }) => updateOperatorDailyPlan(Number(ctx.user.id), input as OperatorDailyPlanPayload)),
+    .input(dailyPlanUpdatePayloadSchema)
+    .mutation(async ({ input, ctx }) => {
+      if (isManagerPilotWorker(Number(ctx.user.id))) assertManagerPlanMutationAllowed(Number(ctx.user.id));
+      try {
+        const { expectedPlanVersion, ...payload } = input;
+        const plan = await updateOperatorDailyPlan(Number(ctx.user.id), payload as OperatorDailyPlanPayload, expectedPlanVersion);
+        return toWorkerOperatorDailyPlan(plan);
+      } catch (error) {
+        if (error instanceof OperatorDailyPlanScopeError) {
+          throw new TRPCError({ code: "FORBIDDEN", message: error.message });
+        }
+        if (error instanceof OperatorDailyPlanConflictError) {
+          throw new TRPCError({ code: "CONFLICT", message: error.message });
+        }
+        throw error;
+      }
+    }),
 
   getBrowserTabStatus: operatorProcedure.query(({ ctx }) => getBrowserTabStatus(ctx.user.id)),
   getBrowserTabPolicy: operatorProcedure.query(({ ctx }) => getBrowserTabPolicy(ctx.user.id)),
@@ -365,4 +590,31 @@ export const operatorRouter = router({
   getBrowserTabEvidenceHistory: operatorProcedure
     .input(z.object({ limit: z.number().int().min(1).max(366).default(30) }).optional())
     .query(({ input, ctx }) => getBrowserTabEvidenceHistory(ctx.user.id, input?.limit ?? 30)),
+
+  getGoogleEvidenceStatus: operatorProcedure.query(({ ctx }) => getGoogleEvidenceStatus(ctx.user.id)),
+  updateGoogleEvidenceSettings: workerMutation
+    .input(z.object({
+      gmail: z.object({
+        enabled: z.boolean().optional(),
+        intervalMinutes: z.number().int().min(15).max(1_440).optional(),
+        lookbackDays: z.number().int().min(1).max(90).optional(),
+      }).optional(),
+      drive: z.object({
+        enabled: z.boolean().optional(),
+        intervalMinutes: z.number().int().min(15).max(1_440).optional(),
+        lookbackDays: z.number().int().min(1).max(90).optional(),
+        folderId: z.string().trim().max(256).nullable().optional(),
+      }).optional(),
+    }))
+    .mutation(({ input, ctx }) => updateGoogleEvidenceSettings(ctx.user.id, input)),
+  syncGoogleEvidence: workerMutation
+    .input(z.object({
+      gmail: z.boolean().optional(),
+      drive: z.boolean().optional(),
+    }).optional())
+    .mutation(({ input, ctx }) => syncWorkerGoogleEvidence(ctx.user.id, input)),
+  disconnectGoogleEvidence: workerMutation.mutation(async ({ ctx }) => {
+    await clearGoogleRefreshToken(ctx.user.id);
+    return { success: true };
+  }),
 });

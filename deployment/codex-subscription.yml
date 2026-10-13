@@ -1,0 +1,10 @@
+services:
+  app:
+    environment:
+      APTLSS_MANAGER_PROVIDER: codex-subscription
+      APTLSS_CODEX_QUEUE_DIR: /app/codex-queue
+    volumes:
+      - type: bind
+        source: ${PILOT_CODEX_QUEUE_DIRECTORY:?Private Codex queue directory required}
+        target: /app/codex-queue
+        read_only: false

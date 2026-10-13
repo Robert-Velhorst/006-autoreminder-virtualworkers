@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { appRouter } from "./routers";
 import { COOKIE_NAME } from "../shared/const";
 import type { TrpcContext } from "./_core/context";
+
+const { revokeSession } = vi.hoisted(() => ({ revokeSession: vi.fn() }));
+vi.mock("./_core/sdk", () => ({ sdk: { revokeSession } }));
 
 type CookieCall = {
   name: string;
@@ -42,6 +45,8 @@ function createAuthContext(): { ctx: TrpcContext; clearedCookies: CookieCall[] }
 }
 
 describe("auth.logout", () => {
+  beforeEach(() => revokeSession.mockReset());
+
   it("clears the session cookie and reports success", async () => {
     const { ctx, clearedCookies } = createAuthContext();
     const caller = appRouter.createCaller(ctx);
@@ -52,11 +57,20 @@ describe("auth.logout", () => {
     expect(clearedCookies).toHaveLength(1);
     expect(clearedCookies[0]?.name).toBe(COOKIE_NAME);
     expect(clearedCookies[0]?.options).toMatchObject({
-      maxAge: -1,
       secure: true,
       sameSite: "lax",
       httpOnly: true,
       path: "/",
     });
+    expect(clearedCookies[0]?.options).not.toHaveProperty("maxAge");
+  });
+
+  it("revokes the presented session and clears its cookie", async () => {
+    const { ctx, clearedCookies } = createAuthContext();
+    ctx.req.headers.cookie = `${COOKIE_NAME}=signed-session-token`;
+    await appRouter.createCaller(ctx).auth.logout();
+
+    expect(revokeSession).toHaveBeenCalledWith("signed-session-token");
+    expect(clearedCookies).toHaveLength(1);
   });
 });

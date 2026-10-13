@@ -1,11 +1,13 @@
-import { and, desc, eq } from "drizzle-orm";
-import { appSettings, dailyPlans } from "../drizzle/schema";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { appSettings, aptlssPlans, aptlssSteps, dailyPlans, timeEntries, userWorkingHours, users, vaProfiles } from "../drizzle/schema";
 import { dateKeyInTimeZone } from "../shared/workerTime";
 import { getWorkLaneRank } from "../shared/workLanePriority";
 import { getAllAptlssPlans } from "./aptlssDb";
 import { getDb } from "./db";
-import { getAllCardStates, getAllPriorityScores, getOpenStepsForCard } from "./aptlssStepsDb";
-import type { WorkerOperatorContext } from "./workerOperatorContext";
+import { getAllCardStates, getAllPriorityScores, getOpenStepsForCards } from "./aptlssStepsDb";
+import { indexWorkQueueSteps } from "./operatorWorkQueueIndex";
+import { resolveWorkerOperatorContextById, type WorkerOperatorContext } from "./workerOperatorContext";
+import { managerPlanVersion } from "./aptlssManagerReviewService";
 
 type ScheduleSettings = {
   startTime: string;
@@ -33,6 +35,7 @@ export type OperatorPlanBlock = {
 };
 
 export type OperatorDailyPlanPayload = {
+  planningImpact?: import("../shared/aptlssManagerPlanImpact").ManagerPlanImpact;
   version: 2;
   dateKey: string;
   generatedAt: string;
@@ -55,6 +58,47 @@ const DEFAULT_SCHEDULE: ScheduleSettings = {
   endTime: "18:00",
   breaks: [],
 };
+
+export class OperatorDailyPlanScopeError extends Error {
+  constructor() {
+    super("Daily plan references work outside this worker's queue");
+    this.name = "OperatorDailyPlanScopeError";
+  }
+}
+
+export class OperatorDailyPlanConflictError extends Error {
+  constructor(
+    readonly expectedPlanVersion: string | null,
+    readonly currentPlanVersion: string | null,
+    message = "A newer version of this day plan was saved while you were working. The saved plan was kept; reload it before making further changes.",
+  ) {
+    super(message);
+    this.name = "OperatorDailyPlanConflictError";
+  }
+}
+
+export function assertOperatorDailyPlanReferencesInScope(
+  payload: OperatorDailyPlanPayload,
+  ownedCardIds: ReadonlySet<string>,
+  ownedStepCards: ReadonlyMap<number, string>,
+) {
+  const cardIds = [
+    ...payload.blocks.flatMap((block) => block.cardId !== null ? [block.cardId] : []),
+    ...payload.robertItems.map((item) => item.cardId),
+    ...payload.unscheduledCards.map((item) => item.cardId),
+  ];
+  if (cardIds.some((cardId) => !ownedCardIds.has(cardId))) throw new OperatorDailyPlanScopeError();
+
+  for (const block of payload.blocks) {
+    if ((!block.cardId && block.stepIds.length > 0)
+      || block.stepIds.some((stepId) => ownedStepCards.get(stepId) !== block.cardId)) {
+      throw new OperatorDailyPlanScopeError();
+    }
+  }
+  for (const item of payload.robertItems) {
+    if (ownedStepCards.get(item.stepId) !== item.cardId) throw new OperatorDailyPlanScopeError();
+  }
+}
 
 function toMinutes(value: string) {
   const [hours, minutes] = value.split(":").map(Number);
@@ -84,8 +128,12 @@ async function getScheduleSettings(vaId: number, worker?: WorkerOperatorContext)
     .from(appSettings)
     .where(and(eq(appSettings.vaId, vaId), eq(appSettings.key, "daily_schedule")))
     .limit(1);
+  return normalizeScheduleSettings(rows[0]?.value, fallback);
+}
+
+function normalizeScheduleSettings(value: string | undefined, fallback: ScheduleSettings): ScheduleSettings {
   try {
-    const parsed = JSON.parse(rows[0]?.value ?? "{}") as Partial<ScheduleSettings>;
+    const parsed = JSON.parse(value ?? "{}") as Partial<ScheduleSettings>;
     return {
       startTime: parsed.startTime && /^\d{2}:\d{2}$/.test(parsed.startTime) ? parsed.startTime : fallback.startTime,
       endTime: parsed.endTime && /^\d{2}:\d{2}$/.test(parsed.endTime) ? parsed.endTime : fallback.endTime,
@@ -126,6 +174,166 @@ function buildAvailableWindows(schedule: ScheduleSettings) {
   return { windows, breaks, availableMinutes: windows.reduce((total, item) => total + item.end - item.start, 0) };
 }
 
+function scheduleIdentity(schedule: ScheduleSettings) {
+  return JSON.stringify({
+    startTime: schedule.startTime,
+    endTime: schedule.endTime,
+    breaks: [...schedule.breaks]
+      .map(({ name, startTime, durationMinutes }) => ({ name, startTime, durationMinutes }))
+      .sort((left, right) => left.startTime.localeCompare(right.startTime) || left.name.localeCompare(right.name)),
+  });
+}
+
+function protectedBlocks(schedule: OperatorDailyPlanPayload | null, expectedPlanVersion: string | null) {
+  const blocks = schedule?.blocks.filter(block => block.status === "active" || block.status === "done") ?? [];
+  const sorted = [...blocks].sort((left, right) => toMinutes(left.startTime) - toMinutes(right.startTime));
+  for (let index = 0; index < sorted.length; index += 1) {
+    const block = sorted[index];
+    const validTime = (value: string) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+    if (!validTime(block.startTime) || !validTime(block.endTime)
+      || toMinutes(block.endTime) <= toMinutes(block.startTime)
+      || (index > 0 && toMinutes(block.startTime) < toMinutes(sorted[index - 1].endTime))) {
+      throw new OperatorDailyPlanConflictError(
+        expectedPlanVersion,
+        expectedPlanVersion,
+        "The saved active or completed blocks cannot be compared safely. The saved plan was kept; reload it before regenerating.",
+      );
+    }
+  }
+  return blocks;
+}
+
+function subtractProtectedBlocks(
+  windows: Array<{ start: number; end: number }>,
+  blocks: OperatorPlanBlock[],
+) {
+  const reserved = blocks.map(block => ({ start: toMinutes(block.startTime), end: toMinutes(block.endTime) }));
+  return windows.flatMap(window => {
+    let remaining = [window];
+    for (const block of reserved) {
+      remaining = remaining.flatMap(segment => {
+        if (block.end <= segment.start || block.start >= segment.end) return [segment];
+        return [
+          ...(block.start > segment.start ? [{ start: segment.start, end: block.start }] : []),
+          ...(block.end < segment.end ? [{ start: block.end, end: segment.end }] : []),
+        ];
+      });
+    }
+    return remaining;
+  });
+}
+
+function savedPlanPayload(scheduleJson: string | undefined): OperatorDailyPlanPayload | null {
+  if (!scheduleJson) return null;
+  try {
+    const parsed = JSON.parse(scheduleJson) as OperatorDailyPlanPayload;
+    return parsed.version === 2 && Array.isArray(parsed.blocks) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function samePlanBlock(left: OperatorPlanBlock, right: OperatorPlanBlock) {
+  const identity = (block: OperatorPlanBlock) => JSON.stringify([
+    block.id, block.startTime, block.endTime, block.cardId, block.cardName, block.cardUrl,
+    block.boardName, block.listName, block.action, block.stepIds, block.priority, block.score,
+    block.state, block.status, block.notes, block.flags,
+  ]);
+  return identity(left) === identity(right);
+}
+
+function assertProtectedBlocksPreserved(
+  existing: OperatorDailyPlanPayload | null,
+  payload: OperatorDailyPlanPayload,
+  expectedPlanVersion: string | null,
+  currentPlanVersion: string | null,
+) {
+  const protectedItems = existing?.blocks.filter(block => block.status === "active" || block.status === "done") ?? [];
+  for (const block of protectedItems) {
+    const replacement = payload.blocks.find(candidate => candidate.id === block.id);
+    if (!replacement || !samePlanBlock(block, replacement)) {
+      throw new OperatorDailyPlanConflictError(
+        expectedPlanVersion,
+        currentPlanVersion,
+        "Completed or active blocks must remain unchanged when saving this day plan. The saved plan was kept; reload it before making further changes.",
+      );
+    }
+  }
+}
+
+type OperatorPlanDatabase = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+type OperatorPlanTransaction = Parameters<Parameters<OperatorPlanDatabase["transaction"]>[0]>[0];
+
+function workerScheduleIdentity(worker: WorkerOperatorContext) {
+  return JSON.stringify({
+    schedule: scheduleIdentity(profileSchedule(worker)),
+    workingDays: [...worker.workingDays].sort((left, right) => left - right),
+    timezone: worker.timezone,
+  });
+}
+
+async function readCurrentWorkerContext(tx: OperatorPlanTransaction, vaId: number) {
+  const profiles = await tx.select({
+    founderId: vaProfiles.founderId,
+    status: vaProfiles.status,
+  }).from(vaProfiles)
+    .where(eq(vaProfiles.userId, vaId))
+    .orderBy(vaProfiles.id)
+    .for("update");
+  const activeProfiles = profiles.filter(profile => profile.status === "active");
+  const userIds = [...new Set([
+    vaId,
+    ...(activeProfiles.length === 1 ? [activeProfiles[0].founderId] : []),
+  ])];
+  await tx.select({ id: userWorkingHours.id }).from(userWorkingHours)
+    .where(inArray(userWorkingHours.userId, userIds))
+    .for("update");
+  return resolveWorkerOperatorContextById(vaId, tx as unknown as OperatorPlanDatabase);
+}
+
+async function assertCurrentSchedule(
+  tx: OperatorPlanTransaction,
+  vaId: number,
+  expectedSchedule: ScheduleSettings,
+  fallback: ScheduleSettings,
+  expectedPlanVersion: string | null,
+  currentPlanVersion: string | null,
+) {
+  const [currentSetting] = await tx.select({ value: appSettings.value }).from(appSettings)
+    .where(and(eq(appSettings.vaId, vaId), eq(appSettings.key, "daily_schedule")))
+    .limit(1).for("update");
+  const currentSchedule = normalizeScheduleSettings(currentSetting?.value, fallback);
+  if (scheduleIdentity(currentSchedule) !== scheduleIdentity(expectedSchedule)) {
+    throw new OperatorDailyPlanConflictError(
+      expectedPlanVersion,
+      currentPlanVersion,
+      "The working schedule changed while this day plan was being prepared. No plan was saved; reload the schedule and try again.",
+    );
+  }
+}
+
+async function assertNoActiveTimer(
+  tx: OperatorPlanTransaction,
+  vaId: number,
+  expectedPlanVersion: string | null,
+  currentPlanVersion: string | null,
+) {
+  const [activeTimer] = await tx.select({ id: timeEntries.id }).from(timeEntries)
+    .where(and(
+      eq(timeEntries.vaId, vaId),
+      eq(timeEntries.isVoided, false),
+      isNull(timeEntries.endTime),
+    ))
+    .limit(1).for("update");
+  if (activeTimer) {
+    throw new OperatorDailyPlanConflictError(
+      expectedPlanVersion,
+      currentPlanVersion,
+      "Stop the active timer before changing this day plan. The saved plan was kept; try again when the timer is stopped.",
+    );
+  }
+}
+
 function parsePlan(planJson: string) {
   try {
     return JSON.parse(planJson) as {
@@ -163,6 +371,57 @@ export async function getOperatorDailyPlan(
   }
 }
 
+type StoredOperatorDailyPlan = NonNullable<Awaited<ReturnType<typeof getOperatorDailyPlan>>>;
+
+export function toWorkerOperatorDailyPlan(plan: StoredOperatorDailyPlan | null) {
+  if (!plan) return null;
+
+  const { schedule } = plan;
+  return {
+    vaId: plan.vaId,
+    dateKey: plan.dateKey,
+    generatedAt: plan.generatedAt,
+    totalScheduledMinutes: plan.totalScheduledMinutes,
+    planVersion: managerPlanVersion(plan.scheduleJson),
+    schedule: {
+      version: schedule.version,
+      dateKey: schedule.dateKey,
+      generatedAt: schedule.generatedAt,
+      blocks: schedule.blocks.map((block) => ({
+        id: block.id,
+        startTime: block.startTime,
+        endTime: block.endTime,
+        cardId: block.cardId,
+        cardName: block.cardName,
+        cardUrl: block.cardUrl,
+        boardName: block.boardName,
+        listName: block.listName,
+        stepIds: [...(block.stepIds ?? [])],
+        action: block.stepIds?.length
+          ? block.action
+          : "Open the task and record the next concrete action.",
+        priority: block.priority,
+        status: block.status,
+      })),
+      unscheduledCards: schedule.unscheduledCards.map((item) => ({
+        cardId: item.cardId,
+        cardName: item.cardName,
+        reason: "No time block is scheduled for this item today.",
+      })),
+      planHealth: {
+        ...(schedule.planHealth.confidence === 0 ? { confidence: 0 } : {}),
+        scheduledMinutes: schedule.planHealth.scheduledMinutes,
+        availableMinutes: schedule.planHealth.availableMinutes,
+        ...(schedule.planHealth.overlaps === 0 ? { overlaps: 0 } : {}),
+        gaps: schedule.planHealth.gaps,
+      },
+      constraints: schedule.constraints,
+      ...(schedule.robertItems.length === 0 ? { robertItems: [] } : {}),
+      ...(schedule.auditTrail.length === 0 ? { auditTrail: [] } : {}),
+    },
+  };
+}
+
 export async function generateOperatorDailyPlan(
   vaId: number,
   dateKey: string | undefined,
@@ -172,6 +431,20 @@ export async function generateOperatorDailyPlan(
   const effectiveDateKey = dateKey ?? dateKeyInTimeZone(Date.now(), worker?.timezone);
   const existing = await getOperatorDailyPlan(vaId, effectiveDateKey, worker);
   if (existing && !force) return existing;
+  const expectedPlanVersion = existing ? managerPlanVersion(existing.scheduleJson) : null;
+  const fixedBlocks = protectedBlocks(existing?.schedule ?? null, expectedPlanVersion);
+  const protectedStepIdsByCard = new Map<string, Set<number>>();
+  const protectedCardLevelWork = new Set<string>();
+  for (const block of fixedBlocks) {
+    if (!block.cardId) continue;
+    if (!block.stepIds.length) {
+      protectedCardLevelWork.add(block.cardId);
+      continue;
+    }
+    const stepIds = protectedStepIdsByCard.get(block.cardId) ?? new Set<number>();
+    for (const stepId of block.stepIds) stepIds.add(stepId);
+    protectedStepIdsByCard.set(block.cardId, stepIds);
+  }
 
   const [plans, states, scores, schedule] = await Promise.all([
     getAllAptlssPlans(vaId),
@@ -180,43 +453,60 @@ export async function generateOperatorDailyPlan(
     getScheduleSettings(vaId, worker),
   ]);
   const generatedAt = new Date();
-  const { windows, breaks, availableMinutes } = buildAvailableWindows(schedule);
+  const { windows: scheduleWindows, breaks, availableMinutes } = buildAvailableWindows(schedule);
+  const windows = subtractProtectedBlocks(scheduleWindows, fixedBlocks);
   const stateMap = new Map(states.map((item) => [item.cardId, item]));
   const scoreMap = new Map(scores.map((item) => [item.cardId, item]));
+  const indexedSteps = indexWorkQueueSteps(await getOpenStepsForCards(vaId, plans.map((plan) => plan.cardId)));
+  const remainingStepsByCardId = new Map([...indexedSteps].map(([cardId, steps]) => [
+    cardId,
+    steps.filter(step => step.status !== "complete" && step.status !== "obsolete"
+      && !protectedStepIdsByCard.get(cardId)?.has(step.id)),
+  ]));
+  const hasRemainingWork = (cardId: string) => {
+    if (protectedCardLevelWork.has(cardId)) return false;
+    if (!protectedStepIdsByCard.has(cardId)) return true;
+    return (remainingStepsByCardId.get(cardId)?.length ?? 0) > 0;
+  };
 
   const localDay = new Date(`${effectiveDateKey}T12:00:00Z`).getUTCDay();
   if (worker && !worker.workingDays.includes(localDay)) {
     const dayName = new Intl.DateTimeFormat("en-GB", { weekday: "long", timeZone: "UTC" })
       .format(new Date(`${effectiveDateKey}T12:00:00Z`));
+    const scheduledMinutes = fixedBlocks.reduce((total, block) => total + toMinutes(block.endTime) - toMinutes(block.startTime), 0);
     const payload: OperatorDailyPlanPayload = {
       version: 2,
       dateKey: effectiveDateKey,
       generatedAt: generatedAt.toISOString(),
-      blocks: [],
+      blocks: fixedBlocks,
       robertItems: [],
-      unscheduledCards: plans.map((plan) => ({
+      unscheduledCards: plans.filter(plan => hasRemainingWork(plan.cardId)).map((plan) => ({
         cardId: plan.cardId,
         cardName: plan.cardName,
         reason: `${dayName} is protected time for this worker.`,
       })),
-      planHealth: { confidence: 100, scheduledMinutes: 0, availableMinutes: 0, overlaps: 0, gaps: 0 },
+      planHealth: { confidence: 100, scheduledMinutes, availableMinutes: 0, overlaps: 0, gaps: 0 },
       constraints: schedule,
       auditTrail: [{ at: generatedAt.toISOString(), action: "generated", detail: `Protected ${dayName} plan created.` }],
     };
-    return persistOperatorPlan(vaId, payload);
+    return persistOperatorPlan(vaId, payload, expectedPlanVersion, schedule, worker);
   }
 
-  const candidates = await Promise.all(plans.map(async (plan) => {
-    const steps = await getOpenStepsForCard(vaId, plan.cardId);
+  const candidates = plans.filter(plan => hasRemainingWork(plan.cardId)).map((plan) => {
+    const steps = remainingStepsByCardId.get(plan.cardId) ?? [];
     const state = stateMap.get(plan.cardId);
     const score = scoreMap.get(plan.cardId);
     const parsed = parsePlan(plan.planJson);
+    const stepEstimate = steps.reduce((total, step) => total + step.estimatedMinutes, 0);
+    const estimatedSource = protectedStepIdsByCard.has(plan.cardId)
+      ? stepEstimate || score?.estimatedRemainingMinutes
+      : score?.estimatedRemainingMinutes || stepEstimate;
     const estimatedMinutes = Math.max(
       30,
-      Math.min(120, score?.estimatedRemainingMinutes || steps.reduce((total, step) => total + step.estimatedMinutes, 0) || 30),
+      Math.min(120, estimatedSource || 30),
     );
     return { plan, parsed, state, score, steps, estimatedMinutes };
-  }));
+  });
 
   candidates.sort((left, right) => {
     const lane = getWorkLaneRank(left.plan.listName) - getWorkLaneRank(right.plan.listName);
@@ -224,7 +514,7 @@ export async function generateOperatorDailyPlan(
     return (right.score?.score ?? 0) - (left.score?.score ?? 0);
   });
 
-  const blocks: OperatorPlanBlock[] = [];
+  const blocks: OperatorPlanBlock[] = [...fixedBlocks];
   const unscheduledCards: OperatorDailyPlanPayload["unscheduledCards"] = [];
   const robertItems: OperatorDailyPlanPayload["robertItems"] = [];
   let windowIndex = 0;
@@ -295,6 +585,7 @@ export async function generateOperatorDailyPlan(
     cursor = end;
   }
 
+  blocks.sort((left, right) => toMinutes(left.startTime) - toMinutes(right.startTime));
   const scheduledMinutes = blocks.reduce((total, block) => total + toMinutes(block.endTime) - toMinutes(block.startTime), 0);
   const confidenceValues = candidates.map((item) => item.parsed.confidenceScore).filter((value): value is number => typeof value === "number");
   const evidenceConfidence = confidenceValues.length
@@ -322,13 +613,85 @@ export async function generateOperatorDailyPlan(
       detail: `${blocks.length} blocks scheduled; ${unscheduledCards.length} cards unscheduled.`,
     }],
   };
-  return persistOperatorPlan(vaId, payload);
+  return persistOperatorPlan(vaId, payload, expectedPlanVersion, schedule, worker);
 }
 
-async function persistOperatorPlan(vaId: number, payload: OperatorDailyPlanPayload) {
+async function persistOperatorPlan(
+  vaId: number,
+  payload: OperatorDailyPlanPayload,
+  expectedPlanVersion: string | null,
+  expectedSchedule: ScheduleSettings,
+  workerContext?: WorkerOperatorContext,
+) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
-  const values = {
+  const values = operatorPlanValues(vaId, payload);
+  await db.transaction(async (tx) => {
+    const [worker] = await tx.select({ id: users.id }).from(users)
+      .where(eq(users.id, vaId)).limit(1).for("update");
+    if (!worker) throw new Error("Worker account not found");
+
+    const [current] = await tx.select({ scheduleJson: dailyPlans.scheduleJson }).from(dailyPlans)
+      .where(and(eq(dailyPlans.vaId, vaId), eq(dailyPlans.dateKey, payload.dateKey)))
+      .limit(1).for("update");
+    const currentPlanVersion = current ? managerPlanVersion(current.scheduleJson) : null;
+    if (currentPlanVersion !== expectedPlanVersion) {
+      throw new OperatorDailyPlanConflictError(expectedPlanVersion, currentPlanVersion);
+    }
+    const currentPayload = savedPlanPayload(current?.scheduleJson);
+    assertProtectedBlocksPreserved(currentPayload, payload, expectedPlanVersion, currentPlanVersion);
+    await assertNoActiveTimer(tx, vaId, expectedPlanVersion, currentPlanVersion);
+    const currentWorker = await readCurrentWorkerContext(tx, vaId);
+    if (workerContext && workerScheduleIdentity(currentWorker) !== workerScheduleIdentity(workerContext)) {
+      throw new OperatorDailyPlanConflictError(
+        expectedPlanVersion,
+        currentPlanVersion,
+        "Worker hours, workdays, or timezone changed while this day plan was being prepared. No plan was saved; reload the schedule and try again.",
+      );
+    }
+    await assertCurrentSchedule(tx, vaId, expectedSchedule, profileSchedule(currentWorker), expectedPlanVersion, currentPlanVersion);
+
+    const cardIds = [...new Set([
+      ...payload.blocks.flatMap((block) => block.cardId !== null ? [block.cardId] : []),
+      ...payload.robertItems.map((item) => item.cardId),
+      ...payload.unscheduledCards.map((item) => item.cardId),
+    ])];
+    const stepIds = [...new Set([
+      ...payload.blocks.flatMap((block) => block.stepIds),
+      ...payload.robertItems.map((item) => item.stepId),
+    ])];
+    const ownedCards = cardIds.length
+      ? await tx.select({ cardId: aptlssPlans.cardId }).from(aptlssPlans)
+        .where(and(eq(aptlssPlans.vaId, vaId), inArray(aptlssPlans.cardId, cardIds)))
+        .for("update")
+      : [];
+    const ownedSteps = stepIds.length
+      ? await tx.select({ id: aptlssSteps.id, cardId: aptlssSteps.cardId }).from(aptlssSteps)
+        .where(and(eq(aptlssSteps.vaId, vaId), inArray(aptlssSteps.id, stepIds)))
+        .for("update")
+      : [];
+    try {
+      assertOperatorDailyPlanReferencesInScope(
+        payload,
+        new Set(ownedCards.map((card) => card.cardId)),
+        new Map(ownedSteps.map((step) => [step.id, step.cardId])),
+      );
+    } catch (error) {
+      if (!(error instanceof OperatorDailyPlanScopeError)) throw error;
+      throw new OperatorDailyPlanConflictError(
+        expectedPlanVersion,
+        currentPlanVersion,
+        "A task assignment changed while this day plan was being prepared. No plan was saved; reload the work queue and try again.",
+      );
+    }
+
+    await tx.insert(dailyPlans).values(values).onDuplicateKeyUpdate({ set: values });
+  }, { isolationLevel: "serializable" });
+  return getOperatorDailyPlan(vaId, payload.dateKey);
+}
+
+function operatorPlanValues(vaId: number, payload: OperatorDailyPlanPayload) {
+  return {
     vaId,
     dateKey: payload.dateKey,
     scheduleJson: JSON.stringify(payload),
@@ -341,11 +704,13 @@ async function persistOperatorPlan(vaId: number, payload: OperatorDailyPlanPaylo
     autoGenerated: true,
     generatedAt: new Date(payload.generatedAt),
   };
-  await db.insert(dailyPlans).values(values).onDuplicateKeyUpdate({ set: values });
-  return getOperatorDailyPlan(vaId, payload.dateKey);
 }
 
-export async function updateOperatorDailyPlan(vaId: number, payload: OperatorDailyPlanPayload) {
+export async function updateOperatorDailyPlan(
+  vaId: number,
+  payload: OperatorDailyPlanPayload,
+  expectedPlanVersion: string | null,
+) {
   if (payload.version !== 2) throw new Error("Unsupported plan version");
   const sorted = [...payload.blocks].sort((left, right) => toMinutes(left.startTime) - toMinutes(right.startTime));
   for (let index = 1; index < sorted.length; index += 1) {
@@ -353,5 +718,58 @@ export async function updateOperatorDailyPlan(vaId: number, payload: OperatorDai
       throw new Error("Daily plan blocks cannot overlap");
     }
   }
-  return persistOperatorPlan(vaId, payload);
+
+  const cardIds = [...new Set([
+    ...payload.blocks.flatMap((block) => block.cardId !== null ? [block.cardId] : []),
+    ...payload.robertItems.map((item) => item.cardId),
+    ...payload.unscheduledCards.map((item) => item.cardId),
+  ])];
+  const stepIds = [...new Set([
+    ...payload.blocks.flatMap((block) => block.stepIds),
+    ...payload.robertItems.map((item) => item.stepId),
+  ])];
+  const values = operatorPlanValues(vaId, payload);
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+
+  await db.transaction(async (tx) => {
+    const [worker] = await tx.select({ id: users.id }).from(users)
+      .where(eq(users.id, vaId)).limit(1).for("update");
+    if (!worker) throw new Error("Worker account not found");
+
+    const [current] = await tx.select({ scheduleJson: dailyPlans.scheduleJson }).from(dailyPlans)
+      .where(and(eq(dailyPlans.vaId, vaId), eq(dailyPlans.dateKey, payload.dateKey)))
+      .limit(1).for("update");
+    const currentPlanVersion = current ? managerPlanVersion(current.scheduleJson) : null;
+    if (currentPlanVersion !== expectedPlanVersion) {
+      throw new OperatorDailyPlanConflictError(expectedPlanVersion, currentPlanVersion);
+    }
+    const currentPayload = savedPlanPayload(current?.scheduleJson);
+    assertProtectedBlocksPreserved(currentPayload, payload, expectedPlanVersion, currentPlanVersion);
+    await assertNoActiveTimer(tx, vaId, expectedPlanVersion, currentPlanVersion);
+    const ownedCards = cardIds.length
+      ? await tx.select({ cardId: aptlssPlans.cardId }).from(aptlssPlans)
+        .where(and(eq(aptlssPlans.vaId, vaId), inArray(aptlssPlans.cardId, cardIds)))
+        .for("update")
+      : [];
+
+    const ownedSteps = stepIds.length
+      ? await tx.select({ id: aptlssSteps.id, cardId: aptlssSteps.cardId }).from(aptlssSteps)
+        .where(and(eq(aptlssSteps.vaId, vaId), inArray(aptlssSteps.id, stepIds)))
+        .for("update")
+      : [];
+    assertOperatorDailyPlanReferencesInScope(
+      payload,
+      new Set(ownedCards.map((card) => card.cardId)),
+      new Map(ownedSteps.map((step) => [step.id, step.cardId])),
+    );
+
+    const currentWorker = await readCurrentWorkerContext(tx, vaId);
+    const expectedSchedule = currentPayload?.constraints ?? payload.constraints;
+    await assertCurrentSchedule(tx, vaId, expectedSchedule, profileSchedule(currentWorker), expectedPlanVersion, currentPlanVersion);
+
+    await tx.insert(dailyPlans).values(values).onDuplicateKeyUpdate({ set: values });
+  }, { isolationLevel: "serializable" });
+
+  return getOperatorDailyPlan(vaId, payload.dateKey);
 }

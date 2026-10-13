@@ -1,5 +1,10 @@
 # VA Dashboard - Production Completion Plan (30% Remaining)
 
+> Historical planning document. The percentages, cost estimates, and completion
+> claims below are not current release evidence. See
+> [production verification](docs/PRODUCTION_VERIFICATION_20260930.md) for checked
+> results and [cutover requirements](docs/PRODUCTION_CUTOVER.md) for deployment gates.
+
 ## Executive Summary
 
 **Current Status:** 70% Complete  

@@ -1,5 +1,10 @@
 # Documentation Authority & Canonical Sources
 
+> Historical documentation inventory. Its accuracy labels and task counts are
+> not current verification. Use the checked-out source for implementation and
+> [dated production evidence](docs/PRODUCTION_VERIFICATION_20260930.md) for release
+> status. Earlier test results do not attest later source changes.
+
 **Purpose:** Clarify which documentation is authoritative for different purposes, eliminating confusion about conflicting information.
 
 ---

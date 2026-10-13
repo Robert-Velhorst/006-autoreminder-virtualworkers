@@ -1,63 +1,38 @@
-# Multi-stage build for VA Dashboard
-# Stage 1: Build frontend and backend
-FROM node:22-alpine AS builder
+# Multi-stage build for VA Dashboard. Dependencies are installed once and the
+# resulting layer is shared by build, migration, and production-prune stages.
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS dependencies
 
-# Install pnpm
-RUN npm install -g pnpm@10.4.1
-
-# Set working directory
+RUN npm install -g pnpm@11.28.0
 WORKDIR /app
-
-# Copy package files
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY patches ./patches
-
-# Install dependencies
 RUN pnpm install --frozen-lockfile
 
-# Copy source code
+FROM dependencies AS builder
 COPY . .
-
-# Build frontend and backend
 RUN pnpm build
 
-# Stage 2: Production image
-FROM node:22-alpine AS production
+FROM dependencies AS production-dependencies
+RUN pnpm prune --prod
 
-# Install pnpm
-RUN npm install -g pnpm@10.4.1
-
-# Create app user
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS production
+ENV NODE_ENV=production
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
-
-# Set working directory
 WORKDIR /app
 
-# Copy package files
-COPY --chown=nodejs:nodejs package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY --chown=nodejs:nodejs patches ./patches
-
-# Install production dependencies only
-RUN pnpm install --frozen-lockfile --prod
-
-# Copy built artifacts from builder
+COPY --chown=nodejs:nodejs package.json ./
+COPY --chown=nodejs:nodejs --from=production-dependencies /app/node_modules ./node_modules
 COPY --chown=nodejs:nodejs --from=builder /app/dist ./dist
 COPY --chown=nodejs:nodejs --from=builder /app/drizzle ./drizzle
 COPY --chown=nodejs:nodejs --from=builder /app/shared ./shared
-
-# Copy necessary runtime files
 COPY --chown=nodejs:nodejs drizzle.config.ts ./
+COPY --chown=nodejs:nodejs scripts/run-migrations.mjs ./scripts/run-migrations.mjs
 
-# Switch to non-root user
 USER nodejs
-
-# Expose port
 EXPOSE 3000
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/api/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+  CMD node -e "require('http').get('http://localhost:3000/api/health/ready', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
 
-# Start application
 CMD ["node", "dist/index.js"]

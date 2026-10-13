@@ -8,7 +8,7 @@ import {
   users,
   vaProfiles,
 } from "../../drizzle/schema";
-import { and, eq, gte, isNotNull, isNull, lte } from "drizzle-orm";
+import { and, eq, getTableColumns, gte, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import {
   getWorkerCards,
   getWorkerCommentedCardIdsToday,
@@ -17,23 +17,48 @@ import {
 } from "./trello-manus";
 import { notifyOwner } from "../_core/notification";
 import { parseDateKey } from "../utils/date-only";
-import { dateKeyInTimeZone, dateWindowInTimeZone, dayOfWeekInTimeZone } from "../../shared/workerTime";
+import { dateKeyInTimeZone, dateWindowInTimeZone } from "../../shared/workerTime";
 import { calculateScheduledTargetSeconds } from "../complianceMetrics";
 import { resolveWorkerOperatorContextById } from "../workerOperatorContext";
+import { runScheduledJob, ScheduledJobLeaseLostError, type ScheduledJobContext } from "../scheduledJobRuntime";
+import { createNonOverlappingRunner } from "./non-overlapping-runner";
 
 let schedulerInterval: NodeJS.Timeout | null = null;
+
+async function checkpointOwnership(context?: ScheduledJobContext) {
+  if (!context) return;
+  if (context.signal.aborted) throw new ScheduledJobLeaseLostError();
+  await context.assertOwnership();
+  if (context.signal.aborted) throw new ScheduledJobLeaseLostError();
+}
+
+function unchangedTimer(entry: typeof timeEntries.$inferSelect) {
+  // updatedAt has second precision; compare the full row so same-second edits
+  // also win against a stale automatic stop.
+  return and(...Object.entries(getTableColumns(timeEntries)).map(([key, column]) => {
+    const value = entry[key as keyof typeof entry];
+    if (typeof value === "string") return sql`BINARY ${column} = BINARY ${value}`;
+    return value === null ? isNull(column) : eq(column, value);
+  }));
+}
 
 export function startManusScheduler() {
   if (schedulerInterval) clearInterval(schedulerInterval);
 
   console.log("[ManusScheduler] Starting Manus background cron scheduler");
-  schedulerInterval = setInterval(async () => {
+  const run = createNonOverlappingRunner(async () => {
     try {
       await runBackgroundTasks();
     } catch (error) {
       console.error("[ManusScheduler] Error in runBackgroundTasks:", error);
     }
+  });
+
+  schedulerInterval = setInterval(() => {
+    void run();
   }, 60 * 1000);
+  schedulerInterval.unref?.();
+  void run();
 }
 
 export function stopManusScheduler() {
@@ -62,28 +87,33 @@ async function runBackgroundTasks() {
       const parts = formatter.formatToParts(new Date());
       const currentHour = Number(parts.find(part => part.type === "hour")?.value ?? 0);
       const currentMinute = Number(parts.find(part => part.type === "minute")?.value ?? 0);
+      const now = new Date();
+      const dateKey = dateKeyInTimeZone(now, worker.timezone);
 
-      if (currentHour === 0 && currentMinute === 0) {
-        await runAutoStopForWorker(worker);
-      }
-      if (currentHour === 22 && currentMinute === 30) {
-        await runComplianceSnapshotForWorker(worker);
+      if (currentHour === 0 && currentMinute <= 4) {
+        await runScheduledJob({ jobKey: `auto-stop:${worker.userId}:${dateKey}` }, async context => {
+          const recordsProcessed = await runAutoStopForWorker(worker, context);
+          return { recordsProcessed, detail: `Timer reconciliation for ${dateKey}` };
+        });
       }
     } catch (error) {
+      if (error instanceof ScheduledJobLeaseLostError) throw error;
       console.error(`[ManusScheduler] Error processing worker ${worker.id}:`, error);
     }
   }
 }
 
-async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect) {
+async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect, context?: ScheduledJobContext) {
+  await checkpointOwnership(context);
   console.log(`[ManusScheduler] Running auto-stop for worker ${worker.name}...`);
   const db = await getDb();
-  if (!db) return;
+  if (!db) return 0;
 
   const maxSeconds = 12 * 3600;
   const now = new Date();
   const running = await db.select().from(timeEntries).where(
-    and(eq(timeEntries.vaId, worker.userId), isNull(timeEntries.endTime)),
+    and(eq(timeEntries.vaId, worker.userId), eq(timeEntries.founderId, worker.founderId),
+      eq(timeEntries.isVoided, false), isNull(timeEntries.endTime)),
   );
 
   const stopped: Array<(typeof timeEntries.$inferSelect) & {
@@ -92,19 +122,29 @@ async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect) {
   }> = [];
   for (const entry of running) {
     const rawSeconds = Math.round((now.getTime() - entry.startTime.getTime()) / 1000);
+    if (!Number.isFinite(rawSeconds) || rawSeconds < 0) continue;
     const durationSeconds = Math.min(rawSeconds, maxSeconds);
     const durationMinutes = Math.round(durationSeconds / 60);
     const wasCapped = rawSeconds > maxSeconds;
 
-    await db.update(timeEntries)
+    await checkpointOwnership(context);
+    const result = await db.update(timeEntries)
       .set({ endTime: now, durationSeconds, durationMinutes })
-      .where(eq(timeEntries.id, entry.id));
+      .where(and(
+        eq(timeEntries.vaId, worker.userId), eq(timeEntries.founderId, worker.founderId),
+        eq(timeEntries.isVoided, false), isNull(timeEntries.endTime), unchangedTimer(entry),
+      ));
+    const header = Array.isArray(result) ? result[0] : result;
+    const affectedRows = Number((header as { affectedRows?: unknown } | undefined)?.affectedRows);
+    if (affectedRows === 0) continue;
+    if (affectedRows !== 1) throw new Error("Automatic timer stop outcome could not be confirmed");
     stopped.push({ ...entry, durationSeconds, wasCapped });
   }
 
-  if (stopped.length === 0) return;
+  await checkpointOwnership(context);
+  if (stopped.length === 0) return 0;
   const founder = await db.select().from(users).where(eq(users.id, worker.founderId)).limit(1);
-  if (founder.length === 0) return;
+  if (founder.length === 0) return stopped.length;
 
   const lines = stopped.map(entry => {
     const hours = Math.floor(entry.durationSeconds / 3600);
@@ -112,6 +152,7 @@ async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect) {
     const capped = entry.wasCapped ? " (capped at 12h)" : "";
     return `- ${entry.cardName || "Unknown Card"}: ${hours}h ${minutes}m${capped}`;
   });
+  await checkpointOwnership(context);
   await notifyOwner({
     title: `Auto-stopped ${stopped.length} timer(s) for ${worker.name}`,
     content: [
@@ -124,21 +165,15 @@ async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect) {
         : "All durations are below the 12-hour safety cap.",
     ].join("\n"),
   });
-}
-
-async function runComplianceSnapshotForWorker(worker: typeof vaProfiles.$inferSelect) {
-  if (dayOfWeekInTimeZone(new Date(), worker.timezone) === 0) return;
-  try {
-    await collectComplianceSnapshot(worker, "auto");
-  } catch (error) {
-    console.error(`[ManusScheduler] Error creating compliance snapshot for ${worker.name}:`, error);
-  }
+  return stopped.length;
 }
 
 export async function collectComplianceSnapshot(
   worker: typeof vaProfiles.$inferSelect,
   source: "auto" | "manual",
+  context?: ScheduledJobContext,
 ) {
+  await checkpointOwnership(context);
   const now = new Date();
   const dateKey = dateKeyInTimeZone(now, worker.timezone);
   console.log(`[ManusScheduler] Collecting compliance for ${worker.name} on ${dateKey}`);
@@ -245,6 +280,7 @@ export async function collectComplianceSnapshot(
     evidenceCount,
   };
 
+  await checkpointOwnership(context);
   await db.insert(dailyComplianceSnapshots).values(values).onDuplicateKeyUpdate({
     set: values,
   });

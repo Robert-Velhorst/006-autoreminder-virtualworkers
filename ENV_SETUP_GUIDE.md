@@ -361,7 +361,7 @@ PORT=3001 pnpm dev
 | `DATABASE_URL` | ✅ | String | `mysql://root:pass@localhost/va_dashboard` |
 | `TRELLO_API_KEY` | ✅ | String | `abc123...` |
 | `TRELLO_TOKEN` | ✅ | String | `xyz789...` |
-| `JWT_SECRET` | ✅ | String | `a7f3k9m2x8q1w5r4t6y9u2i3o4p5l6k7` |
+| `JWT_SECRET` | ✅ | String | Generate a unique private random secret; never reuse a documentation example. |
 | `OAUTH_SERVER_URL` | ✅ | URL | `https://api.manus.im` |
 | `VITE_OAUTH_PORTAL_URL` | ✅ | URL | `https://portal.manus.im` |
 | `VITE_APP_ID` | ✅ | String | `va-dashboard` |

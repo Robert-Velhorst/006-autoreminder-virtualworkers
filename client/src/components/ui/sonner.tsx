@@ -1,8 +1,11 @@
 import { useTheme } from "next-themes";
 import { Toaster as Sonner, type ToasterProps } from "sonner";
 
-const Toaster = ({ ...props }: ToasterProps) => {
+const Toaster = ({ toastOptions, ...props }: ToasterProps) => {
   const { theme = "system" } = useTheme();
+  const titleClassName = [toastOptions?.classNames?.title, "aptlss-toast-title"]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <Sonner
@@ -15,6 +18,13 @@ const Toaster = ({ ...props }: ToasterProps) => {
           "--normal-border": "var(--border)",
         } as React.CSSProperties
       }
+      toastOptions={{
+        ...toastOptions,
+        classNames: {
+          ...toastOptions?.classNames,
+          title: titleClassName,
+        },
+      }}
       {...props}
     />
   );

@@ -9,12 +9,12 @@
 
 import { getDb } from '../db';
 import { sql } from 'drizzle-orm';
-import { fetchWithRetry } from '../utils/retry';
-import { createRequire } from 'module';
+import { PDFParse } from 'pdf-parse';
+import { downloadPinnedHttpsAttachment, MAX_ATTACHMENT_DOWNLOAD_BYTES } from './attachment-download';
+import { isTrelloAttachmentUrl, resolveSafeAttachmentDownloadTarget } from './attachment-url-policy';
 
-// pdf-parse doesn't have proper ESM exports, use createRequire
-const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
+// `unreadable` is the terminal state in the persisted ATIS attachment enum.
+export const UNSUPPORTED_ATTACHMENT_STATUS = "unreadable" as const;
 
 interface ExtractionResult {
   success: boolean;
@@ -76,30 +76,24 @@ export class AttachmentExtractorService {
   /**
    * Download attachment content from Trello
    */
-  private async downloadAttachment(url: string): Promise<Buffer | null> {
+  private async downloadAttachment(url: string, expectedBytes: number | null): Promise<Buffer | null> {
     try {
-      // Add Trello auth to URL if it's a Trello attachment
-      let downloadUrl = url;
-      if (url.includes('trello.com') || url.includes('trello-attachments')) {
-        const separator = url.includes('?') ? '&' : '?';
-        downloadUrl = `${url}${separator}key=${this.trelloApiKey}&token=${this.trelloToken}`;
-      }
-
-      const response = await fetchWithRetry(downloadUrl, {
-        headers: {
-          'Accept': '*/*',
-        },
-      });
-
-      if (!response.ok) {
-        console.error(`[AttachmentExtractor] Failed to download: ${response.status}`);
+      if (expectedBytes !== null && expectedBytes > MAX_ATTACHMENT_DOWNLOAD_BYTES) {
         return null;
       }
+      // Add Trello auth to URL if it's a Trello attachment
+      const target = await resolveSafeAttachmentDownloadTarget(url);
+      const downloadUrl = target.url;
+      if (isTrelloAttachmentUrl(downloadUrl)) {
+        downloadUrl.searchParams.set("key", this.trelloApiKey);
+        downloadUrl.searchParams.set("token", this.trelloToken);
+      }
 
-      const arrayBuffer = await response.arrayBuffer();
-      return Buffer.from(arrayBuffer);
-    } catch (error: any) {
-      console.error(`[AttachmentExtractor] Download error:`, error.message);
+      return await downloadPinnedHttpsAttachment(downloadUrl, target.addresses, {
+        Accept: '*/*',
+      });
+    } catch {
+      console.error('[AttachmentExtractor] Attachment download failed');
       return null;
     }
   }
@@ -108,22 +102,30 @@ export class AttachmentExtractorService {
    * Extract text from PDF
    */
   private async extractPdf(buffer: Buffer): Promise<ExtractionResult> {
+    let parser: PDFParse | undefined;
     try {
-      const data = await pdfParse(buffer);
+      parser = new PDFParse({ data: buffer });
+      const data = await parser.getText({ pageJoiner: "" });
       const content = data.text.trim();
       
       return {
         success: true,
         content,
-        wordCount: content.split(/\s+/).filter(Boolean).length,
-        pageCount: data.numpages,
+        wordCount: content ? content.split(/\s+/).length : 0,
+        pageCount: data.total,
         extractedAt: new Date(),
       };
-    } catch (error: any) {
+    } catch {
       return {
         success: false,
-        error: `PDF extraction failed: ${error.message}`,
+        error: 'PDF extraction failed',
       };
+    } finally {
+      // Release the PDF worker on both successful and rejected documents.
+      if (parser) {
+        try { await parser.destroy(); }
+        catch { console.warn('[AttachmentExtractor] PDF parser cleanup failed'); }
+      }
     }
   }
 
@@ -162,8 +164,15 @@ export class AttachmentExtractorService {
       };
     }
 
+    if (attachment.bytes !== null && attachment.bytes > MAX_ATTACHMENT_DOWNLOAD_BYTES) {
+      return {
+        success: false,
+        error: `Attachment exceeds the ${MAX_ATTACHMENT_DOWNLOAD_BYTES / (1024 * 1024)} MB extraction limit`,
+      };
+    }
+
     // Download the file
-    const buffer = await this.downloadAttachment(attachment.url);
+    const buffer = await this.downloadAttachment(attachment.url, attachment.bytes);
     if (!buffer) {
       return {
         success: false,
@@ -253,7 +262,7 @@ export class AttachmentExtractorService {
       if (!this.isExtractable(attachment.name, attachment.mimeType)) {
         await db.execute(sql`
           UPDATE atis_attachments
-          SET extraction_status = 'skipped'
+          SET extractionStatus = ${UNSUPPORTED_ATTACHMENT_STATUS}
           WHERE id = ${attachment.id}
         `);
         skipped++;

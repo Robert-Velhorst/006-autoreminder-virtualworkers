@@ -26,6 +26,11 @@
  * ```
  */
 import { ENV } from "./env";
+import { readResponseBufferWithinLimit } from "../services/attachment-download";
+import { resolveSafeAttachmentDownloadUrl } from "../services/attachment-url-policy";
+
+const MAX_AUDIO_DOWNLOAD_BYTES = 16 * 1024 * 1024;
+const AUDIO_DOWNLOAD_TIMEOUT_MS = 15_000;
 
 export type TranscribeOptions = {
   audioUrl: string; // URL to the audio file (e.g., S3 URL)
@@ -94,32 +99,32 @@ export async function transcribeAudio(
     let audioBuffer: Buffer;
     let mimeType: string;
     try {
-      const response = await fetch(options.audioUrl);
+      const audioUrl = await resolveSafeAttachmentDownloadUrl(options.audioUrl);
+      const response = await fetch(audioUrl, { signal: AbortSignal.timeout(AUDIO_DOWNLOAD_TIMEOUT_MS) });
       if (!response.ok) {
         return {
           error: "Failed to download audio file",
           code: "INVALID_FORMAT",
-          details: `HTTP ${response.status}: ${response.statusText}`
+          details: `The audio URL returned HTTP ${response.status}`
         };
       }
       
-      audioBuffer = Buffer.from(await response.arrayBuffer());
-      mimeType = response.headers.get('content-type') || 'audio/mpeg';
-      
-      // Check file size (16MB limit)
-      const sizeMB = audioBuffer.length / (1024 * 1024);
-      if (sizeMB > 16) {
+      const downloadedAudio = await readResponseBufferWithinLimit(response, MAX_AUDIO_DOWNLOAD_BYTES);
+      if (!downloadedAudio) {
         return {
           error: "Audio file exceeds maximum size limit",
           code: "FILE_TOO_LARGE",
-          details: `File size is ${sizeMB.toFixed(2)}MB, maximum allowed is 16MB`
+          details: "Maximum allowed is 16MB"
         };
       }
+      audioBuffer = downloadedAudio;
+      mimeType = response.headers.get('content-type') || 'audio/mpeg';
     } catch (error) {
+      console.error("[VoiceTranscription] Audio download failed", error);
       return {
         error: "Failed to fetch audio file",
         code: "SERVICE_ERROR",
-        details: error instanceof Error ? error.message : "Unknown error"
+        details: "The audio URL could not be retrieved"
       };
     }
 
@@ -162,11 +167,10 @@ export async function transcribeAudio(
     });
 
     if (!response.ok) {
-      const errorText = await response.text().catch(() => "");
       return {
         error: "Transcription service request failed",
         code: "TRANSCRIPTION_FAILED",
-        details: `${response.status} ${response.statusText}${errorText ? `: ${errorText}` : ""}`
+        details: `The transcription service returned HTTP ${response.status}`
       };
     }
 
@@ -185,11 +189,12 @@ export async function transcribeAudio(
     return whisperResponse; // Return native Whisper API response directly
 
   } catch (error) {
+    console.error("[VoiceTranscription] Transcription failed", error);
     // Handle unexpected errors
     return {
       error: "Voice transcription failed",
       code: "SERVICE_ERROR",
-      details: error instanceof Error ? error.message : "An unexpected error occurred"
+      details: "An unexpected error occurred"
     };
   }
 }

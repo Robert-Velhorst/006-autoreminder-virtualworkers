@@ -1,0 +1,489 @@
+{
+  "tables": {
+    "admin_sync_log": "d51c4e54a54b657de30005b033b4da820275ebaf8a83bcb4b7403e73694b82e8",
+    "app_settings": "b530868089442d9948d356a9abd876f9245e3a87c3cb1ca8273bbbb996cf6b3d",
+    "aptlss_assessment_feedback": "11d9fe936c8161c73d16e9b10ffa4724bac65c5a9c010474f9862c363df0b6b6",
+    "aptlss_assessments": "3c8b9c209047e4e162c4df7c4c02fdf812ffce832aa0f7e991d034956ab5261c",
+    "aptlss_audit_log": "994cbfa6c0ec5a76ea60137d479f2355ab8d15356a1b515f773359455494b09e",
+    "aptlss_operational_policies": "1e44ce60ec748e6e31e6ce85afbf8be3152302fd8e175ee5a6332a8196099dfe",
+    "aptlss_plans": "47b82a9693271f9790414669d8f3cbc593c4d3dcb51b5567cfc67f5a623b2c77",
+    "aptlss_steps": "039014457ec283bdacbafff4ca00ee2e2e3a04ba6755e215a669e10031f03c28",
+    "aptlss_waiting_reasons": "ea6005880f1163020d89e9e0d8a99452dc9e0a96c1b6a01d117da840032d3bce",
+    "ares_configurations": "1f4d4195c9af25951ed581fe25641d47b3ad2184f80e06a6e5ac37a1736666d9",
+    "ares_validation_history": "14baa296144c69b28ea57bf8c36661cbf30401f6b0351fa73954a566ecaa5c40",
+    "ares_validation_rules": "742fe73f24bf2fe7657dd3235edf71a77edb996c35c53a9410caea4fda9b9588",
+    "atis_analysis_sessions": "c864aaa346287584b41d0a945d2104bbb8a6b51ad5ad0748f6d36ae886397613",
+    "atis_attachments": "859ddb4bcdd51b047eadf24549b41615f6dfa41f026af0f6383f2812ff4197e3",
+    "atis_boards": "71099a10ad790f68a9485667aece599980571dd8ccdf1daea35ff5cd88701fef",
+    "atis_card_understanding": "fe335b1061f634968d321b1ac2078f467145953fe0b42abfc0de9a08d2aeb33b",
+    "atis_cards": "b6e26846d44eba19a74ee054f6faff86778be5896e78a0f0cf45ed02a8acf54e",
+    "atis_checklist_completion": "0653959b9a8e7e8e96bb44db7adec711cd0a35d5b4c8a1de1e3bf9eaa8e62c9a",
+    "atis_comments": "2fb579c76928feea10c61497b4e15cf005a1466a1cd54b4b467ab736fa9bc1d7",
+    "atis_ingestion_jobs": "f5256184fcfaad84183f009caaed881a09796124cfb3424aa8bddaebafcc570c",
+    "atis_workspaces": "e6094c86aeeabb5a989350072088a21f749d10267ae0bf85f58a8b7a672dba6b",
+    "auto_follow_up_drafts": "dd214484ec48ec31b1c166b4ae3f4f9d215da29c1c0669aec32ac9f19ca16f98",
+    "batch_operation_settings": "2e928ffc3da3d59c27e59b8a781a184c48bd3f2ca2e1c2fd6e4505ee6ee4e7cb",
+    "batch_operations": "bf2a3bee764680df81912c2e2ac4b7416038d65255928757ee91fd0c16705e5c",
+    "browser_tab_daily_evidence": "e486b54531ab362a2a178945a8bbee496f9e26bf33966f721f21dbb79089ad5f",
+    "browser_tab_states": "40c07a0b08a35812714172eae2b876041d2b768c178a2d98651763d33cf823ba",
+    "card_snoozes": "92c8f9025139c44dc6519172fa1ed38b4be6409a5a019599ad7b8328eb67f4b9",
+    "card_states": "35bfa2502078505f2aa34512d91c2ce2cd109dcc25fda9c7eca02d4705f19f4b",
+    "chatbot_analytics": "b8e18ea2d458d0ff556e1a9120b0ae3f082c77a012a66f588df749feecf96bf7",
+    "chatbot_checkin_responses": "3f1bbb8d50d037a28b8a3a6278cd776fe955c94d5c796b4e7f393f542bd26e7d",
+    "chatbot_conversations": "ee4db35a5ec6c9c91d3398ceaa8e0a0a55b1311d209b17657c8a3d722a23e305",
+    "chatbot_webhooks": "2ea6e81a7ad4d7dc90d28804d3fc910ccb1075a5f7257252b2e17d4b98496b8f",
+    "clients": "ef968a1a291ce1bf9c19c814a207d60e7153f1beb6acc1d57782feece3bd2ee2",
+    "commitments": "3d865f76cdaa6d91a5f0c726b1e99ebd2094dda7604c5a4be5a624fa8bf90cd8",
+    "communication_evidence": "f8ff08fba0bea26739370ffc878362b7bedf3825ab63f5344304a11e5d8a6007",
+    "communication_log": "22af31e1517477e3586e82a7b3850f395e6da1e2b08867170333f999f4036f0f",
+    "compliance_card_evidence": "64d72dff871c3934d77c1f96cb644d950f0b39b5d6b9bbb133cd5702ba788941",
+    "compliance_clarification_requests": "0c90811c206204b0149a0ed77a090225f0a7c04991c0de92daa5800fbb3bb7b7",
+    "compliance_communication_evidence": "7932dea9a0ba262b5120b50e543de31f0b006dbba8bf232660bc694f3b405967",
+    "conflict_detection_settings": "6aa3b8de55154b0035ec7c88169ee1803d2b9febc978278c70fac6ce8ff188b8",
+    "critical_path_analysis": "7f7738dc705d2012773cf136b3a26ec321126b48e24811d1451364df605ddbee",
+    "daily_briefings": "120a726fce9b9b463f55abc2eeca1d20e649b82ea704b8c2481661ac53ae056d",
+    "daily_card_updates": "44ba2b95d4d4f94702103527c1d8b39d4310f87c6d2d8a3fc9b93dea7db39c86",
+    "daily_compliance_snapshots": "c70b56c3988e4378112729c384b4386e098289fd243331bcb20f2d33e48141b3",
+    "daily_due_date_assignments": "8a520465a4e69085556783759ba71786f7fe938a4edaad8ba9e1545e9c725a1b",
+    "daily_plans": "3a522228451b853e00847f03b95cb79dbb8f374df57340a1f4f2ca664c91835d",
+    "daily_triage_state": "981d8b3a735046c77343e90b5c525d20e51eae543527c576244ebb858cd9dcf6",
+    "daily_update_streak": "de6ffbf67f9b4542f7495eb6cf72fb7147787cc0bc924e6e61cf6d3ceca47083",
+    "decision_outcomes": "2f0a3365fb275aeda24ebc290aca948adb6f2fe51b180e378be8dde00e767ade",
+    "digest_jobs": "c982db99f86d4d29f8ed8dd17bd1db61312ecc6f91b97b2b266d55b6e56e933c",
+    "email_tasks": "585e9ea04a71fb6fdbf9195a97d42dc9b925fb31810cf3590f5b9fbd4b24cb41",
+    "execution_plan_status_history": "76fdac7091ddfd95664511ccb1e49f866dd9f5514ac6b2234e740fe045e13ffd",
+    "execution_plan_steps": "8212c6684da9d668fb3f79ee295ffa956bbcfc6298938e027199ec43c8aa9d88",
+    "execution_plans": "d8c68fd117b6d4702b2ab3e985550c2b121d502c24328eaa231ba7b791406837",
+    "founder_priority_overrides": "f5fc7cc3f3be63d3bf4bd577eb4b38a096ae636a6a85f6edb9b573b6372a37b0",
+    "generation_items": "6602eb8ec837ce3bf2c1999fb4198972c62721697ee71ad69b457cabec17e51d",
+    "generation_jobs": "b11eec68ec9f2567f46065df645e793a95e92a7fd14f54f2b9e5f83b9d4496e7",
+    "hai_connector_tokens": "1bc3104685c3bf49fd459f3b364fbd519c0fe9eb1b7a83f4908c35953cb8304f",
+    "handoff_notes": "48bb36f5a68e94660c50690445831b0fce7a0ad7575be7b8993586223ca6c0c7",
+    "holidays": "c6be507de996c31701f6549ce49004215730c25b2d07d746a4be568f13b852c8",
+    "interview_history": "e60008526d5f7227b1e6411b66db4c0252a187ba0bd89dbf93a549a0a45d6f8f",
+    "interview_results": "65ac39052a63a73166e0c86db55944523745e994c3d08e961d9993202e975a99",
+    "interview_sessions": "0102f37a6e6795cea195cd7075a3a9fd607d5d337e024ae00bbdad0e71a16ae6",
+    "keyboard_shortcuts": "2c8b54a5cf600129c100fe867e88c9fd8da3f16fc12552aca696741a8489666a",
+    "keyboard_shortcuts_settings": "788d5514fdd9be46cd42e572a44dd85fadd8e7c617166e4586fdf6a7275a6e35",
+    "maintenance_job_settings": "54b1b914b52456c55fef5d0ca237c9bbc496a1390dbf041e1febc6ba7f0fd5de",
+    "notification_history": "3d1cf9001d3aa54e2fe209b362e1cfda0806bd0d825fa93bde5524cd4dbad27a",
+    "on_hold_daily_checks": "397793ddc974832f7a56a5e3902a3063049b1c89653d3290d43c64e022d46d55",
+    "payment_cycles": "5d7e3fe70e2c95b3aca07404bf54956b6c0012818c95bfa467ce1bffc445e2d3",
+    "performance_metrics_settings": "d64ba8e3e1654e0f4f6d7cd40351e26ae34edf82b6c4082c94f5f84371a18321",
+    "priority_scores": "c77ab0778f91f19f544bc91afad90fb2fa051087b10a50321715c7897bab3a74",
+    "reminder_audit_events": "977dde41bad2c662a08b230e7d0b33fb696d0a11845fec7ba50fd9ab4eff58b7",
+    "reminder_policies": "d11b2dbc20d1068f5c9e346a678500a69ec6312d6b9e2ebd10aed795551efbcd",
+    "reminder_rules": "d68cb806d1b46095eef79db7ff9161c5a6d34cdafb3a86a1e3dcc0768fd77efb",
+    "reminder_schedules": "eaf3d9f5d9fe9552c8ec08255fd33237698df2d36bfe4d016690becb56a7ab04",
+    "reply_threads": "11f22ac9fc9fb770096e486cd964f70035fd33346281d7694be19b2e8f868dd1",
+    "review_queue": "95f9b362de097c09c656ba12b9aaf849e4d167c1a1d10e815bc2f5e107990ab5",
+    "risk_mitigations": "e4ddf3aeb99408673e0a8c362b775a8c081c2067284efd6bb010b919822b5c9d",
+    "scheduled_job_leases": "96da592c9c97ecd1a9dbc457320fe428cf33a6bc2aab6f5717a38ae71058df09",
+    "scheduled_job_runs": "66137195037c0ae64d2a66d075cc2cad42d5a0a71e0a774fc667b7dfdaa8cf56",
+    "scheduled_jobs": "e5b3df6d43696d530a9773e84d9c97742c0e1bb6e4a2619b35ac4e8e40023b37",
+    "settings_sync_log": "1c902588e1f179cf74bea31898158fafb4d2be81878435d9f755b23b7d2d727c",
+    "shift_schedules": "b6b743c8c6077b49fdb8e1f8c2090580e2fde1c6407eabd499372902230b3223",
+    "subtask_dependencies": "fffd85bd234da9489748882bd049448f0ea96814e66114217f6b9aca16cc7b19",
+    "sunday_checklist": "864adcb1caba9a57006dfe8edb8836daa8b0f4b0a41e8445226d2da63443dde9",
+    "task_assignments": "537deec25e7d9410b9624d68584f307d893daa7d00aed253d4e45d21155aca66",
+    "task_dependencies": "53dca294f1eae6f296cd5a27d165ddd7d216f6094c590510b3a1d1b09ec6ca18",
+    "task_documentation_requirements": "b2e82de1578ec6230b1597bf04786bf56acfc679d31299be34a587fa186c3b46",
+    "task_execution_plan": "a1af6ccc3048cc16e1413514e52172007023596736ad23c72e75ac1b9fc5edd4",
+    "task_external_dependencies": "4784b1a5ff73bf5c8e4aef2019f039c1db7c725c85e1dac55dc98532d286adb1",
+    "task_milestones": "d7ec709a4a30d259786208583acde6daf22a0286965ba501bc1a9b0753c853ae",
+    "task_qa_strategy": "2048351d607dc1f1cdc3f5b308330f797ce5dc4249cbc2ad6a955fcca0da0244",
+    "task_resource_requirements": "d2b08231e57636a90ce05ff9487dc107da1399a390689fe34197c82ad9173b55",
+    "task_risks": "b4f3b7243086239cd432c7bdf16143367d89ebdbe630d9ce848ab97bc1233bac",
+    "task_schedule_history": "845e1c4253d3700b6a04746b95ce41034553dc4fd3f183d7a48db2445432f403",
+    "task_subtasks": "9499a2a79406bcd233e25c3aee9fe808bb33274d04e4489a6fa3723eb9b3ad25",
+    "task_timeline": "0c697e80150a97804c248ef19d7a6ef5bcb869a1b4e2ee23e9c9c920f5419f76",
+    "time_day_reviews": "293b41afa3b442c7afe1f8bb79f14a88b6ea0cff065db715f6a99529fff35f84",
+    "time_entries": "2f729013b459c5f92e0129f6ca4ecf4f9296556407e5ef12a26ea8bca1dd5e5c",
+    "time_entry_events": "ac4b1a2b691ae5390a4d177a9ce6729af6523696972d222eaaae2cff41a9b5ac",
+    "time_reconciliation_items": "be75bfa50819d5e6478173bc644a94438d596d47d377e9aa89c4af41da14cf2f",
+    "trello_cache_metadata": "11439c9475d9c9b00517017bd5cdebef372099dfe80d19a131e81fa54eb4e816",
+    "trello_cached_boards": "7790349d6941b7923d94fe4a128a5cbfe491d354dfab8479d3c01463d9ef29fe",
+    "trello_cached_cards": "2a5f44d9b6bea3af0b98eb923bae812ebf0e71e2591e53b408605692b5c10da4",
+    "trello_cached_tasks": "1eaffd976306444a1284384e6f66b9a41fb1be317e687cd3a5098763435bfb67",
+    "unsigned_message_flags": "c9171cfa3048268cf19090315ef8e51f07a736c7d1a7209679215b88e08c26bb",
+    "user_notification_preferences": "28b7ab1d129516986231a6a63b2018edfa08b4b2e0fc4464f200cfc9bf3f6f7e",
+    "user_working_hours": "3225bf7667c594220b25b11c5c619dc32c784120c8c81a7169682e6f6b23cb1f",
+    "users": "78b7eacc1a0020bff4a2c324bfac997dd66d9d5f846fa8e70e20343c812dbc63",
+    "va_profiles": "a857c36ad1f8ca63c6111662eab9e7c5b3a0443e2f527af060c5df23e4c5d361",
+    "vague_reply_flags": "cf1df5227a0b786afd1161aff4b84338172aa47b0e4965b55a3114be4a453290",
+    "weekly_analysis_snapshots": "66452926d7161693313c0d5ad0e7bc114d8f893d5dd32606fc629f72aba47beb",
+    "weekly_pay_log": "d995be57326df49144816909f90a11e941e46afcc1a67696731a30b9f9666d64",
+    "worker_invitations": "a54c95d2807fb1abc0dd5e1869449cfb120692ceced6381c45df6873f9cc0096",
+    "worker_performance_signals": "1299db8421f9b5c1260285ea88e63f4d6766e39ff8297177b30939fa7d26d4e1",
+    "workspace_evidence_items": "6e7fdd41bd1cc8fb7d7f36176b7e9d23dfbcf06f0bf1033e361fe4bde1e35e84",
+    "workspace_evidence_links": "a94aec4b0331b20391e1ac8312e36046a014bb312cdebc84e4a9d10dc98a3607"
+  },
+  "hashes": {
+    "0000_long_tarantula.sql": "b2ba62d710cdddf493918b34e3027d8daafcd82800723f5e9164371bc1740b6b",
+    "0001_colorful_toad.sql": "d9dc868bd4f5fe206fe35246b8ea0297166522243687aefdc3e546c5916b651d",
+    "0002_slippery_doctor_spectrum.sql": "3af663df98ea598834b67d72fe852d817e09f8391962bda8a5615b61e82b804b",
+    "0003_lazy_quasimodo.sql": "62927e64f7bb420bb76d4e25e1a281942224ec8a76dab886d8e2cfefcde988b2",
+    "0004_hot_thunderbolts.sql": "ef66fca5ee9e128b1c92926c29b7baa927c94eca2ce3431b94e0e1b72c2153ea",
+    "0005_nebulous_inhumans.sql": "efa623b10e209fe6345ce0f388cce1db3ea264c348a572e3126a0ea659b89f4c",
+    "0006_faulty_chameleon.sql": "b87e1bcdbcaca5b6319a24e7c2a69f9775d62a8cdb07d0d40ae55a365c70567f",
+    "0007_legal_mephisto.sql": "a964d169de981c3901f08c8a22f16576ee9a15fcb434a41406a7ffc29bc397ce",
+    "0008_round_squadron_sinister.sql": "cd4fda58d9913faaf42ba82c398f9a7724ad53f90c6b49e7875bf696171064f7",
+    "0009_green_doctor_doom.sql": "c22bc459b8edf67744f747554709f675852124ee2d8e447490b34c284e8bb23f",
+    "0010_dusty_psylocke.sql": "58cc7053d42cb6891d89cb373083b8259c2dc7f5b803f12fcf4810f8bbcba689",
+    "0011_useful_cammi.sql": "eda80378f6c72c6ebfa5b13555389132880f21f1120bf38d0f89f1425571c9b6",
+    "0012_cooing_epoch.sql": "2648069cd4a20879b02fa189caf30acba938e0004f048681daf135a4b889e4ee",
+    "0013_curved_the_leader.sql": "a18eb082c755b453518c8a8b73eb2cdcaa5cf5d78d328af105ef01251ed26d42",
+    "0014_lovely_yellow_claw.sql": "06775c289023fdb004b92ec841af4db48894e8443d11f59700814b8789b8865a",
+    "0015_chemical_lady_vermin.sql": "b010462006a72f4004e6f1eb1cd01ba99825499eac9c688e842157a678cf9a41",
+    "0016_lazy_miek.sql": "af01936a29d238f579ca937a3006008d229c6c5c1c4aa4794baa97fa2d0ec968",
+    "0017_high_mystique.sql": "8ac7d55adb39f21c5d37a17760db2828399c6d000053958d695b7e6f3d189534",
+    "0018_cheerful_king_bedlam.sql": "90495b84410c65aee52f8620962aa57548d2be6736e4dc62e77ba997bbc3114e",
+    "0019_fine_hiroim.sql": "32f9c3194dea14035d8f3be37d2ce9f6da44bbb6c56909d27401f6ed5de0e988",
+    "0020_smart_liz_osborn.sql": "430eb5db98174242e02a412868a7e3e6efcbbd92000c78e5002e0c89f054be9c",
+    "0021_cuddly_red_wolf.sql": "c68fa4228cbed334174403ad81902eff8a2d6b1a6eecd321f4b126cb063655cd",
+    "0022_careful_dark_phoenix.sql": "c84124643d2d2a12fcd101d21738dddb240ab1919dbb12c8770a326d35a47b09",
+    "0023_ambitious_nightcrawler.sql": "4601302f3b0493978ca449ce0d4ab02e2b0755da00e4ea56521430ac44aa6c48",
+    "0024_previous_gauntlet.sql": "b6ab6fba0518a9f65065683e8165012b7e15b9594fc5866bbe374ca20d8b11ee",
+    "0025_pale_harpoon.sql": "dab55ba9be04d65b6dea79f869db043ce4b7cf5f9a1edb83ed4d82deb2402328",
+    "0026_tearful_rocket_racer.sql": "5757a02c0db9b4812f7ee4bfccbf5d9524d4da80ac9753980186a9b445902ac2",
+    "0027_glorious_epoch.sql": "3d34e921bcd63f6bb2fe92a4a2fece29587fe419de7692c150dd7c39ee1bcb98",
+    "0028_add_task_assignment_schedule.sql": "0e681997a35eca219462833dc68d27c9aa538bb9430b4b2206cd44ac97def68c",
+    "0029_operator_evidence_foundation.sql": "c81810ed688a38f36672faa00b6fd1b0ccc9063fc32968f9296bf341c4fd8242",
+    "0030_restore_schema_parity.sql": "9019bf97fbd3582661989c09a2673e8a78710279d26af8e3210ea371789db396",
+    "0031_worker_operator_scope.sql": "2ba0e9d356e0619c6f437f0fbda8e846a806690938cda5f152260b4db12b4ca5",
+    "0032_worker_invitations.sql": "1c29574e9ca1d49e52593a2c46c12f984aaa61d799be419b634933ff45bb7073",
+    "0033_durable_reminder_orchestration.sql": "45744261d3983be15fe4f5407e91ca9b65b0c5612a393bb33b59184ec43173d8",
+    "0034_hai_worker_control_connector.sql": "020cf2e3b06393b1a72b09b8c9bd6347e2ff42a6fd61d4f53af0e01c00ba621b",
+    "0035_worker_evidence_isolation.sql": "148f38f3938dbd401db2e12f1f7c2e7d978d1fe4dc5ba2e3a7a42f7e607293c9",
+    "0036_formalize_atis_checklist.sql": "894f94da27ece47c389f19deefd47030614edf34d58049617523f2183c12f6a6",
+    "0037_maintenance_job_settings.sql": "083c02aacb669256ae6eaba66864d61c8b86889014724f27354ecc49907fff8f",
+    "0038_reply_thread_lifecycle.sql": "d7230ffe207a92a109ccbb5583133ec9e825942156a9df1190a74a670bfa4981",
+    "0039_remove_legacy_trello_comment_tokens.sql": "cc7d932348eb5e56f9f68ffa9d688b2e2e4e66b27f2871e211436a26e8a6271d",
+    "0040_expand_trello_task_cache.sql": "e2f5f145bf77829367e5d42a8c2860cd5543dd1febe48236bb15a499be0b9433",
+    "0041_hash_browser_tab_collector_tokens.sql": "16c27f0fc8b23756cc7a9bba26810af24cd6d4939f1c2e385050088a555eea7c",
+    "0042_hash_legacy_browser_tab_collector_token.sql": "0c2fa66cc52dcf035825a1d482bdf25728dcd4a0da93251a5b3236dad48e4c5c",
+    "0043_worker_cockpit_query_indexes.sql": "b660f037a2e0a041911df24d58422806c2b70b34c59d45278bb1f59d26d1b285",
+    "0044_schedule_history_tenant_scope.sql": "11cfd99e1571f834ef6ed964a8b151844011fe92691d73f1a740ded0c6165acf"
+  },
+  "journal": {
+    "version": "7",
+    "dialect": "mysql",
+    "entries": [
+      {
+        "idx": 0,
+        "version": "5",
+        "when": 1764978012672,
+        "tag": "0000_long_tarantula",
+        "breakpoints": true
+      },
+      {
+        "idx": 1,
+        "version": "5",
+        "when": 1765569841081,
+        "tag": "0001_colorful_toad",
+        "breakpoints": true
+      },
+      {
+        "idx": 2,
+        "version": "5",
+        "when": 1765613115881,
+        "tag": "0002_slippery_doctor_spectrum",
+        "breakpoints": true
+      },
+      {
+        "idx": 3,
+        "version": "5",
+        "when": 1765627088964,
+        "tag": "0003_lazy_quasimodo",
+        "breakpoints": true
+      },
+      {
+        "idx": 4,
+        "version": "5",
+        "when": 1765627772958,
+        "tag": "0004_hot_thunderbolts",
+        "breakpoints": true
+      },
+      {
+        "idx": 5,
+        "version": "5",
+        "when": 1765644533700,
+        "tag": "0005_nebulous_inhumans",
+        "breakpoints": true
+      },
+      {
+        "idx": 6,
+        "version": "5",
+        "when": 1765779682129,
+        "tag": "0006_faulty_chameleon",
+        "breakpoints": true
+      },
+      {
+        "idx": 7,
+        "version": "5",
+        "when": 1765877061172,
+        "tag": "0007_legal_mephisto",
+        "breakpoints": true
+      },
+      {
+        "idx": 8,
+        "version": "5",
+        "when": 1765878895807,
+        "tag": "0008_round_squadron_sinister",
+        "breakpoints": true
+      },
+      {
+        "idx": 9,
+        "version": "5",
+        "when": 1765879648396,
+        "tag": "0009_green_doctor_doom",
+        "breakpoints": true
+      },
+      {
+        "idx": 10,
+        "version": "5",
+        "when": 1766408070067,
+        "tag": "0010_dusty_psylocke",
+        "breakpoints": true
+      },
+      {
+        "idx": 11,
+        "version": "5",
+        "when": 1766448419868,
+        "tag": "0011_useful_cammi",
+        "breakpoints": true
+      },
+      {
+        "idx": 12,
+        "version": "5",
+        "when": 1766481285720,
+        "tag": "0012_cooing_epoch",
+        "breakpoints": true
+      },
+      {
+        "idx": 13,
+        "version": "5",
+        "when": 1766604215487,
+        "tag": "0013_curved_the_leader",
+        "breakpoints": true
+      },
+      {
+        "idx": 14,
+        "version": "5",
+        "when": 1766616044843,
+        "tag": "0014_lovely_yellow_claw",
+        "breakpoints": true
+      },
+      {
+        "idx": 15,
+        "version": "5",
+        "when": 1766864017074,
+        "tag": "0015_chemical_lady_vermin",
+        "breakpoints": true
+      },
+      {
+        "idx": 16,
+        "version": "5",
+        "when": 1772825342431,
+        "tag": "0016_lazy_miek",
+        "breakpoints": true
+      },
+      {
+        "idx": 17,
+        "version": "5",
+        "when": 1772903552320,
+        "tag": "0017_high_mystique",
+        "breakpoints": true
+      },
+      {
+        "idx": 18,
+        "version": "5",
+        "when": 1772908998059,
+        "tag": "0018_cheerful_king_bedlam",
+        "breakpoints": true
+      },
+      {
+        "idx": 19,
+        "version": "5",
+        "when": 1772913915970,
+        "tag": "0019_fine_hiroim",
+        "breakpoints": true
+      },
+      {
+        "idx": 20,
+        "version": "5",
+        "when": 1775601620328,
+        "tag": "0020_smart_liz_osborn",
+        "breakpoints": true
+      },
+      {
+        "idx": 21,
+        "version": "5",
+        "when": 1775759871695,
+        "tag": "0021_cuddly_red_wolf",
+        "breakpoints": true
+      },
+      {
+        "idx": 22,
+        "version": "5",
+        "when": 1775857495714,
+        "tag": "0022_careful_dark_phoenix",
+        "breakpoints": true
+      },
+      {
+        "idx": 23,
+        "version": "5",
+        "when": 1776632299148,
+        "tag": "0023_ambitious_nightcrawler",
+        "breakpoints": true
+      },
+      {
+        "idx": 24,
+        "version": "5",
+        "when": 1778708873480,
+        "tag": "0024_previous_gauntlet",
+        "breakpoints": true
+      },
+      {
+        "idx": 25,
+        "version": "5",
+        "when": 1782591775651,
+        "tag": "0025_pale_harpoon",
+        "breakpoints": true
+      },
+      {
+        "idx": 26,
+        "version": "5",
+        "when": 1783455474739,
+        "tag": "0026_tearful_rocket_racer",
+        "breakpoints": true
+      },
+      {
+        "idx": 27,
+        "version": "5",
+        "when": 1783709282333,
+        "tag": "0027_glorious_epoch",
+        "breakpoints": true
+      },
+      {
+        "idx": 28,
+        "version": "5",
+        "when": 1785358421754,
+        "tag": "0028_add_task_assignment_schedule",
+        "breakpoints": true
+      },
+      {
+        "idx": 29,
+        "version": "5",
+        "when": 1785358824199,
+        "tag": "0029_operator_evidence_foundation",
+        "breakpoints": true
+      },
+      {
+        "idx": 30,
+        "version": "5",
+        "when": 1785361200000,
+        "tag": "0030_restore_schema_parity",
+        "breakpoints": true
+      },
+      {
+        "idx": 31,
+        "version": "5",
+        "when": 1785436400753,
+        "tag": "0031_worker_operator_scope",
+        "breakpoints": true
+      },
+      {
+        "idx": 32,
+        "version": "5",
+        "when": 1786147200000,
+        "tag": "0032_worker_invitations",
+        "breakpoints": true
+      },
+      {
+        "idx": 33,
+        "version": "5",
+        "when": 1786233600000,
+        "tag": "0033_durable_reminder_orchestration",
+        "breakpoints": true
+      },
+      {
+        "idx": 34,
+        "version": "5",
+        "when": 1786320000000,
+        "tag": "0034_hai_worker_control_connector",
+        "breakpoints": true
+      },
+      {
+        "idx": 35,
+        "version": "5",
+        "when": 1786406400000,
+        "tag": "0035_worker_evidence_isolation",
+        "breakpoints": true
+      },
+      {
+        "idx": 36,
+        "version": "5",
+        "when": 1786492800000,
+        "tag": "0036_formalize_atis_checklist",
+        "breakpoints": true
+      },
+      {
+        "idx": 37,
+        "version": "5",
+        "when": 1786579200000,
+        "tag": "0037_maintenance_job_settings",
+        "breakpoints": true
+      },
+      {
+        "idx": 38,
+        "version": "5",
+        "when": 1786665600000,
+        "tag": "0038_reply_thread_lifecycle",
+        "breakpoints": true
+      },
+      {
+        "idx": 39,
+        "version": "5",
+        "when": 1786777200000,
+        "tag": "0039_remove_legacy_trello_comment_tokens",
+        "breakpoints": true
+      },
+      {
+        "idx": 40,
+        "version": "5",
+        "when": 1786838400000,
+        "tag": "0040_expand_trello_task_cache",
+        "breakpoints": true
+      },
+      {
+        "idx": 41,
+        "version": "5",
+        "when": 1786896000000,
+        "tag": "0041_hash_browser_tab_collector_tokens",
+        "breakpoints": true
+      },
+      {
+        "idx": 42,
+        "version": "5",
+        "when": 1786982400000,
+        "tag": "0042_hash_legacy_browser_tab_collector_token",
+        "breakpoints": true
+      },
+      {
+        "idx": 43,
+        "version": "5",
+        "when": 1787068800000,
+        "tag": "0043_worker_cockpit_query_indexes",
+        "breakpoints": true
+      },
+      {
+        "idx": 44,
+        "version": "5",
+        "when": 1787155200000,
+        "tag": "0044_schedule_history_tenant_scope",
+        "breakpoints": true
+      }
+    ]
+  }
+}

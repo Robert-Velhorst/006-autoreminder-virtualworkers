@@ -29,6 +29,27 @@ export interface PaginationOptions {
   defaultSortOrder?: 'asc' | 'desc';
 }
 
+export interface LimitOffsetOptions {
+  defaultLimit?: number;
+  maxLimit?: number;
+}
+
+/** Parse offset pagination without allowing a caller to request an unbounded read. */
+export function parseLimitOffset(
+  query: { limit?: unknown; offset?: unknown },
+  options: LimitOffsetOptions = {},
+): { limit: number; offset: number } {
+  const defaultLimit = options.defaultLimit ?? 50;
+  const maxLimit = options.maxLimit ?? 100;
+  const requestedLimit = Number.parseInt(String(query.limit ?? ""), 10);
+  const requestedOffset = Number.parseInt(String(query.offset ?? ""), 10);
+
+  return {
+    limit: Math.min(maxLimit, Math.max(1, Number.isFinite(requestedLimit) ? requestedLimit : defaultLimit)),
+    offset: Math.max(0, Number.isFinite(requestedOffset) ? requestedOffset : 0),
+  };
+}
+
 /**
  * Parse pagination parameters from request query
  */

@@ -6,7 +6,7 @@
 import { nanoid } from 'nanoid';
 import { getDb } from '../db';
 import { batchOperations } from '../../drizzle/schema';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, ne } from 'drizzle-orm';
 import { websocketService } from './websocket';
 import { invalidateCache } from './trello-cache';
 import { log } from '../utils/logger';
@@ -95,9 +95,9 @@ async function updateBatchProgress(
     results?: any;
     errorLog?: any;
   }
-): Promise<void> {
+): Promise<boolean> {
   const db = await getDb();
-  if (!db) return;
+  if (!db) return false;
 
   const operation = await db
     .select()
@@ -105,9 +105,10 @@ async function updateBatchProgress(
     .where(eq(batchOperations.id, operationId))
     .limit(1);
 
-  if (operation.length === 0) return;
+  if (operation.length === 0) return false;
 
   const current = operation[0];
+  if (current.status === 'cancelled' && updates.status !== 'cancelled') return false;
   const totalTasks = current.totalTasks;
   const completedTasks = updates.completedTasks ?? current.completedTasks;
   const failedTasks = updates.failedTasks ?? current.failedTasks;
@@ -131,10 +132,12 @@ async function updateBatchProgress(
     updateData.errorLog = JSON.stringify(updates.errorLog);
   }
 
-  await db
+  const updateResult = await db
     .update(batchOperations)
     .set(updateData)
-    .where(eq(batchOperations.id, operationId));
+    .where(and(eq(batchOperations.id, operationId), ne(batchOperations.status, 'cancelled')));
+  const changed = Number((updateResult as any)[0]?.affectedRows ?? 1) > 0;
+  if (!changed) return false;
 
   // Emit progress update via WebSocket
   websocketService.emitToUser(current.userId, 'batch:progress', {
@@ -146,6 +149,18 @@ async function updateBatchProgress(
     totalTasks,
     currentTaskName: updates.currentTaskName,
   });
+  return true;
+}
+
+async function isBatchOperationCancelled(operationId: string): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return true;
+
+  const operation = await db.select({ status: batchOperations.status })
+    .from(batchOperations)
+    .where(eq(batchOperations.id, operationId))
+    .limit(1);
+  return operation[0]?.status === 'cancelled';
 }
 
 /**
@@ -162,14 +177,17 @@ async function executeBatchReAnalysis(
   let completed = 0;
   let failed = 0;
 
+  if (await isBatchOperationCancelled(operationId)) return;
+
   for (let i = 0; i < taskIds.length; i++) {
     const taskId = taskIds[i];
+    if (await isBatchOperationCancelled(operationId)) return;
 
     try {
-      await updateBatchProgress(operationId, {
+      if (!await updateBatchProgress(operationId, {
         currentTaskIndex: i,
         currentTaskName: `Task ${taskId}`,
-      });
+      })) return;
 
       // Import ATIS service dynamically to avoid circular dependencies
       const { runAllPhases } = await import('./atis-phases-service');
@@ -180,15 +198,17 @@ async function executeBatchReAnalysis(
 
       // Run analysis (this will take time)
       const result = await runAllPhases(taskId, userId, `Re-analysis of task ${taskId}`, sessionId);
+      if (await isBatchOperationCancelled(operationId)) return;
 
       results.push({ taskId, success: true, sessionId, result });
       completed++;
 
-      await updateBatchProgress(operationId, {
+      if (!await updateBatchProgress(operationId, {
         completedTasks: completed,
         failedTasks: failed,
-      });
+      })) return;
     } catch (error) {
+      if (await isBatchOperationCancelled(operationId)) return;
       const errorMessage = error instanceof Error ? error.message : String(error);
       errors.push(`Task ${taskId}: ${errorMessage}`);
       failed++;
@@ -198,13 +218,14 @@ async function executeBatchReAnalysis(
         taskId,
       });
 
-      await updateBatchProgress(operationId, {
+      if (!await updateBatchProgress(operationId, {
         completedTasks: completed,
         failedTasks: failed,
-      });
+      })) return;
     }
   }
 
+  if (await isBatchOperationCancelled(operationId)) return;
   await updateBatchProgress(operationId, {
     status: failed === taskIds.length ? 'failed' : 'completed',
     results,
@@ -229,14 +250,16 @@ async function executeBatchReschedule(
 
   const actor = await schedulingDb.getScheduleActorByOpenId(userOpenId);
   if (!actor) throw new Error('Batch operation owner not found');
+  if (await isBatchOperationCancelled(operationId)) return;
 
   for (let index = 0; index < taskIds.length; index++) {
     const taskId = taskIds[index];
+    if (await isBatchOperationCancelled(operationId)) return;
     try {
-      await updateBatchProgress(operationId, {
+      if (!await updateBatchProgress(operationId, {
         currentTaskIndex: index,
         currentTaskName: `Task ${taskId}`,
-      });
+      })) return;
 
       const schedule = resolveBatchSchedule(parameters, taskId);
       if (!schedule) throw new Error('A valid task schedule is required');
@@ -248,6 +271,7 @@ async function executeBatchReschedule(
         { reason: 'Batch reschedule', source: 'batch' },
       );
       if (!result) throw new Error('Task assignment not found or not owned by this user');
+      if (await isBatchOperationCancelled(operationId)) return;
 
       results.push({
         taskId,
@@ -260,18 +284,20 @@ async function executeBatchReschedule(
       });
       completed++;
     } catch (error) {
+      if (await isBatchOperationCancelled(operationId)) return;
       const message = error instanceof Error ? error.message : String(error);
       errors.push(`Task ${taskId}: ${message}`);
       failed++;
       log.error('Batch reschedule failed for task', error as Error, { operationId, taskId });
     }
 
-    await updateBatchProgress(operationId, {
+    if (!await updateBatchProgress(operationId, {
       completedTasks: completed,
       failedTasks: failed,
-    });
+    })) return;
   }
 
+  if (await isBatchOperationCancelled(operationId)) return;
   if (completed > 0) await invalidateCache(userId, userOpenId, 'tasks');
 
   await updateBatchProgress(operationId, {
@@ -298,10 +324,12 @@ export async function executeBatchOperation(
   }
 
   try {
+    if (await isBatchOperationCancelled(operationId)) return;
+
     // Mark as running
-    await updateBatchProgress(operationId, {
+    if (!await updateBatchProgress(operationId, {
       status: 'running',
-    });
+    })) return;
 
     const userId = parseInt(params.userId, 10);
     if (!Number.isFinite(userId)) {
@@ -331,6 +359,7 @@ export async function executeBatchOperation(
       operationType: params.operationType,
     });
   } catch (error) {
+    if (await isBatchOperationCancelled(operationId)) return;
     log.error('Batch operation failed', error as Error, {
       operationId,
       operationType: params.operationType,

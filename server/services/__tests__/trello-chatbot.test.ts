@@ -1,7 +1,319 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { parseBotCommand, processBotCommand } from '../trello-chatbot';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+const mocks = vi.hoisted(() => ({
+  getDb: vi.fn(),
+  storeConversation: vi.fn(),
+  updateConversationResponse: vi.fn(),
+  isNaturalLanguageQuery: vi.fn(),
+  handleNaturalLanguageQuery: vi.fn(),
+}));
+
+vi.mock('../../db', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../db')>()),
+  getDb: mocks.getDb,
+}));
+vi.mock('../chatbot-history', () => ({
+  storeConversation: mocks.storeConversation,
+  updateConversationResponse: mocks.updateConversationResponse,
+}));
+vi.mock('../ai-chatbot-handler', () => ({
+  isNaturalLanguageQuery: mocks.isNaturalLanguageQuery,
+  handleNaturalLanguageQuery: mocks.handleNaturalLanguageQuery,
+}));
+
+import {
+  isTrelloCommentAutomationEnabled,
+  parseBotCommand,
+  postTrelloComment,
+  processBotCommand,
+  handleTrelloWebhook,
+} from '../trello-chatbot';
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.getDb.mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
+
+function mockPilotOwners(
+  planOwners: number[],
+  assignedWorkerIds: number[] = [],
+  webhookAuthorIds?: number[],
+) {
+  const authorLimit = vi.fn().mockResolvedValue((webhookAuthorIds ?? []).map(vaId => ({ vaId })));
+  const planLimit = vi.fn().mockResolvedValue(planOwners.map(vaId => ({ vaId })));
+  const assignmentLimit = vi.fn().mockResolvedValue(assignedWorkerIds.map(vaId => ({ vaId })));
+  const select = vi.fn();
+  if (webhookAuthorIds !== undefined) {
+    select.mockReturnValueOnce({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: authorLimit })) })) });
+  }
+  select
+    .mockReturnValueOnce({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: planLimit })) })) })
+    .mockReturnValueOnce({ from: vi.fn(() => ({
+      innerJoin: vi.fn(() => ({ where: vi.fn(() => ({ limit: assignmentLimit })) })),
+    })) });
+  mocks.getDb.mockResolvedValue({ select });
+}
 
 describe('Trello Chatbot', () => {
+  describe('external comment safety', () => {
+    it('requires an explicit notification opt-in before automation can post to Trello', () => {
+      expect(isTrelloCommentAutomationEnabled({})).toBe(false);
+      expect(isTrelloCommentAutomationEnabled({ NOTIFICATIONS_ENABLED: 'false', NODE_ENV: 'production' })).toBe(false);
+      expect(isTrelloCommentAutomationEnabled({ NOTIFICATIONS_ENABLED: 'true' })).toBe(true);
+    });
+
+    it('does not make a Trello request while automation is disabled', async () => {
+      const fetchSpy = vi.fn();
+      const originalSetting = process.env.NOTIFICATIONS_ENABLED;
+      process.env.NOTIFICATIONS_ENABLED = 'false';
+      vi.stubGlobal('fetch', fetchSpy);
+
+      try {
+        await expect(postTrelloComment('card123', 'A protected test comment')).resolves.toBe(false);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        if (originalSetting === undefined) {
+          delete process.env.NOTIFICATIONS_ENABLED;
+        } else {
+          process.env.NOTIFICATIONS_ENABLED = originalSetting;
+        }
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('bounds an approved outbound Trello comment without retrying the mutation', async () => {
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+      const originalSetting = process.env.NOTIFICATIONS_ENABLED;
+      const originalKey = process.env.TRELLO_API_KEY;
+      const originalToken = process.env.TRELLO_TOKEN;
+      process.env.NOTIFICATIONS_ENABLED = 'true';
+      process.env.TRELLO_API_KEY = 'test-key';
+      process.env.TRELLO_TOKEN = 'test-token';
+      vi.stubGlobal('fetch', fetchSpy);
+
+      try {
+        await expect(postTrelloComment('card/with space', 'Approved update')).resolves.toBe(true);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(fetchSpy.mock.calls[0]?.[0]).toContain('cards/card%2Fwith%20space/actions/comments');
+        expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({ method: 'POST' });
+        expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+      } finally {
+        if (originalSetting === undefined) {
+          delete process.env.NOTIFICATIONS_ENABLED;
+        } else {
+          process.env.NOTIFICATIONS_ENABLED = originalSetting;
+        }
+        if (originalKey === undefined) delete process.env.TRELLO_API_KEY;
+        else process.env.TRELLO_API_KEY = originalKey;
+        if (originalToken === undefined) delete process.env.TRELLO_TOKEN;
+        else process.env.TRELLO_TOKEN = originalToken;
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('blocks comments on a card mapped to an APTLSS pilot worker before Trello is called', async () => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'true');
+      vi.stubEnv('TRELLO_API_KEY', 'test-key');
+      vi.stubEnv('TRELLO_TOKEN', 'test-token');
+      vi.stubEnv('APTLSS_MANAGER_SHADOW_ONLY', 'true');
+      vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '9');
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', fetchSpy);
+      mockPilotOwners([9]);
+
+      await expect(postTrelloComment('pilot-card', 'Automatic reminder')).resolves.toBe(false);
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when pilot ownership cannot be determined', async () => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'true');
+      vi.stubEnv('TRELLO_API_KEY', 'test-key');
+      vi.stubEnv('TRELLO_TOKEN', 'test-token');
+      vi.stubEnv('APTLSS_MANAGER_SHADOW_ONLY', 'true');
+      vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '9');
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', fetchSpy);
+
+      await expect(postTrelloComment('unmapped-card', 'Automatic reminder')).resolves.toBe(false);
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when a configured pilot list is malformed', async () => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'true');
+      vi.stubEnv('TRELLO_API_KEY', 'test-key');
+      vi.stubEnv('TRELLO_TOKEN', 'test-token');
+      vi.stubEnv('APTLSS_MANAGER_SHADOW_ONLY', 'true');
+      vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '9,not-a-worker');
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', fetchSpy);
+
+      await expect(postTrelloComment('unmapped-card', 'Automatic reminder')).resolves.toBe(false);
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(mocks.getDb).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when pilot IDs exist without shadow-only mode', async () => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'true');
+      vi.stubEnv('TRELLO_API_KEY', 'test-key');
+      vi.stubEnv('TRELLO_TOKEN', 'test-token');
+      vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '9');
+      vi.stubEnv('APTLSS_MANAGER_SHADOW_ONLY', 'false');
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', fetchSpy);
+
+      await expect(postTrelloComment('unmapped-card', 'Automatic reminder')).resolves.toBe(false);
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(mocks.getDb).not.toHaveBeenCalled();
+    });
+
+    it('does not generate or persist a bot response when comment automation is disabled', async () => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'false');
+      mocks.isNaturalLanguageQuery.mockReturnValue(true);
+
+      await handleTrelloWebhook({
+        action: {
+          type: 'commentCard',
+          id: 'incoming-comment',
+          data: { text: '@bot what should I do?', card: { id: 'card-1', name: 'Task' }, board: { id: 'board-1' } },
+          memberCreator: { id: 'member-1', fullName: 'Worker' },
+        },
+      });
+
+      expect(mocks.handleNaturalLanguageQuery).not.toHaveBeenCalled();
+      expect(mocks.storeConversation).not.toHaveBeenCalled();
+      expect(mocks.updateConversationResponse).not.toHaveBeenCalled();
+    });
+
+    it('preserves comments when the card is explicitly mapped only to non-pilot workers', async () => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'true');
+      vi.stubEnv('TRELLO_API_KEY', 'test-key');
+      vi.stubEnv('TRELLO_TOKEN', 'test-token');
+      vi.stubEnv('APTLSS_MANAGER_SHADOW_ONLY', 'true');
+      vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '9');
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', fetchSpy);
+      mockPilotOwners([10]);
+
+      await expect(postTrelloComment('other-card', 'Automatic reminder')).resolves.toBe(true);
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(mocks.getDb).toHaveBeenCalledTimes(1);
+    });
+
+    it('holds a card assigned to a pilot worker even when its saved plan belongs to another worker', async () => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'true');
+      vi.stubEnv('TRELLO_API_KEY', 'test-key');
+      vi.stubEnv('TRELLO_TOKEN', 'test-token');
+      vi.stubEnv('APTLSS_MANAGER_SHADOW_ONLY', 'true');
+      vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '9');
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', fetchSpy);
+      mockPilotOwners([10], [9]);
+
+      await expect(postTrelloComment('shared-card', 'Automatic reminder')).resolves.toBe(false);
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('holds an AI webhook reply triggered by a pilot worker even on another worker\'s card', async () => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'true');
+      vi.stubEnv('TRELLO_API_KEY', 'test-key');
+      vi.stubEnv('TRELLO_TOKEN', 'test-token');
+      vi.stubEnv('APTLSS_MANAGER_SHADOW_ONLY', 'true');
+      vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '9');
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', fetchSpy);
+      mockPilotOwners([10], [], [9]);
+      mocks.isNaturalLanguageQuery.mockReturnValue(true);
+      mocks.handleNaturalLanguageQuery.mockResolvedValue({ text: 'Generated answer' });
+      mocks.storeConversation.mockResolvedValue(11);
+
+      await handleTrelloWebhook({
+        action: {
+          type: 'commentCard',
+          id: 'incoming-comment',
+          data: { text: '@bot what should I do?', card: { id: 'pilot-card', name: 'Pilot task' }, board: { id: 'board-1' } },
+          memberCreator: { id: 'member-1', fullName: 'Pilot worker' },
+        },
+      });
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(mocks.updateConversationResponse).toHaveBeenCalledWith(
+        11,
+        '',
+        'Generated answer',
+        'failed',
+        expect.stringContaining('pilot workers cannot trigger automatic Trello replies'),
+      );
+    });
+
+    it('fails closed when a webhook author is not linked to a worker profile', async () => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'true');
+      vi.stubEnv('TRELLO_API_KEY', 'test-key');
+      vi.stubEnv('TRELLO_TOKEN', 'test-token');
+      vi.stubEnv('APTLSS_MANAGER_SHADOW_ONLY', 'true');
+      vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '9');
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', fetchSpy);
+      mockPilotOwners([10], [], []);
+      mocks.isNaturalLanguageQuery.mockReturnValue(true);
+      mocks.handleNaturalLanguageQuery.mockResolvedValue({ text: 'Generated answer' });
+      mocks.storeConversation.mockResolvedValue(12);
+
+      await handleTrelloWebhook({
+        action: {
+          type: 'commentCard',
+          id: 'incoming-comment',
+          data: { text: '@bot what should I do?', card: { id: 'other-card', name: 'Other task' }, board: { id: 'board-1' } },
+          memberCreator: { id: 'unlinked-member', fullName: 'Unknown worker' },
+        },
+      });
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(mocks.updateConversationResponse).toHaveBeenCalledWith(
+        12,
+        '',
+        'Generated answer',
+        'failed',
+        expect.stringContaining('Trello author could not be verified'),
+      );
+    });
+
+    it('keeps automatic replies for a linked non-pilot worker on a non-pilot card', async () => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'true');
+      vi.stubEnv('TRELLO_API_KEY', 'test-key');
+      vi.stubEnv('TRELLO_TOKEN', 'test-token');
+      vi.stubEnv('APTLSS_MANAGER_SHADOW_ONLY', 'true');
+      vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '9');
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', fetchSpy);
+      mockPilotOwners([10], [], [10]);
+      mocks.isNaturalLanguageQuery.mockReturnValue(true);
+      mocks.handleNaturalLanguageQuery.mockResolvedValue({ text: 'Generated answer' });
+      mocks.storeConversation.mockResolvedValue(13);
+
+      await handleTrelloWebhook({
+        action: {
+          type: 'commentCard',
+          id: 'incoming-comment',
+          data: { text: '@bot what should I do?', card: { id: 'other-card', name: 'Other task' }, board: { id: 'board-1' } },
+          memberCreator: { id: 'non-pilot-member', fullName: 'Non-pilot worker' },
+        },
+      });
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(mocks.updateConversationResponse).toHaveBeenCalledWith(13, '', 'Generated answer', 'success', undefined);
+    });
+  });
+
   describe('parseBotCommand', () => {
     it('should parse @bot status command', () => {
       const result = parseBotCommand(

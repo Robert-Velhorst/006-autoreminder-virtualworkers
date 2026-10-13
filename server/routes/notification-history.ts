@@ -8,7 +8,8 @@ import { Router, Request, Response } from 'express';
 import { getDb } from '../db';
 import { notificationHistory, digestJobs } from '../../drizzle/schema';
 import { eq, and, desc, sql } from 'drizzle-orm';
-import { requireAuthenticated } from '../middleware/auth';
+import { requireAdmin, requireAuthenticated } from '../middleware/auth';
+import { parseLimitOffset } from '../utils/pagination';
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -29,7 +30,8 @@ router.get('/', async (req: Request, res: Response) => {
       return res.status(500).json({ error: 'Database not available' });
     }
 
-    const { limit = 50, offset = 0, unreadOnly = 'false' } = req.query;
+    const { unreadOnly = 'false' } = req.query;
+    const { limit, offset } = parseLimitOffset(req.query);
 
     let query = db.select()
       .from(notificationHistory)
@@ -42,22 +44,22 @@ router.get('/', async (req: Request, res: Response) => {
           : eq(notificationHistory.userOpenId, user.openId)
       )
       .orderBy(desc(notificationHistory.createdAt))
-      .limit(Number(limit))
-      .offset(Number(offset));
+      .limit(limit)
+      .offset(offset);
 
     const notifications = await query;
 
     res.json({
       notifications,
       pagination: {
-        limit: Number(limit),
-        offset: Number(offset),
-        hasMore: notifications.length === Number(limit),
+        limit,
+        offset,
+        hasMore: notifications.length === limit,
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[NotificationHistory] Get error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Unable to load notification history' });
   }
 });
 
@@ -87,9 +89,9 @@ router.get('/unread-count', async (req: Request, res: Response) => {
       ));
 
     res.json({ unreadCount: result[0]?.count || 0 });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[NotificationHistory] Unread count error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Unable to load unread notifications' });
   }
 });
 
@@ -122,9 +124,9 @@ router.post('/:id/read', async (req: Request, res: Response) => {
       ));
 
     res.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[NotificationHistory] Mark read error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Unable to mark the notification as read' });
   }
 });
 
@@ -155,9 +157,9 @@ router.post('/mark-all-read', async (req: Request, res: Response) => {
       ));
 
     res.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[NotificationHistory] Mark all read error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Unable to mark notifications as read' });
   }
 });
 
@@ -186,9 +188,9 @@ router.delete('/:id', async (req: Request, res: Response) => {
       ));
 
     res.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[NotificationHistory] Delete error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Unable to delete the notification' });
   }
 });
 
@@ -208,18 +210,18 @@ router.get('/digest-history', async (req: Request, res: Response) => {
       return res.status(500).json({ error: 'Database not available' });
     }
 
-    const { limit = 10 } = req.query;
+    const { limit } = parseLimitOffset(req.query, { defaultLimit: 10 });
 
     const jobs = await db.select()
       .from(digestJobs)
       .where(eq(digestJobs.userOpenId, user.openId))
       .orderBy(desc(digestJobs.createdAt))
-      .limit(Number(limit));
+      .limit(limit);
 
     res.json({ jobs });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[NotificationHistory] Digest history error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Unable to load digest history' });
   }
 });
 
@@ -227,7 +229,7 @@ router.get('/digest-history', async (req: Request, res: Response) => {
  * POST /api/notifications/trigger-digest
  * Manually trigger digest for testing
  */
-router.post('/trigger-digest', async (req: Request, res: Response) => {
+router.post('/trigger-digest', requireAdmin, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (!user) {
@@ -242,9 +244,9 @@ router.post('/trigger-digest', async (req: Request, res: Response) => {
       success: true,
       ...result,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[NotificationHistory] Trigger digest error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Unable to trigger the notification digest' });
   }
 });
 

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import mysql from "mysql2/promise";
+import { classifyBrowserCollectorImport } from "./operator-data-transfer-ownership.mjs";
 
 const TABLES = [
   { name: "app_settings", keys: ["key"] },
@@ -18,12 +19,12 @@ const TABLES = [
   { name: "aptlss_assessment_feedback", keys: ["assessmentId"] },
   { name: "aptlss_waiting_reasons", keys: ["id"] },
   { name: "decision_outcomes", keys: ["stepId"] },
-  { name: "workspace_evidence_items", keys: ["source", "sourceId"] },
+  { name: "workspace_evidence_items", keys: ["vaId", "source", "sourceId"] },
   { name: "workspace_evidence_links", keys: ["evidenceId", "cardId"] },
-  { name: "communication_evidence", keys: ["channel", "externalId"] },
-  { name: "compliance_card_evidence", keys: ["snapshotDate", "cardId"] },
-  { name: "compliance_communication_evidence", keys: ["snapshotDate", "evidenceKey"] },
-  { name: "compliance_clarification_requests", keys: ["snapshotDate", "evidenceKey"] },
+  { name: "communication_evidence", keys: ["vaId", "channel", "externalId"] },
+  { name: "compliance_card_evidence", keys: ["vaId", "snapshotDate", "cardId"] },
+  { name: "compliance_communication_evidence", keys: ["vaId", "snapshotDate", "evidenceKey"] },
+  { name: "compliance_clarification_requests", keys: ["vaId", "snapshotDate", "evidenceKey"] },
   { name: "time_day_reviews", keys: ["dateKey"] },
   { name: "time_entry_events", keys: ["id"] },
   { name: "time_reconciliation_items", keys: ["fingerprint"] },
@@ -128,6 +129,11 @@ async function importData() {
       }
       const [columnRows] = await connection.query(`SHOW COLUMNS FROM ${quote(definition.name)}`);
       const allowedColumns = new Set(columnRows.map((item) => item.Field));
+      if (definition.name === "browser_tab_states"
+        && (!["captureSequence", "sourceCapturedAt"].every((column) => allowedColumns.has(column)))) {
+        report.skipped.push({ table: definition.name, reason: "apply migration 0051 before importing browser collector data" });
+        continue;
+      }
       let processed = 0;
       for (const sourceRow of rows) {
         const row = { ...sourceRow };
@@ -149,6 +155,43 @@ async function importData() {
         const columns = Object.keys(row).filter((column) => allowedColumns.has(column));
         if (!definition.keys.every((key) => columns.includes(key))) {
           report.conflicts.push({ table: definition.name, keys: definition.keys, reason: "natural key missing" });
+          continue;
+        }
+        if (definition.name === "browser_tab_states") {
+          const [existingRows] = await connection.execute(
+            `SELECT id, vaId, collectorId, captureSequence, collectorLabel, totalTabs, pinnedTabs, windowCount, tabsJson FROM ${quote(definition.name)} WHERE collectorId = ? OR (? IS NOT NULL AND id = ?) FOR UPDATE`,
+            [row.collectorId, row.id ?? null, row.id ?? null],
+          );
+          const decision = classifyBrowserCollectorImport(existingRows, row);
+          if (decision.action === "skip") {
+            report.skipped.push({ table: definition.name, collectorId: row.collectorId, reason: decision.reason });
+            continue;
+          }
+          if (decision.action === "conflict") {
+            report.conflicts.push({ table: definition.name, collectorId: row.collectorId, reason: decision.reason });
+            continue;
+          }
+          if (decision.action === "insert") {
+            await connection.execute(
+              `INSERT INTO ${quote(definition.name)} (${columns.map(quote).join(",")}) VALUES (${columns.map(() => "?").join(",")})`,
+              columns.map((column) => row[column]),
+            );
+          } else {
+            const updateColumns = columns.filter((column) => !["id", "vaId", "collectorId"].includes(column));
+            const assignments = updateColumns.map((column) => `${quote(column)} = ?`).join(", ");
+            const [result] = await connection.execute(
+              `UPDATE ${quote(definition.name)} SET ${assignments} WHERE id = ? AND vaId = ? AND collectorId = ? AND captureSequence < ?`,
+              [
+                ...updateColumns.map((column) => row[column]),
+                decision.existing.id,
+                row.vaId,
+                row.collectorId,
+                Number(row.captureSequence ?? 0),
+              ],
+            );
+            if (result.affectedRows !== 1) throw new Error(`Browser collector changed during import: ${row.collectorId}`);
+          }
+          processed += 1;
           continue;
         }
         const updateColumns = columns.filter((column) => column !== "id" && !definition.keys.includes(column));

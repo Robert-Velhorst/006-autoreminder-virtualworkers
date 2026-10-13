@@ -1,7 +1,8 @@
 import { COOKIE_NAME } from "@shared/const";
+import { parse as parseCookieHeader } from "cookie";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
+import { adminProcedure, operatorAccountProcedure, publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { invalidateCache } from "./services/trello-cache";
 import { interviewRouter } from "./routes/interview";
 import { settingsRouter } from "./routes/settings";
@@ -24,10 +25,15 @@ import { trelloRouter, aptlssRouter, replyMonitorRouter } from "./routes/manus-t
 import { aggregateCardContext, formatContextForAI } from "./services/context-aggregator";
 import { websocketService } from "./services/websocket";
 import { getDb } from "./db";
-import { taskAssignments } from "../drizzle/schema";
+import { taskAssignments, vaProfiles } from "../drizzle/schema";
 import { eq, inArray, and } from "drizzle-orm";
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { operatorRouter } from "./operatorRouter";
+import { reminderRouter } from "./reminderRouter";
+import { haiConnectorRouter } from "./haiConnectorRouter";
+import { maintenanceRouter } from "./maintenanceRouter";
+import { fetchAuthorizedTrelloCard, TrelloAccessError } from "./trelloCardAccess";
 
 export const appRouter = router({
     // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
@@ -39,9 +45,13 @@ export const appRouter = router({
       if (user?.loginMethod === 'mock') return null;
       return user;
     }),
-    logout: publicProcedure.mutation(({ ctx }) => {
-      const cookieOptions = getSessionCookieOptions(ctx.req);
-      ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
+    logout: publicProcedure.mutation(async ({ ctx }) => {
+      try {
+        await (await import("./_core/sdk")).sdk.revokeSession(parseCookieHeader(ctx.req.headers.cookie ?? "")[COOKIE_NAME]);
+      } finally {
+        const cookieOptions = getSessionCookieOptions(ctx.req);
+        ctx.res.clearCookie(COOKIE_NAME, cookieOptions);
+      }
       return {
         success: true,
       } as const;
@@ -64,19 +74,20 @@ export const appRouter = router({
     actionAlerts: trelloRouter.actionAlerts,
     webhooks: trelloRouter.webhooks,
     postComment: trelloRouter.postComment,
-    getCommentToken: trelloRouter.getCommentToken,
-    setCommentToken: trelloRouter.setCommentToken,
   }),
   aptlss: aptlssRouter,
   replyMonitor: replyMonitorRouter,
   operator: operatorRouter,
+  reminders: reminderRouter,
+  haiConnector: haiConnectorRouter,
+  maintenance: maintenanceRouter,
 
   interview: interviewRouter,
   settings: settingsRouter,
   ares: aresRouter,
   atis: router({
     ...atisTaskSelectorRouter,
-    startAnalysis: protectedProcedure
+    startAnalysis: operatorAccountProcedure
       .input(z.object({
         taskId: z.string(),
       }))
@@ -85,9 +96,28 @@ export const appRouter = router({
           const { runAllPhases } = await import('./services/atis-phases-service');
           const { createAnalysisSession } = await import('./db/atis-phases');
 
-          const workerId = Number(ctx.user.id);
-          const workerIdForContext = Number.isFinite(workerId) ? workerId : undefined;
-          const cardContext = await aggregateCardContext(input.taskId, workerIdForContext);
+          // Legacy aggregation uses the shared Trello connector. Authorize the
+          // card against the caller before collecting any context from it.
+          try {
+            await fetchAuthorizedTrelloCard(ctx.user, input.taskId, { fields: 'id,idMembers' });
+          } catch (error) {
+            if (error instanceof TrelloAccessError) {
+              throw new TRPCError({
+                code: error.status === 404 ? 'NOT_FOUND' : error.status === 403 ? 'FORBIDDEN' : 'PRECONDITION_FAILED',
+                message: error.message,
+              });
+            }
+            throw error;
+          }
+
+          const workerUserId = Number(ctx.user.id);
+          const db = await getDb();
+          const [workerProfile] = db && Number.isFinite(workerUserId)
+            ? await db.select({ id: vaProfiles.id }).from(vaProfiles)
+              .where(eq(vaProfiles.userId, workerUserId))
+              .limit(1)
+            : [];
+          const cardContext = await aggregateCardContext(input.taskId, workerProfile?.id);
           const taskDescription = formatContextForAI(cardContext);
           const sessionId = await createAnalysisSession(input.taskId, String(ctx.user.id));
 
@@ -119,9 +149,9 @@ export const appRouter = router({
   }),
 
   scheduling: router({
-    bulkComplete: protectedProcedure
+    bulkComplete: adminProcedure
       .input(z.object({
-        taskIds: z.array(z.string()),
+        taskIds: z.array(z.string().min(1)).min(1).max(100),
       }))
       .mutation(async ({ input, ctx }) => {
         if (input.taskIds.length === 0) {
@@ -182,9 +212,9 @@ export const appRouter = router({
         };
       }),
 
-    bulkIncomplete: protectedProcedure
+    bulkIncomplete: adminProcedure
       .input(z.object({
-        taskIds: z.array(z.string()),
+        taskIds: z.array(z.string().min(1)).min(1).max(100),
       }))
       .mutation(async ({ input, ctx }) => {
         if (input.taskIds.length === 0) {

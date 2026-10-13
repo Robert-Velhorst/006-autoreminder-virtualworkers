@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { RequestQueue } from './services/request-queue';
 
 describe('Request Queue Service', () => {
@@ -281,28 +281,39 @@ describe('Request Queue Service', () => {
     });
 
     it('should report pending request age', async () => {
-      const slowExecutor = async () => {
-        await new Promise(resolve => setTimeout(resolve, 200));
-        return 'result';
-      };
-
-      const promise = queue.execute('test-key', slowExecutor);
-
-      // Wait a bit
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      const age = queue.getPendingAge('test-key');
-      expect(age).toBeGreaterThanOrEqual(100);
-      expect(age).toBeLessThan(200);
-
-      await promise;
-
-      // Should return null after completion
-      expect(queue.getPendingAge('test-key')).toBeNull();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+      let complete!: (value: string) => void;
+      const work = new Promise<string>(resolve => { complete = resolve; });
+      const promise = queue.execute('test-key', () => work);
+      try {
+        expect(queue.getPendingAge('test-key')).toBe(0);
+        clock.mockReturnValue(1100);
+        expect(queue.getPendingAge('test-key')).toBe(100);
+        complete('result');
+        await promise;
+        expect(queue.getPendingAge('test-key')).toBeNull();
+      } finally {
+        complete('result');
+        await promise;
+        clock.mockRestore();
+      }
     });
   });
 
   describe('Error handling', () => {
+    it('rejects a new unique request when the pending queue is at capacity', async () => {
+      const boundedQueue = new RequestQueue(1);
+      const first = boundedQueue.execute('first', () => new Promise<string>(() => {}));
+      first.catch(() => {});
+
+      await expect(
+        boundedQueue.execute('second', async () => 'should not run'),
+      ).rejects.toThrow('Request queue is at capacity');
+
+      boundedQueue.clearAll();
+      await expect(first).rejects.toThrow('Queue cleared');
+    });
+
     it('should handle errors in deduplicated requests', async () => {
       const errorExecutor = async () => {
         await new Promise(resolve => setTimeout(resolve, 100));

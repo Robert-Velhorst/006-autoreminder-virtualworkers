@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
+import { NotificationBell } from "@/components/NotificationBell";
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
 const DEFAULT_WIDTH = 280;
@@ -73,7 +74,7 @@ function AdminDashboardShellContent({
 }: AdminDashboardShellContentProps) {
   const { user, logout } = useAuth();
   const [location, setLocation] = useLocation();
-  const { state, toggleSidebar } = useSidebar();
+  const { state, toggleSidebar, setOpenMobile } = useSidebar();
   const isCollapsed = state === "collapsed";
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
@@ -149,6 +150,7 @@ function AdminDashboardShellContent({
                   <span className="font-semibold tracking-tight truncate">Navigation</span>
                 </div>
               ) : null}
+              {!isMobile && location !== "/" && user?.role === "admin" && <div className="ml-auto"><NotificationBell /></div>}
             </div>
           </SidebarHeader>
 
@@ -190,7 +192,10 @@ function AdminDashboardShellContent({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-48">
                 <DropdownMenuItem
-                  onClick={logout}
+                  onClick={() => {
+                    if (isMobile) setOpenMobile(false);
+                    void logout();
+                  }}
                   className="cursor-pointer text-destructive focus:text-destructive"
                 >
                   <LogOut className="mr-2 h-4 w-4" />
@@ -220,6 +225,7 @@ function AdminDashboardShellContent({
                 </div>
               </div>
             </div>
+            {user?.role === "admin" && <NotificationBell />}
           </div>
         )}
         <main className="flex-1 p-4">{children}</main>

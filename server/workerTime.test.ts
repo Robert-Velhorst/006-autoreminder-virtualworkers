@@ -4,6 +4,7 @@ import {
   dateWindowInTimeZone,
   dayOfWeekInTimeZone,
   formatWorkerDate,
+  InvalidWorkerTimeZoneError,
   timeKeyInTimeZone,
   weekDateKeys,
   zonedDateTimeToUtc,
@@ -19,9 +20,20 @@ describe("worker-local time", () => {
     expect(dateKeyInTimeZone(instant, "America/New_York")).toBe("2026-07-30");
   });
 
-  it("falls back to UTC for an invalid timezone", () => {
-    expect(dateKeyInTimeZone(instant, "Not/AZone")).toBe("2026-07-30");
-    expect(formatWorkerDate(instant, "Not/AZone")).toContain("30");
+  it("rejects an invalid timezone instead of silently planning in UTC", () => {
+    for (const operation of [
+      () => dateKeyInTimeZone(instant, "Not/AZone"),
+      () => formatWorkerDate(instant, "Not/AZone"),
+      () => zonedDateTimeToUtc("2026-07-30", "09:00", "Not/AZone"),
+    ]) {
+      expect(operation).toThrowError(InvalidWorkerTimeZoneError);
+      expect(operation).toThrow("saved worker time zone is invalid");
+    }
+  });
+
+  it("keeps UTC as the default when no timezone is configured", () => {
+    expect(dateKeyInTimeZone(instant)).toBe("2026-07-30");
+    expect(dateKeyInTimeZone(instant, " ")).toBe("2026-07-30");
   });
 
   it("converts worker-local boundaries to UTC across timezone offsets", () => {
@@ -38,6 +50,12 @@ describe("worker-local time", () => {
       .toBe("2026-07-30T07:00:00.000Z");
     expect(zonedDateTimeToUtc("2026-12-30", "09:00", "Europe/Amsterdam").toISOString())
       .toBe("2026-12-30T08:00:00.000Z");
+    expect(dateWindowInTimeZone("2026-03-29", "Europe/Amsterdam").endExclusive.getTime()
+      - dateWindowInTimeZone("2026-03-29", "Europe/Amsterdam").start.getTime())
+      .toBe(23 * 60 * 60 * 1000);
+    expect(dateWindowInTimeZone("2026-10-25", "Europe/Amsterdam").endExclusive.getTime()
+      - dateWindowInTimeZone("2026-10-25", "Europe/Amsterdam").start.getTime())
+      .toBe(25 * 60 * 60 * 1000);
   });
 
   it("returns Monday-through-Sunday date keys", () => {
