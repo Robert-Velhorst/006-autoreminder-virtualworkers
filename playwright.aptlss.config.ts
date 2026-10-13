@@ -7,8 +7,8 @@ const uiOnly = process.env.APTLSS_UI_ONLY === "true";
 // Allocate distinct fixture IDs before the child server starts. The live specs
 // insert these exact IDs only into the separately guarded disposable database.
 if (!uiOnly && !process.env.APTLSS_TEST_PILOT_WORKER_IDS) {
-  const base = randomInt(10_000_000, 20_000_000) * 10;
-  process.env.APTLSS_TEST_PILOT_WORKER_IDS = Array.from({ length: 5 }, (_, index) => base + index * 100).join(",");
+  const base = randomInt(10_000_000, 19_999_000) * 10;
+  process.env.APTLSS_TEST_PILOT_WORKER_IDS = Array.from({ length: 15 }, (_, index) => base + index * 100).join(",");
 }
 const port = process.env.APTLSS_TEST_PORT || (uiOnly ? "3036" : "3035");
 if (!/^\d+$/.test(port) || Number(port) < 1024 || Number(port) > 65535) throw new Error("Invalid APTLSS_TEST_PORT");

@@ -10,7 +10,7 @@ beforeEach(() => {
   vi.spyOn(process, "on").mockReturnValue(process);
   vi.stubEnv("APTLSS_UI_ONLY", "false");
   vi.stubEnv("APTLSS_TEST_DATABASE_URL", "mysql://fixture:fixture@127.0.0.1:33317/recovery_test");
-  vi.stubEnv("APTLSS_TEST_PILOT_WORKER_IDS", "100000001,100000002,100000003,100000004,100000005");
+  vi.stubEnv("APTLSS_TEST_PILOT_WORKER_IDS", "100000001,100000002,100000003,100000004,100000005,100000006,100000007,100000008,100000009,100000010,100000011,100000012,100000013,100000014,100000015");
   for (const key of ["PUBLIC_URL", "APP_URL", "VITE_FRONTEND_URL", "WEBHOOK_BASE_URL", "LOCAL_ACCESS_ORIGINS"]) {
     vi.stubEnv(key, "https://operator.example");
   }

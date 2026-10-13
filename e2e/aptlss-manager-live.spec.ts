@@ -41,15 +41,30 @@ async function mutateThroughUi<T>(
 ): Promise<T> {
   const state = mutationsByPage.get(page)!;
   let transportSettled = false;
-  const response = page.waitForResponse(
-    response =>
-      response.request().method() === "POST" &&
-      decodeURIComponent(new URL(response.url()).pathname)
-        .split("/api/trpc/")[1]
-        ?.split(",")
-        .includes(method),
-    { timeout: 30_000 }
-  );
+  let requestObserved = false;
+  let resolveResponse!: (response: import("@playwright/test").Response) => void;
+  let rejectResponse!: (error: Error) => void;
+  const response = new Promise<import("@playwright/test").Response>((resolve, reject) => {
+    resolveResponse = resolve;
+    rejectResponse = reject;
+  });
+  const matchesRequest = (request: import("@playwright/test").Request) =>
+    request.method() === "POST" &&
+    decodeURIComponent(new URL(request.url()).pathname)
+      .split("/api/trpc/")[1]
+      ?.split(",")
+      .includes(method);
+  const onRequest = (request: import("@playwright/test").Request) => {
+    if (matchesRequest(request)) requestObserved = true;
+  };
+  const onResponse = (result: import("@playwright/test").Response) => {
+    if (!matchesRequest(result.request())) return;
+    page.off("request", onRequest);
+    page.off("response", onResponse);
+    resolveResponse(result);
+  };
+  page.on("request", onRequest);
+  page.on("response", onResponse);
   // Observe the complete body, not just response headers or an early database row.
   const completion = bounded(
     (async () => {
@@ -76,6 +91,8 @@ async function mutateThroughUi<T>(
     `${method} did not complete within 30 seconds`
   ).catch(error => {
     if (!transportSettled) state.uncertain = true;
+    page.off("request", onRequest);
+    page.off("response", onResponse);
     throw error;
   });
   const observed = completion
@@ -85,7 +102,20 @@ async function mutateThroughUi<T>(
     )
     .finally(() => state.pending.delete(observed));
   state.pending.add(observed);
-  await action();
+  try {
+    await action();
+  } catch (error) {
+    if (!requestObserved) {
+      transportSettled = true;
+      page.off("request", onRequest);
+      page.off("response", onResponse);
+      rejectResponse(error instanceof Error ? error : new Error(String(error)));
+      await completion.catch(() => undefined);
+      throw error;
+    }
+    await completion;
+    throw error;
+  }
   return completion;
 }
 
@@ -228,11 +258,26 @@ async function focusByTab(page: Page, control: Locator) {
     return style.visibility !== "hidden" && style.display !== "none" &&
       !(element instanceof HTMLElement && element.hidden);
   }).length);
-  for (let attempt = 0; attempt <= tabStops; attempt += 1) {
+  const maxAttempts = Math.max(80, tabStops * 3);
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     if (await control.evaluate(element => element === document.activeElement)) return;
     await page.keyboard.press("Tab");
   }
-  throw new Error(`Control could not be reached with sequential Tab navigation after ${tabStops + 1} visible tab stops`);
+  const target = await control.evaluate(element => ({
+    tag: element.tagName.toLowerCase(),
+    id: element.id || undefined,
+    label: element.getAttribute("aria-label") || element.textContent?.trim().slice(0, 100),
+    tabIndex: (element as HTMLElement).tabIndex,
+  }));
+  const active = await page.evaluate(() => {
+    const element = document.activeElement;
+    return element instanceof HTMLElement ? {
+      tag: element.tagName.toLowerCase(),
+      id: element.id || undefined,
+      label: element.getAttribute("aria-label") || element.textContent?.trim().slice(0, 100),
+    } : null;
+  });
+  throw new Error(`Control could not be reached with sequential Tab navigation after ${maxAttempts} attempts (${tabStops} visible candidates); target=${JSON.stringify(target)}; active=${JSON.stringify(active)}`);
 }
 
 async function activateByKeyboard(page: Page, control: Locator) {
@@ -511,7 +556,7 @@ for (const scenario of [
         workerId = await insert(
           "INSERT INTO users (id,openId,name,role,loginMethod,passwordHash) VALUES (?,?,?,?,?,?)",
           [
-            Number(process.env.APTLSS_TEST_PILOT_WORKER_IDS!.split(",")[scenario.pilotIndex]),
+            Number(process.env.APTLSS_TEST_PILOT_WORKER_IDS!.split(",")[scenario.pilotIndex + test.info().retry * 5]),
             `${prefix}-worker`,
             `${prefix} Worker`,
             "worker",
