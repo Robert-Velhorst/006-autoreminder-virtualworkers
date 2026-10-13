@@ -17,6 +17,13 @@
   are pruned during later logout operations.
 - Deploy the `revoked_sessions` migration before serving the updated app. Older
   session cookies without a JWT ID are rejected, so users must sign in again.
+- A pre-revocation binary does not consult `revoked_sessions` and can accept a
+  still-valid cookie after logout. Do not return that binary to user traffic
+  as a security-equivalent rollback. A production fallback must include the
+  session-revocation checks and be verified against the retained database.
+- `JWT_SECRET` also encrypts Google refresh tokens. Rotating it to invalidate
+  cookies without first migrating those encrypted values can break Gmail/Drive
+  access. Do not use secret rotation as a rollback shortcut.
 - Public registration is off by default.
 - Development bypass is accepted only on loopback and rejected in production.
 - Owner bootstrap requires an existing admin with no password, a token of at

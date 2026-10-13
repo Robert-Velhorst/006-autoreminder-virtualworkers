@@ -82,6 +82,15 @@ authentication/CSRF/RBAC, worker/founder scope, WebSocket rooms, all timer-start
 paths, record preservation and explicit reconciliation. Do not replace it with
 the five-user runtime fixture, migration-only results, or an old SQL restore.
 
+The fallback leg must also preserve session-revocation security. A pre-`0054`
+binary does not query `revoked_sessions`; it can accept a still-valid candidate
+cookie after logout. The untouched prior binary may only be inspected in an
+isolated rehearsal with no user traffic. A live-capable fallback needs the
+session-ID issuance, revocation lookup, and logout behavior backported and
+verified; test candidate -> fallback -> candidate and prove revoked cookies
+remain rejected after each switch. Do not rotate `JWT_SECRET` to mask this gap:
+it also encrypts stored Google refresh tokens.
+
 See [current rollout warning](APTLSS_SHADOW_ROLLOUT.md#current-compatibility-warning-2026-10-01)
 and [verification receipts](PRODUCTION_VERIFICATION_20260930.md).
 

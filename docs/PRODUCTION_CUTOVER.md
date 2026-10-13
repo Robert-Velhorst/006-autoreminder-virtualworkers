@@ -118,6 +118,23 @@ Before traffic is moved:
 7. Point the public domain and Trello webhook callback at the new runtime.
 8. Retain the prior build and database snapshot through the rollback window.
 
+### Session-revocation rollback constraint
+
+The pre-`0054_revoked_sessions` application verifies JWT signatures but does
+not check the revocation table. If it is exposed to user traffic after the
+newer application has accepted logouts, a logged-out but unexpired cookie can
+become valid again. Therefore the untouched prior image is not an acceptable
+security-equivalent live fallback. Before public cutover, prepare and verify a
+fallback based on the prior application that includes the session-ID issuance,
+revocation lookup, and logout revocation behavior, or keep rollback isolated
+from user traffic until that compatibility fix is applied. Test both directions
+against the full restored dataset and verify that revoked cookies remain
+rejected after each switch.
+
+Do not rotate `JWT_SECRET` as a shortcut: it also derives the encryption key
+for stored Google refresh tokens. A future key rotation must first migrate and
+verify those encrypted credentials with an explicit key-versioned procedure.
+
 The canonical role enum is currently `admin`, `worker`, and `user`. The founder
 portal uses an admin-role account with founder-owned worker-profile scoping;
 it is not a fourth, independently permissioned founder role. Verify the actual
