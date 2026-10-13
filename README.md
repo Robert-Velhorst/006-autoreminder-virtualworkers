@@ -29,7 +29,7 @@ This repository is actively developed. A versioned container image and tagged re
 ## Current Status
 
 - The application uses a persistent Node.js process, MySQL, and optional Redis.
-- Docker Compose is the supported single-host deployment path.
+- Hetzner is the intended production host; Docker Compose is the supported single-host deployment path.
 - Trello, email, Google evidence, and AI-provider integrations require credentials supplied by the operator.
 - External actions such as Trello changes and outbound messages are policy-gated; configure and verify integrations before enabling them.
 - Production readiness depends on deployment-specific configuration and operational checks. A successful build or container publication is not proof of a live production deployment.
@@ -98,11 +98,11 @@ pnpm test:e2e
 
 ## Deployment
 
-The full application needs a persistent container runtime with HTTPS and WebSocket support. It also runs scheduled work in the application process. Request-only serverless platforms such as the repository's former Vercel deployment are not supported and must not be presented as the production service.
+The full application needs a persistent container runtime with HTTPS and WebSocket support. It also runs scheduled work in the application process. Hetzner is the intended production host; the application is not deployed there yet. Request-only serverless platforms do not meet the runtime requirements.
 
 `Dockerfile` builds the application image. `docker-compose.yml` provides a single-host deployment with MySQL, Redis, migration ordering, a health check, and loopback-only application/database/Redis bindings. For a public single-host demo or testing endpoint, `pnpm docker:public` adds ngrok; that temporary tunnel is not an availability or production guarantee.
 
-See [Production Cutover](docs/PRODUCTION_CUTOVER.md) before deploying. It lists required credentials, data backup and migration steps, integration checks, rollback requirements, and the boundary for retiring the old hosting projects. Configure secrets in the target platform's secret manager; do not put them in source control, image layers, release notes, or issue comments.
+See [Hetzner Deployment](docs/HETZNER_DEPLOYMENT.md) and [Production Cutover](docs/PRODUCTION_CUTOVER.md) before deploying. They cover the host setup, required credentials, data backup and migration, integration checks, rollback requirements, and the safe retirement of the previous hosting projects. Configure secrets on the target host; do not put them in source control, image layers, release notes, or issue comments.
 
 The GitHub Release workflow publishes a versioned image to `ghcr.io/robert-velhorst/006-autoreminder-virtualworkers` after a release is published. It does not deploy that image to a live host. An operator must configure the runtime, persistent storage, secrets, networking, and backups separately.
 
@@ -131,6 +131,7 @@ Please do not report vulnerabilities in public issues. See [SECURITY.md](SECURIT
 ## Project Documentation
 
 - [Production cutover and operations](docs/PRODUCTION_CUTOVER.md)
+- [Hetzner deployment](docs/HETZNER_DEPLOYMENT.md)
 - [Consolidation ledger and data ownership](docs/CONSOLIDATION_LEDGER.md)
 - [Branch consolidation history](docs/BRANCH_CONSOLIDATION.md)
 - [Environment variable template](.env.example)

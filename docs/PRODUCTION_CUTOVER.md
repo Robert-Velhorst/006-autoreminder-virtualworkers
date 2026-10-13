@@ -1,16 +1,16 @@
 # Production Cutover
 
-## Target Runtime
+## Target Runtime: Hetzner
 
 The consolidated application requires a persistent Node.js container runtime,
 MySQL, Redis, HTTPS, and WebSocket support. It also runs scheduled work inside
 the application process. A static or request-only serverless deployment does
 not preserve the complete runtime contract.
 
-Use `Dockerfile` and `docker-compose.yml` for a single-host deployment, or map
-the same services to a managed container platform. Keep one application
-instance active until scheduled-job locking has been verified on the target
-platform.
+Hetzner is the selected target. Use `Dockerfile` and `docker-compose.yml` on a
+single Hetzner server with persistent storage and a TLS reverse proxy. The
+application is not yet deployed to Hetzner. Keep one application instance
+active until scheduled-job locking has been verified on the target host.
 
 The supported single-host public entrypoint is `pnpm docker:public`. It runs
 the application and ngrok in the same Compose network, binds the app and
@@ -24,11 +24,10 @@ or another application already uses the account's default developer domain.
 Public password registration is disabled; existing workers authenticate with
 their registered Trello identity or a separately provisioned local password.
 
-Do not point either obsolete Vercel project at the repository root. A Vercel
-deployment would omit the persistent process, scheduled work, and WebSocket
-runtime required by the platform. Production startup rejects the Vercel
-runtime explicitly so an incomplete frontend cannot be mistaken for an
-operational deployment.
+Do not deploy this application to request-only serverless hosting. It requires
+a persistent process for scheduled work, Redis coordination, and WebSockets.
+Production startup rejects the legacy Vercel runtime explicitly so an
+incomplete frontend cannot be mistaken for an operational deployment.
 
 ## Required Secrets
 
@@ -81,5 +80,7 @@ Before reusing an existing database volume, create a logical SQL backup and
 keep the previous stopped database container until the public verification
 gate passes. `MYSQL_VOLUME_NAME` selects the preserved volume explicitly.
 
-Only disconnect or delete the obsolete Vercel projects after this gate passes
-against the public replacement.
+After the Hetzner deployment passes every verification gate and the public
+domain serves the new host, disable the old Vercel Git integrations and retire
+their projects. Preserve deployment history and any needed rollback artifacts;
+do not remove unrelated Vercel projects or account-wide settings.
