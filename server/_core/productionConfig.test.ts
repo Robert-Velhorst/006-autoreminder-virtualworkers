@@ -56,8 +56,6 @@ describe("production configuration", () => {
       "DATABASE_URL must be a complete MySQL URL with host, database, username, and password",
       "REDIS_URL must be a Redis URL with host and password",
       "JWT_SECRET must contain at least 32 characters",
-      "TRELLO_API_KEY must be configured with a non-placeholder value",
-      "TRELLO_TOKEN must be configured with a non-placeholder value",
       "PUBLIC_URL must be a valid public HTTPS URL",
       "WEBHOOK_BASE_URL must be a valid public HTTPS URL",
       "HOST must bind to a non-loopback interface in production",
@@ -71,6 +69,17 @@ describe("production configuration", () => {
     }
     expect(thrownMessage).toContain("Invalid production configuration");
     expect(thrownMessage).not.toContain("private-trello");
+  });
+
+  it("requires both Trello credentials in production", () => {
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      TRELLO_API_KEY: "",
+      TRELLO_TOKEN: "",
+    })).toEqual([
+      "TRELLO_API_KEY must be configured with a non-placeholder value",
+      "TRELLO_TOKEN must be configured with a non-placeholder value",
+    ]);
   });
 
   it("rejects example values even when they satisfy the variable's shape", () => {
