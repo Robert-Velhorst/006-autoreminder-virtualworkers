@@ -41,10 +41,10 @@ router.get('/', async (req: Request, res: Response) => {
 
     const statusCode = healthy ? 200 : 503;
     res.status(statusCode).json(health);
-  } catch (error) {
+  } catch {
     res.status(503).json({
       status: 'unhealthy',
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: 'Health check failed',
       timestamp: new Date().toISOString(),
     });
   }
@@ -68,10 +68,10 @@ router.get('/ready', async (req: Request, res: Response) => {
       ready: true,
       timestamp: new Date().toISOString(),
     });
-  } catch (error) {
+  } catch {
     res.status(503).json({
       ready: false,
-      reason: error instanceof Error ? error.message : 'Unknown error',
+      reason: 'Database not available',
     });
   }
 });
