@@ -16,8 +16,8 @@ must publish both images and pass both attestation checks before deployment.
 
 - A supported Linux Hetzner Cloud server with Docker Engine and Compose v2.
 - A DNS name whose A/AAAA records are deliberately pointed at that server.
-- A TLS reverse proxy on the host (for example, Caddy) forwarding HTTPS and
-  WebSocket traffic to `127.0.0.1:3025`.
+- Caddy installed on the host, forwarding HTTPS and WebSocket traffic to
+  `127.0.0.1:3025` using `deployment/Caddyfile.example` as the starting point.
 - Persistent, separately backed-up storage for MySQL and Redis data.
 - Firewall policy allowing SSH only from trusted management addresses and
   public TCP 80/443; do not expose MySQL, Redis, or the application port.
@@ -61,8 +61,10 @@ Before the first start:
    appended to the latter. Set `DATABASE_URL` to host `mysql` and `REDIS_URL`
    to host `redis`; URL-encode reserved characters in credentials.
 4. Configure `PUBLIC_URL` and `WEBHOOK_BASE_URL` to the final HTTPS origin.
-   Configure the Trello webhook callback to the corresponding application
-   endpoint only after HTTPS is live.
+   Replace the example hostname in `deployment/Caddyfile.example`, install it
+   as the host's Caddyfile, then validate and reload Caddy. Caddy handles
+   WebSocket upgrades through `reverse_proxy`. Configure the Trello webhook
+   callback to the corresponding application endpoint only after HTTPS is live.
 5. Back up and inspect the source database. Rehearse migration/import and
    reconciliation against a disposable test database before production
    cutover.
