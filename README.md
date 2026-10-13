@@ -127,7 +127,7 @@ node scripts/operator-data-transfer.mjs reconcile --in .local/operator-export.js
 
 ## Security
 
-Please do not report vulnerabilities in public issues. See [SECURITY.md](SECURITY.md) for supported-version and private-reporting guidance. The repository currently has GitHub secret scanning and push protection, Dependabot security updates, CodeQL analysis, and a protected `main` branch requiring the `verify` check and resolved review conversations. GitHub Actions are restricted to an explicit action allowlist and pinned to full commit SHAs.
+Please do not report vulnerabilities in public issues. See [SECURITY.md](SECURITY.md) for supported-version and private-reporting guidance. The repository currently has GitHub secret scanning and push protection, Dependabot security updates, CodeQL analysis, and a protected `main` branch. Merging requires a pull request, the `verify` check, all three CodeQL analyses (`actions`, `javascript-typescript`, and `python`), and resolved review conversations. These rules apply to administrators, require the branch to be up to date, and prohibit force pushes and branch deletion. GitHub Actions are restricted to an explicit action allowlist and pinned to full commit SHAs.
 
 The repository does not currently enforce an approving review, and GitHub's optional non-provider secret patterns and validity checks are not enabled. Do not treat a green build as evidence that credentials are safe: revoke exposed credentials at their provider and resolve the corresponding alert only after rotation. Keep deployment credentials outside Git and use least-privilege accounts.
 
