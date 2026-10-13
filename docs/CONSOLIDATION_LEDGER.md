@@ -110,8 +110,9 @@ tRPC, scheduled work, Redis, and WebSockets. Production hosting is moving to
 Hetzner using the repository's Docker deployment configuration.
 
 The Vercel GitHub App was uninstalled on 2026-10-13, removing its access to 43
-GitHub repositories. Five of seven Vercel projects and their deployments were
-also deleted. `promise-app` and `040-5-trello-mcp-connectors-to-chat-gpt-5`
-remain because the signed-in Vercel account lacks visible deletion controls;
-an authorized team owner must complete their removal. The Vercel account was
-not deleted.
+GitHub repositories. Five projects and their deployments were deleted during
+the initial cleanup. A later check of the Noodzakelijk Online team showed no
+projects remaining; `promise-app` and
+`040-5-trello-mcp-connectors-to-chat-gpt-5` were already absent, so no further
+deletion was performed for those two. The Vercel account was not deleted. The
+`promise-app` domain's DNS records were not inspected or changed.

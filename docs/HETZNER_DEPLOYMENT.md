@@ -95,12 +95,12 @@ from another database. Do not delete or rewrite migration history.
 ## Previous Hosting Cleanup
 
 The Vercel GitHub App was uninstalled from Robert Velhorst's GitHub account on
-2026-10-13, removing its access to all 43 repositories. All seven projects in
-the Noodzakelijk Online Vercel team were also deleted through the dashboard;
-their deployments and project-level domains, environment variables, functions,
-and settings were removed with them. The Vercel account itself remains. The
+2026-10-13, removing its access to all 43 repositories. Five projects and their
+deployments were deleted during the initial cleanup. A later team overview
+showed no projects remaining, including `promise-app` and
+`040-5-trello-mcp-connectors-to-chat-gpt-5`; the latter two were already absent
+and were not deleted again. The Vercel account itself remains. The
 `promise-app` project had the custom domain `promiseapp.io`; DNS records at the
-domain provider were not inspected or changed during project deletion. Verify
-and update or remove those records as part of the Hetzner cutover. The Hetzner
-service is not live yet, so Vercel deletion is not evidence of a completed
-production migration.
+domain provider were not inspected or changed. Verify and update or remove
+those records as part of the Hetzner cutover. The Hetzner service is not live
+yet, so Vercel cleanup is not evidence of a completed production migration.
