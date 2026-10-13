@@ -7,45 +7,57 @@ MySQL, Redis, HTTPS, and WebSocket support. It also runs scheduled work inside
 the application process. A static or request-only serverless deployment does
 not preserve the complete runtime contract.
 
-Hetzner is the selected target. Use `Dockerfile` and `docker-compose.yml` on a
-single Hetzner server with persistent storage and a TLS reverse proxy. The
-application is not yet deployed to Hetzner. Keep one application instance
-active until scheduled-job locking has been verified on the target host.
+Hetzner is the selected target. Use `deployment/compose.hetzner.yml` on a
+single Hetzner server with persistent storage and a host-level TLS reverse
+proxy. The application is not yet deployed to Hetzner. Keep exactly one app
+instance active until scheduled-job locking has been verified on the target
+host.
 
-The supported single-host public entrypoint is `pnpm docker:public`. It runs
-the application and ngrok in the same Compose network, binds the app and
-database ports to loopback only, and records the current public endpoint in
-`.local/public-dashboard.json`. Because an automatically assigned ngrok URL
-can change after a restart, rerun the command after reboot so the backend and
-Trello callback use the current URL.
+The production images are published to GHCR when a GitHub release is
+published. The release workflow publishes both the app image and a
+migration-capable image tagged with the same release plus `-migrate`. Pin both
+to the same release version (or verified digest); do not build the production
+image from an unreviewed working tree on the server.
 
-Set `NGROK_URL` in `.env.db.local` when the account has more than one endpoint
-or another application already uses the account's default developer domain.
-Public password registration is disabled; existing workers authenticate with
-their registered Trello identity or a separately provisioned local password.
+`pnpm docker:public` is a local testing helper that starts ngrok. It is not a
+production entrypoint. Production ingress terminates HTTPS at the host proxy
+and forwards app and WebSocket traffic to loopback port 3025. MySQL and Redis
+remain private to the Compose network.
 
-Do not deploy this application to request-only serverless hosting. It requires
-a persistent process for scheduled work, Redis coordination, and WebSockets.
-Production startup rejects the legacy Vercel runtime explicitly so an
-incomplete frontend cannot be mistaken for an operational deployment.
+Public password registration is disabled; workers authenticate with their
+registered Trello identity or a separately provisioned local password.
+Do not use request-only serverless hosting: scheduled work, Redis coordination,
+and WebSockets require a persistent process.
 
 ## Required Secrets
 
-Configure these values in the deployment platform's secret store:
+Keep application secrets in the ignored `deployment/.env.app` file with
+restrictive permissions, or inject them from a secret manager. Copy
+`deployment/.env.app.example` to that file. Copy
+`deployment/.env.hetzner.example` to the ignored `deployment/.env.hetzner`
+for Compose and database/Redis settings. Never commit populated files or pass
+secrets as image build arguments.
 
-- `DATABASE_URL`: MySQL connection URL.
 - `JWT_SECRET`: newly generated random value of at least 32 characters.
 - `TRELLO_API_KEY`: active Trello API key.
 - `TRELLO_TOKEN`: active Trello member token.
-- `OPENAI_API_KEY`: active OpenAI API key.
-- `REDIS_URL`: authenticated Redis connection URL.
 
-For Docker Compose, also set `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`,
-`MYSQL_USER`, `MYSQL_PASSWORD`, and `REDIS_PASSWORD`. Do not commit `.env`.
+For Hetzner Compose, set `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`, `MYSQL_USER`,
+`MYSQL_PASSWORD`, `REDIS_PASSWORD`, `DATABASE_URL`, and `REDIS_URL` in
+`deployment/.env.hetzner`. `APP_ENV_FILE` defaults to `.env.app`, relative to
+the Compose file. Set `APP_IMAGE` and `MIGRATION_IMAGE` to the same release
+version, with `-migrate` on the latter. Use the `mysql` and `redis` Compose
+hostnames in the respective URLs. URL-encode reserved characters in credentials.
 
 The server accepts the old local names `TrelloAPIKey` and `TrelloAPIToken`
 during transition, but production configuration should use the canonical
 uppercase names.
+
+AI provider credentials are not required for the server to start. AI-backed
+features remain unavailable until a supported provider is configured in the
+Settings UI or through its documented environment variable. This application
+does not currently implement Codex subscription authentication; do not treat
+an OpenAI API key as an equivalent subscription credential.
 
 ## Optional Integrations
 
@@ -57,30 +69,45 @@ uppercase names.
 
 Do not migrate the legacy MongoDB URL, Twilio credentials, React frontend URL,
 or old reminder timing variables. They belong to the retired split
-application, not the consolidated runtime.
+application, not the consolidated runtime. Before production cutover, revoke
+any credentials exposed by that retired application and resolve the related
+secret-scanning alerts after rotation; removing a value from Git history does
+not revoke it.
 
 ## Verification Gate
 
 Before traffic is moved:
 
-1. Back up the source database.
-2. Deploy MySQL and Redis with persistent storage.
-3. Apply the canonical Drizzle migrations. Docker Compose runs the one-shot
-   `migrate` service and starts the app only after it succeeds.
-4. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and
+1. Back up the source database and rehearse its import into an isolated,
+   disposable target database.
+2. Deploy MySQL and Redis with persistent storage and verify a restorable
+   backup before importing production data.
+3. Copy both deployment templates to `deployment/.env.hetzner` and
+   `deployment/.env.app`, replace all placeholders, and restrict file
+   permissions. Run `docker compose --env-file deployment/.env.hetzner -f deployment/compose.hetzner.yml config -q` before starting any service.
+4. Pull the pinned images with `docker compose --env-file deployment/.env.hetzner -f deployment/compose.hetzner.yml pull app migrate`, then start MySQL, Redis, the one-shot migration, and app with `docker compose --env-file deployment/.env.hetzner -f deployment/compose.hetzner.yml up -d`. The app starts only after migration succeeds.
+5. Confirm the application runs with `NODE_ENV=production`, `HOST=0.0.0.0`, and
    `LOCAL_AUTH_BYPASS=false`.
-5. Confirm `/api/health`, authenticated founder/admin/worker access,
-   WebSockets, scheduled jobs, Trello, OpenAI, Gmail, and Drive.
-6. Confirm no unapproved Trello comment, move, email, or other external action
+6. Confirm `/api/health`, authenticated founder/admin/worker access,
+   WebSockets, scheduled jobs, Trello, Gmail, and Drive. Test any explicitly
+   enabled AI provider only after its configuration and account authorization
+   have been verified.
+7. Confirm no unapproved Trello comment, move, email, or other external action
    occurs during smoke testing.
-7. Point the public domain and Trello webhook callback at the new runtime.
-8. Retain the prior build and database snapshot through the rollback window.
+8. Freeze writes briefly, take a final source-database backup, import and
+   reconcile it, then switch the public domain and Trello webhook callback.
+9. Retain the prior build and source snapshot through the rollback window.
 
 Before reusing an existing database volume, create a logical SQL backup and
 keep the previous stopped database container until the public verification
 gate passes. `MYSQL_VOLUME_NAME` selects the preserved volume explicitly.
 
-After the Hetzner deployment passes every verification gate and the public
-domain serves the new host, disable the old Vercel Git integrations and retire
-their projects. Preserve deployment history and any needed rollback artifacts;
-do not remove unrelated Vercel projects or account-wide settings.
+Retire the previous deployment only after the Hetzner deployment passes every
+verification gate and the public domain serves the new host. Preserve
+deployment history and rollback artifacts; do not remove infrastructure that
+belongs to another application.
+
+The repository-scoped Vercel GitHub App authorization remains to be revoked
+after GitHub sudo reauthentication. The repository's Vercel-created deployment
+records and empty deployment environments have already been removed. Do not
+disable Vercel account access for unrelated repositories.

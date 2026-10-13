@@ -25,9 +25,6 @@ export function getProductionConfigurationErrors(env: Environment = process.env)
   if (!hasValue(env, "TRELLO_TOKEN")) {
     errors.push("TRELLO_TOKEN is required");
   }
-  if (!hasValue(env, "OPENAI_API_KEY")) {
-    errors.push("OPENAI_API_KEY is required");
-  }
   if (!host || LOOPBACK_HOSTS.has(host)) {
     errors.push("HOST must bind to a non-loopback interface in production");
   }

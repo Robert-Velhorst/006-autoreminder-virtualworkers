@@ -63,6 +63,8 @@ jobs:
       - run: pnpm build
       - name: Build the production container
         run: docker build --tag va-dashboard:ci .
+      - name: Build the migration container
+        run: docker build --target migration --tag va-dashboard:migration-ci .
       - name: Verify migration metadata matches the schema
         shell: bash
         run: |

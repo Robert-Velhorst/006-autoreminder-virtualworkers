@@ -100,9 +100,9 @@ pnpm test:e2e
 
 The full application needs a persistent container runtime with HTTPS and WebSocket support. It also runs scheduled work in the application process. Hetzner is the intended production host; the application is not deployed there yet. Request-only serverless platforms do not meet the runtime requirements.
 
-`Dockerfile` builds the application image. `docker-compose.yml` provides a single-host deployment with MySQL, Redis, migration ordering, a health check, and loopback-only application/database/Redis bindings. For a public single-host demo or testing endpoint, `pnpm docker:public` adds ngrok; that temporary tunnel is not an availability or production guarantee.
+`deployment/compose.hetzner.yml` is the production Compose deployment. It pulls separate release and migration images from GHCR, keeps MySQL and Redis private to the Compose network, runs one app instance and a one-shot migration, and binds the app only to host loopback behind a TLS proxy. `deployment/.env.hetzner.example` and `deployment/.env.app.example` document the two separate host-side configuration files. The older `docker-compose.yml` is for local development; `pnpm docker:public` adds ngrok only for temporary testing and is not a production entrypoint.
 
-See [Hetzner Deployment](docs/HETZNER_DEPLOYMENT.md) and [Production Cutover](docs/PRODUCTION_CUTOVER.md) before deploying. They cover the host setup, required credentials, data backup and migration, integration checks, rollback requirements, and the safe retirement of the previous hosting projects. Configure secrets on the target host; do not put them in source control, image layers, release notes, or issue comments.
+See [Hetzner Deployment](docs/HETZNER_DEPLOYMENT.md) and [Production Cutover](docs/PRODUCTION_CUTOVER.md) before deploying. They cover image provenance, host setup, credentials, data backup and migration, integration checks, rollback requirements, and retirement gates. Configure secrets on the target host; do not put them in source control, image layers, release notes, or issue comments.
 
 The GitHub Release workflow publishes a versioned image to `ghcr.io/robert-velhorst/006-autoreminder-virtualworkers` after a release is published. It does not deploy that image to a live host. An operator must configure the runtime, persistent storage, secrets, networking, and backups separately.
 
@@ -126,7 +126,9 @@ node scripts/operator-data-transfer.mjs reconcile --in .local/operator-export.js
 
 ## Security
 
-Please do not report vulnerabilities in public issues. See [SECURITY.md](SECURITY.md) for supported-version and private-reporting guidance. Secret scanning, push protection, dependency alerts, automated security updates, code scanning, and protected `main` checks are enabled or configured at the repository level; verify their current state in GitHub before relying on them.
+Please do not report vulnerabilities in public issues. See [SECURITY.md](SECURITY.md) for supported-version and private-reporting guidance. The repository currently has GitHub secret scanning and push protection, Dependabot security updates, CodeQL analysis, and a protected `main` branch requiring the `verify` check and resolved review conversations. GitHub Actions are restricted to an explicit action allowlist and pinned to full commit SHAs.
+
+The repository does not currently enforce an approving review, and GitHub's optional non-provider secret patterns and validity checks are not enabled. Do not treat a green build as evidence that credentials are safe: revoke exposed credentials at their provider and resolve the corresponding alert only after rotation. Keep deployment credentials outside Git and use least-privilege accounts.
 
 ## Project Documentation
 
@@ -135,6 +137,7 @@ Please do not report vulnerabilities in public issues. See [SECURITY.md](SECURIT
 - [Consolidation ledger and data ownership](docs/CONSOLIDATION_LEDGER.md)
 - [Branch consolidation history](docs/BRANCH_CONSOLIDATION.md)
 - [Environment variable template](.env.example)
+- [Security policy](SECURITY.md)
 
 ## License
 

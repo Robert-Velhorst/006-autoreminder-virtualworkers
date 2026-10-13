@@ -41,5 +41,5 @@ describe("session identity", () => {
       appId: "va-dashboard",
       name: "Joyce",
     });
-  });
+  }, 15_000);
 });

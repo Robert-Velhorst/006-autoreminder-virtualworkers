@@ -21,6 +21,15 @@ COPY . .
 # Build frontend and backend
 RUN pnpm build
 
+# Release artifact used only for the one-shot schema migration job.
+FROM builder AS migration
+
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001
+
+USER nodejs
+CMD ["pnpm", "exec", "drizzle-kit", "migrate"]
+
 # Stage 2: Production image
 FROM node:22-alpine AS production
 
