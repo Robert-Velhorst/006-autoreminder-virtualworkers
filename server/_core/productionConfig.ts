@@ -6,6 +6,10 @@ function hasValue(env: Environment, name: string) {
   return Boolean(env[name]?.trim());
 }
 
+export function getExpressTrustProxySetting(env: Environment = process.env): 1 | false {
+  return env.NODE_ENV === "production" ? 1 : false;
+}
+
 export function getProductionConfigurationErrors(env: Environment = process.env) {
   if (env.NODE_ENV !== "production") return [];
 

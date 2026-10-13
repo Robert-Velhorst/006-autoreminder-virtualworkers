@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assertProductionConfiguration,
+  getExpressTrustProxySetting,
   getProductionConfigurationErrors,
 } from "./productionConfig";
 
@@ -15,6 +16,11 @@ const validProductionEnvironment = {
 };
 
 describe("production configuration", () => {
+  it("trusts only the single configured production ingress proxy", () => {
+    expect(getExpressTrustProxySetting(validProductionEnvironment)).toBe(1);
+    expect(getExpressTrustProxySetting({ NODE_ENV: "development" })).toBe(false);
+  });
+
   it("accepts the canonical production contract", () => {
     expect(getProductionConfigurationErrors(validProductionEnvironment)).toEqual([]);
     expect(() => assertProductionConfiguration(validProductionEnvironment)).not.toThrow();
