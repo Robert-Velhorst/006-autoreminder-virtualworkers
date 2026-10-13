@@ -107,7 +107,12 @@ verification gate and the public domain serves the new host. Preserve
 deployment history and rollback artifacts; do not remove infrastructure that
 belongs to another application.
 
-The repository-scoped Vercel GitHub App authorization remains to be revoked
-after GitHub sudo reauthentication. The repository's Vercel-created deployment
-records and empty deployment environments have already been removed. Do not
-disable Vercel account access for unrelated repositories.
+The Vercel GitHub App was uninstalled from Robert Velhorst's GitHub account on
+2026-10-13, removing its access to all 43 repositories. This action did not
+delete Vercel projects or deployment data. On 2026-10-13, five of the seven
+projects in the Noodzakelijk Online team were deleted in Vercel, including
+their associated deployments. The remaining `promise-app` and
+`040-5-trello-mcp-connectors-to-chat-gpt-5` projects had no deletion controls
+available to the signed-in account and need an authorized team owner to remove
+them. The Vercel account itself was not deleted. The Hetzner public acceptance
+gate remains outstanding.

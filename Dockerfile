@@ -3,7 +3,7 @@
 FROM node:22-alpine AS builder
 
 # Install pnpm
-RUN npm install -g pnpm@10.4.1
+RUN npm install -g pnpm@10.34.5
 
 # Set working directory
 WORKDIR /app
@@ -34,7 +34,7 @@ CMD ["pnpm", "exec", "drizzle-kit", "migrate"]
 FROM node:22-alpine AS production
 
 # Install pnpm
-RUN npm install -g pnpm@10.4.1
+RUN npm install -g pnpm@10.34.5
 
 # Create app user
 RUN addgroup -g 1001 -S nodejs && \

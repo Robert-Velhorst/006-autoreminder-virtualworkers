@@ -101,11 +101,17 @@ reject.
 
 The recovery branch passed the repository quality gate on 30 July 2026:
 secret scan, TypeScript, canonical MySQL migrations, schema parity, 564 tests,
-production build, and migration-drift detection. The two failing Vercel checks
-are obsolete project configurations that still point to removed `Frontend` and
-`Backend` directories; they are not application test failures.
+production build, and migration-drift detection. The previous hosting checks
+were obsolete project configurations pointing to removed `Frontend` and
+`Backend` directories; they were not application test failures.
 
-Those projects must not be repointed to the repository root. The consolidated
-server requires a persistent container runtime for Express, tRPC, scheduled
-work, Redis, and WebSockets. Retire the obsolete Vercel Git integrations only
-after the public container replacement passes the production cutover gate.
+The consolidated server requires a persistent container runtime for Express,
+tRPC, scheduled work, Redis, and WebSockets. Production hosting is moving to
+Hetzner using the repository's Docker deployment configuration.
+
+The Vercel GitHub App was uninstalled on 2026-10-13, removing its access to 43
+GitHub repositories. Five of seven Vercel projects and their deployments were
+also deleted. `promise-app` and `040-5-trello-mcp-connectors-to-chat-gpt-5`
+remain because the signed-in Vercel account lacks visible deletion controls;
+an authorized team owner must complete their removal. The Vercel account was
+not deleted.

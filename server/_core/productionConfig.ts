@@ -34,7 +34,6 @@ export function getProductionConfigurationErrors(env: Environment = process.env)
   if (hasValue(env, "VERCEL")) {
     errors.push("Vercel request-only runtime is unsupported; deploy the unified Docker container");
   }
-
   return errors;
 }
 

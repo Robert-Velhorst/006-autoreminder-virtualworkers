@@ -85,12 +85,15 @@ production writes. If schema rollback is unavoidable, preserve a fresh
 Hetzner backup and reconcile every post-cutover write before serving traffic
 from another database. Do not delete or rewrite migration history.
 
-## Retirement of Previous Hosting
+## Previous Hosting Cleanup
 
-Once the Hetzner endpoint passes the public acceptance and rollback gates,
-retire only the previous hosting resources that belong to this dashboard.
-Keep account-wide settings, unrelated projects, and unrelated deployment
-history unchanged. The repository's old Vercel deployment records and empty
-GitHub deployment environments have been removed; the repository-scoped
-Vercel GitHub App authorization still requires GitHub reauthentication before
-it can be revoked.
+The Vercel GitHub App was uninstalled from Robert Velhorst's GitHub account on
+2026-10-13, removing its access to all 43 repositories. This did not delete
+Vercel projects, deployments, or account data. On 2026-10-13, five of the seven
+projects in the Noodzakelijk Online team were deleted through the Vercel
+dashboard, which also removed their associated deployments. The remaining
+`promise-app` and `040-5-trello-mcp-connectors-to-chat-gpt-5` projects did not
+expose deletion controls to the signed-in account, so they remain and require
+an authorized team owner to remove. This is not evidence that the Vercel
+account or all Vercel resources were deleted. Keep any rollback artifacts until
+the Hetzner public acceptance gate passes.
