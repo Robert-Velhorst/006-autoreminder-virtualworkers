@@ -85,7 +85,7 @@ export async function revokeSession(sessionId: string, expiresAt: Date): Promise
   await database.insert(schema.revokedSessions).values({
     sessionHash: sessionHash(sessionId),
     expiresAt,
-  });
+  }).onDuplicateKeyUpdate({ set: { expiresAt } });
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {
