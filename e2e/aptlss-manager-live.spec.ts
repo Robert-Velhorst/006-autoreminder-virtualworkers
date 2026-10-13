@@ -995,7 +995,9 @@ for (const scenario of [
         managerSchedule.getByText("Suggestions only", { exact: true })
       ).toBeVisible();
       await expect(
-        managerSchedule.getByText("Configured check interval: 5 minutes.", { exact: true })
+        managerSchedule.getByText("Check interval: every 5 minutes.", {
+          exact: true,
+        })
       ).toBeVisible();
       await expect(managerSchedule.getByRole("status")).toHaveText(
         "Automatic checks are not running on this server. Contact your supervisor."
