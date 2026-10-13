@@ -10,7 +10,6 @@ WORKDIR /app
 
 # Copy package files
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY patches ./patches
 
 # Install dependencies
 RUN pnpm install --frozen-lockfile
@@ -45,7 +44,6 @@ WORKDIR /app
 
 # Copy package files
 COPY --chown=nodejs:nodejs package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY --chown=nodejs:nodejs patches ./patches
 
 # Install production dependencies only
 RUN pnpm install --frozen-lockfile --prod
