@@ -1,115 +1,140 @@
-# Virtual Worker Operations Platform
+# VA Dashboard
 
-This repository combines the developer platform with a reusable worker operator while preserving the developer architecture, authentication, RBAC, database lineage, and deployment services. Joyce is the first configured worker profile; her identity, schedule, timezone, evidence, and integrations are profile data rather than application-wide assumptions.
+VA Dashboard is a self-hosted operations workspace for coordinating virtual-worker tasks. It brings task planning, evidence, decisions, reminders, time tracking, and supervised Trello workflows into one application.
 
-## Application Surfaces
+The application has two main surfaces:
 
-| Route | Role | Purpose |
+- **Worker workspace** for a profile-scoped task queue, daily plan, decisions, evidence, reminders, and time tracking.
+- **Operator workspace** for worker and schedule administration, APTLSS assessments, oversight, and platform settings.
+
+| Route | Access | Purpose |
 | --- | --- | --- |
-| `/` | admin | Developer administration dashboard |
-| `/founder` | admin | Founder and worker management |
-| `/aptlss` | admin | APTLSS management |
-| `/settings` | admin | Platform settings |
-| `/calendar` | admin | Calendar |
-| `/advanced-scheduling` | admin | Advanced scheduling |
-| `/atis-phases` | admin | ATIS analysis |
-| `/robert` | admin | Robert oversight |
-| `/command-center` | admin | Priority command center |
-| `/admin` | admin | System monitor |
-| `/worker` | worker | Profile-scoped worker queue |
-| `/worker/plan` | worker | Persisted Plan My Day |
-| `/worker/decisions` | worker | Decision inbox and recorded outcomes |
-| `/worker/evidence` | worker | Evidence and integration state |
+| `/` | Admin | Developer administration dashboard |
+| `/founder` | Admin | Founder and worker management |
+| `/aptlss` | Admin | APTLSS management |
+| `/settings` | Admin | Platform settings |
+| `/calendar` | Admin | Calendar |
+| `/advanced-scheduling` | Admin | Advanced scheduling |
+| `/atis-phases` | Admin | ATIS analysis |
+| `/robert` | Admin | Oversight |
+| `/command-center` | Admin | Priority command center |
+| `/admin` | Admin | System monitor |
+| `/worker` | Worker | Profile-scoped queue and current work |
+| `/worker/plan` | Worker | Daily time blocks |
+| `/worker/decisions` | Worker | Decision inbox and recorded outcomes |
+| `/worker/evidence` | Worker | Evidence and integration state |
 
-The worker experience has one canonical application shell. Historical
-`/worker/operations` bookmarks redirect to `/worker`; the recovered worker
-dashboard source remains preserved in Git history and the Kamal delivery
-archive, but it is not mounted as a second portal.
+This repository is actively developed. A versioned container image and tagged release are produced only by the GitHub Release workflow after its verification gates pass. The project does not currently provide a hosted production service.
 
-## Local Setup
+## Current Status
 
-1. Install Node.js 20 or newer and pnpm 10.4.1.
-2. Copy `.env.example` to `.env` and supply the required database, session, and Trello settings.
-3. Start MySQL and optional Redis with `docker compose up -d mysql redis`.
-4. Apply migrations with `pnpm db:push`.
-5. Run `pnpm dev`.
+- The application uses a persistent Node.js process, MySQL, and optional Redis.
+- Docker Compose is the supported single-host deployment path.
+- Trello, email, Google evidence, and AI-provider integrations require credentials supplied by the operator.
+- External actions such as Trello changes and outbound messages are policy-gated; configure and verify integrations before enabling them.
+- Production readiness depends on deployment-specific configuration and operational checks. A successful build or container publication is not proof of a live production deployment.
 
-The server binds to `127.0.0.1` by default. Set `HOST` explicitly for a deployed environment.
+## Requirements
 
-## Production Deployment
+- Docker Engine and Docker Compose v2 for the complete local stack.
+- Node.js 22 and pnpm 10.4.1 for development outside Docker.
+- MySQL 8.4. Redis is included in the provided Compose stack.
 
-The complete application needs a persistent container runtime with MySQL,
-Redis, HTTPS, and WebSocket support. `docker-compose.yml` applies the canonical
-Drizzle migrations before starting the application and refuses insecure or
-incomplete production configuration.
+## Quick Start: Docker Compose
 
-Vercel's request-only runtime is not a supported deployment target for this
-application. The server performs scheduled work, maintains WebSocket state,
-and serves the frontend and API from one Node process. Do not repoint the old
-`Frontend` or `Backend` Vercel projects at the repository root; deploy the
-provided Docker image to a persistent container host instead.
+1. Clone the repository and enter its directory.
+2. Copy `.env.example` to `.env` and set the required application values. Generate a unique `JWT_SECRET` of at least 32 characters. Do not commit `.env`.
+3. Create `.env.db.local` with the Docker-only settings below. Use unique strong passwords; these are examples of variable names, not values:
 
-For the approved local Docker + ngrok deployment, keep the ignored `.env` for
-application credentials and `.env.db.local` for Docker-only credentials, then
-run:
+   ```dotenv
+   MYSQL_ROOT_PASSWORD=<unique-strong-password>
+   MYSQL_DATABASE=va_dashboard
+   MYSQL_USER=va_dashboard
+   MYSQL_PASSWORD=<different-unique-strong-password>
+   REDIS_PASSWORD=<another-unique-strong-password>
+   MYSQL_PORT=3307
+   ```
+
+4. Start the application and dependencies:
+
+   ```powershell
+   docker compose --env-file .env.db.local up -d --build
+   ```
+
+5. Open `http://127.0.0.1:3025/worker` and verify the health endpoint at `http://127.0.0.1:3025/api/health`.
+
+Compose runs the canonical database migrations before starting the application. The database and Redis ports bind to loopback by default. Do not expose them directly to the public internet.
+
+To stop the local stack while preserving its data:
 
 ```powershell
-pnpm docker:public
+docker compose --env-file .env.db.local down
 ```
 
-The command builds the unified app, starts MySQL, Redis, the application and
-ngrok, discovers the assigned HTTPS URL, injects it back into the backend for
-webhook generation, and verifies both local and public health endpoints. The
-current URL is written to ignored `.local/public-dashboard.json`.
+Do not add `-v` unless you intend to delete the database volumes.
 
-See [docs/PRODUCTION_CUTOVER.md](docs/PRODUCTION_CUTOVER.md) for the required
-secret contract, verification gate, rollback requirements, and the boundary
-for retiring the old Vercel projects.
+## Development
 
-## Authentication
+```powershell
+Copy-Item .env.example .env
+pnpm install --frozen-lockfile
+docker compose --env-file .env.db.local up -d mysql redis
+pnpm db:push
+pnpm dev
+```
 
-Production uses the restored user table, signed sessions, and role checks. Admin and worker routes are independent.
+For the development server, set `DATABASE_URL` in `.env` to the mapped MySQL port (3307 by default, or the value of `MYSQL_PORT`). The server uses its app configuration from `.env`; Compose reads its database and Redis credentials from `.env.db.local`. Keep production credentials out of local development files and never commit environment files.
 
-For loopback development only, `LOCAL_AUTH_BYPASS=true` can select one existing worker account. The server refuses to start when this flag is enabled in production or when `HOST` is not loopback. If more than one worker exists, set `LOCAL_AUTH_BYPASS_OPEN_ID` to the exact worker `openId`.
+The canonical migration lineage continues through `0027_glorious_epoch`. Consolidated migrations are additive and include task assignments/schedules, evidence foundations, schema parity repairs, and worker-scoped operator data. See [the consolidation ledger](docs/CONSOLIDATION_LEDGER.md) for migration ownership and compatibility decisions.
 
-## Operator Data
+Useful checks:
 
-The canonical migration lineage is the developer sequence through `0027_glorious_epoch`. Consolidated migrations are additive:
+```powershell
+pnpm check
+pnpm test
+pnpm build
+pnpm test:e2e
+```
 
-- `0028_add_task_assignment_schedule`
-- `0029_operator_evidence_foundation`
-- `0030_restore_schema_parity`
-- `0031_worker_operator_scope`
+## Deployment
 
-`0029` adds evidence-backed assessments, waiting reasons, decision outcomes, cross-source evidence, communication and compliance evidence, time reconciliation, maintenance run history, and browser-tab evidence. It does not drop or rename developer tables.
+The full application needs a persistent container runtime with HTTPS and WebSocket support. It also runs scheduled work in the application process. Request-only serverless platforms such as the repository's former Vercel deployment are not supported and must not be presented as the production service.
 
-`0030` repairs three schema/migration parity gaps found during the fresh-database rehearsal. It adds the Trello member identifier, backfills generic reply-thread columns while retaining their legacy Joyce-named sources, and creates the unsigned-message table expected by the restored application.
+`Dockerfile` builds the application image. `docker-compose.yml` provides a single-host deployment with MySQL, Redis, migration ordering, a health check, and loopback-only application/database/Redis bindings. For a public single-host demo or testing endpoint, `pnpm docker:public` adds ngrok; that temporary tunnel is not an availability or production guarantee.
 
-`0031` scopes waiting reasons, decision outcomes, browser inventories, browser policies, collector tokens, and daily browser evidence to the authenticated worker. Existing operator rows are backfilled to the matching worker account before the new constraints are enforced.
+See [Production Cutover](docs/PRODUCTION_CUTOVER.md) before deploying. It lists required credentials, data backup and migration steps, integration checks, rollback requirements, and the boundary for retiring the old hosting projects. Configure secrets in the target platform's secret manager; do not put them in source control, image layers, release notes, or issue comments.
 
-Use the transfer utility before importing an operator database:
+The GitHub Release workflow publishes a versioned image to `ghcr.io/robert-velhorst/006-autoreminder-virtualworkers` after a release is published. It does not deploy that image to a live host. An operator must configure the runtime, persistent storage, secrets, networking, and backups separately.
+
+## Authentication and Access
+
+Production authentication uses registered accounts and role-based access controls. `LOCAL_AUTH_BYPASS` is for loopback development only; the server refuses that mode in production or on a non-loopback host. Do not expose the dashboard publicly until authentication, account recovery, role boundaries, HTTPS, and integration scopes have been reviewed for the target deployment.
+
+## Integrations and Data
+
+The application stores operational data in MySQL. Redis is used for shared cache and realtime coordination when configured. Trello and other providers require separately provisioned credentials. Follow least privilege when creating provider accounts and tokens, and rotate any credential that has entered source control or an untrusted log.
+
+The operator transfer tools and data ownership rules are described in the [consolidation ledger](docs/CONSOLIDATION_LEDGER.md). The tools are designed to avoid guessing worker or founder identities. Back up both source and target databases before importing data.
+
+Before importing, export and inspect the source data. Supply explicit, existing target worker and founder IDs; the utility does not infer identity mappings:
 
 ```powershell
 node scripts/operator-data-transfer.mjs export --out .local/operator-export.json
-node scripts/operator-data-transfer.mjs import --in .local/operator-export.json --target $env:TARGET_DATABASE_URL --worker-id 42 --founder-id 1
+node scripts/operator-data-transfer.mjs import --in .local/operator-export.json --target $env:TARGET_DATABASE_URL --worker-id $env:WORKER_ID --founder-id $env:FOUNDER_ID
 node scripts/operator-data-transfer.mjs reconcile --in .local/operator-export.json --target $env:TARGET_DATABASE_URL
 ```
 
-The utility never prints connection strings and produces row-count, identity-map, and conflict reports. It imports compatible APTLSS, daily-plan, compliance, time, and operator history, but deliberately excludes `users`, VA identity, founder identity, authentication, scheduling, ATIS, and ARES records because the developer database remains authoritative for those domains. `--worker-id` and `--founder-id` must reference existing target identities; legacy rows are never attached by guessing.
+## Security
 
-## External Actions
+Please do not report vulnerabilities in public issues. See [SECURITY.md](SECURITY.md) for supported-version and private-reporting guidance. Secret scanning, push protection, dependency alerts, automated security updates, code scanning, and protected `main` checks are enabled or configured at the repository level; verify their current state in GitHub before relying on them.
 
-Trello comments, card moves, outbound messages, and similar external effects remain explicit and policy-gated. Recording a decision outcome or waiting reason only updates local platform data. The browser collector uses a dedicated bearer token and stores sanitized URLs without query strings or fragments.
+## Project Documentation
 
-## Verification
+- [Production cutover and operations](docs/PRODUCTION_CUTOVER.md)
+- [Consolidation ledger and data ownership](docs/CONSOLIDATION_LEDGER.md)
+- [Branch consolidation history](docs/BRANCH_CONSOLIDATION.md)
+- [Environment variable template](.env.example)
 
-```powershell
-npx.cmd pnpm@10.4.1 check
-npx.cmd pnpm@10.4.1 test
-npx.cmd pnpm@10.4.1 build
-npx.cmd pnpm@10.4.1 test:e2e
-```
+## License
 
-See [docs/CONSOLIDATION_LEDGER.md](docs/CONSOLIDATION_LEDGER.md) for source ownership and compatibility decisions.
-See [docs/BRANCH_CONSOLIDATION.md](docs/BRANCH_CONSOLIDATION.md) for the
-preserved Kamal delivery, branch dispositions, and main cutover rules.
+MIT. See [LICENSE](LICENSE).
