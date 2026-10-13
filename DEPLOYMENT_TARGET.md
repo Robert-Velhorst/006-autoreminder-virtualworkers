@@ -1,0 +1,5 @@
+# Deployment target
+
+Hetzner is this repository's intended production deployment target. Owner direction is that Vercel and ngrok are no longer used as deployment providers. Do not add new production deployments that rely on either service. Treat any remaining configuration or documentation references as legacy until checked against live services; preserve local development or test tooling only when still needed.
+
+This directive does not claim that a Hetzner migration or production cutover has already happened. Before cutover, document the target architecture and operational runbook, including application and database/data migration, secrets, network access, DNS/TLS, monitoring, backups and a tested restore path, security controls, and rollback. Verify the running service and acceptance evidence before declaring migration complete. Keep credentials and private data out of this file.
