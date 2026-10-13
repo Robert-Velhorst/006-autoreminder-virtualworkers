@@ -76,7 +76,7 @@ export function getProductionConfigurationErrors(env: Environment = process.env)
   if (env.LOCAL_AUTH_BYPASS === "true") {
     errors.push("LOCAL_AUTH_BYPASS cannot be enabled in production");
   }
-  if (hasValue(env, "VERCEL")) {
+  if (env.VERCEL?.trim()) {
     errors.push("Vercel request-only runtime is unsupported; deploy the unified Docker container");
   }
   return errors;
