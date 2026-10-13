@@ -436,8 +436,28 @@ function CardInspector({
   onRefresh: () => Promise<void>;
   refreshing: boolean;
 }) {
+  const utils = trpc.useUtils();
   const [preferredWidth, setPreferredWidth] = useState(INSPECTOR_DEFAULT_WIDTH);
   const [viewportWidth, setViewportWidth] = useState(() => typeof window === "undefined" ? 1_280 : window.innerWidth);
+  const [rawEvidenceOpen, setRawEvidenceOpen] = useState(false);
+  const [assertion, setAssertion] = useState("");
+  const cardEvidence = trpc.operator.getCardEvidence.useQuery(
+    { cardId: card?.cardId ?? "", limit: 30 },
+    { enabled: Boolean(card), staleTime: 60_000 },
+  );
+  const verification = trpc.operator.getVerificationFollowups.useQuery(
+    card ? { cardId: card.cardId } : undefined,
+    { enabled: Boolean(card), staleTime: 30_000 },
+  );
+  const recordAssertion = trpc.operator.recordEvidenceAssertion.useMutation({
+    onSuccess: () => {
+      setAssertion("");
+      void utils.operator.getCardEvidence.invalidate();
+      void utils.operator.getWorkQueueContext.invalidate();
+      toast.success("Evidence note recorded for verification");
+    },
+    onError: (error) => toast.error(error.message),
+  });
   const resizeState = useRef<{ startX: number; startWidth: number; nextWidth: number } | null>(null);
 
   useEffect(() => {
@@ -659,6 +679,26 @@ function CardInspector({
                 )}
               </section>
 
+              <section>
+                <div className="flex items-center justify-between gap-3">
+                  <InspectorLabel>Verification follow-ups</InspectorLabel>
+                  <Badge variant="outline">{verification.data?.length ?? 0} open</Badge>
+                </div>
+                {verification.data?.length ? <div className="mt-2 space-y-2">{verification.data.map((followup) => <div key={followup.id} className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3"><p className="text-sm font-medium">{followup.title}</p><p className="mt-1 text-sm text-muted-foreground">{followup.question}</p></div>)}</div> : <p className="mt-2 text-sm text-muted-foreground">No conflicting evidence needs a worker response.</p>}
+              </section>
+
+              <section>
+                <Collapsible open={rawEvidenceOpen} onOpenChange={setRawEvidenceOpen}>
+                  <CollapsibleTrigger className="flex w-full items-center justify-between rounded-md border p-3 text-left hover:bg-accent/30">
+                    <span><span className="block text-sm font-semibold">Raw linked evidence</span><span className="block text-xs text-muted-foreground">Exact retained detail, shown only when needed.</span></span>{rawEvidenceOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="space-y-3 border-x border-b p-3">
+                    {cardEvidence.isLoading ? <QueueSkeleton /> : cardEvidence.data?.length ? cardEvidence.data.map((item) => <div key={item.id} className="rounded-md border p-3"><div className="flex items-start justify-between gap-3"><span className="text-sm font-medium">{item.title}</span><Badge variant="outline">{item.source}</Badge></div>{item.summary && <p className="mt-2 text-sm text-muted-foreground">{item.summary}</p>}{item.content && <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-muted/40 p-3 text-xs leading-relaxed">{item.content}</pre>}{item.sourceUrl && <a className="mt-2 inline-flex items-center gap-1 text-xs text-blue-600 hover:underline dark:text-blue-300" href={item.sourceUrl} target="_blank" rel="noreferrer">Open source <ExternalLink className="size-3" /></a>}</div>) : <p className="text-sm text-muted-foreground">No graph-linked evidence has been retained for this card yet.</p>}
+                    <div className="border-t pt-3"><Label htmlFor="evidence-assertion">Add a worker evidence note</Label><Textarea id="evidence-assertion" className="mt-2 min-h-24" value={assertion} onChange={(event) => setAssertion(event.target.value)} placeholder="Record what happened, including the exact source or reason. This does not change Trello." /><Button className="mt-2" size="sm" variant="outline" disabled={assertion.trim().length < 3 || recordAssertion.isPending} onClick={() => card && recordAssertion.mutate({ cardId: card.cardId, title: `Worker update: ${card.cardName}`, detail: assertion })}>{recordAssertion.isPending ? <Loader2 className="size-4 animate-spin" /> : <FileCheck2 className="size-4" />}Record evidence note</Button></div>
+                  </CollapsibleContent>
+                </Collapsible>
+              </section>
+
               {evidenceSummary.forecast && (
                 <section>
                   <InspectorLabel>Remaining-time range</InspectorLabel>
@@ -702,6 +742,20 @@ function PlanView({ founderName, timeZone }: { founderName: string; timeZone: st
     onSuccess: () => { void utils.operator.getDailyPlan.invalidate(); toast.success("Day plan generated"); },
     onError: (error) => toast.error(error.message),
   });
+  const replan = trpc.operator.replanRemainingDay.useMutation({
+    onSuccess: () => {
+      void utils.operator.getDailyPlan.invalidate();
+      toast.success("Remaining day replanned");
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const updatePlan = trpc.operator.updateDailyPlan.useMutation({
+    onSuccess: () => {
+      void utils.operator.getDailyPlan.invalidate();
+      toast.success("Plan block updated");
+    },
+    onError: (error) => toast.error(error.message),
+  });
   const [elapsed, setElapsed] = useState(0);
   const run = (force: boolean) => {
     setElapsed(0);
@@ -711,9 +765,19 @@ function PlanView({ founderName, timeZone }: { founderName: string; timeZone: st
   const plan = query.data?.schedule;
   const progress = mutation.isPending ? Math.min(92, 15 + elapsed * 8) : 0;
   const stage = elapsed < 2 ? "Loading APTLSS state" : elapsed < 5 ? "Protecting breaks and ranking lanes" : "Validating and saving blocks";
+  const updateBlockStatus = (blockId: string, status: "done" | "skipped") => {
+    if (!plan) return;
+    const at = new Date().toISOString();
+    updatePlan.mutate({
+      ...plan,
+      generatedAt: at,
+      blocks: plan.blocks.map((block) => block.id === blockId ? { ...block, status } : block),
+      auditTrail: [...plan.auditTrail, { at, action: `block_${status}`, detail: `Worker marked ${blockId} as ${status}.` }],
+    });
+  };
   return (
     <div className="space-y-5">
-      <PageHeading title="Plan My Day" description="One agenda. Detail remains available inside each block instead of separate duplicate views." actions={<Button onClick={() => run(Boolean(plan))} disabled={mutation.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{plan ? "Regenerate plan" : "Generate plan"}</Button>} />
+      <PageHeading title="Plan My Day" description="One agenda. Detail remains available inside each block instead of separate duplicate views." actions={<div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => replan.mutate()} disabled={!plan || replan.isPending || mutation.isPending}>{replan.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}Replan remaining</Button><Button onClick={() => run(Boolean(plan))} disabled={mutation.isPending || replan.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{plan ? "Regenerate plan" : "Generate plan"}</Button></div>} />
       {mutation.isPending && <Card className="gap-3 rounded-lg p-5"><div className="flex justify-between text-sm"><span className="font-medium">{stage}</span><span className="text-muted-foreground">about {Math.max(1, 12 - elapsed)}s left</span></div><Progress value={progress} /><p className="text-xs text-muted-foreground">{progress}% complete · live estimate adjusts as validation runs</p></Card>}
       {query.isLoading ? <QueueSkeleton /> : !plan ? <Alert><Inbox className="size-4" /><AlertTitle>No saved plan</AlertTitle><AlertDescription>Generate from the current APTLSS plans, states, priorities, and configured schedule.</AlertDescription></Alert> : (
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
@@ -724,7 +788,7 @@ function PlanView({ founderName, timeZone }: { founderName: string; timeZone: st
                 <div key={block.id} className="grid gap-3 border-b p-4 last:border-b-0 sm:grid-cols-[72px_minmax(0,1fr)_auto]">
                   <div className="text-sm font-medium">{block.startTime}<div className="text-xs font-normal text-muted-foreground">{block.endTime}</div></div>
                   <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-medium">{block.cardName}</span><Badge variant="outline" className={priorityTone(block.priority)}>{block.priority}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{block.action}</p></div>
-                  <Badge variant="outline">{block.status}</Badge>
+                  <div className="flex items-center gap-2"><Badge variant="outline">{block.status}</Badge>{block.status === "planned" && <><Button variant="ghost" size="icon" title="Mark block done" aria-label="Mark block done" disabled={updatePlan.isPending} onClick={() => updateBlockStatus(block.id, "done")}><Check className="size-4" /></Button><Button variant="ghost" size="icon" title="Skip block" aria-label="Skip block" disabled={updatePlan.isPending} onClick={() => updateBlockStatus(block.id, "skipped")}><ChevronRight className="size-4" /></Button></>}</div>
                 </div>
               )) : <div className="p-6 text-sm text-muted-foreground">No work blocks are scheduled for this protected day.</div>}
             </CardContent>

@@ -2130,6 +2130,99 @@ export const workspaceEvidenceLinks = mysqlTable("workspace_evidence_links", {
   index("workspace_evidence_card_relevance_idx").on(table.cardId, table.relevanceScore),
 ]);
 
+// The graph is additive: workspaceEvidenceItems remains the canonical retained source record.
+export const aptlssEvidenceRevisions = mysqlTable("aptlss_evidence_revisions", {
+  id: int("id").autoincrement().primaryKey(),
+  evidenceId: int("evidenceId").notNull(),
+  contentHash: varchar("contentHash", { length: 64 }).notNull(),
+  truthClass: mysqlEnum("truthClass", ["source_record", "worker_assertion", "system_inference"]).notNull(),
+  summary: text("summary"),
+  content: text("content"),
+  metadataJson: text("metadataJson"),
+  observedAt: timestamp("observedAt").notNull(),
+  recordedBy: varchar("recordedBy", { length: 128 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  foreignKey({
+    columns: [table.evidenceId],
+    foreignColumns: [workspaceEvidenceItems.id],
+    name: "aptlss_evidence_revision_item_fk",
+  }).onDelete("cascade").onUpdate("cascade"),
+  uniqueIndex("aptlss_evidence_revision_hash_unique").on(table.evidenceId, table.contentHash),
+  index("aptlss_evidence_revision_observed_idx").on(table.evidenceId, table.observedAt),
+]);
+
+export const aptlssEvidenceSubjectLinks = mysqlTable("aptlss_evidence_subject_links", {
+  id: int("id").autoincrement().primaryKey(),
+  evidenceId: int("evidenceId").notNull(),
+  vaId: int("vaId").notNull(),
+  subjectType: mysqlEnum("subjectType", ["card", "worker", "decision", "plan_block"]).notNull(),
+  subjectId: varchar("subjectId", { length: 256 }).notNull(),
+  relevanceScore: int("relevanceScore").notNull(),
+  linkMethod: mysqlEnum("linkMethod", ["automatic", "manual", "confirmed"]).notNull().default("automatic"),
+  matchReason: varchar("matchReason", { length: 512 }).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  foreignKey({
+    columns: [table.evidenceId],
+    foreignColumns: [workspaceEvidenceItems.id],
+    name: "aptlss_evidence_subject_item_fk",
+  }).onDelete("cascade").onUpdate("cascade"),
+  uniqueIndex("aptlss_evidence_subject_unique").on(table.evidenceId, table.vaId, table.subjectType, table.subjectId),
+  index("aptlss_evidence_subject_lookup_idx").on(table.vaId, table.subjectType, table.subjectId, table.relevanceScore),
+]);
+
+export const aptlssEvidenceConflicts = mysqlTable("aptlss_evidence_conflicts", {
+  id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId").notNull(),
+  sourceEvidenceId: int("sourceEvidenceId").notNull(),
+  assertedEvidenceId: int("assertedEvidenceId").notNull(),
+  status: mysqlEnum("status", ["needs_verification", "consistent", "resolved", "dismissed"]).notNull().default("needs_verification"),
+  resolution: text("resolution"),
+  resolvedBy: varchar("resolvedBy", { length: 128 }),
+  resolvedAt: timestamp("resolvedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  foreignKey({
+    columns: [table.sourceEvidenceId],
+    foreignColumns: [workspaceEvidenceItems.id],
+    name: "aptlss_evidence_conflict_source_fk",
+  }).onDelete("cascade").onUpdate("cascade"),
+  foreignKey({
+    columns: [table.assertedEvidenceId],
+    foreignColumns: [workspaceEvidenceItems.id],
+    name: "aptlss_evidence_conflict_asserted_fk",
+  }).onDelete("cascade").onUpdate("cascade"),
+  uniqueIndex("aptlss_evidence_conflict_pair_unique").on(table.sourceEvidenceId, table.assertedEvidenceId),
+  index("aptlss_evidence_conflict_va_status_idx").on(table.vaId, table.status, table.createdAt),
+]);
+
+export const aptlssVerificationFollowups = mysqlTable("aptlss_verification_followups", {
+  id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId").notNull(),
+  cardId: varchar("cardId", { length: 64 }),
+  conflictId: int("conflictId"),
+  title: varchar("title", { length: 512 }).notNull(),
+  question: text("question").notNull(),
+  status: mysqlEnum("status", ["open", "resolved", "superseded"]).notNull().default("open"),
+  dueAt: timestamp("dueAt"),
+  resolution: text("resolution"),
+  resolvedBy: varchar("resolvedBy", { length: 128 }),
+  resolvedAt: timestamp("resolvedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  foreignKey({
+    columns: [table.conflictId],
+    foreignColumns: [aptlssEvidenceConflicts.id],
+    name: "aptlss_verification_followup_conflict_fk",
+  }).onDelete("set null").onUpdate("cascade"),
+  index("aptlss_verification_followup_va_status_idx").on(table.vaId, table.status, table.dueAt),
+  index("aptlss_verification_followup_card_idx").on(table.cardId, table.status),
+]);
+
 export const communicationEvidence = mysqlTable("communication_evidence", {
   id: int("id").autoincrement().primaryKey(),
   channel: varchar("channel", { length: 64 }).notNull(),
@@ -2376,6 +2469,14 @@ export type WorkspaceEvidenceItem = typeof workspaceEvidenceItems.$inferSelect;
 export type InsertWorkspaceEvidenceItem = typeof workspaceEvidenceItems.$inferInsert;
 export type WorkspaceEvidenceLink = typeof workspaceEvidenceLinks.$inferSelect;
 export type InsertWorkspaceEvidenceLink = typeof workspaceEvidenceLinks.$inferInsert;
+export type AptlssEvidenceRevision = typeof aptlssEvidenceRevisions.$inferSelect;
+export type InsertAptlssEvidenceRevision = typeof aptlssEvidenceRevisions.$inferInsert;
+export type AptlssEvidenceSubjectLink = typeof aptlssEvidenceSubjectLinks.$inferSelect;
+export type InsertAptlssEvidenceSubjectLink = typeof aptlssEvidenceSubjectLinks.$inferInsert;
+export type AptlssEvidenceConflict = typeof aptlssEvidenceConflicts.$inferSelect;
+export type InsertAptlssEvidenceConflict = typeof aptlssEvidenceConflicts.$inferInsert;
+export type AptlssVerificationFollowup = typeof aptlssVerificationFollowups.$inferSelect;
+export type InsertAptlssVerificationFollowup = typeof aptlssVerificationFollowups.$inferInsert;
 export type CommunicationEvidence = typeof communicationEvidence.$inferSelect;
 export type InsertCommunicationEvidence = typeof communicationEvidence.$inferInsert;
 export type ComplianceCardEvidence = typeof complianceCardEvidence.$inferSelect;

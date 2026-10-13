@@ -126,6 +126,82 @@ function buildAvailableWindows(schedule: ScheduleSettings) {
   return { windows, breaks, availableMinutes: windows.reduce((total, item) => total + item.end - item.start, 0) };
 }
 
+export function validateOperatorPlanBlocks({
+  blocks,
+  schedule,
+}: {
+  blocks: OperatorPlanBlock[];
+  schedule: ScheduleSettings;
+}) {
+  const sorted = [...blocks].sort((left, right) => toMinutes(left.startTime) - toMinutes(right.startTime));
+  const { windows, availableMinutes } = buildAvailableWindows(schedule);
+  let scheduledMinutes = 0;
+  for (const block of sorted) {
+    const start = toMinutes(block.startTime);
+    const end = toMinutes(block.endTime);
+    if (end <= start || !windows.some((window) => start >= window.start && end <= window.end)) {
+      throw new Error("Daily plan blocks must fit within configured working windows");
+    }
+    scheduledMinutes += end - start;
+  }
+  for (let index = 1; index < sorted.length; index += 1) {
+    if (toMinutes(sorted[index].startTime) < toMinutes(sorted[index - 1].endTime)) {
+      throw new Error("Daily plan blocks cannot overlap");
+    }
+  }
+  if (scheduledMinutes > availableMinutes) {
+    throw new Error("Daily plan exceeds available working minutes");
+  }
+}
+
+export function replanFutureBlocks({
+  blocks,
+  schedule,
+  nowTime,
+}: {
+  blocks: OperatorPlanBlock[];
+  schedule: ScheduleSettings;
+  nowTime: string;
+}) {
+  const now = toMinutes(nowTime);
+  const future = blocks
+    .filter((block) => block.status === "planned" && toMinutes(block.startTime) >= now)
+    .sort((left, right) => toMinutes(left.startTime) - toMinutes(right.startTime));
+  const preserved = blocks.filter((block) => !future.includes(block));
+  const { windows } = buildAvailableWindows(schedule);
+  const protectedEnd = preserved.reduce((latest, block) => {
+    const end = toMinutes(block.endTime);
+    return end > now ? Math.max(latest, end) : latest;
+  }, now);
+
+  const replanned: OperatorPlanBlock[] = [];
+  const unscheduled: OperatorPlanBlock[] = [];
+  let cursor = protectedEnd;
+  let windowIndex = 0;
+
+  for (const original of future) {
+    const duration = Math.max(15, toMinutes(original.endTime) - toMinutes(original.startTime));
+    while (windows[windowIndex] && cursor >= windows[windowIndex].end) windowIndex += 1;
+    if (windows[windowIndex] && cursor < windows[windowIndex].start) cursor = windows[windowIndex].start;
+    while (windows[windowIndex] && cursor + duration > windows[windowIndex].end) {
+      windowIndex += 1;
+      if (windows[windowIndex]) cursor = Math.max(cursor, windows[windowIndex].start);
+    }
+    if (!windows[windowIndex] || cursor + duration > windows[windowIndex].end) {
+      unscheduled.push(original);
+      continue;
+    }
+    const next = { ...original, startTime: toTime(cursor), endTime: toTime(cursor + duration) };
+    replanned.push(next);
+    cursor += duration;
+  }
+
+  return {
+    blocks: [...preserved, ...replanned].sort((left, right) => toMinutes(left.startTime) - toMinutes(right.startTime)),
+    unscheduled,
+  };
+}
+
 function parsePlan(planJson: string) {
   try {
     return JSON.parse(planJson) as {
@@ -347,11 +423,76 @@ async function persistOperatorPlan(vaId: number, payload: OperatorDailyPlanPaylo
 
 export async function updateOperatorDailyPlan(vaId: number, payload: OperatorDailyPlanPayload) {
   if (payload.version !== 2) throw new Error("Unsupported plan version");
-  const sorted = [...payload.blocks].sort((left, right) => toMinutes(left.startTime) - toMinutes(right.startTime));
-  for (let index = 1; index < sorted.length; index += 1) {
-    if (toMinutes(sorted[index].startTime) < toMinutes(sorted[index - 1].endTime)) {
-      throw new Error("Daily plan blocks cannot overlap");
-    }
-  }
+  validateOperatorPlanBlocks({ blocks: payload.blocks, schedule: payload.constraints });
+  return persistOperatorPlan(vaId, payload);
+}
+
+function timeInTimeZone(date: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const hour = parts.find((part) => part.type === "hour")?.value ?? "00";
+  const minute = parts.find((part) => part.type === "minute")?.value ?? "00";
+  return `${hour}:${minute}`;
+}
+
+export async function replanOperatorRemainingDay({
+  vaId,
+  dateKey,
+  completedBlockIds = [],
+  activeBlockId,
+  now = new Date(),
+  worker,
+}: {
+  vaId: number;
+  dateKey?: string;
+  completedBlockIds?: string[];
+  activeBlockId?: string;
+  now?: Date;
+  worker?: WorkerOperatorContext;
+}) {
+  const existing = await getOperatorDailyPlan(vaId, dateKey, worker);
+  if (!existing) throw new Error("No saved plan to replan");
+  const completed = new Set(completedBlockIds);
+  const blocks = existing.schedule.blocks.map((block) => {
+    if (completed.has(block.id)) return { ...block, status: "done" as const };
+    if (activeBlockId === block.id) return { ...block, status: "active" as const };
+    return block;
+  });
+  const nowTime = timeInTimeZone(now, worker?.timezone ?? "UTC");
+  const result = replanFutureBlocks({ blocks, schedule: existing.schedule.constraints, nowTime });
+  const unscheduledCards = [
+    ...existing.schedule.unscheduledCards,
+    ...result.unscheduled.map((block) => ({
+      cardId: block.cardId ?? block.id,
+      cardName: block.cardName,
+      reason: "No remaining protected work window can fit this block.",
+    })),
+  ];
+  const scheduledMinutes = result.blocks
+    .filter((block) => block.status !== "skipped")
+    .reduce((total, block) => total + toMinutes(block.endTime) - toMinutes(block.startTime), 0);
+  const payload: OperatorDailyPlanPayload = {
+    ...existing.schedule,
+    generatedAt: now.toISOString(),
+    blocks: result.blocks,
+    unscheduledCards,
+    planHealth: {
+      ...existing.schedule.planHealth,
+      scheduledMinutes,
+      gaps: Math.max(0, existing.schedule.planHealth.availableMinutes - scheduledMinutes),
+    },
+    auditTrail: [
+      ...existing.schedule.auditTrail,
+      {
+        at: now.toISOString(),
+        action: "replanned_remaining_day",
+        detail: `${result.blocks.filter((block) => block.status === "planned").length} future blocks retained; ${result.unscheduled.length} moved to unscheduled.`,
+      },
+    ],
+  };
   return persistOperatorPlan(vaId, payload);
 }
