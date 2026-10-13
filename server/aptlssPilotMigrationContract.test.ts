@@ -37,7 +37,7 @@ describe("APTLSS pilot additive migration contract", () => {
   });
 
   it("retains the consolidation and appends only the reviewed additive migrations", () => {
-    expect(journal.entries).toHaveLength(54);
+    expect(journal.entries).toHaveLength(55);
     expect(journal.entries[45]).toMatchObject({
       idx: 45, tag: "0045_aptlss_pilot_consolidation", version: "5", breakpoints: true,
     });
@@ -54,11 +54,13 @@ describe("APTLSS pilot additive migration contract", () => {
       [51, "0051_browser_collector_ordering"],
       [52, "0052_manager_completion_reports"],
       [53, "0053_manager_history_checks"],
+      [54, "0054_revoked_sessions"],
     ]);
     expect(migrations[50]?.hash).toBe(hash(read("drizzle/0050_founder_decision_disposition.sql")));
     expect(migrations[51]?.hash).toBe(hash(read("drizzle/0051_browser_collector_ordering.sql")));
     expect(migrations[52]?.hash).toBe(hash(read("drizzle/0052_manager_completion_reports.sql")));
     expect(migrations[53]?.hash).toBe(hash(read("drizzle/0053_manager_history_checks.sql")));
+    expect(migrations[54]?.hash).toBe(hash(read("drizzle/0054_revoked_sessions.sql")));
   });
 
   it("preserves all 117 main table definitions and adds only additive source tables", async () => {
@@ -73,7 +75,7 @@ describe("APTLSS pilot additive migration contract", () => {
       }
       expect(hash(JSON.stringify(table)), name).toBe(expected);
     }
-    expect(Object.keys(current.tables).filter(name => !(name in baseline.tables)).sort()).toEqual([...names, "founder_decision_deadlines"].sort());
+    expect(Object.keys(current.tables).filter(name => !(name in baseline.tables)).sort()).toEqual([...names, "founder_decision_deadlines", "revoked_sessions"].sort());
     for (const name of ["aptlss_manager_state", "aptlss_manager_runs"]) {
       expect(current.tables[name]?.columns.mode).toMatchObject({
         type: "enum('shadow','active')", notNull: true, default: "'shadow'",
@@ -95,6 +97,7 @@ describe("APTLSS pilot additive migration contract", () => {
     const latest = JSON.parse(read("drizzle/meta/0051_snapshot.json"));
     const completion = JSON.parse(read("drizzle/meta/0052_snapshot.json"));
     const history = JSON.parse(read("drizzle/meta/0053_snapshot.json"));
+    const sessions = JSON.parse(read("drizzle/meta/0054_snapshot.json"));
     expect(review.prevId).toBe(snapshot.id);
     expect(queue.prevId).toBe(review.id);
     expect(update.prevId).toBe(queue.id);
@@ -103,8 +106,13 @@ describe("APTLSS pilot additive migration contract", () => {
     expect(latest.prevId).toBe(disposition.id);
     expect(completion.prevId).toBe(latest.id);
     expect(history.prevId).toBe(completion.id);
-    expect(history.tables).toEqual(current.tables);
-    expect(history.views).toEqual(current.views);
+    expect(sessions.prevId).toBe(history.id);
+    expect(sessions.tables).toEqual(current.tables);
+    expect(sessions.views).toEqual(current.views);
+    const beforeSessionRevocation = structuredClone(sessions.tables);
+    delete beforeSessionRevocation.revoked_sessions;
+    expect(beforeSessionRevocation).toEqual(history.tables);
+    expect(sessions.views).toEqual(history.views);
     const beforeHistoryChecks = structuredClone(history.tables);
     delete beforeHistoryChecks.aptlss_manager_checks;
     delete beforeHistoryChecks.aptlss_manager_state.columns.currentCheckId;

@@ -21,28 +21,28 @@ const escape = (value: string) => "`" + value.replace(/`/g, "``") + "`";
 const freshName = "recovery_test";
 
 describe("manager history additive migration metadata", () => {
-  const previous = JSON.parse(read("drizzle/meta/0052_snapshot.json"));
-  const snapshot = JSON.parse(read("drizzle/meta/0053_snapshot.json"));
+  const previous = JSON.parse(read("drizzle/meta/0053_snapshot.json"));
+  const snapshot = JSON.parse(read("drizzle/meta/0054_snapshot.json"));
   const journal = JSON.parse(read("drizzle/meta/_journal.json"));
 
-  it("appends migration 0053 as the 54th canonical identity", () => {
-    expect(journal.entries).toHaveLength(54);
+  it("appends migration 0054 as the 55th canonical identity", () => {
+    expect(journal.entries).toHaveLength(55);
     expect(journal.entries.map((entry: { idx: number }) => entry.idx)).toEqual(
-      Array.from({ length: 54 }, (_, idx) => idx)
+      Array.from({ length: 55 }, (_, idx) => idx)
     );
     expect(journal.entries.at(-1)).toMatchObject({
-      idx: 53, version: "5", tag: "0053_manager_history_checks", breakpoints: true,
+      idx: 54, version: "5", tag: "0054_revoked_sessions", breakpoints: true,
     });
     expect(journal.entries.at(-1).when).toBeGreaterThan(journal.entries.at(-2).when);
     const migrations = readMigrationFiles({ migrationsFolder: path.join(root, "drizzle") });
-    expect(migrations).toHaveLength(54);
+    expect(migrations).toHaveLength(55);
     expect(migrations.at(-1)).toMatchObject({
-      hash: hash(read("drizzle/0053_manager_history_checks.sql")),
+      hash: hash(read("drizzle/0054_revoked_sessions.sql")),
       folderMillis: journal.entries.at(-1).when,
     });
   });
 
-  it("matches the generated schema and retains every full legacy run definition", async () => {
+  it("matches the generated schema and links the session migration snapshot", async () => {
     const current = await generateMySQLDrizzleJson(schema);
     expect(snapshot).toMatchObject({ version: "5", dialect: "mysql", prevId: previous.id });
     expect(snapshot.id).toMatch(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
@@ -50,9 +50,7 @@ describe("manager history additive migration metadata", () => {
     expect(snapshot.tables).toEqual(current.tables);
     expect(snapshot.views).toEqual(current.views);
     const retained = structuredClone(snapshot.tables);
-    delete retained.aptlss_manager_checks;
-    delete retained.aptlss_manager_state.columns.currentCheckId;
-    delete retained.aptlss_manager_state.columns.historyScopeHash;
+    delete retained.revoked_sessions;
     expect(retained).toEqual(previous.tables);
     expect(snapshot.views).toEqual(previous.views);
   }, 30000);
@@ -88,6 +86,15 @@ describe("manager history additive migration metadata", () => {
         columnsFrom: ["runId"], columnsTo: ["id"], onDelete: "no action", onUpdate: "no action",
       },
     });
+  });
+
+  it("adds only the revocation table without destructive DDL", () => {
+    const sql = read("drizzle/0054_revoked_sessions.sql");
+    expect(sql).toMatch(/^CREATE TABLE IF NOT EXISTS `revoked_sessions`/);
+    expect(sql).toContain("`sessionHash` varchar(64) NOT NULL");
+    expect(sql).toContain("`expiresAt` timestamp NOT NULL");
+    expect(sql).toContain("INDEX `revoked_sessions_expires_at_idx` (`expiresAt`)");
+    expect(sql).not.toMatch(/\b(?:DROP|TRUNCATE|RENAME|DELETE|UPDATE|FOREIGN_KEY_CHECKS)\b/i);
   });
 
   it("uses only guarded additive DDL without migrating or deleting history", () => {
@@ -126,7 +133,7 @@ describe.skipIf(!enabled)(
     let fresh: Connection;
     let rehearsalFailed = false;
     const fullSize = Boolean(process.env.APTLSS_REHEARSAL_SOURCE_MANIFEST);
-    const snapshot = JSON.parse(read("drizzle/meta/0053_snapshot.json"));
+    const snapshot = JSON.parse(read("drizzle/meta/0054_snapshot.json"));
     const baseline = JSON.parse(
       read("drizzle/contracts/0045-canonical-baseline.json")
     );
@@ -219,7 +226,7 @@ describe.skipIf(!enabled)(
         : text;
     };
 
-    it("retains every captured applied identity and appends only unapplied canonical migrations through 0053", async () => {
+    it("retains every captured applied identity and appends only unapplied canonical migrations through 0054", async () => {
       const original = readRehearsalMigrationLedger(
         root,
         process.env.APTLSS_REHEARSAL_SOURCE_MANIFEST
@@ -252,10 +259,10 @@ describe.skipIf(!enabled)(
       ]);
     });
 
-    it("applies all 54 canonical migrations through 0053 from empty with no foreign lineage", async () => {
-      expect(journal.entries).toHaveLength(54);
+    it("applies all 55 canonical migrations through 0054 from empty with no foreign lineage", async () => {
+      expect(journal.entries).toHaveLength(55);
       expect(journal.entries.at(-1).tag).toBe(
-        "0053_manager_history_checks"
+        "0054_revoked_sessions"
       );
       const ledger = await rows(
         fresh,
