@@ -474,6 +474,11 @@ export async function postCardComment(
   apiKey: string,
   apiToken: string
 ): Promise<{ id: string; date: string }> {
+  // Keep every service-backed Trello comment behind the same outbound kill switch.
+  if (process.env.NOTIFICATIONS_ENABLED !== "true") {
+    throw new Error("Outbound Trello comments are disabled");
+  }
+
   const response = await axios.post(
     `${TRELLO_API_BASE}/cards/${cardId}/actions/comments`,
     null,

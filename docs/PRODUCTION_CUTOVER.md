@@ -73,7 +73,9 @@ an OpenAI API key as an equivalent subscription credential.
 ## Optional Integrations
 
 - `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, and
-  `NOTIFICATIONS_ENABLED=true` enable outbound email notifications.
+  `NOTIFICATIONS_ENABLED=true` enable outbound email and automated Trello
+  comments. Keep this `false` (the default) until those outbound actions have
+  been explicitly approved and verified.
 - `TRELLO_WEBHOOK_CALLBACK_URL` and `TRELLO_WEBHOOK_SECRET` enable verified
   Trello push updates after a public HTTPS domain exists.
 - `SCHEDULED_TASK_SECRET` protects explicitly exposed scheduled-task routes.
