@@ -19,6 +19,11 @@ migration-capable image tagged with the same release plus `-migrate`. Pin both
 to the same release version (or verified digest); do not build the production
 image from an unreviewed working tree on the server.
 
+The already-published `v1.0.0-rc.1` predates the migration-image workflow and
+has no corresponding `v1.0.0-rc.1-migrate` image. Do not use that prerelease
+for the Hetzner Compose deployment. Verify both app and migration image
+attestations for a later release before pulling either image.
+
 `pnpm docker:public` is a local testing helper that starts ngrok. It is not a
 production entrypoint. Production ingress terminates HTTPS at the host proxy
 and forwards app and WebSocket traffic to loopback port 3025. MySQL and Redis

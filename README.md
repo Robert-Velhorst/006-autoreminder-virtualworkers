@@ -33,11 +33,12 @@ This repository is actively developed. A versioned container image and tagged re
 - Trello, email, Google evidence, and AI-provider integrations require credentials supplied by the operator.
 - External actions such as Trello changes and outbound messages are policy-gated; configure and verify integrations before enabling them.
 - Production readiness depends on deployment-specific configuration and operational checks. A successful build or container publication is not proof of a live production deployment.
+- `v1.0.0-rc.1` is an app-image-only prerelease. Its release workflow did not publish the required migration image; do not deploy it with the Hetzner Compose configuration.
 
 ## Requirements
 
 - Docker Engine and Docker Compose v2 for the complete local stack.
-- Node.js 22 and pnpm 10.4.1 for development outside Docker.
+- Node.js 22 and pnpm 10.34.5 for development outside Docker.
 - MySQL 8.4. Redis is included in the provided Compose stack.
 
 ## Quick Start: Docker Compose
@@ -104,7 +105,7 @@ The full application needs a persistent container runtime with HTTPS and WebSock
 
 See [Hetzner Deployment](docs/HETZNER_DEPLOYMENT.md) and [Production Cutover](docs/PRODUCTION_CUTOVER.md) before deploying. They cover image provenance, host setup, credentials, data backup and migration, integration checks, rollback requirements, and retirement gates. Configure secrets on the target host; do not put them in source control, image layers, release notes, or issue comments.
 
-The GitHub Release workflow publishes a versioned image to `ghcr.io/robert-velhorst/006-autoreminder-virtualworkers` after a release is published. It does not deploy that image to a live host. An operator must configure the runtime, persistent storage, secrets, networking, and backups separately.
+The current GitHub Release workflow publishes versioned app and migration images to `ghcr.io/robert-velhorst/006-autoreminder-virtualworkers` after a release is published. The already-published `v1.0.0-rc.1` predates that workflow and has no migration image. Verify both image attestations before using a later release. The workflow does not deploy images to a live host; an operator must configure the runtime, persistent storage, secrets, networking, and backups separately.
 
 ## Authentication and Access
 

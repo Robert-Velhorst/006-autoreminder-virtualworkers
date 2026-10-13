@@ -7,6 +7,11 @@ deployed to a Hetzner server yet. The published GHCR image is a release
 artifact, not a running service. Do not point the production domain at the new
 host until the verification and rollback gates below pass.
 
+Do not deploy `v1.0.0-rc.1`: its release workflow published the app image but
+did not publish the migration image required by the Compose deployment. The
+expected `v1.0.0-rc.1-migrate` manifest is absent from GHCR. A later release
+must publish both images and pass both attestation checks before deployment.
+
 ## Host Requirements
 
 - A supported Linux Hetzner Cloud server with Docker Engine and Compose v2.
