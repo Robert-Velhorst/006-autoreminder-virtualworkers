@@ -894,9 +894,11 @@ for (const scenario of [
         "operator.submitManagerUpdate",
         () => activateByKeyboard(page, manager.getByRole("button", { name: "Send answer to APTLSS" }))
       );
+      const assessmentToast = page.getByText("Proposal assessed; active plan unchanged").last();
+      await expect(assessmentToast).toBeVisible();
       await expect(
-        page.getByText("Proposal assessed; active plan unchanged").last()
-      ).toBeVisible();
+        assessmentToast.locator("xpath=ancestor::*[@data-sonner-toast][1]")
+      ).toHaveCSS("opacity", "1");
       const updated = (await latest())!;
       expect(updated.runId).toBeGreaterThan(sourced.runId);
       expect(updatedResponse.applied).toBe(false);
