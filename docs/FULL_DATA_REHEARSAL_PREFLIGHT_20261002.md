@@ -300,3 +300,20 @@ the Windows host. This is split-runtime evidence, not an all-green pinned run.
 The temporary container was absent afterward and the operational image remained
 healthy and unchanged. Full application rollback and production acceptance remain
 unverified.
+
+## Fresh Storage Recheck, 2026-10-13
+
+The protected private rehearsal directory passed the current NTFS/ACL and
+capacity check with 127,633,862,656 bytes free against the unchanged
+27,326,091,699-byte restore-plus-reserve requirement. This removes the prior
+capacity shortfall for that volume at the time of inspection; it does not
+reserve the space or prove a restore or application rollback.
+
+The existing restored MySQL data directory did not pass the same privacy gate:
+its ACL still inherits write access from multiple account groups, including
+CodexSandboxUsers. No ACL, data, database or production volume was changed.
+No `mysqld.exe` process or listener on port 33317 was present during the check.
+The full-data rehearsal remains paused until this exact isolated test-data tree
+is securely restricted and its ownership is revalidated. Do not use the private
+configuration directory's passing ACL as proof that the restored data directory
+is protected.
