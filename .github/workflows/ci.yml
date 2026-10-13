@@ -65,6 +65,8 @@ jobs:
         run: docker build --tag va-dashboard:ci .
       - name: Build the migration container
         run: docker build --target migration --tag va-dashboard:migration-ci .
+      - name: Validate Hetzner Compose configuration
+        run: APP_ENV_FILE=.env.app.example docker compose --env-file deployment/.env.hetzner.example -f deployment/compose.hetzner.yml config --quiet
       - name: Verify migration metadata matches the schema
         shell: bash
         run: |
