@@ -9,6 +9,10 @@ html.dark .aptlss-toast-title {
   color: #f4f4f5 !important;
 }
 
+.toaster [data-sonner-toast][data-expanded="false"][data-front="false"] > * {
+  transition: none;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
@@ -88,7 +92,7 @@ html.dark .aptlss-toast-title {
   --accent-foreground: oklch(0.3 0.05 250);
   
   /* Soft Destructive */
-  --destructive: oklch(0.7 0.15 20);
+  --destructive: #b91c1c;
   --destructive-foreground: oklch(0.98 0 0);
   
   --border: oklch(0.92 0.01 250);

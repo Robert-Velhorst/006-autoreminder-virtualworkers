@@ -251,6 +251,10 @@ async function login(page: Page, username: string, role: "worker" | "admin") {
 }
 
 async function focusByTab(page: Page, control: Locator) {
+  await page.evaluate(() => {
+    document.body.tabIndex = -1;
+    document.body.focus();
+  });
   const tabStops = await page.locator(
     'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
   ).evaluateAll(elements => elements.filter(element => {

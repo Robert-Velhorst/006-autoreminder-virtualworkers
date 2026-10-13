@@ -362,6 +362,27 @@ describe("APTLSS external message policy", () => {
     );
   });
 
+  it("reports missing Trello credentials as unavailable read data without calling the provider", async () => {
+    vi.stubEnv("TRELLO_API_KEY", "");
+    vi.stubEnv("TRELLO_TOKEN", "");
+    vi.stubEnv("TrelloAPIKey", "");
+    vi.stubEnv("TrelloAPIToken", "");
+
+    await expect(trelloCaller("worker").actionAlerts()).resolves.toMatchObject({
+      available: false,
+      noDueDateCards: [],
+      dueTodayCards: [],
+      overdueCards: [],
+      onHoldCards: [],
+      doingCards: [],
+      recentActions: [],
+      commentedCardIds: [],
+    });
+    expect(calls.getWorkerCards).not.toHaveBeenCalled();
+    expect(calls.getWorkerRecentActions).not.toHaveBeenCalled();
+    expect(calls.getWorkerCommentedCardIdsToday).not.toHaveBeenCalled();
+  });
+
   it.each(["admin", "worker"] as const)(
     "blocks generated follow-up posting for %s accounts",
     async role => {

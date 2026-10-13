@@ -1972,7 +1972,9 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
 
     await page.getByRole("button", { name: "Open details", exact: true }).click();
     const inspector = page.getByRole("dialog");
-    await expect(inspector.getByRole("status")).toContainText("Existing timed task");
+    await expect(
+      inspector.getByRole("status").filter({ hasText: "Timer already running for Existing timed task" })
+    ).toContainText("Existing timed task");
     await expect(inspector.getByRole("button", { name: "Timer running on another task", exact: true })).toBeDisabled();
     expect(calls.filter(call => call.method === "timer.start")).toHaveLength(0);
   });

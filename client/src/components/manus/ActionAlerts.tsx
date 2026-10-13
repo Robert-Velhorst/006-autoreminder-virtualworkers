@@ -574,7 +574,7 @@ export default function ActionAlerts() {
 
   useEffect(() => {
     if (!error) {
-      if (data && backoffMs !== BASE_POLL_MS) {
+      if (data?.available !== false && data && backoffMs !== BASE_POLL_MS) {
         if (backoffTimerRef.current) clearTimeout(backoffTimerRef.current);
         setBackoffMs(BASE_POLL_MS);
       }
@@ -592,7 +592,7 @@ export default function ActionAlerts() {
   }, [error, data, backoffMs]);
 
   useEffect(() => {
-    if (data && !isFetching) setLastSynced(new Date());
+    if (data?.available !== false && data && !isFetching) setLastSynced(new Date());
   }, [data, isFetching]);
 
   const { data: streakData } = trpc.streak.get.useQuery({}, { staleTime: 5 * 60_000 });
@@ -718,7 +718,8 @@ export default function ActionAlerts() {
   });
 
   const totalPending = doingPendingCount + onHoldPendingCount + overdueCount;
-  const allClear = !isLoading && !error && totalPending === 0;
+  const integrationUnavailable = !!error || data?.available === false;
+  const allClear = !isLoading && !integrationUnavailable && totalPending === 0;
 
   // Auto-record streak when all DOING cards are updated before 23:00
   useEffect(() => {
@@ -786,6 +787,8 @@ export default function ActionAlerts() {
           <span className="font-semibold text-sm text-foreground truncate">
             {isLoading
               ? "Loading daily actions…"
+            : integrationUnavailable
+              ? "Trello connection needs attention"
               : allClear
               ? "All Clear — No Actions Required Today"
               : `Daily Actions Required (${totalPending} pending)`}
@@ -845,13 +848,13 @@ export default function ActionAlerts() {
               Loading Trello data…
             </div>
           )}
-          {error && (
+          {integrationUnavailable && (
             <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-sm text-red-700 dark:text-red-300">
-              Failed to load Trello data. Check that your Trello API credentials are configured.
+              Trello data is unavailable. Check that your Trello connection is configured, then refresh this section.
             </div>
           )}
 
-          {data && (
+          {data && data.available !== false && (
             <>
               {/* ── 1. ON-HOLD Review (first) ── */}
               <ActionSection

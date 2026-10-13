@@ -388,7 +388,16 @@ export const trelloRouter = router({
   actionAlerts: operatorAccountProcedure.query(async ({ ctx }) => {
     const apiKey = process.env.TRELLO_API_KEY || process.env.TrelloAPIKey;
     const apiToken = process.env.TRELLO_TOKEN || process.env.TrelloAPIToken;
-    if (!apiKey || !apiToken) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Trello API credentials not configured" });
+    if (!apiKey || !apiToken) return {
+      available: false as const,
+      noDueDateCards: [],
+      dueTodayCards: [],
+      overdueCards: [],
+      onHoldCards: [],
+      doingCards: [],
+      recentActions: [],
+      commentedCardIds: [],
+    };
     
     const worker = await resolveTrelloWorker(ctx);
     const trelloMemberId = requireTrelloMemberId(ctx.user, worker);
@@ -405,6 +414,7 @@ export const trelloRouter = router({
     const doingCards = cards.filter(c => c.list && isDoingList(c.list.name));
 
     return {
+      available: true as const,
       noDueDateCards: noDueDate.map(c => ({ id: c.id, name: c.name, url: c.url, boardName: c.boardName, listName: c.list?.name })),
       dueTodayCards: dueToday.map(c => ({ id: c.id, name: c.name, url: c.url, boardName: c.boardName, listName: c.list?.name })),
       overdueCards: overdue.map(c => ({ id: c.id, name: c.name, url: c.url, boardName: c.boardName, listName: c.list?.name, due: c.due })),

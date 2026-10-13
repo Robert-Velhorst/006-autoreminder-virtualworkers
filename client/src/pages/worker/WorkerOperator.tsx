@@ -531,7 +531,7 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
     <div className="space-y-5">
       <PageHeading title="Today" description="" />
       <ManagerCoach />
-      {actionQuery.error && <Alert variant="destructive">
+      {(actionQuery.error || actionQuery.data?.available === false) && <Alert variant="destructive">
         <AlertTriangle className="size-4" />
         <AlertTitle>Trello task updates are unavailable</AlertTitle>
         <AlertDescription>
