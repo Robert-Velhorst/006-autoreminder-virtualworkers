@@ -77,7 +77,9 @@ or old reminder timing variables. They belong to the retired split
 application, not the consolidated runtime. Before production cutover, revoke
 any credentials exposed by that retired application and resolve the related
 secret-scanning alerts after rotation; removing a value from Git history does
-not revoke it.
+not revoke it. Use [the Atlas credential rotation runbook](ATLAS_CREDENTIAL_ROTATION.md)
+to inventory consumers, rotate safely, and verify revocation before closing
+the two remaining Atlas alerts.
 
 ## Verification Gate
 
