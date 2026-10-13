@@ -14,6 +14,8 @@ build/
 .env.test.local
 .env.production.local
 .env.*.local
+deployment/.env.hetzner
+deployment/.env.app
 output/playwright/
 
 # IDE and editor files

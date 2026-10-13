@@ -1,85 +1,135 @@
 # Production Cutover
 
-## Target Runtime
+## Target Runtime: Hetzner
 
 The consolidated application requires a persistent Node.js container runtime,
 MySQL, Redis, HTTPS, and WebSocket support. It also runs scheduled work inside
 the application process. A static or request-only serverless deployment does
 not preserve the complete runtime contract.
 
-Use `Dockerfile` and `docker-compose.yml` for a single-host deployment, or map
-the same services to a managed container platform. Keep one application
+Hetzner is the selected target. Use `deployment/compose.hetzner.yml` on a
+single Hetzner server with persistent storage and a host-level TLS reverse
+proxy. The application is not yet deployed to Hetzner. Keep exactly one app
 instance active until scheduled-job locking has been verified on the target
-platform.
+host.
 
-The supported single-host public entrypoint is `pnpm docker:public`. It runs
-the application and ngrok in the same Compose network, binds the app and
-database ports to loopback only, and records the current public endpoint in
-`.local/public-dashboard.json`. Because an automatically assigned ngrok URL
-can change after a restart, rerun the command after reboot so the backend and
-Trello callback use the current URL.
+The production images are published to GHCR when a GitHub release is
+published. The release workflow publishes both the app image and a
+migration-capable image tagged with the same release plus `-migrate`. Pin both
+to the same release version (or verified digest); do not build the production
+image from an unreviewed working tree on the server.
 
-Set `NGROK_URL` in `.env.db.local` when the account has more than one endpoint
-or another application already uses the account's default developer domain.
-Public password registration is disabled; existing workers authenticate with
-their registered Trello identity or a separately provisioned local password.
+The already-published `v1.0.0-rc.1` predates the migration-image workflow and
+has no corresponding `v1.0.0-rc.1-migrate` image. Do not use that prerelease
+for the Hetzner Compose deployment. Verify both app and migration image
+attestations for a later release before pulling either image.
 
-Do not point either obsolete Vercel project at the repository root. A Vercel
-deployment would omit the persistent process, scheduled work, and WebSocket
-runtime required by the platform. Production startup rejects the Vercel
-runtime explicitly so an incomplete frontend cannot be mistaken for an
-operational deployment.
+`pnpm docker:public` is a local testing helper that starts ngrok. It is not a
+production entrypoint. Production ingress terminates HTTPS at the host proxy
+and forwards app and WebSocket traffic to loopback port 3025. MySQL and Redis
+remain private to the Compose network.
+
+Public password registration is disabled; workers authenticate with their
+registered Trello identity or a separately provisioned local password.
+Do not use request-only serverless hosting: scheduled work, Redis coordination,
+and WebSockets require a persistent process.
 
 ## Required Secrets
 
-Configure these values in the deployment platform's secret store:
+Keep application secrets in the ignored `deployment/.env.app` file with
+restrictive permissions, or inject them from a secret manager. Copy
+`deployment/.env.app.example` to that file. Copy
+`deployment/.env.hetzner.example` to the ignored `deployment/.env.hetzner`
+for Compose and database/Redis settings. Never commit populated files or pass
+secrets as image build arguments.
 
-- `DATABASE_URL`: MySQL connection URL.
 - `JWT_SECRET`: newly generated random value of at least 32 characters.
 - `TRELLO_API_KEY`: active Trello API key.
 - `TRELLO_TOKEN`: active Trello member token.
-- `OPENAI_API_KEY`: active OpenAI API key.
-- `REDIS_URL`: authenticated Redis connection URL.
 
-For Docker Compose, also set `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`,
-`MYSQL_USER`, `MYSQL_PASSWORD`, and `REDIS_PASSWORD`. Do not commit `.env`.
+In production, startup validates the MySQL and Redis URLs, requires credentials,
+rejects known template placeholders, and requires public HTTPS URLs for
+`PUBLIC_URL` and `WEBHOOK_BASE_URL`. The example values are intentionally
+invalid for production; the app will refuse to start until they are replaced.
+Validation errors name the affected setting but never print its value.
+
+For Hetzner Compose, set `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`, `MYSQL_USER`,
+`MYSQL_PASSWORD`, `REDIS_PASSWORD`, `DATABASE_URL`, and `REDIS_URL` in
+`deployment/.env.hetzner`. `APP_ENV_FILE` defaults to `.env.app`, relative to
+the Compose file. Set `APP_IMAGE` and `MIGRATION_IMAGE` to the same release
+version, with `-migrate` on the latter. Use the `mysql` and `redis` Compose
+hostnames in the respective URLs. URL-encode reserved characters in credentials.
 
 The server accepts the old local names `TrelloAPIKey` and `TrelloAPIToken`
 during transition, but production configuration should use the canonical
 uppercase names.
 
+AI provider credentials are not required for the server to start. AI-backed
+features remain unavailable until a supported provider is configured in the
+Settings UI or through its documented environment variable. This application
+does not currently implement Codex subscription authentication; do not treat
+an OpenAI API key as an equivalent subscription credential.
+
 ## Optional Integrations
 
 - `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, and
-  `NOTIFICATIONS_ENABLED=true` enable outbound email notifications.
+  `NOTIFICATIONS_ENABLED=true` enable outbound email and automated Trello
+  comments. Keep this `false` (the default) until those outbound actions have
+  been explicitly approved and verified.
 - `TRELLO_WEBHOOK_CALLBACK_URL` and `TRELLO_WEBHOOK_SECRET` enable verified
   Trello push updates after a public HTTPS domain exists.
 - `SCHEDULED_TASK_SECRET` protects explicitly exposed scheduled-task routes.
 
 Do not migrate the legacy MongoDB URL, Twilio credentials, React frontend URL,
 or old reminder timing variables. They belong to the retired split
-application, not the consolidated runtime.
+application, not the consolidated runtime. Before production cutover, revoke
+any credentials exposed by that retired application and resolve the related
+secret-scanning alerts after rotation; removing a value from Git history does
+not revoke it. Use [the Atlas credential rotation runbook](ATLAS_CREDENTIAL_ROTATION.md)
+to inventory consumers, rotate safely, and verify revocation before closing
+the two remaining Atlas alerts.
 
 ## Verification Gate
 
 Before traffic is moved:
 
-1. Back up the source database.
-2. Deploy MySQL and Redis with persistent storage.
-3. Apply the canonical Drizzle migrations. Docker Compose runs the one-shot
-   `migrate` service and starts the app only after it succeeds.
-4. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and
+1. Back up the source database and rehearse its import into an isolated,
+   disposable target database.
+2. Deploy MySQL and Redis with persistent storage and verify a restorable
+   backup before importing production data.
+3. Copy both deployment templates to `deployment/.env.hetzner` and
+   `deployment/.env.app`, replace all placeholders, and restrict file
+   permissions. Run `docker compose --env-file deployment/.env.hetzner -f deployment/compose.hetzner.yml config -q` before starting any service.
+4. Pull the pinned images with `docker compose --env-file deployment/.env.hetzner -f deployment/compose.hetzner.yml pull app migrate`, then start MySQL, Redis, the one-shot migration, and app with `docker compose --env-file deployment/.env.hetzner -f deployment/compose.hetzner.yml up -d`. The app starts only after migration succeeds.
+5. Confirm the application runs with `NODE_ENV=production`, `HOST=0.0.0.0`, and
    `LOCAL_AUTH_BYPASS=false`.
-5. Confirm `/api/health`, authenticated founder/admin/worker access,
-   WebSockets, scheduled jobs, Trello, OpenAI, Gmail, and Drive.
-6. Confirm no unapproved Trello comment, move, email, or other external action
+6. Confirm `/api/health`, authenticated founder/admin/worker access,
+   WebSockets, scheduled jobs, Trello, Gmail, and Drive. Test any explicitly
+   enabled AI provider only after its configuration and account authorization
+   have been verified.
+7. Confirm no unapproved Trello comment, move, email, or other external action
    occurs during smoke testing.
-7. Point the public domain and Trello webhook callback at the new runtime.
-8. Retain the prior build and database snapshot through the rollback window.
+8. Freeze writes briefly, take a final source-database backup, import and
+   reconcile it, then switch the public domain and Trello webhook callback.
+9. Retain the prior build and source snapshot through the rollback window.
 
 Before reusing an existing database volume, create a logical SQL backup and
 keep the previous stopped database container until the public verification
 gate passes. `MYSQL_VOLUME_NAME` selects the preserved volume explicitly.
 
-Only disconnect or delete the obsolete Vercel projects after this gate passes
-against the public replacement.
+Retire the previous deployment only after the Hetzner deployment passes every
+verification gate and the public domain serves the new host. Preserve
+deployment history and rollback artifacts; do not remove infrastructure that
+belongs to another application.
+
+The Vercel GitHub App was uninstalled from Robert Velhorst's GitHub account on
+2026-10-13, removing its access to all 43 repositories. Five projects and their
+deployments were deleted during the initial cleanup. A later team overview
+showed no projects remaining, including `promise-app` and
+`040-5-trello-mcp-connectors-to-chat-gpt-5`; the latter two were already absent
+and were not deleted again. The Vercel account itself remains. `promise-app`
+had the custom domain `promiseapp.io`; DNS records at the domain provider were
+not inspected or changed. Verify and update or remove those records during the
+Hetzner cutover. The Hetzner service is not live yet, so Vercel cleanup is not
+evidence of a completed production migration. The Hetzner public acceptance
+gate remains outstanding.

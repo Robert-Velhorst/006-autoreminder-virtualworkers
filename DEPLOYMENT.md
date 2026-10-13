@@ -45,6 +45,7 @@ PORT=3000
 # Email Notifications (optional)
 SENDGRID_API_KEY=your_sendgrid_api_key
 SENDGRID_FROM_EMAIL=noreply@yourdomain.com
+# Enables outbound email and automated Trello comments; keep false by default.
 NOTIFICATIONS_ENABLED=false
 
 # LLM Providers (at least one required for ATIS)

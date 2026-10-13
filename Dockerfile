@@ -3,14 +3,13 @@
 FROM node:22-alpine AS builder
 
 # Install pnpm
-RUN npm install -g pnpm@10.4.1
+RUN npm install -g pnpm@10.34.5
 
 # Set working directory
 WORKDIR /app
 
 # Copy package files
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY patches ./patches
 
 # Install dependencies
 RUN pnpm install --frozen-lockfile
@@ -21,11 +20,20 @@ COPY . .
 # Build frontend and backend
 RUN pnpm build
 
+# Release artifact used only for the one-shot schema migration job.
+FROM builder AS migration
+
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001
+
+USER nodejs
+CMD ["pnpm", "exec", "drizzle-kit", "migrate"]
+
 # Stage 2: Production image
 FROM node:22-alpine AS production
 
 # Install pnpm
-RUN npm install -g pnpm@10.4.1
+RUN npm install -g pnpm@10.34.5
 
 # Create app user
 RUN addgroup -g 1001 -S nodejs && \
@@ -36,7 +44,6 @@ WORKDIR /app
 
 # Copy package files
 COPY --chown=nodejs:nodejs package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY --chown=nodejs:nodejs patches ./patches
 
 # Install production dependencies only
 RUN pnpm install --frozen-lockfile --prod

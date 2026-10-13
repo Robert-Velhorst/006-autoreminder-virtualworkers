@@ -1,0 +1,106 @@
+# Hetzner Deployment
+
+## Status
+
+Hetzner is the intended production host, but this repository has not been
+deployed to a Hetzner server yet. The published GHCR image is a release
+artifact, not a running service. Do not point the production domain at the new
+host until the verification and rollback gates below pass.
+
+Do not deploy `v1.0.0-rc.1`: its release workflow published the app image but
+did not publish the migration image required by the Compose deployment. The
+expected `v1.0.0-rc.1-migrate` manifest is absent from GHCR. A later release
+must publish both images and pass both attestation checks before deployment.
+
+## Host Requirements
+
+- A supported Linux Hetzner Cloud server with Docker Engine and Compose v2.
+- A DNS name whose A/AAAA records are deliberately pointed at that server.
+- Caddy installed on the host, forwarding HTTPS and WebSocket traffic to
+  `127.0.0.1:3025` using `deployment/Caddyfile.example` as the starting point.
+- Persistent, separately backed-up storage for MySQL and Redis data.
+- Firewall policy allowing SSH only from trusted management addresses and
+  public TCP 80/443; do not expose MySQL, Redis, or the application port.
+- Monitoring for host capacity, container health, disk space, backups, and
+  certificate renewal.
+
+## Deployment Shape
+
+Use `deployment/compose.hetzner.yml` and release images from GHCR rather than
+building arbitrary source on the server. The release workflow publishes an
+app image and a migration image (`<release>-migrate`) from the same commit,
+with build provenance and an SBOM. Verify both image attestations and pin both
+images to the same release tag or digest. Run exactly one app instance and one
+one-shot migration job. The app is published only to host loopback port 3025;
+MySQL and Redis have no host-published ports. A host-level TLS reverse proxy
+forwards HTTPS and WebSocket traffic to the app.
+
+After authenticating to GHCR, verify both release attestations before using
+the images. Replace `vX.Y.Z` with the published release tag:
+
+```sh
+gh attestation verify oci://ghcr.io/robert-velhorst/006-autoreminder-virtualworkers:vX.Y.Z \
+  --repo Robert-Velhorst/006-autoreminder-virtualworkers \
+  --signer-workflow github.com/Robert-Velhorst/006-autoreminder-virtualworkers/.github/workflows/publish-container.yml
+gh attestation verify oci://ghcr.io/robert-velhorst/006-autoreminder-virtualworkers:vX.Y.Z-migrate \
+  --repo Robert-Velhorst/006-autoreminder-virtualworkers \
+  --signer-workflow github.com/Robert-Velhorst/006-autoreminder-virtualworkers/.github/workflows/publish-container.yml
+```
+
+Before the first start:
+
+1. Provision the server, restrict SSH, enable the host firewall, and apply OS
+   security updates.
+2. Create a deployment directory owned by a dedicated, non-root service user.
+3. Copy `deployment/.env.hetzner.example` to the ignored
+   `deployment/.env.hetzner` and `deployment/.env.app.example` to the ignored
+   `deployment/.env.app`; replace every placeholder. The first file contains
+   Compose/runtime settings, while the second contains app secrets. Never put
+   secrets in Git, shell history, image build arguments, or deployment logs.
+   Set `APP_IMAGE` and `MIGRATION_IMAGE` to the same release with `-migrate`
+   appended to the latter. Set `DATABASE_URL` to host `mysql` and `REDIS_URL`
+   to host `redis`; URL-encode reserved characters in credentials.
+4. Configure `PUBLIC_URL` and `WEBHOOK_BASE_URL` to the final HTTPS origin.
+   Replace the example hostname in `deployment/Caddyfile.example`, install it
+   as the host's Caddyfile, then validate and reload Caddy. Caddy handles
+   WebSocket upgrades through `reverse_proxy`. Configure the Trello webhook
+   callback to the corresponding application endpoint only after HTTPS is live.
+5. Back up and inspect the source database. Rehearse migration/import and
+   reconciliation against a disposable test database before production
+   cutover.
+6. From the repository root, validate the Compose file with
+   `docker compose --env-file deployment/.env.hetzner -f deployment/compose.hetzner.yml config -q`, then start it with
+   `docker compose --env-file deployment/.env.hetzner -f deployment/compose.hetzner.yml pull app migrate` and
+   `docker compose --env-file deployment/.env.hetzner -f deployment/compose.hetzner.yml up -d`.
+   This starts one app container, private MySQL/Redis containers, and one
+   one-shot migration container. Verify `/api/health`, login,
+   worker/admin role separation, WebSockets, scheduled jobs, and enabled
+   provider integrations.
+7. Confirm backups can be restored. Keep the previous host and database
+   snapshot available until the rollback window ends.
+8. Move DNS only after the checks pass. Monitor logs, health, disk, and
+   integrations after cutover.
+
+## Rollback
+
+Keep the previous host and deployment artifacts untouched until the new
+service has passed its public acceptance period. If the app or integrations
+fail, first freeze writes and keep the Hetzner database as the authoritative
+copy. Roll back the app image only when its schema is backward-compatible with
+the current database; never restore a pre-cutover database snapshot over new
+production writes. If schema rollback is unavoidable, preserve a fresh
+Hetzner backup and reconcile every post-cutover write before serving traffic
+from another database. Do not delete or rewrite migration history.
+
+## Previous Hosting Cleanup
+
+The Vercel GitHub App was uninstalled from Robert Velhorst's GitHub account on
+2026-10-13, removing its access to all 43 repositories. Five projects and their
+deployments were deleted during the initial cleanup. A later team overview
+showed no projects remaining, including `promise-app` and
+`040-5-trello-mcp-connectors-to-chat-gpt-5`; the latter two were already absent
+and were not deleted again. The Vercel account itself remains. The
+`promise-app` project had the custom domain `promiseapp.io`; DNS records at the
+domain provider were not inspected or changed. Verify and update or remove
+those records as part of the Hetzner cutover. The Hetzner service is not live
+yet, so Vercel cleanup is not evidence of a completed production migration.

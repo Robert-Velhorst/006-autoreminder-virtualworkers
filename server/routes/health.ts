@@ -20,15 +20,18 @@ router.get('/', async (req: Request, res: Response) => {
     const db = await getDb();
     const dbHealthy = db !== null;
 
-    // Check Redis connection (optional)
+    // Redis may be omitted in local setups, but a configured connection is
+    // part of the production runtime and must be visible to health probes.
+    const redisConfigured = Boolean(process.env.REDIS_URL?.trim());
     const redisHealthy = isRedisAvailable();
+    const healthy = dbHealthy && (!redisConfigured || redisHealthy);
 
     const health = {
-      status: dbHealthy ? 'healthy' : 'unhealthy',
+      status: healthy ? 'healthy' : 'unhealthy',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       database: dbHealthy ? 'connected' : 'disconnected',
-      redis: redisHealthy ? 'connected' : 'not configured',
+      redis: !redisConfigured ? 'not configured' : redisHealthy ? 'connected' : 'disconnected',
       memory: {
         used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
         total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
@@ -36,12 +39,12 @@ router.get('/', async (req: Request, res: Response) => {
       },
     };
 
-    const statusCode = dbHealthy ? 200 : 503;
+    const statusCode = healthy ? 200 : 503;
     res.status(statusCode).json(health);
-  } catch (error) {
+  } catch {
     res.status(503).json({
       status: 'unhealthy',
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: 'Health check failed',
       timestamp: new Date().toISOString(),
     });
   }
@@ -65,10 +68,10 @@ router.get('/ready', async (req: Request, res: Response) => {
       ready: true,
       timestamp: new Date().toISOString(),
     });
-  } catch (error) {
+  } catch {
     res.status(503).json({
       ready: false,
-      reason: error instanceof Error ? error.message : 'Unknown error',
+      reason: 'Database not available',
     });
   }
 });

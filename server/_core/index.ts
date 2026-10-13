@@ -45,7 +45,7 @@ import { apiRateLimiter, authRateLimiter, aptlssGenerationRateLimiter } from "..
 import { log } from "../utils/logger.js";
 import { registerBrowserTabRoutes } from "../browserTabRoutes.js";
 import { assertLocalAuthBypassConfiguration } from "./localAuthBypass.js";
-import { assertProductionConfiguration } from "./productionConfig.js";
+import { assertProductionConfiguration, getExpressTrustProxySetting } from "./productionConfig.js";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -150,7 +150,7 @@ async function startServer() {
   assertProductionConfiguration();
   assertLocalAuthBypassConfiguration();
   const app = express();
-  app.set("trust proxy", true);
+  app.set("trust proxy", getExpressTrustProxySetting());
   const server = createServer(app);
 
   app.use(securityHeaders);

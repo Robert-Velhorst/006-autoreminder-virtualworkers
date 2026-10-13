@@ -1,0 +1,5 @@
+# Replace the hostname with the production DNS name before installing.
+dashboard.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3025
+}
