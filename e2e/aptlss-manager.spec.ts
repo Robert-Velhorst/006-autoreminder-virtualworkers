@@ -510,10 +510,16 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     };
   }
 
-  async function expectAccessible(page: Page, label: string) {
-    const results = await new AxeBuilder({ page })
-      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
-      .analyze();
+  async function expectAccessible(page: Page, label: string, scope?: string) {
+    let axe = new AxeBuilder({ page }).withTags([
+      "wcag2a",
+      "wcag2aa",
+      "wcag21a",
+      "wcag21aa",
+      "wcag22aa",
+    ]);
+    if (scope) axe = axe.include(scope);
+    const results = await axe.analyze();
     const violations = results.violations.map(violation => ({
       id: violation.id,
       impact: violation.impact,
@@ -1265,7 +1271,11 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await page.getByLabel("Correction or review notes").fill("Check the source before choosing the follow-up.");
     await page.getByLabel("Review source").fill("Reviewed retained source record");
     await page.getByRole("switch", { name: "Use as scoped reviewed guidance" }).click();
-    await page.getByLabel("Guidance topic").fill("source-review");
+    const topic = page.getByLabel("Guidance topic");
+    await topic.fill("source-review_1");
+    expect(
+      await topic.evaluate(element => (element as HTMLInputElement).validity.valid)
+    ).toBe(true);
     await page.getByLabel("Guidance expiry (local time)").fill(
       new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 16)
     );
@@ -1275,6 +1285,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
   for (const theme of ["dark", "light"] as const) {
     test(`manager result notification meets WCAG contrast in ${theme} theme`, async ({ page }) => {
       await page.setViewportSize({ width: 1280, height: 900 });
+      await page.emulateMedia({ reducedMotion: "reduce" });
       await page.addInitScript(value => localStorage.setItem("theme", value), theme);
       await managerFixture(page, "admin");
       await page.goto("/founder");
@@ -1282,7 +1293,11 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       await page.getByLabel("Review worker").selectOption("2");
       await page.getByRole("button", { name: "Run shadow assessment" }).click();
       await expect(page.getByText("Shadow proposal assessed")).toBeVisible();
-      await expectAccessible(page, `manager-result-notification-${theme}`);
+      await expectAccessible(
+        page,
+        `manager-result-notification-${theme}`,
+        "[data-sonner-toaster]"
+      );
     });
   }
 

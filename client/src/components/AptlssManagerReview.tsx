@@ -650,7 +650,7 @@ function RunReview({
                           value={topic}
                           onChange={e => setTopic(e.target.value)}
                           required
-                          pattern="[a-z0-9][a-z0-9_-]*"
+                          pattern="[a-z0-9](?:[a-z0-9_]|-)*"
                           maxLength={64}
                         />
                       </div>

@@ -1,6 +1,14 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+html:not(.dark) .aptlss-toast-title {
+  color: #27272a !important;
+}
+
+html.dark .aptlss-toast-title {
+  color: #f4f4f5 !important;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
@@ -151,14 +159,6 @@
 }
 
 @layer components {
-  .toaster [data-sonner-toast][data-styled="true"] {
-    color: var(--foreground) !important;
-  }
-
-  .toaster [data-sonner-toast][data-styled="true"] [data-title] {
-    color: var(--foreground) !important;
-  }
-
   /**
    * Custom container utility that centers content and adds responsive padding.
    *
