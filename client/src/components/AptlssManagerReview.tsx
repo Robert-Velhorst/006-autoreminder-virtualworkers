@@ -478,7 +478,7 @@ function RunReview({
         </div>
         <ManagerSnapshotDetails snapshot={entry.snapshot} />
         <form
-          className="border-t pt-3"
+          className="min-w-0 border-t pt-3"
           onSubmit={event => {
             event.preventDefault();
             if (!recordedReview && !save.isPending && !closed && knowledgeValid)
@@ -527,7 +527,7 @@ function RunReview({
           )}
           <fieldset
             disabled={!!recordedReview || save.isPending || closed}
-            className="space-y-3"
+            className="min-w-0 space-y-3"
           >
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1">
@@ -720,7 +720,7 @@ function RunReview({
                         />
                       </div>
                     </div>
-                    <fieldset className="space-y-2">
+                    <fieldset className="min-w-0 space-y-2">
                       <legend className="mb-2 text-sm font-medium">
                         Supporting source records
                       </legend>

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isDisabledProviderResponse, UNLINKED_TRELLO_MESSAGE, UNLINKED_TRELLO_PATH } from "./disabled-provider-response.mjs";
+import { isDisabledProviderResponse, TRELLO_CREDENTIALS_MISSING_MESSAGE, UNLINKED_TRELLO_MESSAGE, UNLINKED_TRELLO_PATH } from "./disabled-provider-response.mjs";
 
 const fixtures = [
   ["/api/trello/tasks", 500, { error: "Trello credentials not configured" }],
@@ -30,4 +30,14 @@ test("unlinked worker errors require the exact procedure and structured precondi
     { ...error, data: { ...error.data, path: "operator.runManager" } },
     { ...error, data: { ...error.data, httpStatus: 500 } }])
     assert.equal(isDisabledProviderResponse(UNLINKED_TRELLO_PATH, 412, { error: { json: changed } }), false);
+});
+test("missing Trello credentials require the exact procedure and structured precondition", () => {
+  const error = { message: TRELLO_CREDENTIALS_MISSING_MESSAGE, code: -32012,
+    data: { code: "PRECONDITION_FAILED", httpStatus: 412, path: "trello.actionAlerts" } };
+  assert.equal(isDisabledProviderResponse(UNLINKED_TRELLO_PATH, 412, { error: { json: error } }), true);
+  assert.equal(isDisabledProviderResponse(UNLINKED_TRELLO_PATH, 500, { error: { json: error } }), false);
+  assert.equal(isDisabledProviderResponse("/api/trpc/operator.runManager", 412, { error: { json: error } }), false);
+  assert.equal(isDisabledProviderResponse(UNLINKED_TRELLO_PATH, 412, {
+    error: { json: { ...error, message: "Another failure" } },
+  }), false);
 });

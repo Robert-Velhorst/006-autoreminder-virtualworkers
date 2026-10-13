@@ -131,9 +131,22 @@ for (const viewport of [
       }
     };
     const capture = async (name: string) => {
-      expect(
-        await page.evaluate(() => document.documentElement.scrollWidth)
-      ).toBeLessThanOrEqual(viewport.width);
+      const overflow = await page.evaluate(() => ({
+        scrollWidth: document.documentElement.scrollWidth,
+        offenders: Array.from(document.querySelectorAll<HTMLElement>("body *"))
+          .map(element => ({
+            tag: element.tagName,
+            className: typeof element.className === "string" ? element.className : "",
+            text: element.innerText?.slice(0, 80),
+            left: Math.round(element.getBoundingClientRect().left),
+            right: Math.round(element.getBoundingClientRect().right),
+            width: Math.round(element.getBoundingClientRect().width),
+          }))
+          .filter(element => element.right > window.innerWidth + 1 && element.width > 0)
+          .slice(0, 12),
+      }));
+      expect(overflow.scrollWidth, `Horizontal overflow at ${name}: ${JSON.stringify(overflow.offenders)}`)
+        .toBeLessThanOrEqual(viewport.width);
       const path = info.outputPath(`${name}.png`);
       // Capture from the document origin so the existing sticky page header is
       // not composited halfway through a full-page image after form scrolling.

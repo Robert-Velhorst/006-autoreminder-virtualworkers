@@ -1254,6 +1254,38 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       .toBe(3);
   });
 
+  test("scoped review guidance form stays within a narrow mobile viewport", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await managerFixture(page, "admin");
+    await page.goto("/founder");
+    await page.getByRole("tab", { name: "Manager review" }).click();
+    await page.getByLabel("Review worker").selectOption("2");
+    await page.getByText("Review run 101", { exact: true }).click();
+    await page.getByLabel("Verdict").selectOption("incorrect");
+    await page.getByLabel("Correction or review notes").fill("Check the source before choosing the follow-up.");
+    await page.getByLabel("Review source").fill("Reviewed retained source record");
+    await page.getByRole("switch", { name: "Use as scoped reviewed guidance" }).click();
+    await page.getByLabel("Guidance topic").fill("source-review");
+    await page.getByLabel("Guidance expiry (local time)").fill(
+      new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 16)
+    );
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  });
+
+  for (const theme of ["dark", "light"] as const) {
+    test(`manager result notification meets WCAG contrast in ${theme} theme`, async ({ page }) => {
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.addInitScript(value => localStorage.setItem("theme", value), theme);
+      await managerFixture(page, "admin");
+      await page.goto("/founder");
+      await page.getByRole("tab", { name: "Manager review" }).click();
+      await page.getByLabel("Review worker").selectOption("2");
+      await page.getByRole("button", { name: "Run shadow assessment" }).click();
+      await expect(page.getByText("Shadow proposal assessed")).toBeVisible();
+      await expectAccessible(page, `manager-result-notification-${theme}`);
+    });
+  }
+
   for (const width of [1280, 390]) test(`confirmed review stays read-only while inbox refresh is delayed at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     const { calls } = await managerFixture(page, "admin");
@@ -1444,10 +1476,10 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       managerSchedule.getByText("Suggestions only", { exact: true })
     ).toBeVisible();
     await expect(
-      managerSchedule.getByText("Continuous guidance is on.", { exact: true })
+      managerSchedule.getByRole("status").filter({ hasText: "Automatic-check status is unavailable." })
     ).toBeVisible();
     await expect(
-      managerSchedule.getByText("Checks run every 5 minutes.", { exact: true })
+      managerSchedule.getByText("Check interval: every 5 minutes.", { exact: true })
     ).toBeVisible();
     await expect(
       managerSchedule.getByText(

@@ -5,12 +5,12 @@ import { securityHeaders } from "./security";
 
 afterEach(() => vi.unstubAllEnvs());
 
-async function headers(mode: string | undefined) {
+async function headers(mode: string | undefined, hostname = "127.0.0.1") {
   vi.stubEnv("NODE_ENV", mode);
   const app = express();
   app.use(securityHeaders);
   app.get("/", (_req, res) => res.type("html").send('<script type="module">/* Vite React refresh preamble */</script>'));
-  return (await request(app).get("/").expect(200)).headers;
+  return (await request(app).get("/").set("Host", hostname).expect(200)).headers;
 }
 
 function directives(policy: string) {
@@ -21,12 +21,17 @@ function directives(policy: string) {
 }
 
 describe("environment-scoped Vite CSP compatibility", () => {
-  it("permits the React inline preamble and HTTP hot reload only in explicit development", async () => {
+  it("permits local Vite development requirements only on loopback", async () => {
     const response = await headers("development");
     const csp = directives(response["content-security-policy"]);
-    expect(csp["script-src"]).toEqual(["'self'", "'unsafe-inline'"]);
+    expect(csp["script-src"]).toEqual(["'self'", "'unsafe-inline'", "'unsafe-eval'"]);
     expect(csp["connect-src"]).toEqual(["'self'", "wss:", "ws:"]);
-    expect(response["content-security-policy"]).not.toContain("'unsafe-eval'");
+    const exposed = directives(
+      (await headers("development", "dashboard.example"))["content-security-policy"]
+    );
+    expect(exposed["script-src"]).toEqual(["'self'", "'unsafe-inline'"]);
+    expect(exposed["connect-src"]).toEqual(["'self'", "wss:"]);
+    expect(JSON.stringify(exposed)).not.toContain("unsafe-eval");
   });
 
   it.each(["production", "test", "staging", "Development", "", undefined])(
@@ -42,7 +47,7 @@ describe("environment-scoped Vite CSP compatibility", () => {
 
   it("changes no other production CSP directives or security headers", async () => {
     const production = await headers("production");
-    const development = await headers("development");
+    const development = await headers("development", "dashboard.example");
     const prodCsp = directives(production["content-security-policy"]);
     const devCsp = directives(development["content-security-policy"]);
     for (const directive of Object.keys(prodCsp).filter(name => !["script-src", "connect-src"].includes(name))) {

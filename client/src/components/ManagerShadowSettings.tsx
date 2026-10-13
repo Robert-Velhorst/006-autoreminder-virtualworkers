@@ -51,7 +51,7 @@ export default function ManagerShadowSettings() {
       {policy && (
         <div className="space-y-1 text-sm text-muted-foreground">
           <p role="status">{schedulerMessage}</p>
-          <p>Configured check interval: {policy.intervalMinutes} minutes.</p>
+          <p>Check interval: every {policy.intervalMinutes} minutes.</p>
           <p>Schedule changes are managed by your founder or admin.</p>
         </div>
       )}

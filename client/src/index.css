@@ -151,6 +151,14 @@
 }
 
 @layer components {
+  .toaster [data-sonner-toast][data-styled="true"] {
+    color: var(--foreground) !important;
+  }
+
+  .toaster [data-sonner-toast][data-styled="true"] [data-title] {
+    color: var(--foreground) !important;
+  }
+
   /**
    * Custom container utility that centers content and adds responsive padding.
    *

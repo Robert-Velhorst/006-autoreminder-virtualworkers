@@ -1,6 +1,6 @@
 import { expect, test, type ConsoleMessage, type Locator, type Page, type TestInfo } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { isDisabledProviderResponse, UNLINKED_TRELLO_MESSAGE, UNLINKED_TRELLO_PATH } from "./disabled-provider-response.mjs";
+import { isDisabledProviderResponse, TRELLO_CREDENTIALS_MISSING_MESSAGE, UNLINKED_TRELLO_MESSAGE, UNLINKED_TRELLO_PATH } from "./disabled-provider-response.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import {
@@ -103,6 +103,7 @@ const errorsByPage = new WeakMap<
     verifiedProviderUrls: Set<string>;
     resourceErrors: { text: string; url: string }[];
     unlinkedQueryErrors: string[];
+    missingCredentialQueryErrors: string[];
   }
 >();
 
@@ -220,11 +221,18 @@ async function login(page: Page, username: string, role: "worker" | "admin") {
 }
 
 async function focusByTab(page: Page, control: Locator) {
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  const tabStops = await page.locator(
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  ).evaluateAll(elements => elements.filter(element => {
+    const style = getComputedStyle(element);
+    return style.visibility !== "hidden" && style.display !== "none" &&
+      !(element instanceof HTMLElement && element.hidden);
+  }).length);
+  for (let attempt = 0; attempt <= tabStops; attempt += 1) {
     if (await control.evaluate(element => element === document.activeElement)) return;
     await page.keyboard.press("Tab");
   }
-  throw new Error("Control could not be reached with sequential Tab navigation");
+  throw new Error(`Control could not be reached with sequential Tab navigation after ${tabStops + 1} visible tab stops`);
 }
 
 async function activateByKeyboard(page: Page, control: Locator) {
@@ -278,6 +286,7 @@ test.beforeEach(async ({ page }) => {
     verifiedProviderUrls: new Set<string>(),
     resourceErrors: [] as { text: string; url: string }[],
     unlinkedQueryErrors: [] as string[],
+    missingCredentialQueryErrors: [] as string[],
   };
   errorsByPage.set(page, errors);
   page.on("request", request => {
@@ -333,6 +342,10 @@ test.beforeEach(async ({ page }) => {
       errors.unlinkedQueryErrors.push(message.text());
       return;
     }
+    if (message.text().startsWith(`[API Query Error] TRPCClientError: ${TRELLO_CREDENTIALS_MISSING_MESSAGE}\n`)) {
+      errors.missingCredentialQueryErrors.push(message.text());
+      return;
+    }
     errors.unexpected.push(message.text());
   });
 });
@@ -350,8 +363,9 @@ test.afterEach(async ({ page }, testInfo) => {
   const errors = errorsByPage.get(page)!;
   await page.waitForLoadState("networkidle");
   await Promise.all(errors.providerChecks);
-  const unlinkedResponseVerified = [...errors.verifiedProviderUrls].some(url => new URL(url).pathname === UNLINKED_TRELLO_PATH);
-  (unlinkedResponseVerified ? errors.expected : errors.unexpected).push(...errors.unlinkedQueryErrors);
+  const trelloResponseVerified = [...errors.verifiedProviderUrls].some(url => new URL(url).pathname === UNLINKED_TRELLO_PATH);
+  (trelloResponseVerified ? errors.expected : errors.unexpected).push(...errors.unlinkedQueryErrors);
+  (trelloResponseVerified ? errors.expected : errors.unexpected).push(...errors.missingCredentialQueryErrors);
   for (const error of errors.resourceErrors) {
     (errors.verifiedProviderUrls.has(error.url)
       ? errors.expected

@@ -37,7 +37,7 @@ describe("shadow pilot controls", () => {
   it("does not infer running automatic checks from enabled policy", () => {
     const html = render(ManagerShadowSettings);
     expect(html).toContain("Automatic-check status is unavailable");
-    expect(html).toContain("Configured check interval: 5 minutes");
+    expect(html).toContain("Check interval: every 5 minutes");
     expect(html).not.toContain("Continuous guidance is on");
     expect(html).not.toContain("Checks run every");
   });

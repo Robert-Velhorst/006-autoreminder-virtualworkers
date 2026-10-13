@@ -531,6 +531,14 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
     <div className="space-y-5">
       <PageHeading title="Today" description="" />
       <ManagerCoach />
+      {actionQuery.error && <Alert variant="destructive">
+        <AlertTriangle className="size-4" />
+        <AlertTitle>Trello task updates are unavailable</AlertTitle>
+        <AlertDescription>
+          The saved task list may not include recent Trello changes. Check with your supervisor that Trello is connected before relying on it. {" "}
+          <Button variant="outline" size="sm" onClick={() => void actionQuery.refetch()}>Retry</Button>
+        </AlertDescription>
+      </Alert>}
       {googleQuery.data?.gmail.sourceConflictPending && <Alert variant="destructive">
         <AlertTriangle className="size-4" />
         <AlertTitle>Gmail source needs review</AlertTitle>
