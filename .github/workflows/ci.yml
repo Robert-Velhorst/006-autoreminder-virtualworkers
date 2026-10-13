@@ -123,7 +123,10 @@ jobs:
             fi
             sleep 1
           done
-          curl --fail --silent http://127.0.0.1:3025/api/health/ready >/dev/null
+          if ! curl --fail --silent http://127.0.0.1:3025/api/health/ready >/dev/null; then
+            cat server.log
+            exit 1
+          fi
           pnpm test:e2e
       - name: Run isolated APTLSS browser acceptance with real storage
         env:

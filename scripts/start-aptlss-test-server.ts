@@ -24,7 +24,7 @@ const url = process.env.APTLSS_TEST_DATABASE_URL;
 if (!url) throw new Error("Set APTLSS_TEST_DATABASE_URL to an isolated test database.");
 const database = new URL(url);
 if (database.protocol !== "mysql:" || database.search || database.hash || !["127.0.0.1", "localhost", "[::1]"].includes(database.hostname) || !/^\/(?:aptlss_test|recovery_test)$/.test(database.pathname)) throw new Error("Only an explicit loopback MySQL URL naming aptlss_test or recovery_test is allowed.");
-const fixtureIds = process.env.APTLSS_TEST_PILOT_WORKER_IDS?.split(",") ?? [];
+const fixtureIds = process.env.APTLSS_TEST_PILOT_WORKER_IDS?.split(",").map(id => id.trim()) ?? [];
 if (fixtureIds.length !== 15 || new Set(fixtureIds).size !== 15 || fixtureIds.some(id => !/^\d+$/.test(id) || Number(id) < 100_000_000 || Number(id) > 200_001_000)) throw new Error("Run via playwright.aptlss.config.ts with fifteen isolated fixture worker IDs.");
 const port = process.env.APTLSS_TEST_PORT || "3035";
 if (!/^[1-9]\d{0,4}$/.test(port) || Number(port) > 65535) throw new Error("APTLSS_TEST_PORT must be a valid TCP port.");
