@@ -12,6 +12,11 @@
 ## Authentication
 
 - Sessions are signed, HTTP-only, same-site cookies with a stable audience.
+- Each session has a unique JWT ID. Logout stores only its SHA-256 hash in
+  MySQL, and authenticated requests reject revoked IDs. Expired revocation rows
+  are pruned during later logout operations.
+- Deploy the `revoked_sessions` migration before serving the updated app. Older
+  session cookies without a JWT ID are rejected, so users must sign in again.
 - Public registration is off by default.
 - Development bypass is accepted only on loopback and rejected in production.
 - Owner bootstrap requires an existing admin with no password, a token of at

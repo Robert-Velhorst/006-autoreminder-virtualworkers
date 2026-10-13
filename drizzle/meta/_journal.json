@@ -379,6 +379,13 @@
       "when": 1790828562234,
       "tag": "0053_manager_history_checks",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "5",
+      "when": 1791860325258,
+      "tag": "0054_revoked_sessions",
+      "breakpoints": true
     }
   ]
 }

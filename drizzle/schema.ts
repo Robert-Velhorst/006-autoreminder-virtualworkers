@@ -28,6 +28,14 @@ export const users = mysqlTable("users", {
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 
+export const revokedSessions = mysqlTable("revoked_sessions", {
+  sessionHash: varchar("sessionHash", { length: 64 }).primaryKey(),
+  revokedAt: timestamp("revokedAt").defaultNow().notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+}, (table) => ({
+  expiresAtIdx: index("revoked_sessions_expires_at_idx").on(table.expiresAt),
+}));
+
 // Generation history tables
 export const generationJobs = mysqlTable('generation_jobs', {
   id: varchar('id', { length: 64 }).primaryKey(),

@@ -1,4 +1,5 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, lte } from "drizzle-orm";
+import { createHash } from "crypto";
 import { drizzle as drizzleMySQL, type MySql2Database } from "drizzle-orm/mysql2";
 import mysql2 from "mysql2/promise";
 import { InsertUser, users } from "../drizzle/schema";
@@ -57,6 +58,34 @@ export async function closeDb(): Promise<void> {
   if (!pool) return;
   _closing = pool.end();
   try { await _closing; } finally { _closing = null; }
+}
+
+function sessionHash(sessionId: string) {
+  return createHash("sha256").update(sessionId).digest("hex");
+}
+
+export async function isSessionRevoked(sessionId: string): Promise<boolean> {
+  const database = await getDb();
+  if (!database) {
+    if (process.env.DATABASE_URL || process.env.NODE_ENV === "production") throw new DatabaseUnavailableError();
+    return false;
+  }
+  const [row] = await database.select({ sessionHash: schema.revokedSessions.sessionHash })
+    .from(schema.revokedSessions)
+    .where(eq(schema.revokedSessions.sessionHash, sessionHash(sessionId)))
+    .limit(1);
+  return Boolean(row);
+}
+
+export async function revokeSession(sessionId: string, expiresAt: Date): Promise<void> {
+  const database = await getDb();
+  if (!database) throw new DatabaseUnavailableError();
+  await database.delete(schema.revokedSessions)
+    .where(lte(schema.revokedSessions.expiresAt, new Date()));
+  await database.insert(schema.revokedSessions).values({
+    sessionHash: sessionHash(sessionId),
+    expiresAt,
+  });
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {

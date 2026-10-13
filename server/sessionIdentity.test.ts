@@ -40,6 +40,8 @@ describe("session identity", () => {
       openId: "worker-local",
       appId: "va-dashboard",
       name: "Worker",
+      sessionId: expect.any(String),
+      expiresAt: expect.any(Date),
     });
   }, 15_000);
 });

@@ -1,4 +1,5 @@
 import { COOKIE_NAME } from "@shared/const";
+import { parse as parseCookieHeader } from "cookie";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, operatorAccountProcedure, publicProcedure, protectedProcedure, router } from "./_core/trpc";
@@ -44,9 +45,13 @@ export const appRouter = router({
       if (user?.loginMethod === 'mock') return null;
       return user;
     }),
-    logout: publicProcedure.mutation(({ ctx }) => {
-      const cookieOptions = getSessionCookieOptions(ctx.req);
-      ctx.res.clearCookie(COOKIE_NAME, cookieOptions);
+    logout: publicProcedure.mutation(async ({ ctx }) => {
+      try {
+        await (await import("./_core/sdk")).sdk.revokeSession(parseCookieHeader(ctx.req.headers.cookie ?? "")[COOKIE_NAME]);
+      } finally {
+        const cookieOptions = getSessionCookieOptions(ctx.req);
+        ctx.res.clearCookie(COOKIE_NAME, cookieOptions);
+      }
       return {
         success: true,
       } as const;
