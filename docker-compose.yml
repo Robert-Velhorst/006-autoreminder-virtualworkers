@@ -91,33 +91,6 @@ services:
       retries: 3
       start_period: 40s
 
-  # Optional public ingress. The public profile is started by
-  # scripts/start-public-dashboard.ps1 after the application is healthy.
-  ngrok:
-    image: ngrok/ngrok:latest
-    profiles: ["public"]
-    restart: unless-stopped
-    environment:
-      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
-      NGROK_URL: ${NGROK_URL:-}
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - >-
-        if [ -n "$$NGROK_URL" ]; then
-          exec ngrok http app:3000 --url "$$NGROK_URL" --config /etc/ngrok.yml --log stdout --name joyce-dashboard;
-        else
-          exec ngrok http app:3000 --config /etc/ngrok.yml --log stdout --name joyce-dashboard;
-        fi
-    volumes:
-      - ./deployment/ngrok.yml:/etc/ngrok.yml:ro
-    ports:
-      - "127.0.0.1:${NGROK_INSPECT_PORT:-4041}:4040"
-    depends_on:
-      app:
-        condition: service_healthy
-    networks:
-      - va-network
-
 networks:
   va-network:
     driver: bridge

@@ -100,7 +100,7 @@ pnpm test:e2e
 
 The full application needs a persistent container runtime with HTTPS and WebSocket support. It also runs scheduled work in the application process. Request-only serverless platforms such as the repository's former Vercel deployment are not supported and must not be presented as the production service.
 
-`Dockerfile` builds the application image. `docker-compose.yml` provides a single-host deployment with MySQL, Redis, migration ordering, a health check, and loopback-only application/database/Redis bindings. For a public single-host demo or testing endpoint, `pnpm docker:public` adds ngrok; that temporary tunnel is not an availability or production guarantee.
+`Dockerfile` builds the application image. `docker-compose.yml` provides the Hetzner single-host stack with MySQL, Redis, migration ordering, a health check, and loopback-only application/database/Redis bindings. Route the stable production domain through the host's HTTPS reverse proxy. The repository does not provide a public tunnel launcher.
 
 See [Production Cutover](docs/PRODUCTION_CUTOVER.md) before deploying. It lists required credentials, data backup and migration steps, integration checks, rollback requirements, and the boundary for retiring the old hosting projects. Configure secrets in the target platform's secret manager; do not put them in source control, image layers, release notes, or issue comments.
 

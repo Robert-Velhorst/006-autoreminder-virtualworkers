@@ -7,20 +7,12 @@ MySQL, Redis, HTTPS, and WebSocket support. It also runs scheduled work inside
 the application process. A static or request-only serverless deployment does
 not preserve the complete runtime contract.
 
-Use `Dockerfile` and `docker-compose.yml` for a single-host deployment, or map
-the same services to a managed container platform. Keep one application
-instance active until scheduled-job locking has been verified on the target
-platform.
-
-The supported single-host public entrypoint is `pnpm docker:public`. It runs
-the application and ngrok in the same Compose network, binds the app and
-database ports to loopback only, and records the current public endpoint in
-`.local/public-dashboard.json`. Because an automatically assigned ngrok URL
-can change after a restart, rerun the command after reboot so the backend and
-Trello callback use the current URL.
-
-Set `NGROK_URL` in `.env.db.local` when the account has more than one endpoint
-or another application already uses the account's default developer domain.
+Use `Dockerfile` and `docker-compose.yml` for deployment on the Hetzner host.
+Put the application behind the host's HTTPS reverse proxy and point the
+production DNS name and Trello callback at that stable domain. Keep one
+application instance active until scheduled-job locking has been verified on
+the target platform. The Compose application, MySQL, and Redis ports bind to
+loopback; do not expose database or cache ports publicly.
 Public password registration is disabled; existing workers authenticate with
 their registered Trello identity or a separately provisioned local password.
 
@@ -82,4 +74,4 @@ keep the previous stopped database container until the public verification
 gate passes. `MYSQL_VOLUME_NAME` selects the preserved volume explicitly.
 
 Only disconnect or delete the obsolete Vercel projects after this gate passes
-against the public replacement.
+against the Hetzner deployment.

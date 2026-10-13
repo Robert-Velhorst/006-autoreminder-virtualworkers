@@ -21,9 +21,8 @@
     "db:verify-parity": "tsx scripts/verify-schema-parity.ts",
     "docker:build": "docker build -t va-dashboard:latest .",
     "docker:run": "docker compose --env-file .env.db.local up -d",
-    "docker:public": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-public-dashboard.ps1",
-    "docker:stop": "docker compose --env-file .env.db.local --profile public down",
-    "docker:logs": "docker compose --env-file .env.db.local --profile public logs -f app ngrok"
+    "docker:stop": "docker compose --env-file .env.db.local down",
+    "docker:logs": "docker compose --env-file .env.db.local logs -f app"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1100.0",
