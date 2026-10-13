@@ -47,6 +47,12 @@ secrets as image build arguments.
 - `TRELLO_API_KEY`: active Trello API key.
 - `TRELLO_TOKEN`: active Trello member token.
 
+In production, startup validates the MySQL and Redis URLs, requires credentials,
+rejects known template placeholders, and requires public HTTPS URLs for
+`PUBLIC_URL` and `WEBHOOK_BASE_URL`. The example values are intentionally
+invalid for production; the app will refuse to start until they are replaced.
+Validation errors name the affected setting but never print its value.
+
 For Hetzner Compose, set `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`, `MYSQL_USER`,
 `MYSQL_PASSWORD`, `REDIS_PASSWORD`, `DATABASE_URL`, and `REDIS_URL` in
 `deployment/.env.hetzner`. `APP_ENV_FILE` defaults to `.env.app`, relative to
