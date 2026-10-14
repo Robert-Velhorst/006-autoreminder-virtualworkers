@@ -34,9 +34,10 @@ acceptance.
 
 ## Latest Verification Snapshot
 
-Verified 2026-10-14 UTC against PR #110 at merge commit
-`dd2bd998dabd5f63514badbda33652cb90667a55`, with quality-gate run
-[38622603875](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/38622603875):
+Verified 2026-10-14 UTC against PR #110 at commit
+`3aa72c3e2788fddcb8cc8a5bd54336b7d103bbe7`, with successful quality-gate runs
+[38623196255](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/38623196255)
+and [38623184032](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/38623184032):
 
 - The GitHub Actions quality gate passed, including dependency and secret
   scans, type checks, transfer checks,
@@ -45,15 +46,13 @@ Verified 2026-10-14 UTC against PR #110 at merge commit
   smoke test, and Hetzner deployment-script syntax validation. This validates
   the CI build, not a live production migration or deployment.
 - The dependency audit for this PR branch reports no known vulnerabilities.
-- The default branch still has 45 open Dependabot alerts (20 high, 21 medium,
-  and 4 low). They are not cleared by the PR-branch audit; the fixes must reach
-  the default branch before those alerts can close.
-- GitHub secret-scanning alerts #1 and #4 remain open for historical MongoDB
-  connection strings. MongoDB is absent from the current application and
-  documentation, but the exposed Atlas credential has not been revoked. The
-  Atlas database user was left untouched at Robert's explicit direction.
-- GitHub's `production` environment has no secrets or variables. The deploy
-  workflow therefore cannot connect to a host; its four required SSH secrets
+- GitHub reports zero open Dependabot alerts and two open secret-scanning
+  alerts. The latter concern historical database credentials. The credential
+  has not been revoked because Robert explicitly declined deleting the related
+  database user; do not mark the alerts as resolved until the credential is
+  safely invalidated or GitHub confirms an appropriate resolution.
+- GitHub's `production` environment currently has no secrets or variables. The
+  deploy workflow therefore cannot connect to a host; its four required SSH secrets
   are listed in [Production Cutover](docs/PRODUCTION_CUTOVER.md). No stable
   release is available: `v1.0.0-rc.1` is a prerelease and is rejected by the
   production gate.
