@@ -6,6 +6,7 @@ import * as schema from "../drizzle/schema.postgres";
 import { ENV } from "./_core/env";
 import { parseDateKey } from "./utils/date-only";
 import { requirePostgresDatabaseUrl } from "./db/databaseUrl";
+import { hasRequiredPostgresSchema } from "./db/readiness";
 
 let _db: NodePgDatabase<typeof schema> | null = null;
 let _pool: Pool | null = null;
@@ -50,13 +51,7 @@ export async function getDb() {
 export async function isDatabaseReachable(): Promise<boolean> {
   await getDb();
   if (!_pool) return false;
-
-  try {
-    await _pool.query("SELECT 1");
-    return true;
-  } catch {
-    return false;
-  }
+  return hasRequiredPostgresSchema(_pool);
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {

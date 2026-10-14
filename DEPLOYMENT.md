@@ -55,7 +55,13 @@ The PostgreSQL schema and migration lineage are in `drizzle/schema.postgres.ts` 
 
 ## Operations
 
-- Health endpoint: `/api/health`
+- Container health endpoint: `/api/health`; it returns unhealthy when the
+  PostgreSQL connection or required migration version is unavailable.
+- Readiness endpoint: `/api/health/ready`; use it before routing traffic. Its
+  bounded database probe checks that the current canonical migration has been
+  applied.
+- Liveness endpoint: `/api/health/live`; it reports process liveness without
+  depending on PostgreSQL, so a database outage does not trigger a restart loop.
 - Apply migrations as a separate, reviewed deployment step before starting a release that depends on them.
 - Back up PostgreSQL using the provider-supported process and periodically test restore into an isolated database.
 - Keep secrets out of Git, container build arguments, and logs.

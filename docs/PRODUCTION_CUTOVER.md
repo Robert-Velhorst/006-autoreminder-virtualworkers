@@ -178,11 +178,13 @@ Before traffic is moved:
    `LOCAL_AUTH_BYPASS=false`.
 7. Confirm the public origin variables resolve to the stable HTTPS domain and,
    when enabled, the Trello callback is the exact configured HTTPS URL.
-8. Confirm `/api/health`, authenticated founder/admin/worker access,
-   WebSockets, scheduled jobs, Trello, and each optional integration that is
-   deliberately configured for production. Do not mark an unconfigured
-   integration as verified or treat an unavailable optional integration as a
-   successful smoke test.
+8. Confirm `/api/health` and `/api/health/ready` report healthy only after the
+   current PostgreSQL migration is applied; confirm `/api/health/live` remains
+   independent of database availability. Then verify authenticated
+   founder/admin/worker access, WebSockets, scheduled jobs, Trello, and each
+   optional integration deliberately configured for production. Do not mark an
+   unconfigured integration as verified or treat an unavailable optional
+   integration as a successful smoke test.
 9. Confirm no unapproved Trello comment, move, email, or other external action
    occurs during smoke testing.
 10. Point the public domain and Trello webhook callback at the new runtime.
