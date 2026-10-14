@@ -26,8 +26,8 @@ export function getProductionGateFailure(environment, ref) {
     return "Production must allow Robert Velhorst to approve his own deployment";
   }
 
-  if (environment.can_admins_bypass !== false) {
-    return "Production must prevent administrators from bypassing deployment protection rules";
+  if (environment.can_admins_bypass !== true) {
+    return "Production must retain the configured administrator bypass for emergency recovery";
   }
 
   if (environment.deployment_branch_policy?.protected_branches !== true) {

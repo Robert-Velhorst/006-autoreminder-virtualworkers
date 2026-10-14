@@ -3,7 +3,7 @@ import test from "node:test";
 import { getProductionGateFailure } from "./validate-production-environment.mjs";
 
 const protectedEnvironment = {
-  can_admins_bypass: false,
+  can_admins_bypass: true,
   protection_rules: [
     {
       type: "required_reviewers",
@@ -76,12 +76,17 @@ test("rejects production when self-approval is disabled", () => {
   );
 });
 
-test("rejects production when administrators can bypass protection", () => {
+test("retains the administrator bypass for emergency recovery", () => {
   const environment = structuredClone(protectedEnvironment);
-  environment.can_admins_bypass = true;
+  assert.equal(getProductionGateFailure(environment, "refs/heads/main"), null);
+});
+
+test("rejects production when the configured administrator bypass is removed", () => {
+  const environment = structuredClone(protectedEnvironment);
+  environment.can_admins_bypass = false;
   assert.match(
     getProductionGateFailure(environment, "refs/heads/main"),
-    /prevent administrators from bypassing/
+    /retain the configured administrator bypass/
   );
 });
 
