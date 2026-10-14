@@ -35,10 +35,11 @@ acceptance.
 ## Latest Verification Snapshot
 
 Verified 2026-10-14 UTC against PR #110 at commit
-`aa3b4c4a5ab791395a34fe9315b60ac73eb4d98d`:
+`cf84a24` (verified by quality-gate run
+[38620717557](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/38620717557)):
 
-- GitHub Actions quality gate run [38618056320](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/38618056320)
-  passed, including dependency and secret scans, type checks, transfer checks,
+- The GitHub Actions quality gate passed, including dependency and secret
+  scans, type checks, transfer checks,
   PostgreSQL migration/schema parity, tests/build, browser smoke tests, an
   isolated PostgreSQL backup/restore and sequence check, production-container
   smoke test, and Hetzner deployment-script syntax validation. This validates
