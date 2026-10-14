@@ -99,6 +99,8 @@ jobs:
       - name: Install Chromium for browser smoke tests
         run: pnpm exec playwright install --with-deps chromium
       - name: Verify authentication and worker dashboard in a browser
+        env:
+          JWT_SECRET: ci-only-playwright-session-secret-not-for-deployment
         run: pnpm exec playwright test --project=chromium
       - name: Verify PostgreSQL backup and isolated restore
         shell: bash
