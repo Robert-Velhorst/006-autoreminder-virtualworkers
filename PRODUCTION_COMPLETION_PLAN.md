@@ -35,16 +35,18 @@ acceptance.
 ## Latest Verification Snapshot
 
 Verified 2026-10-14 UTC against PR #110 at commit
-`3aa72c3e2788fddcb8cc8a5bd54336b7d103bbe7`, with successful quality-gate runs
-[38623196255](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/38623196255)
-and [38623184032](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/38623184032):
+`48fb1053b2bdf2e0c25c65bd44627fd5cf1abe74`, with successful quality-gate
+[38629932982](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/38629932982)
+and CodeQL [38629935529](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/38629935529):
 
 - The GitHub Actions quality gate passed, including dependency and secret
   scans, type checks, transfer checks,
   PostgreSQL migration/schema parity, tests/build, browser smoke tests, an
   isolated PostgreSQL backup/restore and sequence check, production-container
-  smoke test, and Hetzner deployment-script syntax validation. This validates
-  the CI build, not a live production migration or deployment.
+  smoke test, and Hetzner deployment-script syntax validation. Readiness also
+  verifies the exact checked-in PostgreSQL migration hash; production fails on
+  a port bind conflict and closes its PostgreSQL pool during graceful shutdown.
+  This validates CI, not a live production migration or deployment.
 - The dependency audit for this PR branch reports no known vulnerabilities.
 - GitHub reports zero open Dependabot alerts and two open secret-scanning
   alerts. The latter concern historical database credentials. The credential
