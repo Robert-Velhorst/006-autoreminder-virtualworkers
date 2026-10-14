@@ -51,6 +51,11 @@ and [38623184032](https://github.com/Robert-Velhorst/006-autoreminder-virtualwor
   has not been revoked because Robert explicitly declined deleting the related
   database user; do not mark the alerts as resolved until the credential is
   safely invalidated or GitHub confirms an appropriate resolution.
+- GitHub `main` protection is enabled with strict required CI and CodeQL
+  analysis checks, administrator enforcement, conversation resolution, and no
+  force-push or branch deletion. GitHub Actions is restricted to selected
+  actions and requires SHA-pinned action references. No required human review
+  is configured for code pull requests.
 - GitHub's `production` environment currently has no secrets or variables. The
   deploy workflow therefore cannot connect to a host; its four required SSH secrets
   are listed in [Production Cutover](docs/PRODUCTION_CUTOVER.md). No stable
