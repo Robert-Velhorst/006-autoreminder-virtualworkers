@@ -41,6 +41,11 @@ RUN addgroup -g 1001 -S nodejs && \
 # Set working directory
 WORKDIR /app
 
+ENV NODE_ENV=production \
+    PORT=3000 \
+    HOST=0.0.0.0 \
+    LOCAL_AUTH_BYPASS=false
+
 # Keep package.json for Node's ESM package scope; the package manager and
 # dependency manifests are not needed at runtime.
 COPY --chown=nodejs:nodejs package.json ./

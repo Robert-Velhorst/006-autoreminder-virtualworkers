@@ -78,6 +78,20 @@ jobs:
       - run: pnpm build
       - name: Build the production container
         run: docker build --tag va-dashboard:ci .
+      - name: Smoke-test the production image runtime
+        run: |
+          docker run --rm --entrypoint node va-dashboard:ci --input-type=module -e '
+            import assert from "node:assert/strict";
+            import { existsSync } from "node:fs";
+            assert.equal(process.env.NODE_ENV, "production");
+            assert.equal(process.env.LOCAL_AUTH_BYPASS, "false");
+            assert.notEqual(process.getuid(), 0);
+            assert.equal(existsSync("/usr/local/bin/pnpm"), false);
+            assert.ok(existsSync("/app/dist/index.js"));
+            for (const dependency of ["express", "pg", "drizzle-orm"]) {
+              import.meta.resolve(dependency);
+            }
+          '
       - name: Validate Hetzner deployment script syntax
         run: bash -n deployment/hetzner/deploy.sh
       - name: Verify migration metadata matches the schema
