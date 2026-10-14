@@ -17,6 +17,8 @@ services:
       LOCAL_AUTH_BYPASS: "false"
       SESSION_APP_ID: ${SESSION_APP_ID:-va-dashboard}
       PUBLIC_URL: ${PUBLIC_URL:-}
+      APP_URL: ${APP_URL:-}
+      VITE_FRONTEND_URL: ${VITE_FRONTEND_URL:-}
       TRELLO_WEBHOOK_CALLBACK_URL: ${TRELLO_WEBHOOK_CALLBACK_URL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"

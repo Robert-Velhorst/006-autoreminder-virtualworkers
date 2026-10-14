@@ -43,6 +43,36 @@ describe("AI settings authorization", () => {
     })).status).toBe(403);
   });
 
+  it("limits repeated Trello webhook registration attempts", async () => {
+    const configKeys = [
+      "TRELLO_API_KEY",
+      "TRELLO_TOKEN",
+      "TRELLO_WEBHOOK_CALLBACK_URL",
+      "TRELLO_WEBHOOK_SECRET",
+    ] as const;
+    const previous = Object.fromEntries(configKeys.map(key => [key, process.env[key]]));
+    const app = createApp("admin");
+    for (const key of configKeys) delete process.env[key];
+
+    try {
+      const responses = [];
+      for (let attempt = 0; attempt < 11; attempt += 1) {
+        responses.push(await request(app).post("/api/trello-webhook/register").send({
+          modelId: "12345678",
+        }));
+      }
+
+      expect(responses.slice(0, 10).every(response => response.status === 500)).toBe(true);
+      expect(responses[10].status).toBe(429);
+      expect(responses[10].body.error).toContain("Too many webhook registration attempts");
+    } finally {
+      for (const key of configKeys) {
+        if (previous[key] === undefined) delete process.env[key];
+        else process.env[key] = previous[key];
+      }
+    }
+  });
+
   it("rejects unsigned Trello callbacks before attempting persistence", async () => {
     const previousUrl = process.env.TRELLO_WEBHOOK_CALLBACK_URL;
     const previousSecret = process.env.TRELLO_WEBHOOK_SECRET;

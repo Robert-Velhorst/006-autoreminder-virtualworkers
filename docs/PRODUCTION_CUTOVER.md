@@ -17,6 +17,17 @@ database or cache publicly; use a private network or loopback-bound host service
 Public password registration is disabled; existing workers authenticate with
 their registered Trello identity or a separately provisioned local password.
 
+Set `PUBLIC_URL`, `APP_URL`, and `VITE_FRONTEND_URL` in the same
+`/opt/va-dashboard/.env` file passed to `docker compose --env-file`. All three
+must be the public HTTPS origin (for example `https://dashboard.example.com`),
+without a trailing path; do not leave the localhost defaults from `.env.example`
+in production. Compose uses `PUBLIC_URL` and `TRELLO_WEBHOOK_CALLBACK_URL` for
+origin and callback configuration, so both must also be present in that file.
+If Trello webhooks are enabled, set `TRELLO_WEBHOOK_CALLBACK_URL` to the exact
+URL `https://dashboard.example.com/api/trello-webhook` and configure
+`TRELLO_WEBHOOK_SECRET`. Keep the callback unset if webhooks are not deliberately
+enabled.
+
 ## Release and Deployment Gate
 
 Production deployment is started manually from protected `main`. The selected
@@ -161,15 +172,17 @@ Before traffic is moved:
    behavior, and document the exact rollback point before any traffic move.
 6. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and
    `LOCAL_AUTH_BYPASS=false`.
-7. Confirm `/api/health`, authenticated founder/admin/worker access,
+7. Confirm the public origin variables resolve to the stable HTTPS domain and,
+   when enabled, the Trello callback is the exact configured HTTPS URL.
+8. Confirm `/api/health`, authenticated founder/admin/worker access,
    WebSockets, scheduled jobs, Trello, and each optional integration that is
    deliberately configured for production. Do not mark an unconfigured
    integration as verified or treat an unavailable optional integration as a
    successful smoke test.
-8. Confirm no unapproved Trello comment, move, email, or other external action
+9. Confirm no unapproved Trello comment, move, email, or other external action
    occurs during smoke testing.
-9. Point the public domain and Trello webhook callback at the new runtime.
-10. Retain the prior build and database snapshot through the rollback window.
+10. Point the public domain and Trello webhook callback at the new runtime.
+11. Retain the prior build and database snapshot through the rollback window.
 
 Before reusing any existing database, create and restore-test a logical
 backup. Compose does not provision or alter database storage. Keep the MySQL

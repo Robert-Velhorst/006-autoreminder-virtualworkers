@@ -70,6 +70,26 @@ jobs:
       - run: pnpm check:db-transfer
       - name: Test deployment release-source validation
         run: node --test deployment/hetzner/release-source.test.mjs
+      - name: Validate production URL and webhook Compose configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          trap 'rm -f .env' EXIT
+          export PUBLIC_URL=https://dashboard.example.com
+          export APP_URL=https://dashboard.example.com
+          export VITE_FRONTEND_URL=https://dashboard.example.com
+          export TRELLO_WEBHOOK_CALLBACK_URL=https://dashboard.example.com/api/trello-webhook
+          docker compose --env-file .env config --format json | node --input-type=module -e '
+            import assert from "node:assert/strict";
+            let input = "";
+            for await (const chunk of process.stdin) input += chunk;
+            const app = JSON.parse(input).services.app;
+            assert.equal(app.environment.PUBLIC_URL, "https://dashboard.example.com");
+            assert.equal(app.environment.TRELLO_WEBHOOK_CALLBACK_URL, "https://dashboard.example.com/api/trello-webhook");
+            assert.equal(app.environment.APP_URL, "https://dashboard.example.com");
+            assert.equal(app.environment.VITE_FRONTEND_URL, "https://dashboard.example.com");
+          '
       - name: Apply PostgreSQL migrations
         run: pnpm exec drizzle-kit migrate
       - name: Verify PostgreSQL schema parity

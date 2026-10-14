@@ -13,6 +13,14 @@ import {
 
 const router = Router();
 
+const registerWebhookRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many webhook registration attempts, please wait before retrying' },
+});
+
 router.use(rateLimit({
   windowMs: 60 * 1000,
   limit: 120,
@@ -68,7 +76,7 @@ router.get('/', (_req: any, res: Response) => {
  * Register a webhook for a Trello board/workspace.
  * Fix #3 (duplicate detection): checks DB before calling Trello.
  */
-router.post('/register', requireAdmin, async (req: any, res: Response) => {
+router.post('/register', requireAdmin, registerWebhookRateLimit, async (req: any, res: Response) => {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
