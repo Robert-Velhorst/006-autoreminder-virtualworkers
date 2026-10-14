@@ -104,34 +104,47 @@ jobs:
         run: pnpm exec playwright test --project=chromium
       - name: Verify PostgreSQL backup and isolated restore
         shell: bash
+        env:
+          RESTORE_DATABASE_URL: postgresql://recovery:recovery_test@127.0.0.1:5432/recovery_restore_verify?sslmode=disable
         run: |
           set -euo pipefail
-          docker run --rm -i --network host \
-            --env DATABASE_URL="$DATABASE_URL" \
-            --env RESTORE_DATABASE_URL='postgresql://recovery:recovery_test@127.0.0.1:5432/recovery_restore_verify?sslmode=disable' \
-            --env PGPASSWORD=recovery_test \
-            postgres:18.6 sh -s <<'BACKUP_TEST'
-          set -eu
           cleanup() {
-            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
-              -c 'DROP TABLE IF EXISTS public.ci_backup_restore_probe' >/dev/null 2>&1 || true
-            dropdb --maintenance-db="$DATABASE_URL" recovery_restore_verify >/dev/null 2>&1 || true
+            docker run --rm --network host \
+              --env DATABASE_URL="$DATABASE_URL" \
+              --env PGPASSWORD=recovery_test \
+              postgres:18.6 dropdb --maintenance-db="$DATABASE_URL" \
+              --if-exists recovery_restore_verify >/dev/null 2>&1 || true
+            docker run --rm --network host \
+              --env DATABASE_URL="$DATABASE_URL" \
+              --env PGPASSWORD=recovery_test \
+              postgres:18.6 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+              -c "DELETE FROM public.users WHERE \"openId\" IN ('ci-backup-restore-probe', 'ci-backup-sequence-probe')" \
+              >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
 
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
-            -c 'CREATE TABLE public.ci_backup_restore_probe (id integer PRIMARY KEY, payload text NOT NULL)' \
-            -c "INSERT INTO public.ci_backup_restore_probe VALUES (1, 'restore verified')"
+          docker run --rm -i --network host \
+            --env DATABASE_URL="$DATABASE_URL" \
+            --env RESTORE_DATABASE_URL="$RESTORE_DATABASE_URL" \
+            --env PGPASSWORD=recovery_test \
+            postgres:18.6 sh -s <<'BACKUP_TEST'
+          set -eu
+          source_id="$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -At \
+            -c "INSERT INTO public.users (\"openId\", name, role) VALUES ('ci-backup-restore-probe', 'CI backup restore probe', 'worker') RETURNING id")"
           pg_dump --format=custom --no-owner --no-acl \
             --dbname="$DATABASE_URL" --file=/tmp/va-dashboard-ci.dump
           test -s /tmp/va-dashboard-ci.dump
           createdb --maintenance-db="$DATABASE_URL" recovery_restore_verify
           pg_restore --exit-on-error --no-owner --no-acl \
             --dbname="$RESTORE_DATABASE_URL" /tmp/va-dashboard-ci.dump
-          restored="$(psql "$RESTORE_DATABASE_URL" -v ON_ERROR_STOP=1 -At \
-            -c 'SELECT payload FROM public.ci_backup_restore_probe WHERE id = 1')"
-          test "$restored" = 'restore verified'
+          restored_id="$(psql "$RESTORE_DATABASE_URL" -v ON_ERROR_STOP=1 -At \
+            -c "SELECT id FROM public.users WHERE \"openId\" = 'ci-backup-restore-probe'")"
+          test "$restored_id" = "$source_id"
+          next_id="$(psql "$RESTORE_DATABASE_URL" -v ON_ERROR_STOP=1 -At \
+            -c "INSERT INTO public.users (\"openId\", name, role) VALUES ('ci-backup-sequence-probe', 'CI backup sequence probe', 'worker') RETURNING id")"
+          test "$next_id" -gt "$source_id"
           BACKUP_TEST
+          DATABASE_URL="$RESTORE_DATABASE_URL" pnpm db:verify-parity
       - name: Build the production container
         run: docker build --tag va-dashboard:ci .
       - name: Smoke-test the production image runtime
