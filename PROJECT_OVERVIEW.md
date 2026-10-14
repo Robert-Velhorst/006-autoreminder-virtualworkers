@@ -440,7 +440,7 @@ Trello API
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                  DATABASE LAYER                              │
-│  MySQL 8.4.12 / SQLite 3 + Drizzle ORM                      │
+│  MySQL 9.7.2 / SQLite 3 + Drizzle ORM                      │
 │  - 34 Tables                                                 │
 │  - Relationships & Indexes                                   │
 │  - Migrations & Versioning                                   │
@@ -1342,7 +1342,7 @@ socket.on('task:updated', (task) => {
 ### Prerequisites
 
 - Node.js 26.11.1 LTS
-- MySQL 8.4.12 LTS
+- MySQL 9.7.2
 - AWS S3 bucket
 - Trello API credentials
 - Manus OAuth credentials
