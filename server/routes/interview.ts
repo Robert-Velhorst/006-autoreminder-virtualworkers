@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { publicProcedure, router } from '../_core/trpc';
+import { protectedProcedure, router } from '../_core/trpc';
 import { analyzeCardBeforeInterview } from '../services/pre-interview-analysis';
 import { startInterview, processResponse } from '../services/conversational-interview';
 import {
@@ -14,7 +14,7 @@ const TRELLO_API_KEY = process.env.TRELLO_API_KEY;
 const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
 
 // In-memory cache is kept only as a short-lived convenience layer.
-const interviewStates = new Map<string, { sessionId: string; state: any; preAnalysis: any }>();
+const interviewStates = new Map<string, { sessionId: string; userId: number; state: any; preAnalysis: any }>();
 
 // Helper to get Trello card with all details
 async function getTrelloCard(cardId: string) {
@@ -45,16 +45,13 @@ export const interviewRouter = router({
   /**
    * Start a new interview for a card
    */
-  start: publicProcedure
+  start: protectedProcedure
     .input(z.object({
       cardId: z.string(),
     }))
     .mutation(async ({ input, ctx }) => {
       const { cardId } = input;
       const user = ctx.user;
-      if (!user) {
-        throw new Error('Unauthorized');
-      }
 
       // Get card data from Trello
       const card = await getTrelloCard(cardId);
@@ -83,7 +80,7 @@ export const interviewRouter = router({
       });
 
       // Store state
-      interviewStates.set(cardId, { sessionId, state, preAnalysis });
+      interviewStates.set(cardId, { sessionId, userId: user.id, state, preAnalysis });
 
       return {
         sessionId,
@@ -96,7 +93,7 @@ export const interviewRouter = router({
   /**
    * Process user response and get next question
    */
-  respond: publicProcedure
+  respond: protectedProcedure
     .input(z.object({
       cardId: z.string(),
       sessionId: z.string().optional(),
@@ -105,14 +102,12 @@ export const interviewRouter = router({
     .mutation(async ({ input, ctx }) => {
       const { cardId, response, sessionId: providedSessionId } = input;
       const user = ctx.user;
-      if (!user) {
-        throw new Error('Unauthorized');
-      }
 
       // Get stored state
       let stored = providedSessionId
-        ? Array.from(interviewStates.values()).find(entry => entry.sessionId === providedSessionId)
+        ? Array.from(interviewStates.values()).find(entry => entry.sessionId === providedSessionId && entry.userId === user.id)
         : interviewStates.get(cardId);
+      if (stored && stored.userId !== user.id) stored = undefined;
 
       let session = null as any;
       if (!stored) {
@@ -130,7 +125,7 @@ export const interviewRouter = router({
           throw new Error('Interview state not found. Please restart the interview.');
         }
 
-        stored = { sessionId: session.id, state: sessionState, preAnalysis: null };
+        stored = { sessionId: session.id, userId: user.id, state: sessionState, preAnalysis: null };
         interviewStates.set(cardId, stored);
       } else {
         session = await getInterviewSession(stored.sessionId);
@@ -153,7 +148,7 @@ export const interviewRouter = router({
       const result = await processResponse(state, response, preAnalysis);
 
       // Update stored state
-      interviewStates.set(cardId, { sessionId: stored.sessionId, state, preAnalysis });
+      interviewStates.set(cardId, { sessionId: stored.sessionId, userId: user.id, state, preAnalysis });
 
       const latestQuestion = state.messages[state.messages.length - 2]?.content || '';
       const questionNumber = Math.max(0, state.validations.length - 1);
@@ -215,17 +210,19 @@ export const interviewRouter = router({
   /**
    * Get current interview state
    */
-  getState: publicProcedure
+  getState: protectedProcedure
     .input(z.object({
       cardId: z.string(),
     }))
-    .query(async ({ input }: { input: { cardId: string } }) => {
+    .query(async ({ input, ctx }) => {
       const { cardId } = input;
 
       const stored = interviewStates.get(cardId);
-      if (!stored) {
+      if (!stored || stored.userId !== ctx.user.id) {
         const sessions = await getCardInterviewSessions(cardId);
-        const session = sessions.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+        const session = sessions
+          .filter((item: any) => item.userId === ctx.user.id)
+          .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
         if (!session) {
           return null;
         }
@@ -252,13 +249,13 @@ export const interviewRouter = router({
   /**
    * Cancel interview
    */
-  cancel: publicProcedure
+  cancel: protectedProcedure
     .input(z.object({
       cardId: z.string(),
     }))
-    .mutation(async ({ input }: { input: { cardId: string } }) => {
+    .mutation(async ({ input, ctx }) => {
       const { cardId } = input;
-      interviewStates.delete(cardId);
+      if (interviewStates.get(cardId)?.userId === ctx.user.id) interviewStates.delete(cardId);
       return { success: true };
     }),
 });

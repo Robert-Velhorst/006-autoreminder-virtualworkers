@@ -2,7 +2,7 @@
  * APTLSS DB helpers — store and retrieve AI-generated action plans per Trello card.
  */
 import { getDb } from "./db";
-import { aptlssPlans, InsertAptlssPlan, dailyPlans, InsertDailyPlan } from "../drizzle/schema";
+import { aptlssPlans, InsertAptlssPlan, dailyPlans, InsertDailyPlan } from "../drizzle/schema.postgres";
 import { eq, desc, and } from "drizzle-orm";
 
 // ─── APTLSS Card Plans ────────────────────────────────────────────────────────
@@ -45,7 +45,8 @@ export async function upsertDailyPlan(plan: InsertDailyPlan): Promise<void> {
   await db
     .insert(dailyPlans)
     .values(plan)
-    .onDuplicateKeyUpdate({
+    .onConflictDoUpdate({
+      target: [dailyPlans.vaId, dailyPlans.dateKey],
       set: {
         scheduleJson: plan.scheduleJson,
         dailySummary: plan.dailySummary ?? null,

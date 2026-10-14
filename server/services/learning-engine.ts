@@ -1,5 +1,5 @@
 import { getDb } from '../db';
-import { timeEntries } from '../../drizzle/schema';
+import { timeEntries } from '../../drizzle/schema.postgres';
 import { eq } from 'drizzle-orm';
 
 // Mocked learning engine functions for now

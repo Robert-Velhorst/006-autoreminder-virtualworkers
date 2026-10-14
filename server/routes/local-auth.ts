@@ -68,7 +68,7 @@ router.post('/register', async (req: Request, res: Response) => {
     // Store password hash
     const dbInstance = await (await import('../db')).getDb();
     if (dbInstance) {
-      const { users } = await import('../../drizzle/schema');
+      const { users } = await import('../../drizzle/schema.postgres');
       const { eq } = await import('drizzle-orm');
       await dbInstance
         .update(users)
@@ -180,7 +180,7 @@ router.post('/trello/login-token', async (req: Request, res: Response) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    const { vaProfiles, users } = await import('../../drizzle/schema.js');
+    const { vaProfiles, users } = await import('../../drizzle/schema.postgres.js');
     const { eq } = await import('drizzle-orm');
 
     // Look up VA profile by trelloMemberId

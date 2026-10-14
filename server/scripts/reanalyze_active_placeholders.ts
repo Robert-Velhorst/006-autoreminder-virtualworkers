@@ -1,5 +1,5 @@
 import { getDb } from "../db";
-import { atisCards, atisCardUnderstanding } from "../../drizzle/schema";
+import { atisCards, atisCardUnderstanding } from "../../drizzle/schema.postgres";
 import { processCardUnderstanding } from "../services/atis-understanding";
 import { eq, and, sql, isNull } from "drizzle-orm";
 import dotenv from "dotenv";

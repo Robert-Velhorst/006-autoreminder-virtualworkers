@@ -16,7 +16,7 @@ import {
   type InsertATISCard,
   type InsertATISAttachment,
   type InsertATISComment,
-} from '../../drizzle/schema';
+} from '../../drizzle/schema.postgres';
 import { eq, and, sql } from 'drizzle-orm';
 import { fetchWithRetry } from '../utils/retry';
 

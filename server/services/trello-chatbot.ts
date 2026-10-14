@@ -12,7 +12,8 @@ import {
   atisCardUnderstanding, 
   timeEntries, 
   vaProfiles 
-} from '../../drizzle/schema';
+} from '../../drizzle/schema.postgres';
+import { areNotificationsEnabled } from './notificationPolicy';
 
 const TRELLO_API_KEY = process.env.TRELLO_API_KEY;
 const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
@@ -63,9 +64,7 @@ export function parseBotCommand(
   };
 }
 
-// GLOBAL KILL SWITCH - Set to false to disable all automated notifications
-// This prevents the bot from posting any comments to Trello
-const NOTIFICATIONS_ENABLED = process.env.NOTIFICATIONS_ENABLED === 'true' || process.env.NODE_ENV === 'production' || true;
+const NOTIFICATIONS_ENABLED = areNotificationsEnabled();
 
 /**
  * Post a comment to a Trello card
@@ -133,7 +132,7 @@ async function getCardProgress(trelloCardId: string): Promise<{
     const completionsResult = await db.execute(
       sql`SELECT step_index FROM atis_checklist_completion WHERE card_id = ${card.id}`
     );
-    const completionRows = (completionsResult as any)[0] || [];
+    const completionRows = completionsResult.rows;
     const completedStepIds = new Set(completionRows.map((c: any) => c.step_index));
 
     // Parse checklist from understanding

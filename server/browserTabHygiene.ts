@@ -6,7 +6,7 @@ import {
   appSettings,
   users,
   vaProfiles,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import {
   DEFAULT_BROWSER_TAB_POLICY,
   evaluateBrowserTabHygiene,
@@ -50,7 +50,10 @@ async function readSetting(key: string): Promise<string | null> {
 async function writeSetting(key: string, value: string, vaId: number | null = null) {
   const db = await getDb();
   if (!db) throw new Error("Database is required to persist browser-tab settings");
-  await db.insert(appSettings).values({ vaId, key, value }).onDuplicateKeyUpdate({ set: { value, vaId } });
+  await db.insert(appSettings).values({ vaId, key, value }).onConflictDoUpdate({
+    target: appSettings.key,
+    set: { value, vaId },
+  });
 }
 
 async function readWorkerSetting(key: string, vaId: number) {
@@ -201,7 +204,10 @@ export async function ingestBrowserTabInventory(vaId: number, input: BrowserTabI
     tabsJson: JSON.stringify(tabs),
     capturedAt: now,
   };
-  await db.insert(browserTabStates).values(values).onDuplicateKeyUpdate({ set: values });
+  await db.insert(browserTabStates).values(values).onConflictDoUpdate({
+    target: browserTabStates.collectorId,
+    set: values,
+  });
 
   const status = await getBrowserTabStatus(vaId, now);
   if (status.warningWindow) await recordBrowserTabEodEvidence(vaId, now, "collector");
@@ -270,7 +276,7 @@ export async function recordBrowserTabEodEvidence(vaId: number, now = new Date()
   const snapshotDate = dateKeyInTimeZone(now, worker.timezone);
   const values = {
     vaId,
-    snapshotDate: snapshotDate as unknown as Date,
+    snapshotDate: new Date(`${snapshotDate}T00:00:00.000Z`),
     status: status.status,
     totalTabs: status.totalTabs,
     actionableTabs: status.actionableTabs,
@@ -290,7 +296,10 @@ export async function recordBrowserTabEodEvidence(vaId: number, now = new Date()
     capturedAt: status.capturedAt,
     verifiedAt: now,
   };
-  await db.insert(browserTabDailyEvidence).values(values).onDuplicateKeyUpdate({ set: values });
+  await db.insert(browserTabDailyEvidence).values(values).onConflictDoUpdate({
+    target: [browserTabDailyEvidence.vaId, browserTabDailyEvidence.snapshotDate],
+    set: values,
+  });
   return { ...status, snapshotDate };
 }
 
@@ -309,7 +318,7 @@ export async function getBrowserTabEvidenceByDate(vaId: number, dateKey: string)
   const rows = await db.select().from(browserTabDailyEvidence)
     .where(and(
       eq(browserTabDailyEvidence.vaId, vaId),
-      eq(browserTabDailyEvidence.snapshotDate, dateKey as unknown as Date),
+      eq(browserTabDailyEvidence.snapshotDate, new Date(`${dateKey}T00:00:00.000Z`)),
     ))
     .limit(1);
   const row = rows[0];

@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { eq } from "drizzle-orm";
-import { vaProfiles, type User } from "../../drizzle/schema";
+import { vaProfiles, type User } from "../../drizzle/schema.postgres";
 import { getDb } from "../db";
 
 export function requestUser(req: Request) {
@@ -10,6 +10,19 @@ export function requestUser(req: Request) {
 export function requireAuthenticated(req: Request, res: Response, next: NextFunction) {
   if (!requestUser(req)) {
     res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  next();
+}
+
+export function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  const user = requestUser(req);
+  if (!user) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  if (user.role !== "admin") {
+    res.status(403).json({ error: "Forbidden" });
     return;
   }
   next();
