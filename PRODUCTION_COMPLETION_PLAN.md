@@ -32,6 +32,33 @@ The migration and live deployment gates have not been accepted yet. A green
 local test suite, image build, or CI run does not establish production
 acceptance.
 
+## Latest Verification Snapshot
+
+Verified 2026-10-14 UTC against PR #110 at commit
+`1c74f5335ba2fe4fe18a311218f570ce96c8cc0d`:
+
+- GitHub Actions quality gates and CodeQL checks passed. The dependency audit
+  for this PR branch reports no known vulnerabilities.
+- The default branch still has 45 open Dependabot alerts (20 high, 21 medium,
+  and 4 low). They are not cleared by the PR-branch audit; the fixes must reach
+  the default branch before those alerts can close.
+- GitHub secret-scanning alerts #1 and #4 remain open for historical MongoDB
+  connection strings. MongoDB is absent from the current application and
+  documentation, but the exposed Atlas credential has not been revoked.
+- GitHub's `production` environment has no secrets or variables. The deploy
+  workflow therefore cannot connect to a host; its four required SSH secrets
+  are listed in [Production Cutover](docs/PRODUCTION_CUTOVER.md). No stable
+  release is available: `v1.0.0-rc.1` is a prerelease and is rejected by the
+  production gate.
+- The PostgreSQL backup/restore test passed against isolated CI databases.
+  The legacy MySQL-to-PostgreSQL transfer has not been rehearsed against the
+  actual source or a restored backup, and no live Hetzner deployment or
+  production acceptance has occurred.
+
+This is a dated evidence snapshot, not a claim of production readiness. Refresh
+it after a default-branch merge, secret revocation, host configuration, release,
+data-transfer rehearsal, or live deployment.
+
 ## Operational sources
 
 - [Deployment](DEPLOYMENT.md)
