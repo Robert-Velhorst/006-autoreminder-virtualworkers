@@ -426,7 +426,7 @@ Trello API
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                    API LAYER                                 │
-│  Express 4 + tRPC 11 + Node.js 24.14.1 LTS                 │
+│  Express 4 + tRPC 11 + Node.js 24.21.0 LTS                 │
 │  - Task Scheduling (APTLSS)                                 │
 │  - AI Analysis (ATIS)                                        │
 │  - Time Tracking                                             │
@@ -1341,7 +1341,7 @@ socket.on('task:updated', (task) => {
 
 ### Prerequisites
 
-- Node.js 24.14.1 LTS
+- Node.js 24.21.0 LTS
 - MySQL 8.4.12 LTS
 - AWS S3 bucket
 - Trello API credentials

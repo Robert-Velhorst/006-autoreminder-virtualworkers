@@ -1,6 +1,6 @@
 # Multi-stage build for VA Dashboard
 # Stage 1: Build frontend and backend
-FROM node:24.14.1-alpine3.23 AS builder
+FROM node:24.21.0-alpine3.23 AS builder
 
 # Install pnpm
 RUN npm install -g pnpm@12.11.2
@@ -22,7 +22,7 @@ COPY . .
 RUN pnpm build
 
 # Stage 2: Production image
-FROM node:24.14.1-alpine3.23 AS production
+FROM node:24.21.0-alpine3.23 AS production
 
 # Install pnpm
 RUN npm install -g pnpm@12.11.2

@@ -34,7 +34,7 @@ That's it! The application is now running with MySQL and Redis.
 If you prefer to run services manually:
 
 ### Prerequisites
-- Node.js 24.14.1 LTS
+- Node.js 24.21.0 LTS
 - pnpm 12.11.2
 - MySQL 8.4.12 LTS
 - Redis 8.10.2 (optional but recommended)
