@@ -17,6 +17,31 @@ database or cache publicly; use a private network or loopback-bound host service
 Public password registration is disabled; existing workers authenticate with
 their registered Trello identity or a separately provisioned local password.
 
+## Release and Deployment Gate
+
+Production deployment is started manually from protected `main`. The selected
+release must be a published stable `vMAJOR.MINOR.PATCH` tag whose commit is
+contained in `main`. The workflow verifies the GHCR image's provenance against
+that exact source commit before connecting to the host. The GitHub `production`
+environment requires its configured reviewer; the reviewer may approve their
+own deployment.
+
+Configure these four GitHub Actions secrets on the `production` environment;
+they are SSH transport credentials and are separate from the application's
+runtime `.env` on the host:
+
+- `HETZNER_SSH_HOST`: server DNS name or IPv4 address on SSH port 22.
+- `HETZNER_SSH_USER`: dedicated, least-privilege deployment account.
+- `HETZNER_SSH_PRIVATE_KEY`: private key for that account; never commit it or
+  paste it into a pull request or chat.
+- `HETZNER_SSH_KNOWN_HOSTS`: verified host-key line for the server.
+
+The deploy workflow does not provision the host or create `/opt/va-dashboard/.env`.
+Prepare that directory, the runtime environment file, Docker, HTTPS reverse
+proxy, persistent PostgreSQL, backups, and SSH account before dispatching a
+deployment. Do not proceed if host identity or the database restore path has
+not been verified.
+
 Do not point either obsolete Vercel project at the repository root. A Vercel
 deployment would omit the persistent process, scheduled work, and WebSocket
 runtime required by the platform. Production startup rejects the Vercel

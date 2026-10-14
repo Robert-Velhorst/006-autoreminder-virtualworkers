@@ -68,6 +68,8 @@ jobs:
           exit "$status"
       - run: pnpm check
       - run: pnpm check:db-transfer
+      - name: Test deployment release-source validation
+        run: node --test deployment/hetzner/release-source.test.mjs
       - name: Apply PostgreSQL migrations
         run: pnpm exec drizzle-kit migrate
       - name: Verify PostgreSQL schema parity

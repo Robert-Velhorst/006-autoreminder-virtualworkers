@@ -27,6 +27,9 @@ jobs:
     if: inputs.confirm == 'deploy'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      release_tag: ${{ steps.release.outputs.tag }}
+      release_commit: ${{ steps.release.outputs.commit }}
     permissions:
       actions: read
       contents: read
@@ -46,6 +49,22 @@ jobs:
           environment="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
           printf '%s' "$environment" | node deployment/hetzner/validate-production-environment.mjs
 
+      - name: Validate stable release is contained in protected main
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Only stable vMAJOR.MINOR.PATCH release tags can be deployed" >&2
+            exit 1
+          fi
+          release_metadata="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '{tag_name,draft,prerelease}')"
+          comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${RELEASE_TAG}...main" --jq '{status,base_commit:{sha:.base_commit.sha}}')"
+          RELEASE_TAG="$RELEASE_TAG" RELEASE_METADATA="$release_metadata" MAIN_COMPARISON="$comparison" \
+            node deployment/hetzner/validate-release-source.mjs >> "$GITHUB_OUTPUT"
+
   deploy:
     needs: validate-production-gate
     if: inputs.confirm == 'deploy' && github.ref == 'refs/heads/main'
@@ -61,33 +80,16 @@ jobs:
       GHCR_IMAGE: ghcr.io/robert-velhorst/006-autoreminder-virtualworkers
       APP_DIR: /opt/va-dashboard
     steps:
-      - name: Validate stable published release
-        id: release
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Only stable vMAJOR.MINOR.PATCH release tags can be deployed" >&2
-            exit 1
-          fi
-          release_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq 'select(.draft == false and .prerelease == false) | .tag_name')"
-          if [[ "$release_tag" != "$RELEASE_TAG" ]]; then
-            echo "A published, non-prerelease GitHub release is required" >&2
-            exit 1
-          fi
-          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
-
       - name: Check out the exact release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ steps.release.outputs.tag }}
+          ref: ${{ needs.validate-production-gate.outputs.release_tag }}
 
       - name: Authenticate to GHCR and verify release provenance
         shell: bash
         env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_TAG: ${{ needs.validate-production-gate.outputs.release_tag }}
+          RELEASE_COMMIT: ${{ needs.validate-production-gate.outputs.release_commit }}
         run: |
           set -euo pipefail
           printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
@@ -100,7 +102,8 @@ jobs:
           gh attestation verify "oci://${image_ref}" \
             --repo "$GITHUB_REPOSITORY" \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-container.yml" \
-            --source-ref "refs/tags/${RELEASE_TAG}"
+            --source-ref "refs/tags/${RELEASE_TAG}" \
+            --source-digest "$RELEASE_COMMIT"
           echo "APP_IMAGE=$image_ref" >> "$GITHUB_ENV"
 
       - name: Stage the release Compose configuration
