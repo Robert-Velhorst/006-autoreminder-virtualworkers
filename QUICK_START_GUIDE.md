@@ -35,7 +35,7 @@ If you prefer to run services manually:
 
 ### Prerequisites
 - Node.js 26.11.1
-- pnpm 12.11.2+
+- pnpm 12.13.0+
 - MySQL 9.7.2 LTS
 - Redis 8.10.2 (optional but recommended)
 

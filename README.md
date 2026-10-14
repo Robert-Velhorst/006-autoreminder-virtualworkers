@@ -37,7 +37,7 @@ This repository is actively developed. A versioned container image and tagged re
 ## Requirements
 
 - Docker Engine and Docker Compose v2 for the complete local stack.
-- Node.js 26.11.1 and pnpm 12.11.2 for development outside Docker.
+- Node.js 26.11.1 and pnpm 12.13.0 for development outside Docker.
 - MySQL 9.7.2 LTS and Redis 8.10.2 are used by the provided Compose stack.
 
 ## Quick Start: Docker Compose

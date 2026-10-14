@@ -3,7 +3,7 @@
 FROM node:26.11.1-alpine AS builder
 
 # Install pnpm
-RUN npm install -g pnpm@12.11.2
+RUN npm install -g pnpm@12.13.0
 
 # Set working directory
 WORKDIR /app
@@ -25,7 +25,7 @@ RUN pnpm build
 FROM node:26.11.1-alpine AS production
 
 # Install pnpm
-RUN npm install -g pnpm@12.11.2
+RUN npm install -g pnpm@12.13.0
 
 # Create app user
 RUN addgroup -g 1001 -S nodejs && \
