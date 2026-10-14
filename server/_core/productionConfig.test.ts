@@ -10,6 +10,9 @@ const validProductionEnvironment = {
   JWT_SECRET: "a".repeat(32),
   TRELLO_API_KEY: "trello-key",
   TRELLO_TOKEN: "trello-token",
+  PUBLIC_URL: "https://dashboard.example.com",
+  APP_URL: "https://dashboard.example.com",
+  VITE_FRONTEND_URL: "https://dashboard.example.com",
   HOST: "0.0.0.0",
   LOCAL_AUTH_BYPASS: "false",
 };
@@ -45,6 +48,9 @@ describe("production configuration", () => {
       "JWT_SECRET must contain at least 32 characters",
       "TRELLO_API_KEY is required",
       "TRELLO_TOKEN is required",
+      "PUBLIC_URL must be set to the public HTTPS origin in production",
+      "APP_URL must be set to the public HTTPS origin in production",
+      "VITE_FRONTEND_URL must be set to the public HTTPS origin in production",
       "HOST must bind to a non-loopback interface in production",
       "LOCAL_AUTH_BYPASS cannot be enabled in production",
     ]);
@@ -55,6 +61,29 @@ describe("production configuration", () => {
       ...validProductionEnvironment,
       DATABASE_URL: "mysql://worker:secret@mysql:3306/va_dashboard",
     })).toEqual(["DATABASE_URL must be a PostgreSQL connection URL"]);
+  });
+
+  it("requires all public application URLs to use the same HTTPS origin", () => {
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      VITE_FRONTEND_URL: "http://localhost:3000",
+    })).toEqual([
+      "VITE_FRONTEND_URL must be an HTTPS origin without a path, credentials, query, or fragment",
+    ]);
+  });
+
+  it("requires the Trello webhook callback and secret as a matching production pair", () => {
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      TRELLO_WEBHOOK_CALLBACK_URL: "https://other.example.com/api/trello-webhook",
+      TRELLO_WEBHOOK_SECRET: "test-secret",
+    })).toEqual([
+      "TRELLO_WEBHOOK_CALLBACK_URL must be the exact HTTPS /api/trello-webhook URL on the public origin",
+    ]);
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      TRELLO_WEBHOOK_SECRET: "test-secret",
+    })).toContain("TRELLO_WEBHOOK_CALLBACK_URL and TRELLO_WEBHOOK_SECRET must be configured together");
   });
 
   it("rejects a Vercel request-only production runtime", () => {

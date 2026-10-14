@@ -26,7 +26,10 @@ origin and callback configuration, so both must also be present in that file.
 If Trello webhooks are enabled, set `TRELLO_WEBHOOK_CALLBACK_URL` to the exact
 URL `https://dashboard.example.com/api/trello-webhook` and configure
 `TRELLO_WEBHOOK_SECRET`. Keep the callback unset if webhooks are not deliberately
-enabled.
+enabled. Production startup rejects missing, non-HTTPS, or mismatched public
+origins and rejects a webhook callback that does not match the public origin and
+exact callback path. It also rejects a callback configured without its signing
+secret, or a signing secret configured without the callback.
 
 ## Release and Deployment Gate
 
