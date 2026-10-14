@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import express from "express";
 import request from "supertest";
 import trelloWebhookRoutes from "./trello-webhook";
@@ -59,6 +59,38 @@ describe("AI settings authorization", () => {
       else process.env.TRELLO_WEBHOOK_CALLBACK_URL = previousUrl;
       if (previousSecret === undefined) delete process.env.TRELLO_WEBHOOK_SECRET;
       else process.env.TRELLO_WEBHOOK_SECRET = previousSecret;
+    }
+  });
+
+  it("reports webhook configuration without requesting the configured callback URL", async () => {
+    const keys = [
+      "TRELLO_API_KEY",
+      "TRELLO_TOKEN",
+      "TRELLO_WEBHOOK_CALLBACK_URL",
+      "TRELLO_WEBHOOK_SECRET",
+    ] as const;
+    const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+    process.env.TRELLO_API_KEY = "test-key";
+    process.env.TRELLO_TOKEN = "test-token";
+    process.env.TRELLO_WEBHOOK_CALLBACK_URL = "https://va.example.com/api/trello-webhook";
+    process.env.TRELLO_WEBHOOK_SECRET = "test-secret";
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    try {
+      const response = await request(createApp("admin")).get("/api/trello-webhook/status");
+
+      expect(response.status).toBe(200);
+      expect(response.body.status.isConfigured).toBe(true);
+      expect(response.body.status.isReachable).toBeNull();
+      expect(response.body.status.recommendation).toContain("Live delivery has not been tested");
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      for (const key of keys) {
+        const value = previous[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 

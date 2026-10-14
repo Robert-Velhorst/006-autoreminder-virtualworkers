@@ -11,7 +11,7 @@ interface WebhookStatus {
   callbackUrl: string;
   publicUrl: string;
   isConfigured: boolean;
-  isReachable: boolean;
+  isReachable: boolean | null;
   recommendation: string;
 }
 

@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { rateLimit } from 'express-rate-limit';
 import { getDb } from '../db';
 import { chatbotWebhooks, chatbotConversations, appSettings } from '../../drizzle/schema.postgres';
 import { eq, inArray } from 'drizzle-orm';
@@ -11,6 +12,14 @@ import {
 } from './trelloWebhookSignature';
 
 const router = Router();
+
+router.use(rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many webhook requests, please slow down' },
+}));
 
 const TRELLO_API_BASE = 'https://api.trello.com/1';
 
@@ -324,8 +333,8 @@ router.post('/', async (req: any, res: Response) => {
  * GET /api/trello-webhook/status
  * Get webhook configuration status.
  *
- * Fix #6: isReachable was always hardcoded to true. Now actually probes the
- * callback URL with a HEAD request to verify it's reachable.
+ * Reachability is not probed server-side: the callback URL is configurable,
+ * and making an outbound request here would create an SSRF primitive.
  */
 router.get('/status', async (req: any, res: Response) => {
   try {
@@ -336,35 +345,16 @@ router.get('/status', async (req: any, res: Response) => {
     const isConfigured = !!process.env.TRELLO_API_KEY && !!process.env.TRELLO_TOKEN &&
       !!callbackUrl && !!process.env.TRELLO_WEBHOOK_SECRET;
 
-    // Fix #6 — actually probe the endpoint instead of hardcoding true
-    let isReachable = false;
-    let recommendation = '';
-
-    if (!callbackUrl || !process.env.TRELLO_WEBHOOK_SECRET) {
-      recommendation = 'Configure TRELLO_WEBHOOK_CALLBACK_URL and TRELLO_WEBHOOK_SECRET before enabling Trello push updates.';
-    } else {
-      try {
-        const probe = await fetch(callbackUrl, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
-        isReachable = probe.ok || probe.status === 405; // 405 = endpoint exists but HEAD not allowed
-        recommendation = isReachable
-          ? 'Webhook endpoint is reachable and properly configured.'
-          : `Endpoint returned ${probe.status}. Ensure the server is publicly accessible.`;
-      } catch (err) {
-        console.error('[TrelloWebhook] Probe error:', err);
-        recommendation = 'Webhook endpoint is not reachable. Ensure the server is publicly accessible.';
-      }
-    }
-
-    if (!process.env.TRELLO_API_KEY || !process.env.TRELLO_TOKEN) {
-      recommendation = 'Trello API credentials (TRELLO_API_KEY / TRELLO_TOKEN) are not set.';
-    }
+    const recommendation = isConfigured
+      ? 'Webhook settings are present. Live delivery has not been tested; verify by sending a test event from Trello.'
+      : 'Configure the Trello credentials, HTTPS callback URL, and webhook secret before enabling push updates.';
 
     res.json({
       status: {
         callbackUrl,
         publicUrl: callbackUrl,
         isConfigured,
-        isReachable,
+        isReachable: null,
         recommendation,
       },
     });

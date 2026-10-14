@@ -1,5 +1,6 @@
 import "./envBootstrap";
 import express from "express";
+import { rateLimit } from "express-rate-limit";
 import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
@@ -57,6 +58,14 @@ import { registerBrowserTabRoutes } from "../browserTabRoutes.js";
 import { assertLocalAuthBypassConfiguration } from "./localAuthBypass.js";
 import { assertProductionConfiguration } from "./productionConfig.js";
 import { isDatabaseReachable } from "../db.js";
+
+const apiIpRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Too many requests, please slow down" },
+});
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -194,6 +203,9 @@ async function startServer() {
 
   // Health probes must remain public and must not consume the UI/API rate budget.
   app.use("/api/health", healthRoutes);
+
+  // Bound authentication work before credentials are resolved.
+  app.use("/api", apiIpRateLimiter);
 
   // Authentication middleware for all /api routes
   app.use("/api", async (req: any, res, next) => {
