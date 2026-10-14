@@ -23,8 +23,9 @@ Production deployment is started manually from protected `main`. The selected
 release must be a published stable `vMAJOR.MINOR.PATCH` tag whose commit is
 contained in `main`. The workflow verifies the GHCR image's provenance against
 that exact source commit before connecting to the host. The GitHub `production`
-environment requires its configured reviewer; the reviewer may approve their
-own deployment.
+environment requires Robert Velhorst as reviewer, allows him to approve his own
+deployment, and prevents administrators from bypassing deployment protection.
+The workflow validates these settings before it starts the production job.
 
 Configure these four GitHub Actions secrets on the `production` environment;
 they are SSH transport credentials and are separate from the application's

@@ -3,11 +3,12 @@ import test from "node:test";
 import { getProductionGateFailure } from "./validate-production-environment.mjs";
 
 const protectedEnvironment = {
+  can_admins_bypass: false,
   protection_rules: [
     {
       type: "required_reviewers",
-      reviewers: [{ type: "User", reviewer: { login: "release-reviewer" } }],
-      prevent_self_review: true,
+      reviewers: [{ type: "User", reviewer: { login: "Robert-Velhorst" } }],
+      prevent_self_review: false,
     },
   ],
   deployment_branch_policy: {
@@ -30,8 +31,8 @@ test("rejects dispatch from any branch other than main", () => {
   );
 });
 
-test("rejects missing or empty reviewer rules", () => {
-  assert.match(getProductionGateFailure({}, "refs/heads/main"), /reviewer/);
+test("rejects missing, empty, or mismatched reviewer rules", () => {
+  assert.match(getProductionGateFailure({}, "refs/heads/main"), /Robert-Velhorst/);
   assert.match(
     getProductionGateFailure(
       {
@@ -40,14 +41,48 @@ test("rejects missing or empty reviewer rules", () => {
       },
       "refs/heads/main"
     ),
-    /reviewer/
+    /Robert-Velhorst/
+  );
+  assert.match(
+    getProductionGateFailure(
+      {
+        ...protectedEnvironment,
+        protection_rules: [
+          {
+            ...protectedEnvironment.protection_rules[0],
+            reviewers: [
+              { type: "User", reviewer: { login: "another-reviewer" } },
+            ],
+          },
+        ],
+      },
+      "refs/heads/main"
+    ),
+    /Robert-Velhorst/
   );
 });
 
 test("allows the configured reviewer to approve their own deployment", () => {
   const environment = structuredClone(protectedEnvironment);
-  environment.protection_rules[0].prevent_self_review = false;
   assert.equal(getProductionGateFailure(environment, "refs/heads/main"), null);
+});
+
+test("rejects production when self-approval is disabled", () => {
+  const environment = structuredClone(protectedEnvironment);
+  environment.protection_rules[0].prevent_self_review = true;
+  assert.match(
+    getProductionGateFailure(environment, "refs/heads/main"),
+    /allow Robert Velhorst/
+  );
+});
+
+test("rejects production when administrators can bypass protection", () => {
+  const environment = structuredClone(protectedEnvironment);
+  environment.can_admins_bypass = true;
+  assert.match(
+    getProductionGateFailure(environment, "refs/heads/main"),
+    /prevent administrators from bypassing/
+  );
 });
 
 test("rejects environments that allow unprotected branches", () => {

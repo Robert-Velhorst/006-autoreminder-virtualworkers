@@ -8,14 +8,26 @@ export function getProductionGateFailure(environment, ref) {
     return "Dispatch this workflow from the protected main branch";
   }
 
-  const hasIndependentReviewer = environment.protection_rules?.some(
+  const reviewerRule = environment.protection_rules?.find(
     rule =>
       rule.type === "required_reviewers" &&
       Array.isArray(rule.reviewers) &&
-      rule.reviewers.length > 0
+      rule.reviewers.some(
+        reviewer =>
+          reviewer.type === "User" &&
+          reviewer.reviewer?.login === "Robert-Velhorst"
+      )
   );
-  if (!hasIndependentReviewer) {
-    return "Production must require at least one reviewer";
+  if (!reviewerRule) {
+    return "Production must require Robert-Velhorst as a reviewer";
+  }
+
+  if (reviewerRule.prevent_self_review !== false) {
+    return "Production must allow Robert Velhorst to approve his own deployment";
+  }
+
+  if (environment.can_admins_bypass !== false) {
+    return "Production must prevent administrators from bypassing deployment protection rules";
   }
 
   if (environment.deployment_branch_policy?.protected_branches !== true) {
