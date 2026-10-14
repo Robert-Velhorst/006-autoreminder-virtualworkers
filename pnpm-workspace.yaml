@@ -2,7 +2,7 @@ packages:
   - "."
 
 allowBuilds:
-  '@tailwindcss/oxide': true
+  "@tailwindcss/oxide": true
   esbuild: true
 
 patchedDependencies:
@@ -23,3 +23,4 @@ overrides:
   ws: 8.21.1
   katex: 0.19.0
   qs: 6.16.0
+  "@esbuild-kit/core-utils>esbuild": ^0.25.10

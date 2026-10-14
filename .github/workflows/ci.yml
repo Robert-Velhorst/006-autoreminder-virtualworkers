@@ -41,6 +41,8 @@ jobs:
           node-version: 24.21.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Audit locked dependencies
+        run: pnpm audit --audit-level=low
       - name: Reject tracked environment files
         shell: bash
         run: |
