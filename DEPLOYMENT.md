@@ -51,7 +51,7 @@ The deployment workflow uses one Compose service. Before replacing it, the host 
 
 ## PostgreSQL migration status
 
-The PostgreSQL schema and migration lineage are in `drizzle/schema.postgres.ts` and `drizzle-postgres-v1/`. Do not run the legacy MySQL migration lineage against PostgreSQL. The dedicated whole-database transfer command is `pnpm db:migrate:mysql-to-postgres`; it provides a read-only preflight and an explicit `copy --execute` operation with per-table row-count and normalized SHA-256 reconciliation. The tool has not yet been rehearsed against the actual legacy source or a restored production backup. Backup/restore, repeatability, rollback, and live Hetzner acceptance remain required before production data cutover. See [docs/PRODUCTION_CUTOVER.md](docs/PRODUCTION_CUTOVER.md).
+The PostgreSQL schema and migration lineage are in `drizzle/schema.postgres.ts` and `drizzle-postgres-v1/`. Do not run the legacy MySQL migration lineage against PostgreSQL. The dedicated whole-database transfer command is `pnpm db:migrate:mysql-to-postgres`; it provides a read-only preflight and an explicit `copy --execute` operation with per-table row-count and normalized SHA-256 reconciliation. The actual production source database has not been confirmed; the presence of this MySQL transfer utility is not evidence that MySQL is the live source. Confirm the source before selecting a migration path. The tool has not been rehearsed against a confirmed source or restored production backup. Backup/restore, repeatability, rollback, and live Hetzner acceptance remain required before production data cutover. See [docs/PRODUCTION_CUTOVER.md](docs/PRODUCTION_CUTOVER.md).
 
 ## Operations
 

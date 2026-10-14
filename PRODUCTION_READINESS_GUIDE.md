@@ -11,17 +11,21 @@ only.
 
 ## Readiness status
 
-Production cutover is **not yet verified**. In particular, the actual legacy
-MySQL database has not been rehearsed through backup, restore, PostgreSQL
-transfer, and reconciliation, and the Hetzner deployment has not passed live
-acceptance. Do not treat local tests or image publication as live acceptance.
+Production cutover is **not yet verified**. The actual production source
+database has not been confirmed, so no source-specific backup or transfer
+rehearsal has been accepted. The retained MySQL transfer path is conditional,
+not evidence that MySQL is the live source. The Hetzner deployment has not
+passed live acceptance. Do not treat local tests or image publication as live
+acceptance.
 
 ## Required release gates
 
-1. Restore-test a backup of the actual legacy source in an isolated environment.
-2. Run `pnpm db:migrate` on an empty PostgreSQL target, then run the read-only
-   transfer preflight and a rehearsed `copy --execute` against the restored
-   source. Review all row counts and hashes.
+1. Confirm the actual production source database and restore-test its backup in
+   an isolated environment.
+2. Run `pnpm db:migrate` on an empty PostgreSQL target. Select a transfer path
+   supported by the confirmed source; use the MySQL preflight and rehearsed
+   `copy --execute` only if MySQL is confirmed. Review all reconciliation
+   evidence.
 3. Test target backup/restore, sequences, application reads and writes,
    repeatability, and the rollback path.
 4. Deploy the verified release to Hetzner and test health/readiness, login and

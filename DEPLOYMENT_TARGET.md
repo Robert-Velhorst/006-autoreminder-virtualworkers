@@ -3,10 +3,12 @@
 Hetzner is the production hosting target. New production deployments must not
 use Vercel or ngrok.
 
-The application runtime uses PostgreSQL. MySQL is a legacy data source that
-must remain available, with its backups, until the migration and rollback
-window are accepted. Redis is optional and external; verify its data only if
-Redis is configured or used by the current deployment.
+The application runtime uses PostgreSQL. The actual production source database
+has not been confirmed. The repository retains a MySQL transfer utility, but
+that does not establish MySQL as the live source. Identify and back up the
+confirmed source, and retain it with its backups until migration and rollback
+are accepted. Redis is optional and external; verify its data only if Redis is
+configured or used by the current deployment.
 
 Before deploying or retiring infrastructure, verify the actual running
 application, source and target database backups, secrets, security controls,

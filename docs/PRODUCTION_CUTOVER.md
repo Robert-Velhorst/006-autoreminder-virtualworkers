@@ -84,14 +84,21 @@ the URL without an `ssl` override. Node.js then verifies the certificate and
 hostname using its TLS trust configuration. Set `REDIS_URL` only
 when an external Redis service is configured. Do not commit `.env`.
 
-**Database cutover is not yet accepted for production.** A full-schema MySQL to
-PostgreSQL transfer command now exists, but it has only been validated against
-an isolated PostgreSQL schema and unit fixtures. It has not yet been run against
-the actual legacy MySQL source or against a restored production backup. Keep
-production traffic on the current source until those rehearsals and the live
-Hetzner verification gate pass.
+**Database cutover is not yet accepted for production.** The actual production
+source database has not been confirmed. A full-schema MySQL-to-PostgreSQL
+transfer command exists, but it has only been validated against an isolated
+PostgreSQL schema and unit fixtures. It has not been run against a confirmed
+production source or a restored production backup. First identify the
+authoritative source and its backup procedure. Use the MySQL procedure below
+only if the owner confirms that MySQL is the source and the schema is compatible.
+If it is not, stop and define and test a source-appropriate transfer procedure;
+do not point this utility at another database. Keep production traffic on the
+current source until rehearsals and the live Hetzner verification gate pass.
 
-### Legacy Data Transfer Rehearsal
+### MySQL-to-PostgreSQL Transfer Rehearsal (Conditional)
+
+This procedure is applicable only after confirming that MySQL is the actual
+production source. It does not identify or establish the current source.
 
 Use a trusted operator shell, not the app container. Configure
 `LEGACY_MYSQL_DATABASE_URL` with a read-only MySQL account and `DATABASE_URL`
@@ -164,14 +171,19 @@ application, not the consolidated runtime.
 
 Before traffic is moved:
 
-1. Back up the source database and restore that backup into an isolated rehearsal database.
+1. Identify and confirm the source database, then back it up using its
+   authoritative backup procedure and restore the backup into an isolated
+   rehearsal database. Do not proceed with this MySQL-specific procedure unless
+   MySQL is confirmed as the source.
 2. Provision PostgreSQL with persistent storage and a least-privilege role.
    Provision Redis separately only if shared cache/realtime coordination is required.
 3. Apply the PostgreSQL Drizzle migrations from a trusted administration
    environment using `pnpm db:migrate`; Compose does not start a migration container.
-4. Run the legacy transfer `preflight`, then rehearse `copy --execute` against
-   the restored source and empty PostgreSQL target. Review per-table row counts
-   and hashes, then repeat with a fresh target to confirm repeatability.
+4. If and only if the source is confirmed as MySQL, run the transfer `preflight`,
+   then rehearse `copy --execute` against the restored source and empty
+   PostgreSQL target. Review per-table row counts and hashes, then repeat with a
+   fresh target to confirm repeatability. Otherwise, use a separately reviewed
+   and tested transfer procedure for the confirmed source.
 5. Test the PostgreSQL backup and restore, verify sequences and app read/write
    behavior, and document the exact rollback point before any traffic move.
 6. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and

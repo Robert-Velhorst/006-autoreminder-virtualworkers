@@ -16,14 +16,16 @@ reports are historical snapshots and are not deployment or release evidence.
 ## Current production facts
 
 - The application runtime uses PostgreSQL. MySQL references in the legacy
-  schema and transfer tooling describe the old source, not a supported runtime.
+  schema and transfer tooling are not supported runtime backends and do not
+  confirm which database currently contains production data.
 - Hetzner is the production hosting target. The app requires a persistent
   process for HTTP, WebSockets, and scheduled work; Vercel and ngrok are not
   production targets.
 - Docker Compose runs one application container. PostgreSQL and optional Redis
   are provisioned separately.
-- The MySQL-to-PostgreSQL transfer tool has not been accepted against the real
-  legacy source or a restored production backup. Production cutover remains
+- The actual production source database has not been confirmed. The retained
+  MySQL-to-PostgreSQL utility is conditional and has not been accepted against
+  a confirmed source or restored production backup. Production cutover remains
   unverified until all gates in `docs/PRODUCTION_CUTOVER.md` pass.
 - CI, local tests, and image publication do not prove live Hetzner acceptance.
 
