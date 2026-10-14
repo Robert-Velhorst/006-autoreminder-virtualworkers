@@ -1,57 +1,49 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from "@playwright/test";
+import { E2E_PASSWORD, signInAsWorker } from "./helpers";
 
-test.describe('Authentication', () => {
-  test('should show login form when not authenticated', async ({ page }) => {
-    await page.goto('/');
-    
-    // Should see login form
-    await expect(page.locator('input[type="text"]')).toBeVisible();
-    await expect(page.locator('input[type="password"]')).toBeVisible();
-    await expect(page.locator('button[type="submit"]')).toBeVisible();
+test.describe("Authentication", () => {
+  test("shows the sign-in form on a protected worker page", async ({
+    page,
+  }) => {
+    await page.goto("/worker");
+
+    await expect(
+      page.getByRole("heading", { name: "VA Dashboard" })
+    ).toBeVisible();
+    await expect(page.getByLabel("Username")).toBeVisible();
+    await expect(page.getByLabel("Password")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Sign in", exact: true })
+    ).toBeVisible();
   });
 
-  test('should login with valid credentials', async ({ page }) => {
-    await page.goto('/');
-    
-    // Fill in login form
-    await page.fill('input[type="text"]', 'testuser');
-    await page.fill('input[type="password"]', 'testpassword');
-    await page.click('button[type="submit"]');
-    
-    // Should redirect to dashboard
-    await expect(page).toHaveURL('/');
-    
-    // Should see dashboard content (not login form)
-    await expect(page.locator('input[type="text"]')).not.toBeVisible();
+  test("rejects an unknown username without disclosing account existence", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.getByLabel("Username").fill(`missing-${Date.now()}`);
+    await page.getByLabel("Password").fill(E2E_PASSWORD);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+
+    await expect(
+      page.getByText("Invalid username or password").first()
+    ).toBeVisible();
   });
 
-  test('should show error with invalid credentials', async ({ page }) => {
-    await page.goto('/');
-    
-    // Fill in login form with invalid credentials
-    await page.fill('input[type="text"]', 'invalid');
-    await page.fill('input[type="password"]', 'invalid');
-    await page.click('button[type="submit"]');
-    
-    // Should show error message
-    await expect(page.locator('text=Invalid credentials')).toBeVisible();
+  test("authenticates the CI worker account", async ({ page }) => {
+    await signInAsWorker(page);
+
+    await expect(page).toHaveURL(/\/worker$/);
+    await expect(page.getByRole("heading", { name: "Today" })).toBeVisible();
   });
 
-  test('should logout successfully', async ({ page }) => {
-    // Login first
-    await page.goto('/');
-    await page.fill('input[type="text"]', 'testuser');
-    await page.fill('input[type="password"]', 'testpassword');
-    await page.click('button[type="submit"]');
-    
-    // Wait for dashboard to load
-    await page.waitForURL('/');
-    
-    // Click logout button
-    await page.click('button:has-text("Logout")');
-    
-    // Should see login form again
-    await expect(page.locator('input[type="text"]')).toBeVisible();
-    await expect(page.locator('input[type="password"]')).toBeVisible();
+  test("does not let a worker open an administrator route", async ({
+    page,
+  }) => {
+    await signInAsWorker(page);
+    await page.goto("/settings");
+
+    await expect(page).toHaveURL(/\/worker$/);
+    await expect(page.getByRole("heading", { name: "Today" })).toBeVisible();
   });
 });
