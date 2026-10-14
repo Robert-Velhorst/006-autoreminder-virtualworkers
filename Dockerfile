@@ -1,9 +1,9 @@
 # Multi-stage build for VA Dashboard
 # Stage 1: Build frontend and backend
-FROM node:22-alpine AS builder
+FROM node:26.11.1-alpine AS builder
 
 # Install pnpm
-RUN npm install -g pnpm@10.4.1
+RUN npm install -g pnpm@12.11.2
 
 # Set working directory
 WORKDIR /app
@@ -22,10 +22,10 @@ COPY . .
 RUN pnpm build
 
 # Stage 2: Production image
-FROM node:22-alpine AS production
+FROM node:26.11.1-alpine AS production
 
 # Install pnpm
-RUN npm install -g pnpm@10.4.1
+RUN npm install -g pnpm@12.11.2
 
 # Create app user
 RUN addgroup -g 1001 -S nodejs && \

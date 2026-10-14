@@ -34,10 +34,10 @@ That's it! The application is now running with MySQL and Redis.
 If you prefer to run services manually:
 
 ### Prerequisites
-- Node.js 22.13.0+
-- pnpm 10.4.1+
-- MySQL 8.0+
-- Redis 7+ (optional but recommended)
+- Node.js 26.11.1
+- pnpm 12.11.2+
+- MySQL 9.7.2 LTS
+- Redis 8.10.2 (optional but recommended)
 
 ### Step 1: Install Dependencies
 ```bash
@@ -51,7 +51,7 @@ docker run --name va-mysql \
   -e MYSQL_ROOT_PASSWORD=rootpass \
   -e MYSQL_DATABASE=va_dashboard \
   -p 3306:3306 \
-  -d mysql:8.0
+  -d mysql:9.7.2
 
 # Option B: Using local MySQL
 mysql -u root -p
@@ -63,7 +63,7 @@ CREATE DATABASE va_dashboard;
 # Using Docker
 docker run --name va-redis \
   -p 6379:6379 \
-  -d redis:7-alpine
+  -d redis:8.10.2-alpine
 
 # Or install locally
 # macOS: brew install redis && redis-server
