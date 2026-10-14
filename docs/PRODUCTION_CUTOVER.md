@@ -123,6 +123,8 @@ uppercase names.
 - AI provider API keys are optional and are not enabled by default. The
   self-hosted server does not currently authenticate with Codex subscription
   credentials; do not assume subscription-backed AI is available in Hetzner.
+  AI-dependent features are not part of the production acceptance gate unless
+  an explicitly supported provider is configured and its behavior is verified.
 - `REDIS_URL` is optional and enables shared cache/realtime coordination when
   an external Redis service is provisioned.
 - `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, and
@@ -155,7 +157,10 @@ Before traffic is moved:
 6. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and
    `LOCAL_AUTH_BYPASS=false`.
 7. Confirm `/api/health`, authenticated founder/admin/worker access,
-   WebSockets, scheduled jobs, Trello, OpenAI, Gmail, and Drive.
+   WebSockets, scheduled jobs, Trello, and each optional integration that is
+   deliberately configured for production. Do not mark an unconfigured
+   integration as verified or treat an unavailable optional integration as a
+   successful smoke test.
 8. Confirm no unapproved Trello comment, move, email, or other external action
    occurs during smoke testing.
 9. Point the public domain and Trello webhook callback at the new runtime.
