@@ -28,7 +28,7 @@ jobs:
           --health-retries=12
     env:
       CI: "true"
-      DATABASE_URL: postgresql://release:release_test@127.0.0.1:5432/release_test
+      DATABASE_URL: postgresql://release:release_test@127.0.0.1:5432/release_test?sslmode=disable
     permissions:
       contents: read
       packages: write

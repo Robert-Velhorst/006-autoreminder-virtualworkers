@@ -30,7 +30,7 @@ jobs:
           --health-retries=12
     env:
       CI: "true"
-      DATABASE_URL: postgresql://recovery:recovery_test@127.0.0.1:5432/recovery_test
+      DATABASE_URL: postgresql://recovery:recovery_test@127.0.0.1:5432/recovery_test?sslmode=disable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0

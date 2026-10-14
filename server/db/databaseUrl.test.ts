@@ -46,4 +46,36 @@ describe("requirePostgresDatabaseUrl", () => {
       )
     ).toContain("sslmode=verify-full");
   });
+
+  it("allows explicitly insecure TLS only for loopback CI databases", () => {
+    const url =
+      "postgresql://worker:secret@127.0.0.1:5432/dashboard?sslmode=disable";
+    expect(
+      requirePostgresDatabaseUrl(url, {
+        requireVerifiedTls: true,
+        allowInsecureLoopback: true,
+      })
+    ).toBe(url);
+    expect(
+      requirePostgresDatabaseUrl(
+        "postgresql://worker:secret@[::1]:5432/dashboard?sslmode=disable",
+        { requireVerifiedTls: true, allowInsecureLoopback: true }
+      )
+    ).toContain("[::1]");
+  });
+
+  it("does not allow the loopback CI exception for remote hosts or TLS overrides", () => {
+    expect(() =>
+      requirePostgresDatabaseUrl(
+        "postgresql://worker:secret@db.example/dashboard?sslmode=disable",
+        { requireVerifiedTls: true, allowInsecureLoopback: true }
+      )
+    ).toThrow("sslmode=verify-full");
+    expect(() =>
+      requirePostgresDatabaseUrl(
+        "postgresql://worker:secret@127.0.0.1/dashboard?sslmode=disable&ssl=true",
+        { requireVerifiedTls: true, allowInsecureLoopback: true }
+      )
+    ).toThrow("sslmode=verify-full");
+  });
 });

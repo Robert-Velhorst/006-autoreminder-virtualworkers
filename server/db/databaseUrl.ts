@@ -1,4 +1,7 @@
-type DatabaseUrlOptions = { requireVerifiedTls?: boolean };
+type DatabaseUrlOptions = {
+  allowInsecureLoopback?: boolean;
+  requireVerifiedTls?: boolean;
+};
 
 export function requirePostgresDatabaseUrl(
   value: string | undefined,
@@ -18,8 +21,20 @@ export function requirePostgresDatabaseUrl(
   }
   if (options.requireVerifiedTls) {
     const sslModes = url.searchParams.getAll("sslmode");
-    if (sslModes.length !== 1 || sslModes[0] !== "verify-full" || url.searchParams.has("ssl")) {
-      throw new Error("DATABASE_URL must enable verified TLS with one sslmode=verify-full option and no ssl override");
+    const verifiedTls =
+      sslModes.length === 1 &&
+      sslModes[0] === "verify-full" &&
+      !url.searchParams.has("ssl");
+    const loopbackWithoutTls =
+      options.allowInsecureLoopback === true &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) &&
+      sslModes.length === 1 &&
+      sslModes[0] === "disable" &&
+      !url.searchParams.has("ssl");
+    if (!verifiedTls && !loopbackWithoutTls) {
+      throw new Error(
+        "DATABASE_URL must enable verified TLS with one sslmode=verify-full option and no ssl override"
+      );
     }
   }
   return value;

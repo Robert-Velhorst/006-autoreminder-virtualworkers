@@ -20,17 +20,23 @@ function collectSchemaTables(): SchemaTable[] {
       // Ignore enums and non-table schema exports.
     }
   }
-  return [...tables.values()].sort((left, right) => left.name.localeCompare(right.name));
+  return [...tables.values()].sort((left, right) =>
+    left.name.localeCompare(right.name)
+  );
 }
 
 const connectionString = requirePostgresDatabaseUrl(process.env.DATABASE_URL, {
   requireVerifiedTls: true,
+  allowInsecureLoopback: process.env.CI === "true",
 });
 
 const client = new Client({ connectionString });
 await client.connect();
 try {
-  const { rows } = await client.query<{ table_name: string; column_name: string }>(`
+  const { rows } = await client.query<{
+    table_name: string;
+    column_name: string;
+  }>(`
     SELECT table_name, column_name
     FROM information_schema.columns
     WHERE table_schema = current_schema()
@@ -57,14 +63,20 @@ try {
       continue;
     }
     const missing = table.columns.filter(column => !actualColumns.has(column));
-    if (missing.length) missingColumns.push({ table: table.name, columns: missing });
+    if (missing.length)
+      missingColumns.push({ table: table.name, columns: missing });
     const expectedColumns = new Set(table.columns);
-    const extra = [...actualColumns].filter(column => !expectedColumns.has(column)).sort();
+    const extra = [...actualColumns]
+      .filter(column => !expectedColumns.has(column))
+      .sort();
     if (extra.length) extraColumns.push({ table: table.name, columns: extra });
   }
 
   for (const tableName of actual.keys()) {
-    if (tableName !== "__drizzle_migrations" && !expectedByName.has(tableName)) {
+    if (
+      tableName !== "__drizzle_migrations" &&
+      !expectedByName.has(tableName)
+    ) {
       extraTables.push(tableName);
     }
   }
