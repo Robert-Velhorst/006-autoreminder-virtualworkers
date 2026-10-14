@@ -2,8 +2,8 @@
 
 ## Requirements
 
-- Node.js 24.21.0 (see `Dockerfile`)
-- pnpm 12.11.2 (see `package.json`)
+- Node.js 26.11.1 (see `Dockerfile`)
+- pnpm 12.13.0 (see `package.json`)
 - PostgreSQL reachable from the development process
 
 ## Setup

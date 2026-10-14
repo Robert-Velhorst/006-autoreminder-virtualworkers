@@ -37,7 +37,7 @@ This repository is actively developed. A versioned container image and tagged re
 ## Requirements
 
 - Docker Engine and Docker Compose v2 for the application container.
-- Node.js 24.21.0 LTS and pnpm 12.11.2 for development outside Docker.
+- Node.js 26.11.1 and pnpm 12.13.0 for development outside Docker.
 - A separately provisioned PostgreSQL database. Redis is optional and external.
 
 ## Quick Start: Docker Compose
