@@ -34,7 +34,7 @@ That's it! The application is now running with MySQL and Redis.
 If you prefer to run services manually:
 
 ### Prerequisites
-- Node.js 26.11.1 Current
+- Node.js 24.21.0 LTS
 - pnpm 12.11.2
 - MySQL 9.7.2
 - Redis 8.10.2 (optional but recommended)
@@ -51,7 +51,7 @@ docker run --name va-mysql \
   -e MYSQL_ROOT_PASSWORD=rootpass \
   -e MYSQL_DATABASE=va_dashboard \
   -p 3306:3306 \
-  -d mysql:8.0
+  -d mysql:9.7.2
 
 # Option B: Using local MySQL
 mysql -u root -p

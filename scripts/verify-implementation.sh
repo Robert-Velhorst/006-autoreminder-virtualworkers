@@ -171,7 +171,7 @@ echo "🐳 Checking Docker Configuration..."
 echo "-----------------------------------"
 
 # Check Dockerfile
-check_content "Dockerfile" "FROM node:26.11.1-alpine3.23"
+check_content "Dockerfile" "FROM node:24.21.0-alpine3.23"
 check_content "Dockerfile" "HEALTHCHECK"
 check_content "Dockerfile" "USER nodejs"
 

@@ -30,7 +30,6 @@ Configure these values in the deployment platform's secret store:
 - `JWT_SECRET`: newly generated random value of at least 32 characters.
 - `TRELLO_API_KEY`: active Trello API key.
 - `TRELLO_TOKEN`: active Trello member token.
-- `OPENAI_API_KEY`: active OpenAI API key.
 - `REDIS_URL`: authenticated Redis connection URL.
 
 For Docker Compose, also set `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`,
@@ -42,6 +41,9 @@ uppercase names.
 
 ## Optional Integrations
 
+- AI provider API keys are optional and are not enabled by default. The
+  self-hosted server does not currently authenticate with Codex subscription
+  credentials; do not assume subscription-backed AI is available in Hetzner.
 - `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, and
   `NOTIFICATIONS_ENABLED=true` enable outbound email notifications.
 - `TRELLO_WEBHOOK_CALLBACK_URL` and `TRELLO_WEBHOOK_SECRET` enable verified

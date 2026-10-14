@@ -10,13 +10,12 @@ const validProductionEnvironment = {
   JWT_SECRET: "a".repeat(32),
   TRELLO_API_KEY: "trello-key",
   TRELLO_TOKEN: "trello-token",
-  OPENAI_API_KEY: "openai-key",
   HOST: "0.0.0.0",
   LOCAL_AUTH_BYPASS: "false",
 };
 
 describe("production configuration", () => {
-  it("accepts the canonical production contract", () => {
+  it("accepts the production contract without a paid LLM API key", () => {
     expect(getProductionConfigurationErrors(validProductionEnvironment)).toEqual([]);
     expect(() => assertProductionConfiguration(validProductionEnvironment)).not.toThrow();
   });
@@ -39,7 +38,6 @@ describe("production configuration", () => {
       "JWT_SECRET must contain at least 32 characters",
       "TRELLO_API_KEY is required",
       "TRELLO_TOKEN is required",
-      "OPENAI_API_KEY is required",
       "HOST must bind to a non-loopback interface in production",
       "LOCAL_AUTH_BYPASS cannot be enabled in production",
     ]);

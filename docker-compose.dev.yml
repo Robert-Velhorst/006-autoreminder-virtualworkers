@@ -1,12 +1,10 @@
-version: '3.8'
-
 # Development infrastructure only — runs MySQL and Redis locally.
 # Start with: docker-compose -f docker-compose.dev.yml up -d
 # Then run the app with: pnpm dev
 
 services:
   mysql:
-    image: mysql:8.0
+    image: mysql:9.7.2
     container_name: va-dashboard-mysql
     restart: unless-stopped
     environment:
