@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
@@ -8,11 +9,13 @@ import {
   type ReadinessPool,
 } from "./readiness";
 
-function poolReturning(version: string | number | bigint): ReadinessPool {
+function poolReturning(requiredMigrationApplied: boolean): ReadinessPool {
   return {
     query: vi
       .fn()
-      .mockResolvedValue({ rows: [{ applied_schema_version: version }] }),
+      .mockResolvedValue({
+        rows: [{ required_migration_applied: requiredMigrationApplied }],
+      }),
   };
 }
 
@@ -33,28 +36,25 @@ describe("PostgreSQL readiness probe", () => {
       tag: REQUIRED_POSTGRES_MIGRATION.tag,
       when: Number(REQUIRED_POSTGRES_MIGRATION.createdAt),
     });
+
+    const migrationSql = await readFile(
+      new URL(
+        `../../drizzle-postgres-v1/${REQUIRED_POSTGRES_MIGRATION.tag}.sql`,
+        import.meta.url
+      ),
+      "utf8"
+    );
+    expect(createHash("sha256").update(migrationSql).digest("hex")).toBe(
+      REQUIRED_POSTGRES_MIGRATION.hash
+    );
   });
 
-  it("accepts the required or a newer applied schema version", async () => {
-    expect(
-      await hasRequiredPostgresSchema(
-        poolReturning(REQUIRED_POSTGRES_MIGRATION.createdAt)
-      )
-    ).toBe(true);
-    expect(
-      await hasRequiredPostgresSchema(
-        poolReturning(REQUIRED_POSTGRES_MIGRATION.createdAt + 1n)
-      )
-    ).toBe(true);
+  it("accepts the exact required migration", async () => {
+    expect(await hasRequiredPostgresSchema(poolReturning(true))).toBe(true);
   });
 
-  it("rejects a missing or outdated schema version", async () => {
-    expect(await hasRequiredPostgresSchema(poolReturning(0))).toBe(false);
-    expect(
-      await hasRequiredPostgresSchema(
-        poolReturning(REQUIRED_POSTGRES_MIGRATION.createdAt - 1n)
-      )
-    ).toBe(false);
+  it("rejects a missing required migration even if another migration is newer", async () => {
+    expect(await hasRequiredPostgresSchema(poolReturning(false))).toBe(false);
   });
 
   it("fails closed when the probe times out or the migrations table is absent", async () => {
@@ -72,13 +72,19 @@ describe("PostgreSQL readiness probe", () => {
 
   it("bounds the database query time", async () => {
     const query = vi.fn().mockResolvedValue({
-      rows: [{ applied_schema_version: REQUIRED_POSTGRES_MIGRATION.createdAt }],
+      rows: [{ required_migration_applied: true }],
     });
 
     await hasRequiredPostgresSchema({ query });
 
     expect(query).toHaveBeenCalledWith(
-      expect.objectContaining({ query_timeout: READINESS_QUERY_TIMEOUT_MS })
+      expect.objectContaining({
+        query_timeout: READINESS_QUERY_TIMEOUT_MS,
+        values: [
+          REQUIRED_POSTGRES_MIGRATION.createdAt.toString(),
+          REQUIRED_POSTGRES_MIGRATION.hash,
+        ],
+      })
     );
   });
 
