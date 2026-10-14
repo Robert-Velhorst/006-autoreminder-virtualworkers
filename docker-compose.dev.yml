@@ -6,7 +6,7 @@ version: '3.8'
 
 services:
   mysql:
-    image: mysql:8.0
+    image: mysql:9.7.2
     container_name: va-dashboard-mysql
     restart: unless-stopped
     environment:
@@ -24,7 +24,7 @@ services:
       start_period: 30s
 
   redis:
-    image: redis:7-alpine
+    image: redis:8.10.2-alpine
     container_name: va-dashboard-redis
     restart: unless-stopped
     ports:

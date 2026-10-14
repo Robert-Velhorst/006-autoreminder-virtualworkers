@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "node": ">=26.11.1"
+  },
   "scripts": {
     "dev": "cross-env NODE_ENV=development tsx watch server/_core/index.ts",
     "build": "vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --external:./vite.js --outdir=dist",
@@ -123,7 +126,6 @@
     "cross-env": "^10.1.0",
     "drizzle-kit": "^0.31.10",
     "esbuild": "^0.25.0",
-    "pnpm": "^10.34.5",
     "postcss": "^8.4.47",
     "prettier": "^3.6.2",
     "supertest": "^7.2.2",
@@ -136,24 +138,5 @@
     "vitest": "^4.1.11",
     "vitest-dom": "^0.1.1"
   },
-  "packageManager": "pnpm@10.4.1+sha512.c753b6c3ad7afa13af388fa6d808035a008e30ea9993f58c6663e2bc5ff21679aa834db094987129aa4d488b86df57f7b634981b2f827cdcacc698cc0cfb88af",
-  "pnpm": {
-    "patchedDependencies": {
-      "wouter@3.7.1": "patches/wouter@3.7.1.patch"
-    },
-    "overrides": {
-      "tailwindcss>nanoid": "3.3.7",
-      "dompurify": "3.4.12",
-      "engine.io": "6.6.7",
-      "proxy-addr": "2.0.8",
-      "lodash": "4.18.1",
-      "lodash-es": "4.18.1",
-      "mdast-util-to-hast": "13.2.1",
-      "mermaid": "11.16.0",
-      "path-to-regexp": "0.1.13",
-      "socket.io-parser": "4.2.6",
-      "uuid": "13.0.2",
-      "ws": "8.21.1"
-    }
-  }
+  "packageManager": "pnpm@12.13.0"
 }
