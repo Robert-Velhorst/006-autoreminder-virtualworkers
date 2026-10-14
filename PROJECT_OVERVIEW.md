@@ -426,7 +426,7 @@ Trello API
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                    API LAYER                                 │
-│  Express 4 + tRPC 11 + Node.js 22                           │
+│  Express 4 + tRPC 11 + Node.js 24.14.1 LTS                 │
 │  - Task Scheduling (APTLSS)                                 │
 │  - AI Analysis (ATIS)                                        │
 │  - Time Tracking                                             │
@@ -440,7 +440,7 @@ Trello API
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                  DATABASE LAYER                              │
-│  MySQL 8.0 / SQLite 3 + Drizzle ORM                         │
+│  MySQL 8.4.12 / SQLite 3 + Drizzle ORM                      │
 │  - 34 Tables                                                 │
 │  - Relationships & Indexes                                   │
 │  - Migrations & Versioning                                   │
@@ -1341,8 +1341,8 @@ socket.on('task:updated', (task) => {
 
 ### Prerequisites
 
-- Node.js 22+
-- MySQL 8.0+
+- Node.js 24.14.1 LTS
+- MySQL 8.4.12 LTS
 - AWS S3 bucket
 - Trello API credentials
 - Manus OAuth credentials

@@ -174,7 +174,7 @@ Write-Host "🐳 Checking Docker Configuration..." -ForegroundColor Yellow
 Write-Host "-----------------------------------"
 
 # Check Dockerfile
-Test-ContentExists "Dockerfile" "FROM node:22-alpine"
+Test-ContentExists "Dockerfile" "FROM node:24.14.1-alpine3.23"
 Test-ContentExists "Dockerfile" "HEALTHCHECK"
 Test-ContentExists "Dockerfile" "USER nodejs"
 

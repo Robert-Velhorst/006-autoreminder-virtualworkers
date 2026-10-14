@@ -134,5 +134,5 @@
     "vitest": "^4.1.11",
     "vitest-dom": "^0.1.1"
   },
-  "packageManager": "pnpm@12.9.1"
+  "packageManager": "pnpm@12.11.2"
 }
