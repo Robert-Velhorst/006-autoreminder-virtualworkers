@@ -34,9 +34,9 @@ acceptance.
 
 ## Latest Verification Snapshot
 
-Verified 2026-10-14 UTC against PR #110 at commit
-`cf84a24` (verified by quality-gate run
-[38620717557](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/38620717557)):
+Verified 2026-10-14 UTC against PR #110 at merge commit
+`dd2bd998dabd5f63514badbda33652cb90667a55`, with quality-gate run
+[38622603875](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/38622603875):
 
 - The GitHub Actions quality gate passed, including dependency and secret
   scans, type checks, transfer checks,
