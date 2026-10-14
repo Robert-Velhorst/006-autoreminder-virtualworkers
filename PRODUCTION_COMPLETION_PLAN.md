@@ -35,16 +35,22 @@ acceptance.
 ## Latest Verification Snapshot
 
 Verified 2026-10-14 UTC against PR #110 at commit
-`1c74f5335ba2fe4fe18a311218f570ce96c8cc0d`:
+`aa3b4c4a5ab791395a34fe9315b60ac73eb4d98d`:
 
-- GitHub Actions quality gates and CodeQL checks passed. The dependency audit
-  for this PR branch reports no known vulnerabilities.
+- GitHub Actions quality gate run [38618056320](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/38618056320)
+  passed, including dependency and secret scans, type checks, transfer checks,
+  PostgreSQL migration/schema parity, tests/build, browser smoke tests, an
+  isolated PostgreSQL backup/restore and sequence check, production-container
+  smoke test, and Hetzner deployment-script syntax validation. This validates
+  the CI build, not a live production migration or deployment.
+- The dependency audit for this PR branch reports no known vulnerabilities.
 - The default branch still has 45 open Dependabot alerts (20 high, 21 medium,
   and 4 low). They are not cleared by the PR-branch audit; the fixes must reach
   the default branch before those alerts can close.
 - GitHub secret-scanning alerts #1 and #4 remain open for historical MongoDB
   connection strings. MongoDB is absent from the current application and
-  documentation, but the exposed Atlas credential has not been revoked.
+  documentation, but the exposed Atlas credential has not been revoked. The
+  Atlas database user was left untouched at Robert's explicit direction.
 - GitHub's `production` environment has no secrets or variables. The deploy
   workflow therefore cannot connect to a host; its four required SSH secrets
   are listed in [Production Cutover](docs/PRODUCTION_CUTOVER.md). No stable

@@ -140,10 +140,16 @@ jobs:
             --dbname="$RESTORE_DATABASE_URL" /tmp/va-dashboard-ci.dump
           restored_id="$(psql "$RESTORE_DATABASE_URL" -v ON_ERROR_STOP=1 -At \
             -c "SELECT id FROM public.users WHERE \"openId\" = 'ci-backup-restore-probe'")"
-          test "$restored_id" = "$source_id"
+          if [[ "$restored_id" != "$source_id" ]]; then
+            printf 'Restored worker ID mismatch: expected %s, got %s\n' "$source_id" "$restored_id" >&2
+            exit 1
+          fi
           next_id="$(psql "$RESTORE_DATABASE_URL" -v ON_ERROR_STOP=1 -qAt \
             -c "INSERT INTO public.users (\"openId\", name, role) VALUES ('ci-backup-sequence-probe', 'CI backup sequence probe', 'worker') RETURNING id")"
-          test "$next_id" -gt "$source_id"
+          if ! [[ "$next_id" =~ ^[0-9]+$ ]] || (( next_id <= source_id )); then
+            printf 'Restored identity sequence did not advance: source ID %s, next ID %s\n' "$source_id" "$next_id" >&2
+            exit 1
+          fi
           BACKUP_TEST
           DATABASE_URL="$RESTORE_DATABASE_URL" pnpm db:verify-parity
       - name: Build the production container
