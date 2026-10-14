@@ -48,7 +48,7 @@ uppercase names.
   Trello push updates after a public HTTPS domain exists.
 - `SCHEDULED_TASK_SECRET` protects explicitly exposed scheduled-task routes.
 
-Do not migrate the legacy MongoDB URL, Twilio credentials, React frontend URL,
+Do not migrate legacy database URLs, Twilio credentials, the old frontend URL,
 or old reminder timing variables. They belong to the retired split
 application, not the consolidated runtime.
 

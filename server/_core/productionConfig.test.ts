@@ -28,7 +28,7 @@ describe("production configuration", () => {
   it("reports missing or unsafe production configuration without values", () => {
     const errors = getProductionConfigurationErrors({
       NODE_ENV: "production",
-      DATABASE_URL: "mongodb://legacy",
+      DATABASE_URL: "file://legacy",
       JWT_SECRET: "short",
       HOST: "127.0.0.1",
       LOCAL_AUTH_BYPASS: "true",
