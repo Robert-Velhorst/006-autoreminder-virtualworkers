@@ -7,8 +7,8 @@ This guide covers deploying the VA Dashboard using Docker, Docker Compose, and K
 - Docker 20.10+
 - Docker Compose 2.0+ (for local deployment)
 - Kubernetes 1.20+ (for production deployment)
-- MySQL 8.0+
-- Redis 7+ (optional but recommended)
+- MySQL 9.7.2 LTS
+- Redis 8.10.2 (optional but recommended)
 
 ## Environment Variables
 
@@ -215,7 +215,7 @@ spec:
     spec:
       containers:
       - name: mysql
-        image: mysql:8.0
+        image: mysql:9.7.2
         env:
         - name: MYSQL_ROOT_PASSWORD
           valueFrom:
@@ -267,7 +267,7 @@ spec:
     spec:
       containers:
       - name: redis
-        image: redis:7-alpine
+        image: redis:8.10.2-alpine
         ports:
         - containerPort: 6379
 ---

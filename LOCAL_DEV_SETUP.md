@@ -91,7 +91,7 @@ docker run --name va-mysql \
   -e MYSQL_ROOT_PASSWORD=rootpass \
   -e MYSQL_DATABASE=va_dashboard \
   -p 3306:3306 \
-  -d mysql:8.0
+  -d mysql:9.7.2
 
 # Use in .env
 DATABASE_URL=mysql://root:rootpass@localhost:3306/va_dashboard

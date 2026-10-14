@@ -7,6 +7,9 @@ MySQL, Redis, HTTPS, and WebSocket support. It also runs scheduled work inside
 the application process. A static or request-only serverless deployment does
 not preserve the complete runtime contract.
 
+The current container targets are Node.js 26.11.1, MySQL 9.7.2 LTS, and Redis
+8.10.2. Keep CI, development, release, and production image targets aligned.
+
 Use `Dockerfile` and `docker-compose.yml` for a single-host deployment, or map
 the same services to a managed container platform. Keep one application
 instance active until scheduled-job locking has been verified on the target
@@ -59,6 +62,16 @@ uppercase names.
 Do not migrate the legacy MongoDB URL, Twilio credentials, React frontend URL,
 or old reminder timing variables. They belong to the retired split
 application, not the consolidated runtime.
+
+## Existing MySQL Data Upgrade
+
+Do not start MySQL 9.7 against an existing MySQL 8.0 data volume. MySQL's
+supported LTS upgrade path is 8.0 to 8.4, then 8.4 to 9.7. Back up the full
+database, restore a copy to an isolated test host, run MySQL Shell's upgrade
+checker for each step, and verify application migrations and data before
+changing any production volume. Keep the original volume and a tested restore
+path through the rollback window. See the official [MySQL upgrade paths](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)
+and [upgrade preparation guidance](https://dev.mysql.com/doc/refman/9.7/en/upgrade-prerequisites.html).
 
 ## Verification Gate
 
