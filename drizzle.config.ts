@@ -1,45 +1,31 @@
 import { defineConfig } from "drizzle-kit";
-import path from "path";
-
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   throw new Error("DATABASE_URL is required to run drizzle commands");
 }
 
-/**
- * Auto-detect database dialect from CONNECTION_STRING format
- * - mysql:// → MySQL
- * - file:// → SQLite
- * - postgresql:// → PostgreSQL (future)
- */
-function detectDialect(url: string): "mysql" | "sqlite" | "postgresql" {
+function detectDialect(url: string): "mysql" | "postgresql" {
   if (url.startsWith("mysql://")) return "mysql";
-  if (url.startsWith("file://") || url.startsWith("sqlite://")) return "sqlite";
-  if (url.startsWith("postgresql://") || url.startsWith("postgres://")) return "postgresql";
-  
-  // Default to MySQL for backward compatibility
-  console.warn("[Drizzle] Could not detect database dialect from DATABASE_URL. Defaulting to MySQL.");
-  return "mysql";
+  if (url.startsWith("postgresql://") || url.startsWith("postgres://"))
+    return "postgresql";
+  throw new Error(
+    "DATABASE_URL must use mysql://, postgresql://, or postgres://"
+  );
 }
 
 const dialect = detectDialect(connectionString);
 console.log(`[Drizzle] Detected dialect: ${dialect}`);
 
 const config = {
-  schema: "./drizzle/schema.ts",
-  out: "./drizzle",
+  schema:
+    dialect === "postgresql"
+      ? "./drizzle/schema.postgres.ts"
+      : "./drizzle/schema.ts",
+  out: dialect === "postgresql" ? "./drizzle-postgres-v1" : "./drizzle",
   dialect: dialect,
   dbCredentials: {
     url: connectionString,
   },
-} as any;
-
-// SQLite requires file path instead of URL
-if (dialect === "sqlite") {
-  const filePath = connectionString.replace(/^(file:\/\/|sqlite:\/\/)/, "");
-  config.dbCredentials = {
-    url: filePath,
-  };
-}
+};
 
 export default defineConfig(config);
