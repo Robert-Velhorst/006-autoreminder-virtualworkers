@@ -37,6 +37,7 @@ chmod 600 "$APP_DIR/.env"
 compose_file="$APP_DIR/docker-compose.yml"
 previous_compose="$APP_DIR/.docker-compose.yml.previous"
 had_compose=false
+compose_promoted=false
 previous_image_id=""
 rollback_image_tag=""
 if [[ -f "$compose_file" ]]; then
@@ -83,6 +84,12 @@ rollback() {
   status=$?
   trap - ERR
   set +e
+  if [[ "$compose_promoted" != true ]]; then
+    echo "Deployment failed before activation; the existing application was left unchanged" >&2
+    rm -f "$COMPOSE_CANDIDATE"
+    exit "$status"
+  fi
+
   echo "Deployment failed; restoring the previous application state" >&2
   if [[ "$had_compose" == true ]]; then
     cp -p "$previous_compose" "$compose_file"
@@ -112,6 +119,7 @@ trap rollback ERR
 
 APP_IMAGE="$APP_IMAGE" docker compose --env-file "$APP_DIR/.env" -f "$COMPOSE_CANDIDATE" config --quiet
 mv "$COMPOSE_CANDIDATE" "$compose_file"
+compose_promoted=true
 APP_IMAGE="$APP_IMAGE" docker compose --env-file "$APP_DIR/.env" -f "$compose_file" pull app
 APP_IMAGE="$APP_IMAGE" docker compose --env-file "$APP_DIR/.env" -f "$compose_file" up -d --no-build --force-recreate app
 
