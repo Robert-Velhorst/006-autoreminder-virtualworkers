@@ -57,7 +57,7 @@ import { log } from "../utils/logger.js";
 import { registerBrowserTabRoutes } from "../browserTabRoutes.js";
 import { assertLocalAuthBypassConfiguration } from "./localAuthBypass.js";
 import { assertProductionConfiguration } from "./productionConfig.js";
-import { isDatabaseReachable } from "../db.js";
+import { closeDatabase, isDatabaseReachable } from "../db.js";
 import { listenOnPort, selectServerPort } from "./portSelection.js";
 
 const apiIpRateLimiter = rateLimit({
@@ -344,30 +344,39 @@ async function startServer() {
   });
 
   // Graceful shutdown handling
+  let shutdownStarted = false;
   const gracefulShutdown = async () => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
     log.info("Shutting down gracefully...");
 
-    // Close WebSocket connections
-    const io = websocketService.getIO();
-    if (io) {
-      io.close();
-      log.info("WebSocket server closed");
-    }
-
-    // Close Redis connections
-    await closeRedis();
-
-    // Close HTTP server
-    server.close(() => {
-      log.info("HTTP server closed");
-      process.exit(0);
-    });
-
-    // Force exit after 10 seconds
-    setTimeout(() => {
+    const forceExit = setTimeout(() => {
       log.fatal("Forced shutdown after timeout");
       process.exit(1);
     }, 10000);
+
+    try {
+      const io = websocketService.getIO();
+      if (io) {
+        await io.close();
+        log.info("WebSocket and HTTP servers closed");
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          server.close(error => (error ? reject(error) : resolve()));
+        });
+        log.info("HTTP server closed");
+      }
+
+      await closeRedis();
+      await closeDatabase();
+      clearTimeout(forceExit);
+      log.info("Redis and PostgreSQL connections closed");
+      process.exit(0);
+    } catch (error) {
+      clearTimeout(forceExit);
+      log.error("Graceful shutdown failed", error as Error);
+      process.exit(1);
+    }
   };
 
   process.on("SIGTERM", gracefulShutdown);

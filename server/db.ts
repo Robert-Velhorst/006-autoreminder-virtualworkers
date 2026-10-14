@@ -54,6 +54,13 @@ export async function isDatabaseReachable(): Promise<boolean> {
   return hasRequiredPostgresSchema(_pool);
 }
 
+export async function closeDatabase(): Promise<void> {
+  const pool = _pool;
+  _pool = null;
+  _db = null;
+  await pool?.end();
+}
+
 export async function upsertUser(user: InsertUser): Promise<void> {
   if (!user.openId) {
     throw new Error("User openId is required for upsert");
