@@ -58,6 +58,7 @@ import { registerBrowserTabRoutes } from "../browserTabRoutes.js";
 import { assertLocalAuthBypassConfiguration } from "./localAuthBypass.js";
 import { assertProductionConfiguration } from "./productionConfig.js";
 import { isDatabaseReachable } from "../db.js";
+import { listenOnPort, selectServerPort } from "./portSelection.js";
 
 const apiIpRateLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -303,7 +304,12 @@ async function startServer() {
   }
 
   const preferredPort = parseInt(process.env.PORT || "3000");
-  const port = await findAvailablePort(preferredPort);
+  const isProduction = process.env.NODE_ENV === "production";
+  const port = await selectServerPort(
+    preferredPort,
+    isProduction,
+    findAvailablePort
+  );
 
   if (port !== preferredPort) {
     console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
@@ -330,12 +336,11 @@ async function startServer() {
   }
 
   const host = process.env.HOST ?? "127.0.0.1";
-  server.listen(port, host, async () => {
-    log.info(`Server running on http://${host}:${port}/`, {
-      port,
-      host,
-      environment: process.env.NODE_ENV,
-    });
+  await listenOnPort(server, port, host);
+  log.info(`Server running on http://${host}:${port}/`, {
+    port,
+    host,
+    environment: process.env.NODE_ENV,
   });
 
   // Graceful shutdown handling
