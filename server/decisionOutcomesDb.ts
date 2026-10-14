@@ -1,5 +1,5 @@
 import { and, desc, eq } from "drizzle-orm";
-import { aptlssPlans, aptlssSteps, decisionOutcomes } from "../drizzle/schema";
+import { aptlssPlans, aptlssSteps, decisionOutcomes } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 
 export class DecisionOutcomeError extends Error {}
@@ -60,7 +60,7 @@ export async function recordDecisionOutcome({
         resolvedBy,
         resolvedAt,
       })
-      .$returningId();
+      .returning({ id: decisionOutcomes.id });
 
     await tx
       .update(aptlssSteps)

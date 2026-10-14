@@ -837,8 +837,8 @@ export const timeEntries = pgTable(
 export const paymentCycles = pgTable("payment_cycles", {
   id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
   founderId: integer("founderId").notNull(),
-  cycleStart: date("cycleStart").notNull(),
-  cycleEnd: date("cycleEnd").notNull(),
+  cycleStart: date("cycleStart", { mode: "date" }).notNull(),
+  cycleEnd: date("cycleEnd", { mode: "date" }).notNull(),
   baseAmount: numeric("baseAmount", { precision: 8, scale: 2 })
     .notNull()
     .default("90.00"),
@@ -854,8 +854,8 @@ export const weeklyPayLog = pgTable("weekly_pay_log", {
   id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
   vaId: integer("vaId").notNull(),
   founderId: integer("founderId").notNull(),
-  weekStart: date("weekStart").notNull(),
-  weekEnd: date("weekEnd").notNull(),
+  weekStart: date("weekStart", { mode: "date" }).notNull(),
+  weekEnd: date("weekEnd", { mode: "date" }).notNull(),
   paymentCycleId: integer("paymentCycleId"),
   baseAmount: numeric("baseAmount", { precision: 8, scale: 2 })
     .notNull()
@@ -928,7 +928,7 @@ export const dailyTriageState = pgTable(
   {
     id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
     vaId: integer("vaId").notNull(),
-    triageDate: date("triageDate").notNull(),
+    triageDate: date("triageDate", { mode: "date" }).notNull(),
     step1Done: boolean("step1Done").notNull().default(false),
     step2Done: boolean("step2Done").notNull().default(false),
     step3Done: boolean("step3Done").notNull().default(false),
@@ -958,7 +958,7 @@ export const sundayChecklist = pgTable(
   {
     id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
     vaId: integer("vaId").notNull(),
-    sundayDate: date("sundayDate").notNull(),
+    sundayDate: date("sundayDate", { mode: "date" }).notNull(),
     trelloArchived: boolean("trelloArchived").notNull().default(false),
     trelloLabels: boolean("trelloLabels").notNull().default(false),
     trelloDeadlines: boolean("trelloDeadlines").notNull().default(false),
@@ -989,7 +989,7 @@ export const dailyDueDateAssignments = pgTable(
     cardId: varchar("cardId", { length: 64 }).notNull(),
     cardName: varchar("cardName", { length: 512 }).notNull(),
     cardUrl: varchar("cardUrl", { length: 1024 }).notNull(),
-    date: date("date").notNull(),
+    date: date("date", { mode: "date" }).notNull(),
     completed: boolean("completed").notNull().default(false),
     completedAt: timestamp("completedAt"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -1012,7 +1012,7 @@ export const dailyCardUpdates = pgTable(
     cardId: varchar("cardId", { length: 64 }).notNull(),
     cardName: varchar("cardName", { length: 512 }).notNull(),
     cardUrl: varchar("cardUrl", { length: 1024 }).notNull(),
-    date: date("date").notNull(),
+    date: date("date", { mode: "date" }).notNull(),
     completed: boolean("completed").notNull().default(false),
     completedAt: timestamp("completedAt"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -1031,7 +1031,7 @@ export const onHoldDailyChecks = pgTable(
     cardId: varchar("cardId", { length: 64 }).notNull(),
     cardName: varchar("cardName", { length: 512 }).notNull(),
     cardUrl: varchar("cardUrl", { length: 1024 }).notNull(),
-    date: date("date").notNull(),
+    date: date("date", { mode: "date" }).notNull(),
     checked: boolean("checked").notNull().default(false),
     checkedAt: timestamp("checkedAt"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -1051,7 +1051,7 @@ export const dailyUpdateStreak = pgTable(
   {
     id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
     vaId: integer("vaId").notNull(),
-    streakDate: date("streakDate").notNull(),
+    streakDate: date("streakDate", { mode: "date" }).notNull(),
     completedBeforeDeadline: boolean("completedBeforeDeadline")
       .notNull()
       .default(false),
@@ -1081,7 +1081,7 @@ export const dailyComplianceSnapshots = pgTable(
     id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
     vaId: integer("vaId").notNull(),
     founderId: integer("founderId").notNull(),
-    snapshotDate: date("snapshotDate").notNull(),
+    snapshotDate: date("snapshotDate", { mode: "date" }).notNull(),
     onHoldTotal: integer("onHoldTotal").notNull().default(0),
     onHoldReviewed: integer("onHoldReviewed").notNull().default(0),
     onHoldMissedCards: text("onHoldMissedCards"),
@@ -1261,7 +1261,7 @@ export const cardSnoozes = pgTable("card_snoozes", {
   cardName: varchar("cardName", { length: 512 }).notNull(),
   cardUrl: varchar("cardUrl", { length: 1024 }).notNull(),
   snoozedAt: timestamp("snoozedAt").defaultNow().notNull(),
-  snoozedUntil: date("snoozedUntil").notNull(),
+  snoozedUntil: date("snoozedUntil", { mode: "date" }).notNull(),
   isActive: boolean("isActive").notNull().default(true),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt")
@@ -3419,7 +3419,7 @@ export const complianceCardEvidence = pgTable(
   "compliance_card_evidence",
   {
     id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    snapshotDate: date("snapshotDate").notNull(),
+    snapshotDate: date("snapshotDate", { mode: "date" }).notNull(),
     cardId: varchar("cardId", { length: 64 }).notNull(),
     cardName: varchar("cardName", { length: 512 }).notNull(),
     cardUrl: varchar("cardUrl", { length: 1024 }).notNull(),
@@ -3461,7 +3461,7 @@ export const complianceCommunicationEvidence = pgTable(
   "compliance_communication_evidence",
   {
     id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    snapshotDate: date("snapshotDate").notNull(),
+    snapshotDate: date("snapshotDate", { mode: "date" }).notNull(),
     evidenceKey: varchar("evidenceKey", { length: 256 }).notNull(),
     kind: enumText("kind", ["message_response", "email_processing"]).notNull(),
     channel: varchar("channel", { length: 64 }).notNull(),
@@ -3504,7 +3504,7 @@ export const complianceClarificationRequests = pgTable(
   "compliance_clarification_requests",
   {
     id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    snapshotDate: date("snapshotDate").notNull(),
+    snapshotDate: date("snapshotDate", { mode: "date" }).notNull(),
     evidenceKey: varchar("evidenceKey", { length: 256 }).notNull(),
     kind: enumText("kind", ["message_response", "email_processing"]).notNull(),
     channel: varchar("channel", { length: 64 }).notNull(),
@@ -3705,7 +3705,7 @@ export const browserTabDailyEvidence = pgTable(
   {
     id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
     vaId: integer("vaId").notNull(),
-    snapshotDate: date("snapshotDate").notNull(),
+    snapshotDate: date("snapshotDate", { mode: "date" }).notNull(),
     status: varchar("status", { length: 32 }).notNull(),
     totalTabs: integer("totalTabs").notNull().default(0),
     actionableTabs: integer("actionableTabs").notNull().default(0),
@@ -3749,6 +3749,41 @@ export const atisChecklistCompletion = pgTable(
       table.userId
     ),
   ]
+);
+
+export const atisChecklistSync = pgTable(
+  "atis_checklist_sync",
+  {
+    id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
+    trelloCardId: varchar("trello_card_id", { length: 255 }).notNull(),
+    trelloChecklistId: varchar("trello_checklist_id", { length: 255 }),
+    itemsSynced: integer("items_synced").default(0),
+    syncedAt: timestamp("synced_at").defaultNow(),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  table => [
+    uniqueIndex("atis_checklist_sync_card_unique").on(table.trelloCardId),
+  ],
+);
+
+export const atisChatbotConversations = pgTable(
+  "atis_chatbot_conversations",
+  {
+    id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
+    cardId: integer("card_id").notNull(),
+    commentId: integer("comment_id"),
+    platform: varchar("platform", { length: 20 }).notNull(),
+    url: varchar("url", { length: 500 }).notNull(),
+    title: varchar("title", { length: 500 }),
+    messagesJson: text("messages_json"),
+    fullContent: text("full_content"),
+    extractedAt: timestamp("extracted_at").defaultNow(),
+  },
+  table => [
+    uniqueIndex("atis_chatbot_conversations_url_unique").on(table.url),
+    index("atis_chatbot_conversations_card_idx").on(table.cardId),
+    index("atis_chatbot_conversations_platform_idx").on(table.platform),
+  ],
 );
 
 export type AptlssPlan = typeof aptlssPlans.$inferSelect;

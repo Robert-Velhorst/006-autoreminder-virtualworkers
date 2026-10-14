@@ -1,5 +1,5 @@
 import { getDb } from "../db";
-import { trelloCachedCards } from "../../drizzle/schema";
+import { trelloCachedCards } from "../../drizzle/schema.postgres";
 import fs from "fs/promises";
 import path from "path";
 import dotenv from "dotenv";

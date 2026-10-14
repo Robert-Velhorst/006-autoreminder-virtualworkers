@@ -6,7 +6,7 @@ import {
 
 const validProductionEnvironment = {
   NODE_ENV: "production",
-  DATABASE_URL: "mysql://worker:secret@mysql:3306/va_dashboard",
+  DATABASE_URL: "postgresql://worker:secret@postgres:5432/va_dashboard?sslmode=verify-full",
   JWT_SECRET: "a".repeat(32),
   TRELLO_API_KEY: "trello-key",
   TRELLO_TOKEN: "trello-token",
@@ -24,6 +24,13 @@ describe("production configuration", () => {
     expect(getProductionConfigurationErrors({ NODE_ENV: "development" })).toEqual([]);
   });
 
+  it("requires certificate and hostname verification for production PostgreSQL", () => {
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      DATABASE_URL: "postgresql://worker:secret@postgres:5432/va_dashboard?sslmode=require",
+    })).toContain("DATABASE_URL must enable verified TLS with one sslmode=verify-full option and no ssl override");
+  });
+
   it("reports missing or unsafe production configuration without values", () => {
     const errors = getProductionConfigurationErrors({
       NODE_ENV: "production",
@@ -34,13 +41,20 @@ describe("production configuration", () => {
     });
 
     expect(errors).toEqual([
-      "DATABASE_URL must be a MySQL connection URL",
+      "DATABASE_URL must be a PostgreSQL connection URL",
       "JWT_SECRET must contain at least 32 characters",
       "TRELLO_API_KEY is required",
       "TRELLO_TOKEN is required",
       "HOST must bind to a non-loopback interface in production",
       "LOCAL_AUTH_BYPASS cannot be enabled in production",
     ]);
+  });
+
+  it("rejects MySQL URLs after the PostgreSQL runtime migration", () => {
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      DATABASE_URL: "mysql://worker:secret@mysql:3306/va_dashboard",
+    })).toEqual(["DATABASE_URL must be a PostgreSQL connection URL"]);
   });
 
   it("rejects a Vercel request-only production runtime", () => {

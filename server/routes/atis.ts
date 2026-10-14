@@ -14,7 +14,7 @@ import {
   atisComments,
   atisIngestionJobs,
   atisCardUnderstanding,
-} from '../../drizzle/schema';
+} from '../../drizzle/schema.postgres';
 import { eq, desc, isNull, sql, and, inArray } from 'drizzle-orm';
 import { processCardUnderstanding, processAllCardsUnderstanding, getUnderstandingStats } from '../services/atis-understanding';
 import { createChecklistSyncService } from '../services/trello-checklist-sync';
@@ -751,7 +751,7 @@ router.post('/sync', async (req: Request, res: Response) => {
           name: board.name,
           url: board.url || null,
           isOpen: 1,
-        }).$returningId();
+        }).returning({ id: atisBoards.id });
         totalBoards++;
         return inserted.id;
       }
@@ -772,7 +772,7 @@ router.post('/sync', async (req: Request, res: Response) => {
           name: ws.displayName || ws.name,
           displayName: ws.displayName || null,
           url: ws.url || null,
-        }).$returningId();
+        }).returning({ id: atisWorkspaces.id });
         wsDbId = insertedWs.id;
       }
 
@@ -855,7 +855,8 @@ router.post('/sync', async (req: Request, res: Response) => {
             .where(eq(atisCards.trelloId, card.id));
           cardDbId = existing[0].id;
         } else {
-          const [inserted] = await db.insert(atisCards).values({ trelloId: card.id, ...cardData }).$returningId();
+          const [inserted] = await db.insert(atisCards).values({ trelloId: card.id, ...cardData })
+            .returning({ id: atisCards.id });
           cardDbId = inserted.id;
           totalCards++;
         }
@@ -1299,7 +1300,7 @@ router.post('/checklist/toggle', async (req: AuthenticatedAtisRequest, res: Resp
     const existing = await db.execute(
       sql`SELECT id FROM atis_checklist_completion WHERE card_id = ${cardId} AND step_index = ${stepIndex} AND user_id = ${userId}`
     );
-    const rows = (existing as any)[0] || [];
+    const rows = existing.rows;
 
     if (rows && rows.length > 0) {
       // Remove completion
@@ -1343,7 +1344,7 @@ router.get('/checklist/status/:cardId', async (req: AuthenticatedAtisRequest, re
       FROM atis_checklist_completion
       WHERE card_id = ${cardId} AND user_id = ${userId}
     `);
-    const rows = (result as any)[0] || [];
+    const rows = result.rows;
     const completedSteps = rows.map((r: any) => ({
       stepIndex: r.step_index,
       userId: r.user_id,
@@ -1378,12 +1379,15 @@ router.post('/checklist/sync-completion/:cardId', async (req: AuthenticatedAtisR
 
     // Get card's Trello ID and synced checklist ID
     const cardResult = await db.execute(sql`
-      SELECT c.trello_id, s.trello_checklist_id
+      SELECT c."trelloId" AS trello_id, s.trello_checklist_id
       FROM atis_cards c
-      LEFT JOIN atis_checklist_sync s ON c.trello_id = s.trello_card_id
+      LEFT JOIN atis_checklist_sync s ON c."trelloId" = s.trello_card_id
       WHERE c.id = ${cardId}
     `);
-    const cardRows = (cardResult as any)[0] || [];
+    const cardRows = cardResult.rows as Array<{
+      trello_id: string | null;
+      trello_checklist_id: string | null;
+    }>;
 
     if (cardRows.length === 0) {
       return res.status(404).json({ error: 'Card not found' });
@@ -1509,27 +1513,31 @@ router.post('/sync-checklists/bulk', async (req: Request, res: Response) => {
     if (cardIds && cardIds.length > 0) {
       const idList = cardIds.map((id: number) => id).join(',');
       result = await db.execute(sql`
-        SELECT c.id, c.trello_id, u.aptlssChecklist
+        SELECT c.id, c."trelloId" AS trello_id, u."aptlssChecklist"
         FROM atis_cards c
-        JOIN atis_card_understanding u ON c.id = u.cardId
+        JOIN atis_card_understanding u ON c.id = u."cardId"
         WHERE c.id IN (${sql.raw(idList)})
-        AND u.aptlssChecklist IS NOT NULL
-        AND c.trello_id IS NOT NULL
+        AND u."aptlssChecklist" IS NOT NULL
+        AND c."trelloId" IS NOT NULL
         LIMIT ${limit}
       `);
     } else {
       result = await db.execute(sql`
-        SELECT c.id, c.trello_id, u.aptlssChecklist
+        SELECT c.id, c."trelloId" AS trello_id, u."aptlssChecklist"
         FROM atis_cards c
-        JOIN atis_card_understanding u ON c.id = u.cardId
-        WHERE u.aptlssChecklist IS NOT NULL
-        AND c.trello_id IS NOT NULL
-        AND c.is_archived = 0
+        JOIN atis_card_understanding u ON c.id = u."cardId"
+        WHERE u."aptlssChecklist" IS NOT NULL
+        AND c."trelloId" IS NOT NULL
+        AND c."isArchived" = 0
         LIMIT ${limit}
       `);
     }
 
-    const rows = (result as any)[0] || [];
+    const rows = result.rows as Array<{
+      id: number;
+      trello_id: string;
+      aptlssChecklist: string | null;
+    }>;
 
     if (rows.length === 0) {
       return res.json({ total: 0, success: 0, failed: 0, results: [] });
@@ -1548,7 +1556,7 @@ router.post('/sync-checklists/bulk', async (req: Request, res: Response) => {
         trelloId: row.trello_id,
         checklist,
       };
-    }).filter((c: any) => c.aptlssChecklist && c.aptlssChecklist.length > 0);
+    }).filter((c: any) => c.checklist.length > 0);
 
     // Sync to Trello
     const syncService = createChecklistSyncService();
@@ -1576,9 +1584,9 @@ router.get('/sync-status/:cardId', async (req: Request, res: Response) => {
 
     // Get card's Trello ID
     const cardResult = await db.execute(sql`
-      SELECT trello_id FROM atis_cards WHERE id = ${cardId}
+      SELECT "trelloId" AS trello_id FROM atis_cards WHERE id = ${cardId}
     `);
-    const cardRows = (cardResult as any)[0] || [];
+    const cardRows = cardResult.rows;
     
     if (cardRows.length === 0) {
       return res.status(404).json({ error: 'Card not found' });
@@ -1595,7 +1603,7 @@ router.get('/sync-status/:cardId', async (req: Request, res: Response) => {
       FROM atis_checklist_sync
       WHERE trello_card_id = ${trelloId}
     `);
-    const syncRows = (syncResult as any)[0] || [];
+    const syncRows = syncResult.rows;
 
     if (syncRows.length === 0) {
       return res.json({ synced: false });

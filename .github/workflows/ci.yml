@@ -15,23 +15,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     services:
-      mysql:
-        image: mysql:9.7.2
+      postgres:
+        image: postgres:18.6
         env:
-          MYSQL_DATABASE: recovery_test
-          MYSQL_USER: recovery
-          MYSQL_PASSWORD: recovery_test
-          MYSQL_ROOT_PASSWORD: root_test
+          POSTGRES_DB: recovery_test
+          POSTGRES_USER: recovery
+          POSTGRES_PASSWORD: recovery_test
         ports:
-          - 3306:3306
+          - 5432:5432
         options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -urecovery -precovery_test --silent"
+          --health-cmd="pg_isready -U recovery -d recovery_test"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=12
     env:
       CI: "true"
-      DATABASE_URL: mysql://recovery:recovery_test@127.0.0.1:3306/recovery_test
+      DATABASE_URL: postgresql://recovery:recovery_test@127.0.0.1:5432/recovery_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
@@ -42,6 +41,17 @@ jobs:
           node-version: 24.21.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Reject tracked environment files
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            name="${file##*/}"
+            if [[ "$name" == ".env" || ( "$name" == .env.* && "$name" != ".env.example" ) ]]; then
+              echo "Refusing to keep environment file in Git: $file" >&2
+              exit 1
+            fi
+          done < <(git ls-files -z)
       - name: Scan the release tree for secrets
         shell: bash
         run: |
@@ -55,16 +65,19 @@ jobs:
           rm -f gitleaks-report.json
           exit "$status"
       - run: pnpm check
-      - name: Apply canonical migrations
+      - run: pnpm check:db-transfer
+      - name: Apply PostgreSQL migrations
         run: pnpm exec drizzle-kit migrate
-      - name: Verify consolidated schema parity
+      - name: Verify PostgreSQL schema parity
         run: pnpm db:verify-parity
       - run: pnpm test
       - run: pnpm build
       - name: Build the production container
         run: docker build --tag va-dashboard:ci .
+      - name: Validate Hetzner deployment script syntax
+        run: bash -n deployment/hetzner/deploy.sh
       - name: Verify migration metadata matches the schema
         shell: bash
         run: |
           pnpm exec drizzle-kit generate --name ci-drift
-          test -z "$(git status --porcelain -- drizzle)"
+          test -z "$(git status --porcelain -- drizzle-postgres-v1)"

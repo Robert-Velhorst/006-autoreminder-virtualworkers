@@ -175,11 +175,17 @@ check_content "Dockerfile" "FROM node:24.21.0-alpine3.23"
 check_content "Dockerfile" "HEALTHCHECK"
 check_content "Dockerfile" "USER nodejs"
 
-# Check docker-compose.yml
-check_content "docker-compose.yml" "mysql:"
-check_content "docker-compose.yml" "redis:"
+# Check docker-compose.yml uses one application container and external services
 check_content "docker-compose.yml" "app:"
 check_content "docker-compose.yml" "healthcheck:"
+check_content "docker-compose.yml" "host.docker.internal:host-gateway"
+if grep -Eq '^  (postgres|mysql|redis|migrate):' docker-compose.yml; then
+    echo -e "${RED}✗${NC} Compose must not start database, cache, or migration containers"
+    FAILED=$((FAILED + 1))
+else
+    echo -e "${GREEN}✓${NC} Compose starts no auxiliary containers"
+    PASSED=$((PASSED + 1))
+fi
 
 echo ""
 echo "📊 Verification Summary"
@@ -193,10 +199,10 @@ if [ $FAILED -eq 0 ]; then
     echo -e "${GREEN}✅ All checks passed! Implementation is complete.${NC}"
     echo ""
     echo "🚀 Next Steps:"
-    echo "  1. Run 'pnpm install' to install new dependencies"
-    echo "  2. Run 'docker-compose up -d' to start services"
-    echo "  3. Run 'docker-compose exec app pnpm db:push' to run migrations"
-    echo "  4. Visit http://localhost:3000 to see the application"
+    echo "  1. Configure DATABASE_URL with a PostgreSQL connection and install dependencies"
+    echo "  2. Apply reviewed migrations from a trusted host with 'pnpm db:migrate'"
+    echo "  3. Start the single app container with 'docker compose up -d --build'"
+    echo "  4. Open the loopback URL configured by PORT (default http://localhost:3025)"
     echo ""
     exit 0
 else

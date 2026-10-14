@@ -13,8 +13,22 @@ export function getProductionConfigurationErrors(env: Environment = process.env)
   const databaseUrl = env.DATABASE_URL?.trim() ?? "";
   const host = env.HOST?.trim().toLowerCase() ?? "";
 
-  if (!databaseUrl.startsWith("mysql://")) {
-    errors.push("DATABASE_URL must be a MySQL connection URL");
+  let parsedDatabaseUrl: URL | null = null;
+  try {
+    parsedDatabaseUrl = new URL(databaseUrl);
+  } catch {
+    // Report the same actionable configuration error for malformed values.
+  }
+  if (
+    !parsedDatabaseUrl ||
+    (parsedDatabaseUrl.protocol !== "postgresql:" && parsedDatabaseUrl.protocol !== "postgres:")
+  ) {
+    errors.push("DATABASE_URL must be a PostgreSQL connection URL");
+  } else {
+    const sslModes = parsedDatabaseUrl.searchParams.getAll("sslmode");
+    if (sslModes.length !== 1 || sslModes[0] !== "verify-full" || parsedDatabaseUrl.searchParams.has("ssl")) {
+      errors.push("DATABASE_URL must enable verified TLS with one sslmode=verify-full option and no ssl override");
+    }
   }
   if ((env.JWT_SECRET?.trim().length ?? 0) < 32) {
     errors.push("JWT_SECRET must contain at least 32 characters");

@@ -3,16 +3,17 @@
 ## Target Runtime
 
 The consolidated application requires a persistent Node.js container runtime,
-MySQL, Redis, HTTPS, and WebSocket support. It also runs scheduled work inside
+PostgreSQL, HTTPS, and WebSocket support. Redis is optional and external. It also runs scheduled work inside
 the application process. A static or request-only serverless deployment does
 not preserve the complete runtime contract.
 
 Use `Dockerfile` and `docker-compose.yml` for deployment on the Hetzner host.
-Put the application behind the host's HTTPS reverse proxy and point the
+Compose runs only one application container; PostgreSQL and optional Redis must
+be provisioned separately. Put the application behind the host's HTTPS reverse proxy and point the
 production DNS name and Trello callback at that stable domain. Keep one
 application instance active until scheduled-job locking has been verified on
-the target platform. The Compose application, MySQL, and Redis ports bind to
-loopback; do not expose database or cache ports publicly.
+the target platform. The application port binds to loopback. Do not expose the
+database or cache publicly; use a private network or loopback-bound host services.
 Public password registration is disabled; existing workers authenticate with
 their registered Trello identity or a separately provisioned local password.
 
@@ -26,14 +27,67 @@ operational deployment.
 
 Configure these values in the deployment platform's secret store:
 
-- `DATABASE_URL`: MySQL connection URL.
+- `DATABASE_URL`: PostgreSQL connection URL for the Hetzner runtime.
 - `JWT_SECRET`: newly generated random value of at least 32 characters.
 - `TRELLO_API_KEY`: active Trello API key.
 - `TRELLO_TOKEN`: active Trello member token.
-- `REDIS_URL`: authenticated Redis connection URL.
 
-For Docker Compose, also set `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`,
-`MYSQL_USER`, `MYSQL_PASSWORD`, and `REDIS_PASSWORD`. Do not commit `.env`.
+Set `DATABASE_URL` in `.env` to the separately provisioned PostgreSQL service.
+For PostgreSQL installed on the Docker host, use `host.docker.internal`; for
+production, use private networking and add one `sslmode=verify-full` option to
+the URL without an `ssl` override. Node.js then verifies the certificate and
+hostname using its TLS trust configuration. Set `REDIS_URL` only
+when an external Redis service is configured. Do not commit `.env`.
+
+**Database cutover is not yet accepted for production.** A full-schema MySQL to
+PostgreSQL transfer command now exists, but it has only been validated against
+an isolated PostgreSQL schema and unit fixtures. It has not yet been run against
+the actual legacy MySQL source or against a restored production backup. Keep
+production traffic on the current source until those rehearsals and the live
+Hetzner verification gate pass.
+
+### Legacy Data Transfer Rehearsal
+
+Use a trusted operator shell, not the app container. Configure
+`LEGACY_MYSQL_DATABASE_URL` with a read-only MySQL account and `DATABASE_URL`
+with the empty PostgreSQL target that has already received the Drizzle
+migrations. Do not put the legacy URL in the app's runtime secret set.
+
+```powershell
+$env:LEGACY_MYSQL_DATABASE_URL = 'mysql://readonly_user:<url-encoded-password>@legacy-host:3306/legacy_database'
+$env:DATABASE_URL = 'postgresql://migration_user:<url-encoded-password>@postgres-host:5432/va_dashboard'
+pnpm db:migrate
+pnpm db:migrate:mysql-to-postgres preflight
+```
+
+Preflight is read-only. It requires matching source/target tables, columns, and
+primary keys; InnoDB source tables; an empty PostgreSQL application schema; and
+only the three explicitly recognized PostgreSQL-only tables. Fix every
+reported mismatch before proceeding. Take and restore-test a source backup
+first, then rehearse against that restored copy.
+
+The transfer sets the MySQL session timezone to UTC before opening its
+consistent snapshot. MySQL `TIMESTAMP` values are therefore read in UTC and
+stored as UTC wall-clock values in the PostgreSQL schema's `timestamp without
+time zone` columns. `DATETIME` and `DATE` values retain their stored wall-clock
+or calendar values. Before cutover, confirm that application code and reports
+interpret these timestamp columns consistently; do not apply an additional
+timezone conversion to the imported rows.
+
+For the rehearsed cutover only, stop app writes to the target and run:
+
+```powershell
+pnpm db:migrate:mysql-to-postgres copy --execute
+```
+
+The copy holds one PostgreSQL transaction, locks target application tables,
+reads the source from a consistent read-only snapshot, and rolls back all target
+rows if a copy or reconciliation check fails. It rejects MySQL zero-dates and
+unsupported boolean values instead of guessing. Each copied table is checked
+for exact row count and a normalized SHA-256 digest of every row. Save the
+resulting report with the cutover record; it contains counts and hashes, not
+credentials. Keep the source and its backups intact through the rollback
+window. This command has not been accepted against the real source yet.
 
 The server accepts the old local names `TrelloAPIKey` and `TrelloAPIToken`
 during transition, but production configuration should use the canonical
@@ -44,10 +98,15 @@ uppercase names.
 - AI provider API keys are optional and are not enabled by default. The
   self-hosted server does not currently authenticate with Codex subscription
   credentials; do not assume subscription-backed AI is available in Hetzner.
+- `REDIS_URL` is optional and enables shared cache/realtime coordination when
+  an external Redis service is provisioned.
 - `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, and
-  `NOTIFICATIONS_ENABLED=true` enable outbound email notifications.
+  `NOTIFICATIONS_ENABLED=true` explicitly enables outbound email and automated Trello-comment notifications. Notifications remain disabled when unset or set to any other value, including in production.
 - `TRELLO_WEBHOOK_CALLBACK_URL` and `TRELLO_WEBHOOK_SECRET` enable verified
-  Trello push updates after a public HTTPS domain exists.
+  Trello push updates after a public HTTPS domain exists. Set the callback to
+  the exact `https://<domain>/api/trello-webhook` URL. The secret is the Trello
+  app secret used to verify `X-Trello-Webhook`; unsigned callbacks are rejected.
+  Webhook registration, deletion, manual comments, and check-ins require an admin.
 - `SCHEDULED_TASK_SECRET` protects explicitly exposed scheduled-task routes.
 
 Do not migrate legacy database URLs, Twilio credentials, the old frontend URL,
@@ -58,22 +117,28 @@ application, not the consolidated runtime.
 
 Before traffic is moved:
 
-1. Back up the source database.
-2. Deploy MySQL and Redis with persistent storage.
-3. Apply the canonical Drizzle migrations. Docker Compose runs the one-shot
-   `migrate` service and starts the app only after it succeeds.
-4. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and
+1. Back up the source database and restore that backup into an isolated rehearsal database.
+2. Provision PostgreSQL with persistent storage and a least-privilege role.
+   Provision Redis separately only if shared cache/realtime coordination is required.
+3. Apply the PostgreSQL Drizzle migrations from a trusted administration
+   environment using `pnpm db:migrate`; Compose does not start a migration container.
+4. Run the legacy transfer `preflight`, then rehearse `copy --execute` against
+   the restored source and empty PostgreSQL target. Review per-table row counts
+   and hashes, then repeat with a fresh target to confirm repeatability.
+5. Test the PostgreSQL backup and restore, verify sequences and app read/write
+   behavior, and document the exact rollback point before any traffic move.
+6. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and
    `LOCAL_AUTH_BYPASS=false`.
-5. Confirm `/api/health`, authenticated founder/admin/worker access,
+7. Confirm `/api/health`, authenticated founder/admin/worker access,
    WebSockets, scheduled jobs, Trello, OpenAI, Gmail, and Drive.
-6. Confirm no unapproved Trello comment, move, email, or other external action
+8. Confirm no unapproved Trello comment, move, email, or other external action
    occurs during smoke testing.
-7. Point the public domain and Trello webhook callback at the new runtime.
-8. Retain the prior build and database snapshot through the rollback window.
+9. Point the public domain and Trello webhook callback at the new runtime.
+10. Retain the prior build and database snapshot through the rollback window.
 
-Before reusing an existing database volume, create a logical SQL backup and
-keep the previous stopped database container until the public verification
-gate passes. `MYSQL_VOLUME_NAME` selects the preserved volume explicitly.
+Before reusing any existing database, create and restore-test a logical
+backup. Compose does not provision or alter database storage. Keep the MySQL
+source and backups until the public verification gate and rollback window pass.
 
 Only disconnect or delete the obsolete Vercel projects after this gate passes
 against the Hetzner deployment.

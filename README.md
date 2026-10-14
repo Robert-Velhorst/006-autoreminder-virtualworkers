@@ -28,7 +28,7 @@ This repository is actively developed. A versioned container image and tagged re
 
 ## Current Status
 
-- The application uses a persistent Node.js process, MySQL, and optional Redis.
+- The application uses a persistent Node.js process and PostgreSQL; Redis is optional.
 - Docker Compose is the supported single-host deployment path.
 - Trello, email, Google evidence, and AI-provider integrations require credentials supplied by the operator.
 - External actions such as Trello changes and outbound messages are policy-gated; configure and verify integrations before enabling them.
@@ -36,54 +36,56 @@ This repository is actively developed. A versioned container image and tagged re
 
 ## Requirements
 
-- Docker Engine and Docker Compose v2 for the complete local stack.
+- Docker Engine and Docker Compose v2 for the application container.
 - Node.js 24.21.0 LTS and pnpm 12.11.2 for development outside Docker.
-- MySQL 9.7.2. Redis is included in the provided Compose stack.
+- A separately provisioned PostgreSQL database. Redis is optional and external.
 
 ## Quick Start: Docker Compose
 
 1. Clone the repository and enter its directory.
-2. Copy `.env.example` to `.env` and set the required application values. Generate a unique `JWT_SECRET` of at least 32 characters. Do not commit `.env`.
-3. Create `.env.db.local` with the Docker-only settings below. Use unique strong passwords; these are examples of variable names, not values:
-
-   ```dotenv
-   MYSQL_ROOT_PASSWORD=<unique-strong-password>
-   MYSQL_DATABASE=va_dashboard
-   MYSQL_USER=va_dashboard
-   MYSQL_PASSWORD=<different-unique-strong-password>
-   REDIS_PASSWORD=<another-unique-strong-password>
-   MYSQL_PORT=3307
-   ```
-
-4. Start the application and dependencies:
+2. Copy `.env.example` to `.env`. Set `DATABASE_URL` for a separately
+   provisioned PostgreSQL database and configure required Trello and session
+   secrets. Generate a unique `JWT_SECRET` of at least 32 characters. Do not
+   commit `.env`.
+3. Apply database migrations from a trusted operator environment:
 
    ```powershell
-   docker compose --env-file .env.db.local up -d --build
+   pnpm install --frozen-lockfile
+   pnpm db:migrate
    ```
 
-5. Open `http://127.0.0.1:3025/worker` and verify the health endpoint at `http://127.0.0.1:3025/api/health`.
+4. Build and start the single application container:
 
-Compose runs the canonical database migrations before starting the application. The database and Redis ports bind to loopback by default. Do not expose them directly to the public internet.
+   ```powershell
+   docker compose --env-file .env up -d --build
+   ```
 
-To stop the local stack while preserving its data:
+5. Open `http://127.0.0.1:3025/worker` and verify the health endpoint at
+   `http://127.0.0.1:3025/api/health`.
+
+Compose starts only the application. It does not provision PostgreSQL/Redis or
+run migrations at startup. Keep database and cache endpoints private; never
+expose them directly to the public internet.
+
+To stop the application container:
 
 ```powershell
-docker compose --env-file .env.db.local down
+docker compose --env-file .env down
 ```
-
-Do not add `-v` unless you intend to delete the database volumes.
 
 ## Development
 
 ```powershell
 Copy-Item .env.example .env
 pnpm install --frozen-lockfile
-docker compose --env-file .env.db.local up -d mysql redis
-pnpm db:push
+pnpm db:migrate
 pnpm dev
 ```
 
-For the development server, set `DATABASE_URL` in `.env` to the mapped MySQL port (3307 by default, or the value of `MYSQL_PORT`). The server uses its app configuration from `.env`; Compose reads its database and Redis credentials from `.env.db.local`. Keep production credentials out of local development files and never commit environment files.
+The development server uses `DATABASE_URL` from `.env`. Provision PostgreSQL
+separately and configure `REDIS_URL` only when a Redis service is available.
+Keep production credentials out of local development files and never commit
+environment files.
 
 The canonical migration lineage continues through `0027_glorious_epoch`. Consolidated migrations are additive and include task assignments/schedules, evidence foundations, schema parity repairs, and worker-scoped operator data. See [the consolidation ledger](docs/CONSOLIDATION_LEDGER.md) for migration ownership and compatibility decisions.
 
@@ -100,7 +102,7 @@ pnpm test:e2e
 
 The full application needs a persistent container runtime with HTTPS and WebSocket support. It also runs scheduled work in the application process. Request-only serverless platforms such as the repository's former Vercel deployment are not supported and must not be presented as the production service.
 
-`Dockerfile` builds the application image. `docker-compose.yml` provides the Hetzner single-host stack with MySQL, Redis, migration ordering, a health check, and loopback-only application/database/Redis bindings. Route the stable production domain through the host's HTTPS reverse proxy. The repository does not provide a public tunnel launcher.
+`Dockerfile` builds the application image. `docker-compose.yml` runs only the application container; PostgreSQL and optional Redis are external services. This keeps the Docker footprint to one VA Dashboard container. Run database migrations explicitly from a trusted administration environment with `pnpm db:migrate` before deploying the corresponding application version. For Hetzner production, use a dedicated PostgreSQL role and secret-managed connection string. Route the stable production domain through the host's HTTPS reverse proxy. The repository does not provide a public tunnel launcher.
 
 See [Production Cutover](docs/PRODUCTION_CUTOVER.md) before deploying. It lists required credentials, data backup and migration steps, integration checks, rollback requirements, and the boundary for retiring the old hosting projects. Configure secrets in the target platform's secret manager; do not put them in source control, image layers, release notes, or issue comments.
 
@@ -112,17 +114,9 @@ Production authentication uses registered accounts and role-based access control
 
 ## Integrations and Data
 
-The application stores operational data in MySQL. Redis is used for shared cache and realtime coordination when configured. Trello and other providers require separately provisioned credentials. Follow least privilege when creating provider accounts and tokens, and rotate any credential that has entered source control or an untrusted log.
+The application stores operational data in PostgreSQL. Redis is used for shared cache and realtime coordination when configured. Trello and other providers require separately provisioned credentials. Follow least privilege when creating provider accounts and tokens, and rotate any credential that has entered source control or an untrusted log.
 
-The operator transfer tools and data ownership rules are described in the [consolidation ledger](docs/CONSOLIDATION_LEDGER.md). The tools are designed to avoid guessing worker or founder identities. Back up both source and target databases before importing data.
-
-Before importing, export and inspect the source data. Supply explicit, existing target worker and founder IDs; the utility does not infer identity mappings:
-
-```powershell
-node scripts/operator-data-transfer.mjs export --out .local/operator-export.json
-node scripts/operator-data-transfer.mjs import --in .local/operator-export.json --target $env:TARGET_DATABASE_URL --worker-id $env:WORKER_ID --founder-id $env:FOUNDER_ID
-node scripts/operator-data-transfer.mjs reconcile --in .local/operator-export.json --target $env:TARGET_DATABASE_URL
-```
+The operator transfer tools and data ownership rules are described in the [consolidation ledger](docs/CONSOLIDATION_LEDGER.md). The full-database migration command is `pnpm db:migrate:mysql-to-postgres`: it has a read-only `preflight` and requires `copy --execute` before writing. It requires an empty PostgreSQL target and performs per-table row-count and SHA-256 reconciliation. **It has not yet been rehearsed against the actual legacy MySQL source or a restored production backup, so database cutover remains a release blocker.** Keep the source and backups until the rehearsal, restore test, and production acceptance gates pass. MySQL references in legacy migration lineage and transfer tools describe the source only; application runtime targets PostgreSQL.
 
 ## Security
 

@@ -1,0 +1,69 @@
+import { describe, expect, it } from "vitest";
+import express from "express";
+import request from "supertest";
+import trelloWebhookRoutes from "./trello-webhook";
+import trelloWebhookBulkRoutes from "./trello-webhook-bulk";
+
+function createApp(role?: "admin" | "worker") {
+  const app = express();
+  app.use(express.json());
+  if (role) {
+    app.use((req, _res, next) => {
+      (req as any).user = { id: 1, role };
+      next();
+    });
+  }
+  app.use("/api/trello-webhook/bulk", trelloWebhookBulkRoutes);
+  app.use("/api/trello-webhook", trelloWebhookRoutes);
+  app.use("/api/chatbot", trelloWebhookRoutes);
+  return app;
+}
+
+describe("AI settings authorization", () => {
+  it("rejects unauthenticated reads and writes on both route aliases", async () => {
+    const app = createApp();
+    const paths = ["/api/trello-webhook/ai-settings", "/api/chatbot/ai-settings"];
+
+    for (const path of paths) {
+      expect((await request(app).get(path)).status).toBe(401);
+      expect((await request(app).post(path).send({ provider: "ollama" })).status).toBe(401);
+    }
+  });
+
+  it("rejects worker access before reading global settings", async () => {
+    const response = await request(createApp("worker")).get("/api/trello-webhook/ai-settings");
+    expect(response.status).toBe(403);
+  });
+
+  it("keeps the webhook health probe public but requires admin for registration", async () => {
+    const app = createApp("worker");
+    expect((await request(app).get("/api/trello-webhook/")).status).toBe(200);
+    expect((await request(app).post("/api/trello-webhook/register").send({
+      modelId: "12345678",
+    })).status).toBe(403);
+  });
+
+  it("rejects unsigned Trello callbacks before attempting persistence", async () => {
+    const previousUrl = process.env.TRELLO_WEBHOOK_CALLBACK_URL;
+    const previousSecret = process.env.TRELLO_WEBHOOK_SECRET;
+    process.env.TRELLO_WEBHOOK_CALLBACK_URL = "https://va.example.com/api/trello-webhook";
+    process.env.TRELLO_WEBHOOK_SECRET = "test-secret";
+    try {
+      const response = await request(createApp())
+        .post("/api/trello-webhook")
+        .send({ type: "updateCard", data: { card: { id: "card-1" } } });
+      expect(response.status).toBe(401);
+      expect(response.body.error).toBe("Invalid Trello webhook signature");
+    } finally {
+      if (previousUrl === undefined) delete process.env.TRELLO_WEBHOOK_CALLBACK_URL;
+      else process.env.TRELLO_WEBHOOK_CALLBACK_URL = previousUrl;
+      if (previousSecret === undefined) delete process.env.TRELLO_WEBHOOK_SECRET;
+      else process.env.TRELLO_WEBHOOK_SECRET = previousSecret;
+    }
+  });
+
+  it("restricts bulk webhook registration to admins", async () => {
+    expect((await request(createApp()).post("/api/trello-webhook/bulk").send({ boardIds: ["12345678"] })).status).toBe(401);
+    expect((await request(createApp("worker")).post("/api/trello-webhook/bulk").send({ boardIds: ["12345678"] })).status).toBe(403);
+  });
+});

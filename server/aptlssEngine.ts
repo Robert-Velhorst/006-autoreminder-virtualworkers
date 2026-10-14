@@ -19,7 +19,7 @@ import {
   getManualStepsForCard,
   countDependentCards,
 } from "./aptlssStepsDb";
-import { InsertCardState, InsertPriorityScore } from "../drizzle/schema";
+import { InsertCardState, InsertPriorityScore } from "../drizzle/schema.postgres";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

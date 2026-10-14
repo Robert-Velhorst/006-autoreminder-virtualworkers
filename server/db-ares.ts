@@ -9,7 +9,7 @@ import {
   AresConfiguration,
   AresValidationRule,
   AresValidationHistoryRecord
-} from '../drizzle/schema';
+} from '../drizzle/schema.postgres';
 import { eq, and } from 'drizzle-orm';
 
 const getDatabase = async () => {

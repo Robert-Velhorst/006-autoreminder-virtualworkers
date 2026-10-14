@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../db';
-import { timeEntries } from '../../drizzle/schema';
+import { timeEntries } from '../../drizzle/schema.postgres';
 import { eq, and, desc, gte, lte, sql } from 'drizzle-orm';
 
 const router = Router();
@@ -362,7 +362,7 @@ router.get('/time-tracking/weekly-progress', async (req: any, res: Response) => 
     const actualHours = Math.round(actualMinutes / 60 * 10) / 10;
 
     // Get user's weekly hours target from settings
-    const { userWorkingHours } = await import('../../drizzle/schema');
+    const { userWorkingHours } = await import('../../drizzle/schema.postgres');
     const settings = await db.select()
       .from(userWorkingHours)
       .where(eq(userWorkingHours.userOpenId, user.openId))

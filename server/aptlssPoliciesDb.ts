@@ -12,7 +12,7 @@ import {
   type AutoFollowUpDraft,
   type WorkerPerformanceSignal,
   type WeeklyAnalysisSnapshot,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { eq, desc, and } from "drizzle-orm";
 
 // ─── Operational Policies ────────────────────────────────────────────────────
@@ -44,7 +44,10 @@ export async function getAllPolicies(vaId: number): Promise<AptlssOperationalPol
       await db.insert(aptlssOperationalPolicies).values({
         ...policy,
         vaId,
-      } as AptlssOperationalPolicy).onDuplicateKeyUpdate({ set: { label: policy.label } });
+      } as AptlssOperationalPolicy).onConflictDoUpdate({
+        target: [aptlssOperationalPolicies.vaId, aptlssOperationalPolicies.ruleKey],
+        set: { label: policy.label },
+      });
     }
     return db.select().from(aptlssOperationalPolicies)
       .where(eq(aptlssOperationalPolicies.vaId, vaId))
@@ -72,7 +75,10 @@ export async function upsertPolicy(vaId: number, ruleKey: string, value: string)
   if (!db) return;
   await db.insert(aptlssOperationalPolicies)
     .values({ vaId, ruleKey, value, label: ruleKey, category: "general", enabled: 1 } as AptlssOperationalPolicy)
-    .onDuplicateKeyUpdate({ set: { value } });
+    .onConflictDoUpdate({
+      target: [aptlssOperationalPolicies.vaId, aptlssOperationalPolicies.ruleKey],
+      set: { value },
+    });
 }
 
 export async function setPolicyEnabled(vaId: number, ruleKey: string, enabled: boolean): Promise<void> {

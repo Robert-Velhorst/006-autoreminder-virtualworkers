@@ -336,7 +336,7 @@ export function ChatbotSettings() {
                   </code>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-xs text-muted-foreground">PUBLIC_URL:</span>
+                  <span className="text-xs text-muted-foreground">Trello callback:</span>
                   <code className="text-xs font-mono">
                     {webhookStatus.publicUrl || 'Not set'}
                   </code>
@@ -359,13 +359,14 @@ export function ChatbotSettings() {
                       <strong>Step 1:</strong> Publish your app using the Publish button in the top right.
                     </p>
                     <p>
-                      <strong>Step 2:</strong> After publishing, set the PUBLIC_URL environment variable in Settings → Secrets:
+                      <strong>Step 2:</strong> Set the exact callback URL and Trello app secret in the host's secret manager:
                     </p>
                     <div className="bg-white/50 p-2 rounded font-mono text-xs break-all">
-                      PUBLIC_URL=https://your-app.manus.space
+                      TRELLO_WEBHOOK_CALLBACK_URL=https://your-domain.com/api/trello-webhook<br />
+                      TRELLO_WEBHOOK_SECRET=your_trello_app_secret
                     </div>
                     <p>
-                      <strong>Step 3:</strong> Click "Sync All Boards" below to register webhooks with Trello.
+                      <strong>Step 3:</strong> Restart the app, then register or re-register the boards so Trello uses the signed callback.
                     </p>
                   </div>
                 </div>
