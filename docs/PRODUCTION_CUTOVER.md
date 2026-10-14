@@ -61,11 +61,12 @@ proxy, persistent PostgreSQL, backups, and SSH account before dispatching a
 deployment. Do not proceed if host identity or the database restore path has
 not been verified.
 
-Do not point either obsolete Vercel project at the repository root. A Vercel
-deployment would omit the persistent process, scheduled work, and WebSocket
-runtime required by the platform. Production startup rejects the Vercel
-runtime explicitly so an incomplete frontend cannot be mistaken for an
-operational deployment.
+The former Vercel projects and GitHub integration were retired at the owner's
+request before production cutover. Do not recreate or reconnect them as a
+deployment target: a Vercel deployment would omit the persistent process,
+scheduled work, and WebSocket runtime required by the platform. Production
+startup rejects the Vercel runtime explicitly so an incomplete frontend cannot
+be mistaken for an operational deployment.
 
 ## Required Secrets
 
@@ -191,5 +192,7 @@ Before reusing any existing database, create and restore-test a logical
 backup. Compose does not provision or alter database storage. Keep the MySQL
 source and backups until the public verification gate and rollback window pass.
 
-Only disconnect or delete the obsolete Vercel projects after this gate passes
-against the Hetzner deployment.
+The former Vercel projects were removed before this gate passed. That removal
+does not constitute a production cutover or acceptance of the Hetzner runtime;
+complete every migration, deployment, and rollback check above before moving
+production traffic.
