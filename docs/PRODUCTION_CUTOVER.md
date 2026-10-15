@@ -84,21 +84,22 @@ the URL without an `ssl` override. Node.js then verifies the certificate and
 hostname using its TLS trust configuration. Set `REDIS_URL` only
 when an external Redis service is configured. Do not commit `.env`.
 
-**Database cutover is not yet accepted for production.** The actual production
-source database has not been confirmed. A full-schema MySQL-to-PostgreSQL
-transfer command exists, but it has only been validated against an isolated
-PostgreSQL schema and unit fixtures. It has not been run against a confirmed
-production source or a restored production backup. First identify the
-authoritative source and its backup procedure. Use the MySQL procedure below
-only if the owner confirms that MySQL is the source and the schema is compatible.
-If it is not, stop and define and test a source-appropriate transfer procedure;
-do not point this utility at another database. Keep production traffic on the
-current source until rehearsals and the live Hetzner verification gate pass.
+**The production PostgreSQL service and VA Dashboard database do not yet
+exist.** The owner intends to consolidate their GitHub tools on a shared
+open-source PostgreSQL service. Provision the service with private network
+access, TLS, automated backups, and tested recovery. Create a separate VA
+Dashboard database and least-privilege role; other apps must have separate
+databases and credentials. No legacy data source or import plan has been
+identified. Apply this app's migrations to the new database, then test backup,
+restore, application behavior, and the live Hetzner runtime. Do not run a
+legacy transfer unless an actual source containing VA Dashboard data is
+identified and its import is explicitly approved.
 
 ### MySQL-to-PostgreSQL Transfer Rehearsal (Conditional)
 
-This procedure is applicable only after confirming that MySQL is the actual
-production source. It does not identify or establish the current source.
+This procedure is retained for a possible future use only. It is not applicable
+to the new PostgreSQL installation unless an actual MySQL source containing VA
+Dashboard data is identified and an import is explicitly approved.
 
 Use a trusted operator shell, not the app container. Configure
 `LEGACY_MYSQL_DATABASE_URL` with a read-only MySQL account and `DATABASE_URL`
@@ -169,42 +170,40 @@ application, not the consolidated runtime.
 
 ## Verification Gate
 
-Before traffic is moved:
+Before the first production traffic is enabled:
 
-1. Identify and confirm the source database, then back it up using its
-   authoritative backup procedure and restore the backup into an isolated
-   rehearsal database. Do not proceed with this MySQL-specific procedure unless
-   MySQL is confirmed as the source.
-2. Provision PostgreSQL with persistent storage and a least-privilege role.
-   Provision Redis separately only if shared cache/realtime coordination is required.
-3. Apply the PostgreSQL Drizzle migrations from a trusted administration
+1. Provision the shared PostgreSQL service with persistent storage, private
+   network access, TLS, automated backups, and a tested restore procedure.
+   Create a dedicated VA Dashboard database and least-privilege role; never
+   reuse another app's role or database.
+2. Apply the PostgreSQL Drizzle migrations from a trusted administration
    environment using `pnpm db:migrate`; Compose does not start a migration container.
-4. If and only if the source is confirmed as MySQL, run the transfer `preflight`,
-   then rehearse `copy --execute` against the restored source and empty
-   PostgreSQL target. Review per-table row counts and hashes, then repeat with a
-   fresh target to confirm repeatability. Otherwise, use a separately reviewed
-   and tested transfer procedure for the confirmed source.
-5. Test the PostgreSQL backup and restore, verify sequences and app read/write
+3. Do not transfer legacy data unless an actual source containing VA Dashboard
+   data is identified and its import is approved. If the source is confirmed as
+   MySQL, follow the conditional rehearsal below; otherwise design and review a
+   source-specific transfer before touching data. If no import is needed, record
+   the agreed initial-data/bootstrap approach.
+4. Test the PostgreSQL backup and restore, verify sequences and app read/write
    behavior, and document the exact rollback point before any traffic move.
-6. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and
+5. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and
    `LOCAL_AUTH_BYPASS=false`.
-7. Confirm the public origin variables resolve to the stable HTTPS domain and,
+6. Confirm the public origin variables resolve to the stable HTTPS domain and,
    when enabled, the Trello callback is the exact configured HTTPS URL.
-8. Confirm `/api/health` and `/api/health/ready` report healthy only after the
+7. Confirm `/api/health` and `/api/health/ready` report healthy only after the
    current PostgreSQL migration is applied; confirm `/api/health/live` remains
    independent of database availability. Then verify authenticated
    founder/admin/worker access, WebSockets, scheduled jobs, Trello, and each
    optional integration deliberately configured for production. Do not mark an
    unconfigured integration as verified or treat an unavailable optional
    integration as a successful smoke test.
-9. Confirm no unapproved Trello comment, move, email, or other external action
+8. Confirm no unapproved Trello comment, move, email, or other external action
    occurs during smoke testing.
-10. Point the public domain and Trello webhook callback at the new runtime.
-11. Retain the prior build and database snapshot through the rollback window.
+9. Point the public domain and Trello webhook callback at the new runtime.
+10. Retain tested database backups and the prior build through the rollback
+    window. If data was imported, retain its source through acceptance.
 
-Before reusing any existing database, create and restore-test a logical
-backup. Compose does not provision or alter database storage. Keep the MySQL
-source and backups until the public verification gate and rollback window pass.
+Compose does not provision or alter database storage. Keep verified database
+backups through the public verification gate and rollback window.
 
 The former Vercel projects were removed before this gate passed. That removal
 does not constitute a production cutover or acceptance of the Hetzner runtime;
