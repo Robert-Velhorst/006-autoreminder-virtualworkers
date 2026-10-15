@@ -7,7 +7,7 @@ import {
   timeEntries,
   users,
   vaProfiles,
-} from "../../drizzle/schema";
+} from "../../drizzle/schema.postgres";
 import { and, eq, gte, isNotNull, isNull, lte } from "drizzle-orm";
 import {
   getWorkerCards,
@@ -245,7 +245,8 @@ export async function collectComplianceSnapshot(
     evidenceCount,
   };
 
-  await db.insert(dailyComplianceSnapshots).values(values).onDuplicateKeyUpdate({
+  await db.insert(dailyComplianceSnapshots).values(values).onConflictDoUpdate({
+    target: [dailyComplianceSnapshots.vaId, dailyComplianceSnapshots.snapshotDate],
     set: values,
   });
   const rows = await db.select().from(dailyComplianceSnapshots).where(and(

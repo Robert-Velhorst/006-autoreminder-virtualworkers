@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../db';
-import { holidays, vaProfiles } from '../../drizzle/schema';
+import { holidays, vaProfiles } from '../../drizzle/schema.postgres';
 import { eq, and } from 'drizzle-orm';
 
 const router = Router();
@@ -69,7 +69,7 @@ router.get('/fetch/:country/:year', async (req: any, res: Response) => {
     let targetOpenId: string = user.openId;
 
     if (workerId) {
-      const { vaProfiles: vaTable } = await import('../../drizzle/schema');
+      const { vaProfiles: vaTable } = await import('../../drizzle/schema.postgres');
       const [worker] = await db
         .select()
         .from(vaTable)
@@ -266,7 +266,7 @@ router.get('/workers', async (req: any, res: Response) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    const { vaProfiles } = await import('../../drizzle/schema');
+    const { vaProfiles } = await import('../../drizzle/schema.postgres');
     
     // Get all workers (VA profiles) for this founder
     const workers = await db.select({
@@ -465,7 +465,7 @@ router.get('/by-timezone/:timezone/:year', async (req: any, res: Response) => {
     let targetOpenId: string = user.openId;
 
     if (workerId) {
-      const { vaProfiles: vaTable } = await import('../../drizzle/schema');
+      const { vaProfiles: vaTable } = await import('../../drizzle/schema.postgres');
       const [worker] = await db
         .select()
         .from(vaTable)

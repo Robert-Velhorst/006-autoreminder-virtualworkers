@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { eq, inArray } from 'drizzle-orm';
 import { getDb } from '../db';
-import { timeEntries, taskAssignments, vaProfiles } from '../../drizzle/schema';
+import { timeEntries, taskAssignments, vaProfiles } from '../../drizzle/schema.postgres';
 import { requireAuthenticated, requestUser } from '../middleware/auth';
 
 const router = Router();

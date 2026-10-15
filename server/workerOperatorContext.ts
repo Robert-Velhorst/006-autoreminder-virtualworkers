@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import { users, userWorkingHours, vaProfiles, type User } from "../drizzle/schema";
+import { users, userWorkingHours, vaProfiles, type User } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 
 export type WorkerBreak = {

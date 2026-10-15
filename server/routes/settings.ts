@@ -2,7 +2,7 @@ import { router, protectedProcedure } from '../_core/trpc';
 import { z } from 'zod';
 import * as settingsDb from '../db/settings';
 import { getDb } from '../db';
-import { appSettings } from '../../drizzle/schema';
+import { appSettings } from '../../drizzle/schema.postgres';
 import { eq, and } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
 
@@ -76,7 +76,8 @@ export const settingsRouter = router({
         vaId,
         key: "reply_monitor_badge_enabled",
         value,
-      }).onDuplicateKeyUpdate({
+      }).onConflictDoUpdate({
+        target: appSettings.key,
         set: { value }
       });
       return { success: true, enabled: input.enabled };
@@ -388,7 +389,7 @@ export const settingsRouter = router({
         vaId,
         key: "daily_hour_goal",
         value,
-      }).onDuplicateKeyUpdate({ set: { value } });
+      }).onConflictDoUpdate({ target: appSettings.key, set: { value } });
       return { hours: input.hours };
     }),
 
@@ -445,7 +446,7 @@ export const settingsRouter = router({
         vaId,
         key: "daily_schedule",
         value,
-      }).onDuplicateKeyUpdate({ set: { value } });
+      }).onConflictDoUpdate({ target: appSettings.key, set: { value } });
       return input;
     }),
 });

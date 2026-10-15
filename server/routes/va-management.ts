@@ -14,7 +14,7 @@ import {
   atisCards,
   atisBoards,
   atisCardUnderstanding
-} from '../../drizzle/schema';
+} from '../../drizzle/schema.postgres';
 import { eq, and, desc, sql, inArray } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import { sendMorningBriefing, sendEODReport, validateSendGridApiKey } from '../services/email';
@@ -149,7 +149,7 @@ router.post('/vas', async (req: any, res) => {
     const passwordHash = await bcrypt.hash(password, 10);
 
     // Create system user for worker
-    const userResult = await db.insert(users).values({
+    const [userResult] = await db.insert(users).values({
       openId: email,
       name,
       email,
@@ -157,10 +157,11 @@ router.post('/vas', async (req: any, res) => {
       role: 'worker',
       passwordHash,
       lastSignedIn: new Date(),
-    });
-    const newUserId = userResult[0].insertId;
+    }).returning({ id: users.id });
+    if (!userResult) throw new Error("Failed to create worker user");
+    const newUserId = userResult.id;
 
-    const result = await db.insert(vaProfiles).values({
+    const [result] = await db.insert(vaProfiles).values({
       founderId: user.id,
       userId: newUserId,
       name,
@@ -179,9 +180,10 @@ router.post('/vas', async (req: any, res) => {
       dinnerTime: dinnerTime ?? null,
       dinnerDuration: dinnerDuration ?? 0,
       trelloMemberId: trelloMemberId || null,
-    });
+    }).returning({ id: vaProfiles.id });
 
-    res.json({ success: true, id: result[0].insertId });
+    if (!result) throw new Error("Failed to create worker profile");
+    res.json({ success: true, id: result.id });
   } catch (error) {
     console.error('Error creating VA:', error);
     res.status(500).json({ error: 'Failed to create VA' });
@@ -659,16 +661,17 @@ router.post('/clients', async (req: any, res) => {
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
     }
-    const result = await db.insert(clients).values({
+    const [result] = await db.insert(clients).values({
       founderId: user.id,
       name,
       priority: priority || 'standard',
       trelloBoardIds: trelloBoardIds ? JSON.stringify(trelloBoardIds) : null,
       contactEmail,
       notes,
-    });
+    }).returning({ id: clients.id });
 
-    res.json({ success: true, id: result[0].insertId });
+    if (!result) throw new Error("Failed to create client");
+    res.json({ success: true, id: result.id });
   } catch (error) {
     console.error('Error creating client:', error);
     res.status(500).json({ error: 'Failed to create client' });
@@ -752,14 +755,15 @@ router.post('/time-entries/start', async (req: any, res) => {
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
     }
-    const result = await db.insert(timeEntries).values({
+    const [result] = await db.insert(timeEntries).values({
       taskId,
       vaId,
       founderId: user.id,
       startTime: new Date(),
-    });
+    }).returning({ id: timeEntries.id });
 
-    res.json({ success: true, id: result[0].insertId });
+    if (!result) throw new Error("Failed to start timer");
+    res.json({ success: true, id: result.id });
   } catch (error) {
     console.error('Error starting timer:', error);
     res.status(500).json({ error: 'Failed to start timer' });
@@ -1721,7 +1725,7 @@ router.get('/worker/tasks', async (req: any, res) => {
       .where(
         and(
           eq(atisCards.isArchived, 0),
-          sql`JSON_CONTAINS(${atisCards.memberIds}, JSON_QUOTE(${trelloMemberId}))`
+          sql`${atisCards.memberIds}::jsonb @> ${JSON.stringify([trelloMemberId])}::jsonb`
         )
       );
 

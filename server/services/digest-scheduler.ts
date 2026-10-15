@@ -11,7 +11,7 @@ import {
   notificationHistory, 
   digestJobs,
   users 
-} from '../../drizzle/schema';
+} from '../../drizzle/schema.postgres';
 import { eq, and, sql, lte, gte } from 'drizzle-orm';
 import { sendEmail } from './email';
 
@@ -338,7 +338,7 @@ export async function queueNotificationForDigest(
   if (!db) return null;
 
   try {
-    const result = await db.insert(notificationHistory).values({
+    const [result] = await db.insert(notificationHistory).values({
       userId,
       userOpenId,
       title: notification.title,
@@ -349,10 +349,10 @@ export async function queueNotificationForDigest(
       dueDate: notification.dueDate || null,
       channel: 'email',
       deliveryStatus: 'queued_for_digest',
-    });
+    }).returning({ id: notificationHistory.id });
 
     console.log(`[DigestScheduler] Queued notification for digest: ${notification.title}`);
-    return result[0]?.insertId || null;
+    return result?.id ?? null;
   } catch (error) {
     console.error('[DigestScheduler] Error queuing notification:', error);
     return null;
@@ -380,7 +380,7 @@ export async function recordNotification(
   if (!db) return null;
 
   try {
-    const result = await db.insert(notificationHistory).values({
+    const [result] = await db.insert(notificationHistory).values({
       userId,
       userOpenId,
       title: notification.title,
@@ -392,9 +392,9 @@ export async function recordNotification(
       channel: notification.channel,
       deliveryStatus: notification.deliveryStatus,
       deliveredAt: notification.deliveryStatus === 'sent' ? new Date() : null,
-    });
+    }).returning({ id: notificationHistory.id });
 
-    return result[0]?.insertId || null;
+    return result?.id ?? null;
   } catch (error) {
     console.error('[DigestScheduler] Error recording notification:', error);
     return null;

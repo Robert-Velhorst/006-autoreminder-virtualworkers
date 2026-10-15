@@ -1,7 +1,7 @@
 import type { Request } from "express";
 import { eq } from "drizzle-orm";
-import type { User } from "../../drizzle/schema";
-import { users } from "../../drizzle/schema";
+import type { User } from "../../drizzle/schema.postgres";
+import { users } from "../../drizzle/schema.postgres";
 import { getDb } from "../db";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"]);

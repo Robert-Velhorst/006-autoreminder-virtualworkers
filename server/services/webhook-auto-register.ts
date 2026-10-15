@@ -6,8 +6,8 @@
  */
 
 import { getDb } from '../db';
-import { eq, sql, and, isNull } from 'drizzle-orm';
-import { atisBoards, chatbotWebhooks } from '../../drizzle/schema';
+import { eq } from 'drizzle-orm';
+import { atisBoards, chatbotWebhooks } from '../../drizzle/schema.postgres';
 
 const TRELLO_API_KEY = process.env.TRELLO_API_KEY;
 const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
@@ -132,20 +132,28 @@ async function storeWebhook(
   isActive: boolean
 ): Promise<void> {
   const db = await getDb();
-  if (!db) return;
+  if (!db || !callbackUrl) return;
 
   try {
-    await db.execute(sql`
-      INSERT INTO chatbot_webhooks (trelloWebhookId, modelId, modelType, description, callbackUrl, isActive)
-      VALUES (${trelloWebhookId}, ${modelId}, ${modelType}, ${description}, ${callbackUrl}, ${isActive ? 1 : 0})
-      ON DUPLICATE KEY UPDATE
-        modelId = ${modelId},
-        modelType = ${modelType},
-        description = ${description},
-        callbackUrl = ${callbackUrl},
-        isActive = ${isActive ? 1 : 0},
-        updatedAt = NOW()
-    `);
+    await db.insert(chatbotWebhooks).values({
+      trelloWebhookId,
+      modelId,
+      modelType,
+      description,
+      callbackUrl,
+      isActive: isActive ? 1 : 0,
+      updatedAt: new Date(),
+    }).onConflictDoUpdate({
+      target: chatbotWebhooks.trelloWebhookId,
+      set: {
+        modelId,
+        modelType,
+        description,
+        callbackUrl,
+        isActive: isActive ? 1 : 0,
+        updatedAt: new Date(),
+      },
+    });
   } catch (error) {
     console.error('[WebhookAutoRegister] Error storing webhook:', error);
   }
@@ -159,9 +167,7 @@ async function removeWebhookFromDb(trelloWebhookId: string): Promise<void> {
   if (!db) return;
 
   try {
-    await db.execute(sql`
-      DELETE FROM chatbot_webhooks WHERE trelloWebhookId = ${trelloWebhookId}
-    `);
+    await db.delete(chatbotWebhooks).where(eq(chatbotWebhooks.trelloWebhookId, trelloWebhookId));
   } catch (error) {
     console.error('[WebhookAutoRegister] Error removing webhook from db:', error);
   }
@@ -179,10 +185,11 @@ async function getStoredWebhooks(): Promise<Array<{
   if (!db) return [];
 
   try {
-    const result = await db.execute(sql`
-      SELECT trelloWebhookId, modelId, modelType FROM chatbot_webhooks
-    `);
-    return (result as any)[0] || [];
+    return await db.select({
+      trelloWebhookId: chatbotWebhooks.trelloWebhookId,
+      modelId: chatbotWebhooks.modelId,
+      modelType: chatbotWebhooks.modelType,
+    }).from(chatbotWebhooks);
   } catch (error) {
     console.error('[WebhookAutoRegister] Error getting stored webhooks:', error);
     return [];
@@ -327,10 +334,10 @@ export async function removeWebhookForBoard(boardTrelloId: string): Promise<bool
   if (!db) return false;
 
   try {
-    const result = await db.execute(sql`
-      SELECT trelloWebhookId FROM chatbot_webhooks WHERE modelId = ${boardTrelloId}
-    `);
-    const rows = (result as any)[0] || [];
+    const rows = await db.select({ trelloWebhookId: chatbotWebhooks.trelloWebhookId })
+      .from(chatbotWebhooks)
+      .where(eq(chatbotWebhooks.modelId, boardTrelloId))
+      .limit(1);
     
     if (rows.length > 0) {
       const webhookId = rows[0].trelloWebhookId;
