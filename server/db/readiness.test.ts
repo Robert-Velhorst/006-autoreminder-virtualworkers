@@ -11,11 +11,9 @@ import {
 
 function poolReturning(requiredMigrationApplied: boolean): ReadinessPool {
   return {
-    query: vi
-      .fn()
-      .mockResolvedValue({
-        rows: [{ required_migration_applied: requiredMigrationApplied }],
-      }),
+    query: vi.fn().mockResolvedValue({
+      rows: [{ required_migration_applied: requiredMigrationApplied }],
+    }),
   };
 }
 
@@ -37,13 +35,15 @@ describe("PostgreSQL readiness probe", () => {
       when: Number(REQUIRED_POSTGRES_MIGRATION.createdAt),
     });
 
-    const migrationSql = await readFile(
-      new URL(
-        `../../drizzle-postgres-v1/${REQUIRED_POSTGRES_MIGRATION.tag}.sql`,
-        import.meta.url
-      ),
-      "utf8"
-    );
+    const migrationSql = (
+      await readFile(
+        new URL(
+          `../../drizzle-postgres-v1/${REQUIRED_POSTGRES_MIGRATION.tag}.sql`,
+          import.meta.url
+        ),
+        "utf8"
+      )
+    ).replace(/\r\n/g, "\n");
     expect(createHash("sha256").update(migrationSql).digest("hex")).toBe(
       REQUIRED_POSTGRES_MIGRATION.hash
     );
