@@ -38,11 +38,16 @@ const MAX_REDIRECTS = 5;
 class UnsafeOutboundUrlError extends Error {}
 
 function hasAllowedOutboundPath(hostname: string, pathname: string): boolean {
-  if (hostname === 'api.trello.com') {
-    return /^\/1(?:\/|$)/.test(pathname);
-  }
-  if (hostname === 'trello.com' || hostname === 'www.trello.com') {
-    return /^\/(?:c|b|cards)(?:\/|$)/.test(pathname);
+  if (
+    hostname === 'api.trello.com' ||
+    hostname === 'trello.com' ||
+    hostname === 'www.trello.com' ||
+    hostname === 'attachments.trello.com' ||
+    hostname === 'trello-attachments.s3.amazonaws.com'
+  ) {
+    // Trello endpoints and attachment object paths vary by resource. Their
+    // origin remains fixed to the server-owned allowlist below.
+    return true;
   }
   if (hostname === 'chat.openai.com' || hostname === 'chatgpt.com' || hostname === 'claude.ai') {
     return /^\/share\/[A-Za-z0-9_-]+\/?$/.test(pathname);
@@ -53,8 +58,7 @@ function hasAllowedOutboundPath(hostname: string, pathname: string): boolean {
   if (hostname === 'gemini.google.com') {
     return /^\/share\/[A-Za-z0-9_-]+\/?$/.test(pathname);
   }
-  // Trello attachment hosts use opaque object paths supplied by Trello itself.
-  return hostname === 'attachments.trello.com' || hostname === 'trello-attachments.s3.amazonaws.com';
+  return false;
 }
 
 function parseAllowedOutboundUrl(input: string | URL): URL {
