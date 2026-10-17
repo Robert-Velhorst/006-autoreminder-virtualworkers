@@ -20,22 +20,42 @@ const DEFAULT_OPTIONS: Required<RetryOptions> = {
   onRetry: () => {},
 };
 
-const ALLOWED_OUTBOUND_HOSTS = new Set([
-  'api.trello.com',
-  'trello.com',
-  'www.trello.com',
-  'attachments.trello.com',
-  'trello-attachments.s3.amazonaws.com',
-  'chat.openai.com',
-  'chatgpt.com',
-  'g.co',
-  'gemini.google.com',
-  'claude.ai',
+const ALLOWED_OUTBOUND_ORIGINS = new Map([
+  ['api.trello.com', 'https://api.trello.com'],
+  ['trello.com', 'https://trello.com'],
+  ['www.trello.com', 'https://www.trello.com'],
+  ['attachments.trello.com', 'https://attachments.trello.com'],
+  ['trello-attachments.s3.amazonaws.com', 'https://trello-attachments.s3.amazonaws.com'],
+  ['chat.openai.com', 'https://chat.openai.com'],
+  ['chatgpt.com', 'https://chatgpt.com'],
+  ['g.co', 'https://g.co'],
+  ['gemini.google.com', 'https://gemini.google.com'],
+  ['claude.ai', 'https://claude.ai'],
 ]);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECTS = 5;
 
 class UnsafeOutboundUrlError extends Error {}
+
+function hasAllowedOutboundPath(hostname: string, pathname: string): boolean {
+  if (hostname === 'api.trello.com') {
+    return /^\/1(?:\/|$)/.test(pathname);
+  }
+  if (hostname === 'trello.com' || hostname === 'www.trello.com') {
+    return /^\/(?:c|b|cards)(?:\/|$)/.test(pathname);
+  }
+  if (hostname === 'chat.openai.com' || hostname === 'chatgpt.com' || hostname === 'claude.ai') {
+    return /^\/share\/[A-Za-z0-9_-]+\/?$/.test(pathname);
+  }
+  if (hostname === 'g.co') {
+    return /^\/gemini\/share\/[A-Za-z0-9_-]+\/?$/.test(pathname);
+  }
+  if (hostname === 'gemini.google.com') {
+    return /^\/share\/[A-Za-z0-9_-]+\/?$/.test(pathname);
+  }
+  // Trello attachment hosts use opaque object paths supplied by Trello itself.
+  return hostname === 'attachments.trello.com' || hostname === 'trello-attachments.s3.amazonaws.com';
+}
 
 function parseAllowedOutboundUrl(input: string | URL): URL {
   let parsed: URL;
@@ -45,17 +65,24 @@ function parseAllowedOutboundUrl(input: string | URL): URL {
     throw new UnsafeOutboundUrlError('Outbound URL is invalid');
   }
 
+  const approvedOrigin = ALLOWED_OUTBOUND_ORIGINS.get(parsed.hostname);
   if (
     parsed.protocol !== 'https:' ||
     (parsed.port !== '' && parsed.port !== '443') ||
     parsed.username !== '' ||
     parsed.password !== '' ||
-    !ALLOWED_OUTBOUND_HOSTS.has(parsed.hostname)
+    !approvedOrigin ||
+    !hasAllowedOutboundPath(parsed.hostname, parsed.pathname)
   ) {
     throw new UnsafeOutboundUrlError('Outbound URL host is not allowed');
   }
 
-  return parsed;
+  // Rebuild the request from a server-owned origin. User-controlled URL text
+  // can select an approved destination, but cannot supply the fetch hostname.
+  const safeUrl = new URL(approvedOrigin);
+  safeUrl.pathname = parsed.pathname;
+  safeUrl.search = parsed.search;
+  return safeUrl;
 }
 
 async function fetchAllowedOutboundUrl(url: string, init?: RequestInit): Promise<Response> {
