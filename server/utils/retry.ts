@@ -20,6 +20,86 @@ const DEFAULT_OPTIONS: Required<RetryOptions> = {
   onRetry: () => {},
 };
 
+const ALLOWED_OUTBOUND_HOSTS = new Set([
+  'api.trello.com',
+  'trello.com',
+  'www.trello.com',
+  'attachments.trello.com',
+  'trello-attachments.s3.amazonaws.com',
+  'chat.openai.com',
+  'chatgpt.com',
+  'g.co',
+  'gemini.google.com',
+  'claude.ai',
+]);
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_REDIRECTS = 5;
+
+class UnsafeOutboundUrlError extends Error {}
+
+function parseAllowedOutboundUrl(input: string | URL): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(input);
+  } catch {
+    throw new UnsafeOutboundUrlError('Outbound URL is invalid');
+  }
+
+  if (
+    parsed.protocol !== 'https:' ||
+    (parsed.port !== '' && parsed.port !== '443') ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    !ALLOWED_OUTBOUND_HOSTS.has(parsed.hostname)
+  ) {
+    throw new UnsafeOutboundUrlError('Outbound URL host is not allowed');
+  }
+
+  return parsed;
+}
+
+async function fetchAllowedOutboundUrl(url: string, init?: RequestInit): Promise<Response> {
+  let currentUrl = parseAllowedOutboundUrl(url);
+  let currentInit: RequestInit = { ...init, redirect: 'manual' };
+
+  for (let redirectCount = 0; ; redirectCount++) {
+    const response = await fetch(currentUrl, currentInit);
+    if (!REDIRECT_STATUSES.has(response.status)) {
+      return response;
+    }
+
+    const location = response.headers.get('location');
+    if (!location) {
+      return response;
+    }
+    if (redirectCount >= MAX_REDIRECTS) {
+      throw new UnsafeOutboundUrlError('Outbound request exceeded the redirect limit');
+    }
+
+    const nextUrl = parseAllowedOutboundUrl(new URL(location, currentUrl));
+    if (nextUrl.origin !== currentUrl.origin) {
+      for (const sensitiveParameter of ['key', 'token', 'api_key', 'access_token']) {
+        nextUrl.searchParams.delete(sensitiveParameter);
+      }
+
+      const headers = new Headers(currentInit.headers);
+      headers.delete('authorization');
+      headers.delete('cookie');
+      headers.delete('proxy-authorization');
+      currentInit = { ...currentInit, headers };
+    }
+
+    currentUrl = nextUrl;
+    const method = (currentInit.method || 'GET').toUpperCase();
+    if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === 'POST')) {
+      const headers = new Headers(currentInit.headers);
+      headers.delete('content-length');
+      headers.delete('content-type');
+      currentInit = { ...currentInit, method: 'GET', body: undefined, headers };
+    }
+  }
+}
+
 /**
  * Sleep for specified milliseconds
  */
@@ -56,12 +136,13 @@ export async function fetchWithRetry(
   init?: RequestInit,
   options?: RetryOptions
 ): Promise<Response> {
+  parseAllowedOutboundUrl(url);
   const opts = { ...DEFAULT_OPTIONS, ...options };
   let lastError: any;
 
   for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
     try {
-      const response = await fetch(url, init);
+      const response = await fetchAllowedOutboundUrl(url, init);
 
       // If response is successful or non-retryable error, return immediately
       if (response.ok || !opts.retryableStatuses.includes(response.status)) {
@@ -99,6 +180,9 @@ export async function fetchWithRetry(
       await sleep(delayMs);
 
     } catch (error: any) {
+      if (error instanceof UnsafeOutboundUrlError) {
+        throw error;
+      }
       lastError = error;
 
       // Don't retry on last attempt
