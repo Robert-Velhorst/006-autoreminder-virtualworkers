@@ -11,27 +11,30 @@ only.
 
 ## Readiness status
 
-Production cutover is **not yet verified**. The actual production source
-database has not been confirmed, so no source-specific backup or transfer
-rehearsal has been accepted. The retained MySQL transfer path is conditional,
-not evidence that MySQL is the live source. The Hetzner deployment has not
-passed live acceptance. Do not treat local tests or image publication as live
-acceptance.
+Production cutover is **not yet verified**. The owner intends to consolidate
+their GitHub tools on a shared open-source PostgreSQL service, but neither that
+service nor the VA Dashboard database has been provisioned. Use a separate
+database and least-privilege role for this app. No legacy data source or import
+plan has been identified; do not run the retained MySQL transfer utility unless
+a real source is identified and an import is approved. The Hetzner deployment
+has not passed live acceptance. Do not treat local tests or image publication
+as live acceptance.
 
 ## Required release gates
 
-1. Confirm the actual production source database and restore-test its backup in
-   an isolated environment.
-2. Run `pnpm db:migrate` on an empty PostgreSQL target. Select a transfer path
-   supported by the confirmed source; use the MySQL preflight and rehearsed
-   `copy --execute` only if MySQL is confirmed. Review all reconciliation
-   evidence.
+1. Provision the shared PostgreSQL service and an isolated VA Dashboard
+   database/least-privilege role. Define network access, TLS, automated backup,
+   and a restore-tested recovery procedure.
+2. Run `pnpm db:migrate` on the new PostgreSQL database. Only define a transfer
+   path if an existing source containing VA Dashboard data is identified and
+   its import is approved; the MySQL utility is conditional, not a default.
 3. Test target backup/restore, sequences, application reads and writes,
    repeatability, and the rollback path.
 4. Deploy the verified release to Hetzner and test health/readiness, login and
    role boundaries, WebSockets, scheduled work, and all enabled integrations.
-5. Retain the source, backups, and previous application release throughout the
-   agreed rollback window. Retire old hosting only after acceptance.
+5. Retain backups and the previous application release throughout the agreed
+   rollback window. If data is imported, retain its source until acceptance.
+   Retire old hosting only after acceptance.
 
 ## Current instructions
 
