@@ -8,35 +8,40 @@ decisions.
 ## Current target
 
 - Runtime: one persistent VA Dashboard application container on Hetzner.
-- Database: PostgreSQL. The repository retains a MySQL-to-PostgreSQL transfer
-  utility, but the actual production source database has not been confirmed.
-  Do not assume MySQL is the live source or that the utility applies until the
-  owner verifies it.
+- Database: PostgreSQL, intended as the shared open-source database platform
+  for the owner's GitHub tools. The VA Dashboard production database has not
+  yet been provisioned. Share the PostgreSQL service, not application data or
+  credentials: create a separate database and least-privilege role per app.
+  Hetzner is the hosting target; the exact PostgreSQL service topology and
+  network placement still need to be provisioned and verified.
 - Redis: optional, external, and not part of the required single-container
   application deployment.
-- Hosting: Docker Compose behind a stable HTTPS reverse proxy. Vercel and
-  ngrok are not production targets.
+- Hosting: Docker Compose behind a stable HTTPS reverse proxy. Request-only
+  hosting and public tunnels are not production targets.
 
 ## Release blockers
 
-1. Identify and confirm the actual production source database, its owner, and
-   authoritative backup procedure. Restore a verified backup into an isolated
-   rehearsal environment.
-2. Select a transfer path supported by that confirmed source. Use the retained
-   MySQL-to-PostgreSQL utility only if MySQL is confirmed; reconcile every table
-   and preserve the generated report.
+1. Provision the shared PostgreSQL service and a dedicated VA Dashboard
+   database and least-privilege role. Restrict network access, configure TLS,
+   and establish automated backups with a verified restore procedure.
+2. Apply the PostgreSQL migrations to the new VA Dashboard database. Do not
+   run a legacy transfer unless an actual source containing VA Dashboard data
+   is identified and its owner approves a specific backup and transfer plan.
+   The retained MySQL transfer utility is conditional and is not evidence of a
+   MySQL production source.
 3. Test PostgreSQL backup/restore, application read/write behavior, sequences,
    rollback, and repeatability on a fresh target.
 4. Deploy to Hetzner and verify health/readiness, authentication and role
    boundaries, WebSockets, scheduled jobs, and each enabled provider integration.
-5. Complete the cutover and rollback window before retiring any remaining
-   source data or infrastructure.
+5. If existing VA data must be imported, complete its separately approved
+   transfer and rollback window before retiring that source. Otherwise, record
+   the agreed initial-data/bootstrap approach before production acceptance.
 
 The migration and live deployment gates have not been accepted yet. A green
 local test suite, image build, or CI run does not establish production
 acceptance.
 
-## Latest Verification Snapshot
+## Repository Verification Snapshot (2026-10-14)
 
 Verified 2026-10-14 UTC against PR #110 code at commit
 `18da0e9cd71b6ca4d9742263addf51d9c46d721a`, with successful quality-gate
@@ -70,14 +75,18 @@ Verified 2026-10-14 UTC against PR #110 code at commit
   release is available: `v1.0.0-rc.1` is a prerelease and is rejected by the
   production gate.
 - The PostgreSQL backup/restore test passed against isolated CI databases.
-  The actual production source database has not been confirmed. The retained
-  MySQL-to-PostgreSQL transfer has not been rehearsed against a confirmed source
-  or restored backup, and no live Hetzner deployment or production acceptance
-  has occurred.
+  The shared production PostgreSQL service and VA Dashboard database have not
+  yet been provisioned. No legacy data source or import plan has been
+  identified, and no live Hetzner deployment or production acceptance has
+  occurred.
 
 This is a dated evidence snapshot, not a claim of production readiness. Refresh
 it after a default-branch merge, secret revocation, host configuration, release,
 data-transfer rehearsal, or live deployment.
+
+The owner confirmed on 2026-10-15 that the production database is not yet
+provisioned and that the intended direction is a shared open-source PostgreSQL
+service for their GitHub tools, with a separate database and role per app.
 
 ## Operational sources
 

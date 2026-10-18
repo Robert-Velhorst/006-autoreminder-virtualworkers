@@ -19,14 +19,17 @@ reports are historical snapshots and are not deployment or release evidence.
   schema and transfer tooling are not supported runtime backends and do not
   confirm which database currently contains production data.
 - Hetzner is the production hosting target. The app requires a persistent
-  process for HTTP, WebSockets, and scheduled work; Vercel and ngrok are not
+  process for HTTP, WebSockets, and scheduled work; request-only hosting and public tunnels are not
   production targets.
 - Docker Compose runs one application container. PostgreSQL and optional Redis
   are provisioned separately.
-- The actual production source database has not been confirmed. The retained
-  MySQL-to-PostgreSQL utility is conditional and has not been accepted against
-  a confirmed source or restored production backup. Production cutover remains
-  unverified until all gates in `docs/PRODUCTION_CUTOVER.md` pass.
+- The owner intends to consolidate their GitHub tools on a shared open-source
+  PostgreSQL service. The VA Dashboard production database is not yet
+  provisioned. Each app must use a separate database and least-privilege role;
+  sharing the service does not mean sharing credentials or application data.
+  Any legacy data import is a separate decision. Production cutover remains
+  unverified until the provisioning, restore, and acceptance gates in
+  `docs/PRODUCTION_CUTOVER.md` pass.
 - CI, local tests, and image publication do not prove live Hetzner acceptance.
 
 Documents such as `PRODUCTION_COMPLETION_PLAN.md`,
