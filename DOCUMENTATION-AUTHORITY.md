@@ -19,7 +19,7 @@ reports are historical snapshots and are not deployment or release evidence.
   schema and transfer tooling are not supported runtime backends and do not
   confirm which database currently contains production data.
 - Hetzner is the production hosting target. The app requires a persistent
-  process for HTTP, WebSockets, and scheduled work; Vercel and ngrok are not
+  process for HTTP, WebSockets, and scheduled work; request-only hosting and public tunnels are not
   production targets.
 - Docker Compose runs one application container. PostgreSQL and optional Redis
   are provisioned separately.

@@ -1,7 +1,7 @@
 # Production Deployment Target
 
 Hetzner is the production hosting target. New production deployments must not
-use Vercel or ngrok.
+use unapproved serverless hosting or public-tunnel services.
 
 The application runtime uses PostgreSQL. The owner intends to use one shared,
 open-source PostgreSQL service for their GitHub tools; the VA Dashboard

@@ -101,11 +101,11 @@ reject.
 
 The recovery branch passed the repository quality gate on 30 July 2026:
 secret scan, TypeScript, canonical MySQL migrations, schema parity, 564 tests,
-production build, and migration-drift detection. The two failing Vercel checks
+production build, and migration-drift detection. The two failing deployment checks
 are obsolete project configurations that still point to removed `Frontend` and
 `Backend` directories; they are not application test failures.
 
 Those projects must not be repointed to the repository root. The consolidated
 server requires a persistent container runtime for Express, tRPC, scheduled
-work, Redis, and WebSockets. Retire the obsolete Vercel Git integrations only
+work, Redis, and WebSockets. Retire obsolete hosting Git integrations only
 after the public container replacement passes the production cutover gate.
