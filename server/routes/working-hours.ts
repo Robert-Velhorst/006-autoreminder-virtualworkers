@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../db';
-import { userWorkingHours, vaProfiles } from '../../drizzle/schema';
+import { userWorkingHours, vaProfiles } from '../../drizzle/schema.postgres';
 import { eq, and } from 'drizzle-orm';
 
 const router = Router();

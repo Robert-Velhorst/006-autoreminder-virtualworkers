@@ -9,7 +9,7 @@
 
 import { Router, Request, Response } from 'express';
 import { getDb } from '../db';
-import { userNotificationPreferences } from '../../drizzle/schema';
+import { userNotificationPreferences } from '../../drizzle/schema.postgres';
 import { eq } from 'drizzle-orm';
 import { requireAuthenticated, requestUser } from '../middleware/auth';
 

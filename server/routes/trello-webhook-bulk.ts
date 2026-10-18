@@ -1,27 +1,12 @@
 import express, { Response } from 'express';
 import { getDb } from '../db';
-import { chatbotWebhooks } from '../../drizzle/schema';
+import { chatbotWebhooks } from '../../drizzle/schema.postgres';
 import { eq } from 'drizzle-orm';
-import { getWebhookCallbackUrl } from '../services/webhook-auto-register.js';
+import { requireAdmin, requireAuthenticated } from '../middleware/auth';
+import { getConfiguredTrelloWebhookCallbackUrl } from './trelloWebhookSignature';
 
 const router = express.Router();
-
-// Callback URL is always constructed server-side — never trusted from the client.
-// Priority: URL stored by webhook-auto-register at startup (most reliable, reflects
-// the actual live public URL) → WEBHOOK_BASE_URL → PUBLIC_URL → APP_URL env vars.
-const getCallbackUrl = (): string => {
-  // The auto-register service stores the correct public URL set at server startup
-  const autoUrl = getWebhookCallbackUrl();
-  if (autoUrl) return autoUrl;
-
-  // Fallback to env vars
-  const base =
-    process.env.WEBHOOK_BASE_URL ||
-    process.env.PUBLIC_URL ||
-    process.env.APP_URL ||
-    '';
-  return base ? `${base}/api/trello-webhook` : '';
-};
+router.use(requireAuthenticated);
 
 const TRELLO_API_BASE = 'https://api.trello.com/1';
 
@@ -56,13 +41,7 @@ interface BulkRegistrationResponse {
  * Fix #4: callbackUrl is constructed server-side, not accepted from client.
  * Fix #5: Concurrency-limited to 10 parallel requests to avoid Trello rate limits.
  */
-router.post('/', async (req: any, res: Response) => {
-  // Fix #1 — auth guard
-  const user = req.user;
-  if (!user) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
+router.post('/', requireAdmin, async (req: any, res: Response) => {
   try {
     const { boardIds, descriptions } = req.body as BulkRegistrationRequest;
 
@@ -76,11 +55,10 @@ router.post('/', async (req: any, res: Response) => {
     }
 
     // Fix #4 — build callbackUrl on the server
-    const callbackUrl = getCallbackUrl();
-    if (!callbackUrl || callbackUrl === '/api/trello-webhook') {
+    const callbackUrl = getConfiguredTrelloWebhookCallbackUrl();
+    if (!callbackUrl || !process.env.TRELLO_WEBHOOK_SECRET) {
       return res.status(500).json({
-        error:
-          'Server is not configured with a public URL. Set WEBHOOK_BASE_URL (e.g. https://your-domain.com) in your environment variables so Trello can reach the webhook callback.',
+        error: 'Set TRELLO_WEBHOOK_CALLBACK_URL and TRELLO_WEBHOOK_SECRET before registering Trello webhooks.',
       });
     }
 

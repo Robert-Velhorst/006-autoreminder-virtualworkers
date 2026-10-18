@@ -3,10 +3,11 @@
  * Used by Docker healthcheck and monitoring systems
  */
 
-import { Router } from 'express';
-import type { Request, Response } from 'express';
-import { getDb } from '../db';
-import { isRedisAvailable } from '../services/redis';
+import { Router } from "express";
+import type { Request, Response } from "express";
+import { isDatabaseReachable } from "../db";
+import { isRedisAvailable } from "../services/redis";
+import { logger } from "../utils/logger";
 
 const router = Router();
 
@@ -14,34 +15,33 @@ const router = Router();
  * GET /api/health
  * Basic health check
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get("/", async (req: Request, res: Response) => {
   try {
-    // Check database connection
-    const db = await getDb();
-    const dbHealthy = db !== null;
+    const dbHealthy = await isDatabaseReachable();
 
     // Check Redis connection (optional)
     const redisHealthy = isRedisAvailable();
 
     const health = {
-      status: dbHealthy ? 'healthy' : 'unhealthy',
+      status: dbHealthy ? "healthy" : "unhealthy",
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
-      database: dbHealthy ? 'connected' : 'disconnected',
-      redis: redisHealthy ? 'connected' : 'not configured',
+      database: dbHealthy ? "connected" : "disconnected",
+      redis: redisHealthy ? "connected" : "not configured",
       memory: {
         used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
         total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
-        unit: 'MB',
+        unit: "MB",
       },
     };
 
     const statusCode = dbHealthy ? 200 : 503;
     res.status(statusCode).json(health);
   } catch (error) {
+    logger.error("Health check failed", error instanceof Error ? error : undefined);
     res.status(503).json({
-      status: 'unhealthy',
-      error: error instanceof Error ? error.message : 'Unknown error',
+      status: "unhealthy",
+      error: "Health check failed",
       timestamp: new Date().toISOString(),
     });
   }
@@ -51,13 +51,12 @@ router.get('/', async (req: Request, res: Response) => {
  * GET /api/health/ready
  * Readiness check (for Kubernetes)
  */
-router.get('/ready', async (req: Request, res: Response) => {
+router.get("/ready", async (req: Request, res: Response) => {
   try {
-    const db = await getDb();
-    if (!db) {
+    if (!(await isDatabaseReachable())) {
       return res.status(503).json({
         ready: false,
-        reason: 'Database not available',
+        reason: "Database not available",
       });
     }
 
@@ -66,9 +65,10 @@ router.get('/ready', async (req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
+    logger.error("Readiness check failed", error instanceof Error ? error : undefined);
     res.status(503).json({
       ready: false,
-      reason: error instanceof Error ? error.message : 'Unknown error',
+      reason: "Readiness check failed",
     });
   }
 });
@@ -77,7 +77,7 @@ router.get('/ready', async (req: Request, res: Response) => {
  * GET /api/health/live
  * Liveness check (for Kubernetes)
  */
-router.get('/live', (req: Request, res: Response) => {
+router.get("/live", (req: Request, res: Response) => {
   res.json({
     alive: true,
     timestamp: new Date().toISOString(),

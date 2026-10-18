@@ -12,7 +12,7 @@ import {
   timeEntries,
   workspaceEvidenceItems,
   workspaceEvidenceLinks,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { getActiveWaitingReason, getActiveWaitingReasons, getWaitingReasonHistory, recordAptlssWaitingReason, resolveAptlssWaitingReason } from "./aptlssWaitingReasonDb";
 import {
   AptlssEvidenceGraphError,

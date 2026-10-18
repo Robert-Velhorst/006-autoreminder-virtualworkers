@@ -1,0 +1,141 @@
+name: Deploy to Hetzner
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Stable published release tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+      confirm:
+        description: Explicitly authorize this production deployment
+        required: true
+        type: choice
+        options:
+          - do-not-deploy
+          - deploy
+
+permissions:
+  contents: read
+
+concurrency:
+  group: va-dashboard-production
+  cancel-in-progress: false
+
+jobs:
+  validate-production-gate:
+    if: inputs.confirm == 'deploy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release_tag: ${{ steps.release.outputs.tag }}
+      release_commit: ${{ steps.release.outputs.commit }}
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out protected main validation code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Require protected main and reviewed production environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          environment="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
+          printf '%s' "$environment" | node deployment/hetzner/validate-production-environment.mjs
+
+      - name: Validate stable release is contained in protected main
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Only stable vMAJOR.MINOR.PATCH release tags can be deployed" >&2
+            exit 1
+          fi
+          release_metadata="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '{tag_name,draft,prerelease}')"
+          comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${RELEASE_TAG}...main" --jq '{status,base_commit:{sha:.base_commit.sha}}')"
+          RELEASE_TAG="$RELEASE_TAG" RELEASE_METADATA="$release_metadata" MAIN_COMPARISON="$comparison" \
+            node deployment/hetzner/validate-release-source.mjs >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: validate-production-gate
+    if: inputs.confirm == 'deploy' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GHCR_IMAGE: ghcr.io/robert-velhorst/006-autoreminder-virtualworkers
+      APP_DIR: /opt/va-dashboard
+    steps:
+      - name: Check out the exact release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate-production-gate.outputs.release_tag }}
+
+      - name: Authenticate to GHCR and verify release provenance
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.validate-production-gate.outputs.release_tag }}
+          RELEASE_COMMIT: ${{ needs.validate-production-gate.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker pull "${GHCR_IMAGE}:${RELEASE_TAG}"
+          image_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "${GHCR_IMAGE}:${RELEASE_TAG}")"
+          if [[ ! "$image_ref" =~ ^ghcr\.io/robert-velhorst/006-autoreminder-virtualworkers@sha256:[a-f0-9]{64}$ ]]; then
+            echo "Could not resolve the release to a GHCR SHA-256 digest" >&2
+            exit 1
+          fi
+          gh attestation verify "oci://${image_ref}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-container.yml" \
+            --source-ref "refs/tags/${RELEASE_TAG}" \
+            --source-digest "$RELEASE_COMMIT"
+          echo "APP_IMAGE=$image_ref" >> "$GITHUB_ENV"
+
+      - name: Stage the release Compose configuration
+        env:
+          HETZNER_SSH_HOST: ${{ secrets.HETZNER_SSH_HOST }}
+          HETZNER_SSH_USER: ${{ secrets.HETZNER_SSH_USER }}
+          HETZNER_SSH_PRIVATE_KEY: ${{ secrets.HETZNER_SSH_PRIVATE_KEY }}
+          HETZNER_SSH_KNOWN_HOSTS: ${{ secrets.HETZNER_SSH_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in HETZNER_SSH_HOST HETZNER_SSH_USER HETZNER_SSH_PRIVATE_KEY HETZNER_SSH_KNOWN_HOSTS; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing required production environment secret: $name" >&2
+              exit 1
+            fi
+          done
+          if [[ ! "$HETZNER_SSH_HOST" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+            echo "HETZNER_SSH_HOST must be a DNS name or IPv4 address on SSH port 22" >&2
+            exit 1
+          fi
+          if [[ ! "$HETZNER_SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+            echo "HETZNER_SSH_USER must be a valid lowercase Linux account name" >&2
+            exit 1
+          fi
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$HETZNER_SSH_PRIVATE_KEY" > "$HOME/.ssh/va-dashboard-deploy"
+          printf '%s\n' "$HETZNER_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/va-dashboard-deploy" "$HOME/.ssh/known_hosts"
+          ssh_options=(-i "$HOME/.ssh/va-dashboard-deploy" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+          candidate="$APP_DIR/.docker-compose.yml.candidate"
+          scp "${ssh_options[@]}" docker-compose.yml "${HETZNER_SSH_USER}@${HETZNER_SSH_HOST}:${candidate}"
+          ssh "${ssh_options[@]}" "${HETZNER_SSH_USER}@${HETZNER_SSH_HOST}" \
+            "APP_DIR='${APP_DIR}' APP_IMAGE='${APP_IMAGE}' COMPOSE_CANDIDATE='${candidate}' bash -s" \
+            < deployment/hetzner/deploy.sh

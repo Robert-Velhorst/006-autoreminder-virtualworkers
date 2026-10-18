@@ -7,7 +7,7 @@
 
 import { getDb } from '../db';
 import { eq, and, sql, lte, isNotNull } from 'drizzle-orm';
-import { atisCards, atisCardUnderstanding, vaProfiles } from '../../drizzle/schema';
+import { atisCards, atisCardUnderstanding, vaProfiles } from '../../drizzle/schema.postgres';
 import { sendScheduledCheckin, sendEODSummary, postTrelloComment } from './trello-chatbot';
 import { getVATimezone, isWithinWorkingHours, convertToVATimezone } from './timezone-detection';
 

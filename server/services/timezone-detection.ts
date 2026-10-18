@@ -7,7 +7,7 @@
 
 import { getDb } from '../db';
 import { sql } from 'drizzle-orm';
-import { vaProfiles } from '../../drizzle/schema';
+import { vaProfiles } from '../../drizzle/schema.postgres';
 
 // Country to timezone mapping (most common timezone per country)
 const COUNTRY_TIMEZONES: Record<string, string> = {
@@ -261,7 +261,11 @@ export async function getVATimezone(vaId: number): Promise<string> {
     const result = await db.execute(sql`
       SELECT timezone, email, name FROM va_profiles WHERE id = ${vaId}
     `);
-    const rows = (result as any)[0] || [];
+    const rows = result.rows as Array<{
+      timezone: string | null;
+      email: string | null;
+      name: string | null;
+    }>;
     const profile = rows[0];
     
     if (!profile) {
@@ -346,7 +350,12 @@ export async function getAllVATimezones(): Promise<Array<{
     const result = await db.execute(sql`
       SELECT id, name, email, timezone FROM va_profiles WHERE status = 'active'
     `);
-    const rows = (result as any)[0] || [];
+    const rows = result.rows as Array<{
+      id: number;
+      name: string;
+      email: string | null;
+      timezone: string | null;
+    }>;
     
     return rows.map((row: any) => {
       let detectedFrom: string | undefined;

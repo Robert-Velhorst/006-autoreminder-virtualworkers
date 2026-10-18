@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { RequestQueue } from './services/request-queue';
 
 describe('Request Queue Service', () => {
@@ -281,24 +281,25 @@ describe('Request Queue Service', () => {
     });
 
     it('should report pending request age', async () => {
-      const slowExecutor = async () => {
+      vi.useFakeTimers();
+      const promise = queue.execute('test-key', async () => {
         await new Promise(resolve => setTimeout(resolve, 200));
         return 'result';
-      };
+      });
+      const handledPromise = promise.catch(() => undefined);
 
-      const promise = queue.execute('test-key', slowExecutor);
+      try {
+        await vi.advanceTimersByTimeAsync(100);
+        expect(queue.getPendingAge('test-key')).toBe(100);
 
-      // Wait a bit
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      const age = queue.getPendingAge('test-key');
-      expect(age).toBeGreaterThanOrEqual(100);
-      expect(age).toBeLessThan(200);
-
-      await promise;
-
-      // Should return null after completion
-      expect(queue.getPendingAge('test-key')).toBeNull();
+        await vi.advanceTimersByTimeAsync(100);
+        await expect(promise).resolves.toBe('result');
+        expect(queue.getPendingAge('test-key')).toBeNull();
+      } finally {
+        if (queue.isPending('test-key')) queue.clearAll();
+        await handledPromise;
+        vi.useRealTimers();
+      }
     });
   });
 

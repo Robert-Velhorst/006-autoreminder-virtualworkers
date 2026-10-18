@@ -96,22 +96,22 @@ describe('Timezone Detection Service', () => {
   describe('getVATimezone', () => {
     it('should return timezone from database', async () => {
       // Use a non-default timezone to test that it's returned as-is
-      mockDb.execute.mockResolvedValueOnce([[{
+      mockDb.execute.mockResolvedValueOnce({ rows: [{
         timezone: 'Europe/Berlin',
         email: 'user@example.com',
         name: 'Test User',
-      }]]);
+      }] });
 
       const tz = await getVATimezone(1);
       expect(tz).toBe('Europe/Berlin');
     });
 
     it('should detect timezone from email if default', async () => {
-      mockDb.execute.mockResolvedValueOnce([[{
+      mockDb.execute.mockResolvedValueOnce({ rows: [{
         timezone: 'Asia/Manila', // default
         email: 'user@company.de',
         name: 'Test User',
-      }]]);
+      }] });
 
       const tz = await getVATimezone(1);
       // Should detect from email TLD
@@ -119,7 +119,7 @@ describe('Timezone Detection Service', () => {
     });
 
     it('should return default if VA not found', async () => {
-      mockDb.execute.mockResolvedValueOnce([[]]);
+      mockDb.execute.mockResolvedValueOnce({ rows: [] });
 
       const tz = await getVATimezone(999);
       expect(tz).toBe('Asia/Manila');

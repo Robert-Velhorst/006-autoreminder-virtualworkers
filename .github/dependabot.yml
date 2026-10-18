@@ -8,7 +8,7 @@ updates:
       github-actions:
         patterns:
           - "*"
-  - package-ecosystem: pnpm
+  - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
@@ -21,3 +21,11 @@ updates:
         dependency-type: development
         patterns:
           - "*"
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly

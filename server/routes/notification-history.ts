@@ -6,7 +6,7 @@
 
 import { Router, Request, Response } from 'express';
 import { getDb } from '../db';
-import { notificationHistory, digestJobs } from '../../drizzle/schema';
+import { notificationHistory, digestJobs } from '../../drizzle/schema.postgres';
 import { eq, and, desc, sql } from 'drizzle-orm';
 import { requireAuthenticated } from '../middleware/auth';
 

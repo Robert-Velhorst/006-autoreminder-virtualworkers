@@ -261,10 +261,10 @@ export class TrelloChecklistSyncService {
       await db.execute(sql`
         INSERT INTO atis_checklist_sync (trello_card_id, trello_checklist_id, items_synced, synced_at)
         VALUES (${cardId}, ${checklistId}, ${itemCount}, NOW())
-        ON DUPLICATE KEY UPDATE
-          trello_checklist_id = ${checklistId},
-          items_synced = ${itemCount},
-          synced_at = NOW()
+        ON CONFLICT (trello_card_id) DO UPDATE SET
+          trello_checklist_id = EXCLUDED.trello_checklist_id,
+          items_synced = EXCLUDED.items_synced,
+          synced_at = EXCLUDED.synced_at
       `);
     } catch (error) {
       console.error('[TrelloChecklistSync] Failed to record sync:', error);
@@ -285,14 +285,18 @@ export class TrelloChecklistSyncService {
         WHERE trello_card_id = ${cardId}
       `);
 
-      const rows = (result as any)[0] || [];
+      const rows = result.rows as Array<{
+        trello_checklist_id: string;
+        items_synced: number;
+        synced_at: Date | null;
+      }>;
       if (rows.length === 0) {
         return { synced: false };
       }
 
       return {
         synced: true,
-        syncedAt: rows[0].synced_at,
+        syncedAt: rows[0].synced_at ?? undefined,
         itemCount: rows[0].items_synced,
       };
     } catch (error) {

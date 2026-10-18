@@ -1,5 +1,5 @@
 import { getDb } from '../db';
-import { taskAssignments, timeEntries, vaProfiles, users } from '../../drizzle/schema';
+import { taskAssignments, timeEntries, vaProfiles, users } from '../../drizzle/schema.postgres';
 import { and, eq, gte, isNotNull } from 'drizzle-orm';
 import { sendMorningBriefing, sendEODReport } from './email';
 

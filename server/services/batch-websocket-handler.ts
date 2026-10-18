@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { getDb } from '../db';
-import { batchOperations } from '../../drizzle/schema';
+import { batchOperations } from '../../drizzle/schema.postgres';
 import { eq } from 'drizzle-orm';
 import { batchQueueProcessor } from './batch-queue-processor.js';
 

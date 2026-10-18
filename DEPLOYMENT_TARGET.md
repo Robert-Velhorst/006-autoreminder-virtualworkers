@@ -1,5 +1,27 @@
-# Deployment target
+# Production Deployment Target
 
-Hetzner is this repository's intended production deployment target. Owner direction is that Vercel and ngrok are no longer used as deployment providers. Do not add new production deployments that rely on either service. Treat any remaining configuration or documentation references as legacy until checked against live services; preserve local development or test tooling only when still needed.
+Hetzner is the production hosting target. New production deployments must not
+use unapproved serverless hosting or public-tunnel services.
 
-This directive does not claim that a Hetzner migration or production cutover has already happened. Before cutover, document the target architecture and operational runbook, including application and database/data migration, secrets, network access, DNS/TLS, monitoring, backups and a tested restore path, security controls, and rollback. Verify the running service and acceptance evidence before declaring migration complete. Keep credentials and private data out of this file.
+The application runtime uses PostgreSQL. The owner intends to use one shared,
+open-source PostgreSQL service for their GitHub tools; the VA Dashboard
+production database has not yet been provisioned. Share the service, not
+application data or credentials: each app must have its own database and
+least-privilege role. The exact service topology and private network placement
+remain to be provisioned and verified. The repository's MySQL transfer utility
+is conditional and must not be used unless a real VA Dashboard data source is
+identified and an import is explicitly planned. Redis is optional and external;
+verify its data only if Redis is configured or used by the current deployment.
+
+Before deploying or retiring infrastructure, verify the actual running
+application, PostgreSQL backup and restore, secrets, security controls,
+restore procedure, rollback path, DNS, TLS, scheduled work, WebSockets, and
+enabled external integrations. Do not claim migration or cutover until the
+checks in [Production Cutover](docs/PRODUCTION_CUTOVER.md) pass against the
+target environment.
+
+Use the repository's Docker Compose deployment and cutover checklist as the
+operational source of truth. Keep database credentials, integration tokens,
+and private operational data out of this file and source control.
+
+Inventory existing Vercel or ngrok production services and migrate them to the verified Hetzner target before retiring them. Preserve local development and test tooling when still needed.

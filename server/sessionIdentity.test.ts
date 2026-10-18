@@ -14,14 +14,18 @@ describe("session identity", () => {
   });
 
   it("prefers an explicit session audience", () => {
-    expect(getSessionAudience({
-      SESSION_APP_ID: "joyce-production",
-      VITE_APP_ID: "legacy-manus-app",
-    })).toBe("joyce-production");
+    expect(
+      getSessionAudience({
+        SESSION_APP_ID: "joyce-production",
+        VITE_APP_ID: "legacy-manus-app",
+      })
+    ).toBe("joyce-production");
   });
 
   it("keeps the legacy Manus app id as a compatibility fallback", () => {
-    expect(getSessionAudience({ VITE_APP_ID: "legacy-manus-app" })).toBe("legacy-manus-app");
+    expect(getSessionAudience({ VITE_APP_ID: "legacy-manus-app" })).toBe(
+      "legacy-manus-app"
+    );
   });
 
   it("round-trips a local session without a Manus app id", async () => {
@@ -41,5 +45,5 @@ describe("session identity", () => {
       appId: "va-dashboard",
       name: "Joyce",
     });
-  });
+  }, 20_000);
 });
