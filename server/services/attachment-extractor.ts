@@ -78,14 +78,18 @@ export class AttachmentExtractorService {
    */
   private async downloadAttachment(url: string): Promise<Buffer | null> {
     try {
-      // Add Trello auth to URL if it's a Trello attachment
-      let downloadUrl = url;
-      if (url.includes('trello.com') || url.includes('trello-attachments')) {
-        const separator = url.includes('?') ? '&' : '?';
-        downloadUrl = `${url}${separator}key=${this.trelloApiKey}&token=${this.trelloToken}`;
+      // Add API credentials only to Trello's attachment download endpoint.
+      // CDN/S3 URLs are already signed and must never receive Trello secrets.
+      const downloadUrl = new URL(url);
+      const isTrelloAttachmentDownload =
+        (downloadUrl.hostname === 'trello.com' || downloadUrl.hostname === 'api.trello.com') &&
+        /^\/1\/cards\/[^/]+\/attachments\/[^/]+\/download(?:\/.*)?$/.test(downloadUrl.pathname);
+      if (isTrelloAttachmentDownload) {
+        downloadUrl.searchParams.set('key', this.trelloApiKey);
+        downloadUrl.searchParams.set('token', this.trelloToken);
       }
 
-      const response = await fetchWithRetry(downloadUrl, {
+      const response = await fetchWithRetry(downloadUrl.toString(), {
         headers: {
           'Accept': '*/*',
         },
