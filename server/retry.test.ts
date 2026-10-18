@@ -197,6 +197,62 @@ describe('Retry Mechanism', () => {
       expect(fetchMock.mock.calls[1][1]?.redirect).toBe('manual');
       expect(new Headers(fetchMock.mock.calls[1][1]?.headers).has('authorization')).toBe(false);
     });
+
+    it('blocks unapproved cross-origin redirects between otherwise allowed hosts', async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: 'https://chatgpt.com/share/example' } }),
+      );
+
+      await expect(fetchWithRetry('https://claude.ai/share/example')).rejects.toThrow(
+        'Outbound redirect destination is not allowed',
+      );
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not forward mutation bodies or custom headers across approved origins', async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        new Response(null, { status: 307, headers: { location: 'https://gemini.google.com/share/example' } }),
+      );
+
+      await expect(fetchWithRetry('https://g.co/gemini/share/example', {
+        method: 'POST',
+        headers: { 'X-Internal-Secret': 'secret' },
+        body: 'private payload',
+      })).rejects.toThrow('Outbound request cannot redirect across origins');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('strips echoed credentials from an approved cross-origin redirect', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(new Response(null, {
+          status: 302,
+          headers: { location: 'https://gemini.google.com/share/example?ToKeN=secret&x=public' },
+        }))
+        .mockResolvedValueOnce(new Response('conversation', { status: 200 }));
+      global.fetch = fetchMock;
+
+      await fetchWithRetry('https://g.co/gemini/share/example?key=secret', {
+        headers: { 'X-Internal-Secret': 'secret', Accept: 'text/html' },
+      });
+
+      expect(fetchMock.mock.calls[1][0].toString()).toBe('https://gemini.google.com/share/example?x=public');
+      expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('x-internal-secret')).toBeNull();
+      expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('accept')).toBe('text/html');
+    });
+
+    it('rejects credentials reflected into an approved redirect path', async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'https://gemini.google.com/share/secret-value' },
+        }),
+      );
+
+      await expect(fetchWithRetry('https://g.co/gemini/share/example?key=secret-value')).rejects.toThrow(
+        'Outbound redirect reflected a credential',
+      );
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('retryAsync', () => {

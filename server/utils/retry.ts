@@ -34,6 +34,11 @@ const ALLOWED_OUTBOUND_ORIGINS = new Map([
 ]);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECTS = 5;
+const ALLOWED_CROSS_ORIGIN_REDIRECTS = new Set([
+  'https://g.co>https://gemini.google.com',
+  'https://chat.openai.com>https://chatgpt.com',
+  'https://attachments.trello.com>https://trello-attachments.s3.amazonaws.com',
+]);
 
 class UnsafeOutboundUrlError extends Error {}
 
@@ -109,15 +114,48 @@ async function fetchAllowedOutboundUrl(url: string, init?: RequestInit): Promise
 
     const nextUrl = parseAllowedOutboundUrl(new URL(location, currentUrl));
     if (nextUrl.origin !== currentUrl.origin) {
-      for (const sensitiveParameter of ['key', 'token', 'api_key', 'access_token']) {
-        nextUrl.searchParams.delete(sensitiveParameter);
+      const redirectPair = `${currentUrl.origin}>${nextUrl.origin}`;
+      if (!ALLOWED_CROSS_ORIGIN_REDIRECTS.has(redirectPair)) {
+        throw new UnsafeOutboundUrlError('Outbound redirect destination is not allowed');
       }
 
-      const headers = new Headers(currentInit.headers);
-      headers.delete('authorization');
-      headers.delete('cookie');
-      headers.delete('proxy-authorization');
-      currentInit = { ...currentInit, headers };
+      const method = (currentInit.method || 'GET').toUpperCase();
+      if ((method !== 'GET' && method !== 'HEAD') || currentInit.body !== undefined) {
+        throw new UnsafeOutboundUrlError('Outbound request cannot redirect across origins');
+      }
+
+      // Never carry arbitrary caller headers or the source URL's credentials
+      // to another origin. The S3 destination may need its own signed query.
+      const safeHeaders = new Headers();
+      const requestHeaders = new Headers(currentInit.headers);
+      for (const name of ['accept', 'accept-language', 'user-agent']) {
+        const value = requestHeaders.get(name);
+        if (value !== null) safeHeaders.set(name, value);
+      }
+      const sourceUrl = currentUrl;
+      const sourceCredentialValues = new Set(
+        Array.from(sourceUrl.searchParams)
+          .filter(([name]) => /^(key|token|api[_-]?key|access[_-]?token)$/i.test(name))
+          .map(([, value]) => value),
+      );
+      let decodedPathname = nextUrl.pathname;
+      try {
+        decodedPathname = decodeURIComponent(decodedPathname);
+      } catch {
+        throw new UnsafeOutboundUrlError('Outbound redirect path is invalid');
+      }
+      if (Array.from(sourceCredentialValues).some((value) => value !== '' && decodedPathname.includes(value))) {
+        throw new UnsafeOutboundUrlError('Outbound redirect reflected a credential');
+      }
+      for (const [nextName, nextValue] of Array.from(nextUrl.searchParams)) {
+        if (
+          /^(key|token|api[_-]?key|access[_-]?token)$/i.test(nextName) ||
+          sourceCredentialValues.has(nextValue)
+        ) {
+          nextUrl.searchParams.delete(nextName);
+        }
+      }
+      currentInit = { ...currentInit, headers: safeHeaders };
     }
 
     currentUrl = nextUrl;
