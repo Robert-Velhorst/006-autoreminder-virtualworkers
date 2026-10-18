@@ -11,7 +11,7 @@ interface WebhookStatus {
   callbackUrl: string;
   publicUrl: string;
   isConfigured: boolean;
-  isReachable: boolean;
+  isReachable: boolean | null;
   recommendation: string;
 }
 
@@ -185,7 +185,7 @@ export default function TrelloChatbotSettings() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           boardIds: selectedBoardIds,
-          // callbackUrl is now built server-side from WEBHOOK_BASE_URL
+          // The server uses the verified TRELLO_WEBHOOK_CALLBACK_URL setting.
         }),
       });
 

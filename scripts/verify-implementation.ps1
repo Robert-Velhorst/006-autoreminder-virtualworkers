@@ -174,15 +174,22 @@ Write-Host "🐳 Checking Docker Configuration..." -ForegroundColor Yellow
 Write-Host "-----------------------------------"
 
 # Check Dockerfile
-Test-ContentExists "Dockerfile" "FROM node:22-alpine"
+Test-ContentExists "Dockerfile" "FROM node:26.11.1-alpine"
 Test-ContentExists "Dockerfile" "HEALTHCHECK"
 Test-ContentExists "Dockerfile" "USER nodejs"
 
-# Check docker-compose.yml
-Test-ContentExists "docker-compose.yml" "mysql:"
-Test-ContentExists "docker-compose.yml" "redis:"
+# Check docker-compose.yml uses one application container and external services
 Test-ContentExists "docker-compose.yml" "app:"
 Test-ContentExists "docker-compose.yml" "healthcheck:"
+Test-ContentExists "docker-compose.yml" "host.docker.internal:host-gateway"
+$composeServices = Get-Content "docker-compose.yml" -Raw
+if ($composeServices -match '(?m)^  (postgres|mysql|redis|migrate):') {
+    Write-Host "✗ Compose must not start database, cache, or migration containers" -ForegroundColor Red
+    $script:Failed++
+} else {
+    Write-Host "✓ Compose starts no auxiliary containers" -ForegroundColor Green
+    $script:Passed++
+}
 
 Write-Host ""
 Write-Host "📊 Verification Summary" -ForegroundColor Cyan
@@ -196,10 +203,10 @@ if ($script:Failed -eq 0) {
     Write-Host "✅ All checks passed! Implementation is complete." -ForegroundColor Green
     Write-Host ""
     Write-Host "🚀 Next Steps:" -ForegroundColor Cyan
-    Write-Host "  1. Run 'pnpm install' to install new dependencies"
-    Write-Host "  2. Run 'docker-compose up -d' to start services"
-    Write-Host "  3. Run 'docker-compose exec app pnpm db:push' to run migrations"
-    Write-Host "  4. Visit http://localhost:3000 to see the application"
+    Write-Host "  1. Configure DATABASE_URL with a PostgreSQL connection and install dependencies"
+    Write-Host "  2. Apply reviewed migrations from a trusted host with 'pnpm db:migrate'"
+    Write-Host "  3. Start the single app container with 'docker compose up -d --build'"
+    Write-Host "  4. Open the loopback URL configured by PORT (default http://localhost:3025)"
     Write-Host ""
     exit 0
 } else {

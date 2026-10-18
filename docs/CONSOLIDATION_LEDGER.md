@@ -28,7 +28,7 @@ remains byte-for-byte recoverable independently of later consolidation work.
 | `archive/joyce-operator-current-2026-07-29` | Retain as rollback snapshot of the overwritten Joyce-only application |
 | `archive/kamal-platform-delivery-2026-07-28` | Retain as the exact paid Kamal delivery |
 | `codex/port-joyce-operator` | Local source worktree; its commits are fully contained in recovery history |
-| `auto-reminder-structured` | Not merged. This unrelated 2025 MongoDB/React split application tracked populated credentials and performed automatic Trello, email, SMS, and WhatsApp actions. Its relevant reminder concepts are superseded by the approval-gated platform. The remote branch was removed after cutover; rotate every credential that appeared in its tracked `.env`. |
+| `auto-reminder-structured` | Not merged. This unrelated 2025 split application tracked populated credentials and performed automatic Trello, email, SMS, and WhatsApp actions. Its relevant reminder concepts are superseded by the approval-gated platform. The remote branch was removed after cutover; rotate every credential that appeared in its tracked `.env`. |
 
 ## Retained Developer Capabilities
 
@@ -79,8 +79,8 @@ reject.
 - Automatic Trello comments, moves, or outbound messages
 - Browser-extension auto-install behavior, which browsers do not allow safely
 - Hard-coded Trello API and Power-Up keys; setup values now load from server configuration at runtime
-- The `auto-reminder-structured` MongoDB/React application, its tracked
-  credentials, and its automatic outbound reminder jobs
+- The `auto-reminder-structured` legacy application, its tracked credentials,
+  and its automatic outbound reminder jobs
 
 ## Data Authority
 
@@ -101,18 +101,19 @@ reject.
 
 The recovery branch passed the repository quality gate on 30 July 2026:
 secret scan, TypeScript, canonical MySQL migrations, schema parity, 564 tests,
-production build, and migration-drift detection. The previous hosting checks
-were obsolete project configurations pointing to removed `Frontend` and
-`Backend` directories; they were not application test failures.
+production build, and migration-drift detection. The two failing deployment checks
+are obsolete project configurations that still point to removed `Frontend` and
+`Backend` directories; they are not application test failures.
 
-The consolidated server requires a persistent container runtime for Express,
-tRPC, scheduled work, Redis, and WebSockets. Production hosting is moving to
-Hetzner using the repository's Docker deployment configuration.
+Those projects must not be repointed to the repository root. The consolidated
+server requires a persistent container runtime for Express, tRPC, scheduled
+work, Redis, and WebSockets. Retire obsolete hosting Git integrations only
+after the public container replacement passes the production cutover gate.
 
-The Vercel GitHub App was uninstalled on 2026-10-13, removing its access to 43
-GitHub repositories. Five projects and their deployments were deleted during
-the initial cleanup. A later check of the Noodzakelijk Online team showed no
-projects remaining; `promise-app` and
-`040-5-trello-mcp-connectors-to-chat-gpt-5` were already absent, so no further
-deletion was performed for those two. The Vercel account was not deleted. The
-`promise-app` domain's DNS records were not inspected or changed.
+## Deployment branch reconciliation (2026-10-19)
+
+PR #103 keeps the current PostgreSQL runtime, verified TLS, source/release gates,
+notification policy, and working-day regression tests. Its obsolete MySQL
+Compose alternative is retired. Placeholder rejection, configured Redis health,
+Docker credential/data exclusions and the missing Trello comment opt-in guard
+are retained. No live cutover or credential rotation was performed.

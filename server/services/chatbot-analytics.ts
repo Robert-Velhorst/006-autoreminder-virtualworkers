@@ -1,12 +1,13 @@
 /**
  * Chatbot Analytics Service
- * 
+ *
  * Aggregates and calculates analytics for the Trello chatbot.
  * Tracks command usage, response rates, and worker engagement.
  */
 
+import { and, desc, eq, gte, gt, inArray, isNotNull, lt, sql } from 'drizzle-orm';
+import { chatbotAnalytics, chatbotCheckinResponses, chatbotConversations } from '../../drizzle/schema.postgres';
 import { getDb } from '../db';
-import { sql } from 'drizzle-orm';
 
 export interface DailyAnalytics {
   date: string;
@@ -46,58 +47,50 @@ export interface OverallStats {
   topCommands: Array<{ command: string; count: number }>;
 }
 
-/**
- * Get analytics for a specific date
- */
+/** Get analytics for a specific date. */
 export async function getDailyAnalytics(date: Date): Promise<DailyAnalytics | null> {
   const db = await getDb();
   if (!db) return null;
 
   try {
     const dateStr = date.toISOString().split('T')[0];
-    const startOfDay = new Date(dateStr);
+    const startOfDay = new Date(`${dateStr}T00:00:00.000Z`);
     const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
 
-    // Get command stats
-    const commandResult = await db.execute(sql`
-      SELECT 
-        command,
-        COUNT(*) as count,
-        SUM(CASE WHEN responseStatus = 'success' THEN 1 ELSE 0 END) as successful,
-        SUM(CASE WHEN responseStatus = 'failed' THEN 1 ELSE 0 END) as failed,
-        AVG(responseTimeMs) as avgResponseTime
-      FROM chatbot_conversations
-      WHERE receivedAt >= ${startOfDay} AND receivedAt < ${endOfDay}
-      GROUP BY command
-    `);
-    const commandRows = (commandResult as any)[0] || [];
+    const commandRows = await db
+      .select({
+        command: chatbotConversations.command,
+        count: sql<number>`count(*)::int`,
+        successful: sql<number>`count(*) filter (where ${chatbotConversations.responseStatus} = 'success')::int`,
+        failed: sql<number>`count(*) filter (where ${chatbotConversations.responseStatus} = 'failed')::int`,
+        avgResponseTime: sql<number | null>`avg(${chatbotConversations.responseTimeMs})`,
+      })
+      .from(chatbotConversations)
+      .where(and(gte(chatbotConversations.receivedAt, startOfDay), lt(chatbotConversations.receivedAt, endOfDay)))
+      .groupBy(chatbotConversations.command);
 
-    // Get unique workers and cards
-    const uniqueResult = await db.execute(sql`
-      SELECT 
-        COUNT(DISTINCT authorTrelloId) as uniqueWorkers,
-        COUNT(DISTINCT cardTrelloId) as uniqueCards
-      FROM chatbot_conversations
-      WHERE receivedAt >= ${startOfDay} AND receivedAt < ${endOfDay}
-    `);
-    const uniqueRows = (uniqueResult as any)[0] || [];
-    const uniqueData = uniqueRows[0] || {};
+    const [uniqueData] = await db
+      .select({
+        uniqueWorkers: sql<number>`count(distinct ${chatbotConversations.authorTrelloId})::int`,
+        uniqueCards: sql<number>`count(distinct ${chatbotConversations.cardTrelloId})::int`,
+      })
+      .from(chatbotConversations)
+      .where(and(gte(chatbotConversations.receivedAt, startOfDay), lt(chatbotConversations.receivedAt, endOfDay)));
 
-    // Get checkin stats
-    const checkinResult = await db.execute(sql`
-      SELECT 
-        COUNT(*) as totalCheckins,
-        SUM(CASE WHEN r.id IS NOT NULL THEN 1 ELSE 0 END) as responded,
-        AVG(r.responseTimeMinutes) as avgResponseMinutes
-      FROM chatbot_conversations c
-      LEFT JOIN chatbot_checkin_responses r ON c.id = r.conversationId
-      WHERE c.command IN ('checkin', 'check', 'update')
-        AND c.receivedAt >= ${startOfDay} AND c.receivedAt < ${endOfDay}
-    `);
-    const checkinRows = (checkinResult as any)[0] || [];
-    const checkinData = checkinRows[0] || {};
+    const [checkinData] = await db
+      .select({
+        totalCheckins: sql<number>`count(*)::int`,
+        responded: sql<number>`count(${chatbotCheckinResponses.id})::int`,
+        avgResponseMinutes: sql<number | null>`avg(${chatbotCheckinResponses.responseTimeMinutes})`,
+      })
+      .from(chatbotConversations)
+      .leftJoin(chatbotCheckinResponses, eq(chatbotConversations.id, chatbotCheckinResponses.conversationId))
+      .where(and(
+        inArray(chatbotConversations.command, ['checkin', 'check', 'update']),
+        gte(chatbotConversations.receivedAt, startOfDay),
+        lt(chatbotConversations.receivedAt, endOfDay),
+      ));
 
-    // Build command breakdown
     const commandBreakdown: Record<string, number> = {};
     let totalCommands = 0;
     let successfulResponses = 0;
@@ -110,14 +103,14 @@ export async function getDailyAnalytics(date: Date): Promise<DailyAnalytics | nu
       totalCommands += Number(row.count);
       successfulResponses += Number(row.successful);
       failedResponses += Number(row.failed);
-      if (row.avgResponseTime) {
+      if (row.avgResponseTime != null) {
         totalResponseTime += Number(row.avgResponseTime) * Number(row.count);
         responseCount += Number(row.count);
       }
     }
 
-    const totalCheckins = Number(checkinData.totalCheckins) || 0;
-    const checkinsResponded = Number(checkinData.responded) || 0;
+    const totalCheckins = Number(checkinData?.totalCheckins) || 0;
+    const checkinsResponded = Number(checkinData?.responded) || 0;
 
     return {
       date: dateStr,
@@ -129,9 +122,9 @@ export async function getDailyAnalytics(date: Date): Promise<DailyAnalytics | nu
       checkinsSent: totalCheckins,
       checkinsResponded,
       responseRate: totalCheckins > 0 ? Math.round((checkinsResponded / totalCheckins) * 100) : 0,
-      avgCheckinResponseMinutes: Math.round(Number(checkinData.avgResponseMinutes) || 0),
-      uniqueWorkers: Number(uniqueData.uniqueWorkers) || 0,
-      uniqueCards: Number(uniqueData.uniqueCards) || 0,
+      avgCheckinResponseMinutes: Math.round(Number(checkinData?.avgResponseMinutes) || 0),
+      uniqueWorkers: Number(uniqueData?.uniqueWorkers) || 0,
+      uniqueCards: Number(uniqueData?.uniqueCards) || 0,
     };
   } catch (error) {
     console.error('[ChatbotAnalytics] Error getting daily analytics:', error);
@@ -139,76 +132,62 @@ export async function getDailyAnalytics(date: Date): Promise<DailyAnalytics | nu
   }
 }
 
-/**
- * Get analytics for a date range
- */
-export async function getAnalyticsRange(
-  startDate: Date,
-  endDate: Date
-): Promise<DailyAnalytics[]> {
+/** Get analytics for a date range. */
+export async function getAnalyticsRange(startDate: Date, endDate: Date): Promise<DailyAnalytics[]> {
   const analytics: DailyAnalytics[] = [];
   const current = new Date(startDate);
 
   while (current <= endDate) {
     const daily = await getDailyAnalytics(current);
-    if (daily) {
-      analytics.push(daily);
-    }
+    if (daily) analytics.push(daily);
     current.setDate(current.getDate() + 1);
   }
 
   return analytics;
 }
 
-/**
- * Get worker engagement metrics
- */
-export async function getWorkerEngagement(
-  days: number = 30
-): Promise<WorkerEngagement[]> {
+/** Get worker engagement metrics. */
+export async function getWorkerEngagement(days: number = 30): Promise<WorkerEngagement[]> {
   const db = await getDb();
   if (!db) return [];
 
   try {
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const totalCheckins = sql<number>`count(*)::int`;
+    const rows = await db
+      .select({
+        workerId: chatbotCheckinResponses.workerId,
+        workerName: chatbotCheckinResponses.workerName,
+        totalCheckins,
+        responded: sql<number>`count(*) filter (where ${chatbotCheckinResponses.responseReceivedAt} is not null)::int`,
+        avgResponseMinutes: sql<number | null>`avg(${chatbotCheckinResponses.responseTimeMinutes})`,
+        lastActivity: sql<Date | null>`max(${chatbotCheckinResponses.responseReceivedAt})`,
+      })
+      .from(chatbotCheckinResponses)
+      .where(and(gt(chatbotCheckinResponses.checkinSentAt, cutoff), isNotNull(chatbotCheckinResponses.workerId)))
+      .groupBy(chatbotCheckinResponses.workerId, chatbotCheckinResponses.workerName)
+      .orderBy(desc(totalCheckins));
 
-    const result = await db.execute(sql`
-      SELECT 
-        r.workerId,
-        r.workerName,
-        COUNT(*) as totalCheckins,
-        SUM(CASE WHEN r.responseReceivedAt IS NOT NULL THEN 1 ELSE 0 END) as responded,
-        AVG(r.responseTimeMinutes) as avgResponseMinutes,
-        MAX(r.responseReceivedAt) as lastActivity
-      FROM chatbot_checkin_responses r
-      WHERE r.checkinSentAt > ${cutoff}
-        AND r.workerId IS NOT NULL
-      GROUP BY r.workerId, r.workerName
-      ORDER BY totalCheckins DESC
-    `);
-
-    const rows = (result as any)[0] || [];
-    
-    return rows.map((row: any) => ({
-      workerId: row.workerId,
-      workerName: row.workerName || 'Unknown',
-      totalCheckins: Number(row.totalCheckins) || 0,
-      responded: Number(row.responded) || 0,
-      responseRate: row.totalCheckins > 0 
-        ? Math.round((Number(row.responded) / Number(row.totalCheckins)) * 100) 
-        : 0,
-      avgResponseMinutes: Math.round(Number(row.avgResponseMinutes) || 0),
-      lastActivity: row.lastActivity ? new Date(row.lastActivity) : null,
-    }));
+    return rows.map(row => {
+      const total = Number(row.totalCheckins) || 0;
+      const responded = Number(row.responded) || 0;
+      return {
+        workerId: Number(row.workerId),
+        workerName: row.workerName || 'Unknown',
+        totalCheckins: total,
+        responded,
+        responseRate: total > 0 ? Math.round((responded / total) * 100) : 0,
+        avgResponseMinutes: Math.round(Number(row.avgResponseMinutes) || 0),
+        lastActivity: row.lastActivity ? new Date(row.lastActivity) : null,
+      };
+    });
   } catch (error) {
     console.error('[ChatbotAnalytics] Error getting worker engagement:', error);
     return [];
   }
 }
 
-/**
- * Get overall statistics
- */
+/** Get overall statistics. */
 export async function getOverallStats(days: number = 30): Promise<OverallStats> {
   const db = await getDb();
   const defaultStats: OverallStats = {
@@ -223,70 +202,56 @@ export async function getOverallStats(days: number = 30): Promise<OverallStats> 
     activeCards: 0,
     topCommands: [],
   };
-
   if (!db) return defaultStats;
 
   try {
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const [convData] = await db
+      .select({
+        totalConversations: sql<number>`count(*)::int`,
+        avgResponseTime: sql<number | null>`avg(${chatbotConversations.responseTimeMs})`,
+        activeWorkers: sql<number>`count(distinct ${chatbotConversations.authorTrelloId})::int`,
+        activeCards: sql<number>`count(distinct ${chatbotConversations.cardTrelloId})::int`,
+      })
+      .from(chatbotConversations)
+      .where(gt(chatbotConversations.receivedAt, cutoff));
 
-    // Get conversation stats
-    const convResult = await db.execute(sql`
-      SELECT 
-        COUNT(*) as totalConversations,
-        AVG(responseTimeMs) as avgResponseTime,
-        COUNT(DISTINCT authorTrelloId) as activeWorkers,
-        COUNT(DISTINCT cardTrelloId) as activeCards
-      FROM chatbot_conversations
-      WHERE receivedAt > ${cutoff}
-    `);
-    const convRows = (convResult as any)[0] || [];
-    const convData = convRows[0] || {};
-
-    // Get command breakdown
-    const cmdResult = await db.execute(sql`
-      SELECT command, COUNT(*) as count
-      FROM chatbot_conversations
-      WHERE receivedAt > ${cutoff}
-      GROUP BY command
-      ORDER BY count DESC
-    `);
-    const cmdRows = (cmdResult as any)[0] || [];
+    const commandCount = sql<number>`count(*)::int`;
+    const cmdRows = await db
+      .select({ command: chatbotConversations.command, count: commandCount })
+      .from(chatbotConversations)
+      .where(gt(chatbotConversations.receivedAt, cutoff))
+      .groupBy(chatbotConversations.command)
+      .orderBy(desc(commandCount));
 
     const totalCommands: Record<string, number> = {};
     const topCommands: Array<{ command: string; count: number }> = [];
-    
     for (const row of cmdRows) {
       totalCommands[row.command] = Number(row.count);
       topCommands.push({ command: row.command, count: Number(row.count) });
     }
 
-    // Get checkin stats
-    const checkinResult = await db.execute(sql`
-      SELECT 
-        COUNT(*) as totalCheckins,
-        SUM(CASE WHEN responseReceivedAt IS NOT NULL THEN 1 ELSE 0 END) as totalResponses,
-        AVG(responseTimeMinutes) as avgResponseMinutes
-      FROM chatbot_checkin_responses
-      WHERE checkinSentAt > ${cutoff}
-    `);
-    const checkinRows = (checkinResult as any)[0] || [];
-    const checkinData = checkinRows[0] || {};
+    const [checkinData] = await db
+      .select({
+        totalCheckins: sql<number>`count(*)::int`,
+        totalResponses: sql<number>`count(*) filter (where ${chatbotCheckinResponses.responseReceivedAt} is not null)::int`,
+        avgResponseMinutes: sql<number | null>`avg(${chatbotCheckinResponses.responseTimeMinutes})`,
+      })
+      .from(chatbotCheckinResponses)
+      .where(gt(chatbotCheckinResponses.checkinSentAt, cutoff));
 
-    const totalCheckins = Number(checkinData.totalCheckins) || 0;
-    const totalResponses = Number(checkinData.totalResponses) || 0;
-
+    const totalCheckins = Number(checkinData?.totalCheckins) || 0;
+    const totalResponses = Number(checkinData?.totalResponses) || 0;
     return {
-      totalConversations: Number(convData.totalConversations) || 0,
+      totalConversations: Number(convData?.totalConversations) || 0,
       totalCommands,
-      avgResponseTimeMs: Math.round(Number(convData.avgResponseTime) || 0),
+      avgResponseTimeMs: Math.round(Number(convData?.avgResponseTime) || 0),
       totalCheckins,
       totalResponses,
-      overallResponseRate: totalCheckins > 0 
-        ? Math.round((totalResponses / totalCheckins) * 100) 
-        : 0,
-      avgCheckinResponseMinutes: Math.round(Number(checkinData.avgResponseMinutes) || 0),
-      activeWorkers: Number(convData.activeWorkers) || 0,
-      activeCards: Number(convData.activeCards) || 0,
+      overallResponseRate: totalCheckins > 0 ? Math.round((totalResponses / totalCheckins) * 100) : 0,
+      avgCheckinResponseMinutes: Math.round(Number(checkinData?.avgResponseMinutes) || 0),
+      activeWorkers: Number(convData?.activeWorkers) || 0,
+      activeCards: Number(convData?.activeCards) || 0,
       topCommands: topCommands.slice(0, 5),
     };
   } catch (error) {
@@ -295,9 +260,7 @@ export async function getOverallStats(days: number = 30): Promise<OverallStats> 
   }
 }
 
-/**
- * Update daily analytics rollup (called at end of day)
- */
+/** Update daily analytics rollup (called at end of day). */
 export async function updateDailyRollup(date: Date): Promise<void> {
   const db = await getDb();
   if (!db) return;
@@ -306,54 +269,41 @@ export async function updateDailyRollup(date: Date): Promise<void> {
     const analytics = await getDailyAnalytics(date);
     if (!analytics) return;
 
-    // Upsert into chatbot_analytics table
-    await db.execute(sql`
-      INSERT INTO chatbot_analytics (
-        date, totalCommands, statusCommands, checkinCommands, remindCommands,
-        timeCommands, progressCommands, helpCommands, unknownCommands,
-        successfulResponses, failedResponses, avgResponseTimeMs,
-        checkinsSent, checkinsResponded, avgCheckinResponseMinutes,
-        uniqueWorkers, uniqueCards
-      ) VALUES (
-        ${date},
-        ${analytics.totalCommands},
-        ${analytics.commandBreakdown['status'] || 0},
-        ${(analytics.commandBreakdown['checkin'] || 0) + (analytics.commandBreakdown['check'] || 0) + (analytics.commandBreakdown['update'] || 0)},
-        ${(analytics.commandBreakdown['remind'] || 0) + (analytics.commandBreakdown['reminder'] || 0) + (analytics.commandBreakdown['ping'] || 0)},
-        ${(analytics.commandBreakdown['time'] || 0) + (analytics.commandBreakdown['timer'] || 0) + (analytics.commandBreakdown['hours'] || 0)},
-        ${(analytics.commandBreakdown['progress'] || 0) + (analytics.commandBreakdown['report'] || 0)},
-        ${(analytics.commandBreakdown['help'] || 0) + (analytics.commandBreakdown['?'] || 0)},
-        ${Object.entries(analytics.commandBreakdown)
-          .filter(([cmd]) => !['status', 'checkin', 'check', 'update', 'remind', 'reminder', 'ping', 'time', 'timer', 'hours', 'progress', 'report', 'help', '?'].includes(cmd))
-          .reduce((sum, [, count]) => sum + count, 0)},
-        ${analytics.successfulResponses},
-        ${analytics.failedResponses},
-        ${analytics.avgResponseTimeMs},
-        ${analytics.checkinsSent},
-        ${analytics.checkinsResponded},
-        ${analytics.avgCheckinResponseMinutes},
-        ${analytics.uniqueWorkers},
-        ${analytics.uniqueCards}
-      )
-      ON DUPLICATE KEY UPDATE
-        totalCommands = VALUES(totalCommands),
-        statusCommands = VALUES(statusCommands),
-        checkinCommands = VALUES(checkinCommands),
-        remindCommands = VALUES(remindCommands),
-        timeCommands = VALUES(timeCommands),
-        progressCommands = VALUES(progressCommands),
-        helpCommands = VALUES(helpCommands),
-        unknownCommands = VALUES(unknownCommands),
-        successfulResponses = VALUES(successfulResponses),
-        failedResponses = VALUES(failedResponses),
-        avgResponseTimeMs = VALUES(avgResponseTimeMs),
-        checkinsSent = VALUES(checkinsSent),
-        checkinsResponded = VALUES(checkinsResponded),
-        avgCheckinResponseMinutes = VALUES(avgCheckinResponseMinutes),
-        uniqueWorkers = VALUES(uniqueWorkers),
-        uniqueCards = VALUES(uniqueCards),
-        updatedAt = NOW()
-    `);
+    // chatbot_analytics has no unique date constraint; the legacy MySQL upsert
+    // therefore only conflicted on its generated primary key and never rolled a
+    // date forward. Keep that behavior explicit instead of inventing a key.
+    await db.insert(chatbotAnalytics).values({
+      date,
+      totalCommands: analytics.totalCommands,
+      statusCommands: analytics.commandBreakdown.status || 0,
+      checkinCommands: (analytics.commandBreakdown.checkin || 0)
+        + (analytics.commandBreakdown.check || 0)
+        + (analytics.commandBreakdown.update || 0),
+      remindCommands: (analytics.commandBreakdown.remind || 0)
+        + (analytics.commandBreakdown.reminder || 0)
+        + (analytics.commandBreakdown.ping || 0),
+      timeCommands: (analytics.commandBreakdown.time || 0)
+        + (analytics.commandBreakdown.timer || 0)
+        + (analytics.commandBreakdown.hours || 0),
+      progressCommands: (analytics.commandBreakdown.progress || 0)
+        + (analytics.commandBreakdown.report || 0),
+      helpCommands: (analytics.commandBreakdown.help || 0) + (analytics.commandBreakdown['?'] || 0),
+      unknownCommands: Object.entries(analytics.commandBreakdown)
+        .filter(([cmd]) => ![
+          'status', 'checkin', 'check', 'update', 'remind', 'reminder', 'ping',
+          'time', 'timer', 'hours', 'progress', 'report', 'help', '?',
+        ].includes(cmd))
+        .reduce((sum, [, count]) => sum + count, 0),
+      successfulResponses: analytics.successfulResponses,
+      failedResponses: analytics.failedResponses,
+      avgResponseTimeMs: analytics.avgResponseTimeMs,
+      checkinsSent: analytics.checkinsSent,
+      checkinsResponded: analytics.checkinsResponded,
+      avgCheckinResponseMinutes: analytics.avgCheckinResponseMinutes,
+      uniqueWorkers: analytics.uniqueWorkers,
+      uniqueCards: analytics.uniqueCards,
+      updatedAt: new Date(),
+    });
 
     console.log(`[ChatbotAnalytics] Updated daily rollup for ${analytics.date}`);
   } catch (error) {

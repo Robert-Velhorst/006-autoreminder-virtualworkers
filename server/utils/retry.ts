@@ -20,6 +20,155 @@ const DEFAULT_OPTIONS: Required<RetryOptions> = {
   onRetry: () => {},
 };
 
+const ALLOWED_OUTBOUND_ORIGINS = new Map([
+  ['api.trello.com', 'https://api.trello.com'],
+  ['trello.com', 'https://trello.com'],
+  ['www.trello.com', 'https://www.trello.com'],
+  ['attachments.trello.com', 'https://attachments.trello.com'],
+  ['trello-attachments.s3.amazonaws.com', 'https://trello-attachments.s3.amazonaws.com'],
+  ['chat.openai.com', 'https://chat.openai.com'],
+  ['chatgpt.com', 'https://chatgpt.com'],
+  ['g.co', 'https://g.co'],
+  ['gemini.google.com', 'https://gemini.google.com'],
+  ['claude.ai', 'https://claude.ai'],
+]);
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_REDIRECTS = 5;
+const ALLOWED_CROSS_ORIGIN_REDIRECTS = new Set([
+  'https://g.co>https://gemini.google.com',
+  'https://chat.openai.com>https://chatgpt.com',
+  'https://attachments.trello.com>https://trello-attachments.s3.amazonaws.com',
+]);
+
+class UnsafeOutboundUrlError extends Error {}
+
+function hasAllowedOutboundPath(hostname: string, pathname: string): boolean {
+  if (
+    hostname === 'api.trello.com' ||
+    hostname === 'trello.com' ||
+    hostname === 'www.trello.com' ||
+    hostname === 'attachments.trello.com' ||
+    hostname === 'trello-attachments.s3.amazonaws.com'
+  ) {
+    // Trello endpoints and attachment object paths vary by resource. Their
+    // origin remains fixed to the server-owned allowlist below.
+    return true;
+  }
+  if (hostname === 'chat.openai.com' || hostname === 'chatgpt.com' || hostname === 'claude.ai') {
+    return /^\/share\/[A-Za-z0-9_-]+\/?$/.test(pathname);
+  }
+  if (hostname === 'g.co') {
+    return /^\/gemini\/share\/[A-Za-z0-9_-]+\/?$/.test(pathname);
+  }
+  if (hostname === 'gemini.google.com') {
+    return /^\/share\/[A-Za-z0-9_-]+\/?$/.test(pathname);
+  }
+  return false;
+}
+
+function parseAllowedOutboundUrl(input: string | URL): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(input);
+  } catch {
+    throw new UnsafeOutboundUrlError('Outbound URL is invalid');
+  }
+
+  const approvedOrigin = ALLOWED_OUTBOUND_ORIGINS.get(parsed.hostname);
+  if (
+    parsed.protocol !== 'https:' ||
+    (parsed.port !== '' && parsed.port !== '443') ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    !approvedOrigin ||
+    !hasAllowedOutboundPath(parsed.hostname, parsed.pathname)
+  ) {
+    throw new UnsafeOutboundUrlError('Outbound URL host is not allowed');
+  }
+
+  // Rebuild the request from a server-owned origin. User-controlled URL text
+  // can select an approved destination, but cannot supply the fetch hostname.
+  const safeUrl = new URL(approvedOrigin);
+  safeUrl.pathname = parsed.pathname;
+  safeUrl.search = parsed.search;
+  return safeUrl;
+}
+
+async function fetchAllowedOutboundUrl(url: string, init?: RequestInit): Promise<Response> {
+  let currentUrl = parseAllowedOutboundUrl(url);
+  let currentInit: RequestInit = { ...init, redirect: 'manual' };
+
+  for (let redirectCount = 0; ; redirectCount++) {
+    const response = await fetch(currentUrl, currentInit);
+    if (!REDIRECT_STATUSES.has(response.status)) {
+      return response;
+    }
+
+    const location = response.headers.get('location');
+    if (!location) {
+      return response;
+    }
+    if (redirectCount >= MAX_REDIRECTS) {
+      throw new UnsafeOutboundUrlError('Outbound request exceeded the redirect limit');
+    }
+
+    const nextUrl = parseAllowedOutboundUrl(new URL(location, currentUrl));
+    if (nextUrl.origin !== currentUrl.origin) {
+      const redirectPair = `${currentUrl.origin}>${nextUrl.origin}`;
+      if (!ALLOWED_CROSS_ORIGIN_REDIRECTS.has(redirectPair)) {
+        throw new UnsafeOutboundUrlError('Outbound redirect destination is not allowed');
+      }
+
+      const method = (currentInit.method || 'GET').toUpperCase();
+      if ((method !== 'GET' && method !== 'HEAD') || currentInit.body !== undefined) {
+        throw new UnsafeOutboundUrlError('Outbound request cannot redirect across origins');
+      }
+
+      // Never carry arbitrary caller headers or the source URL's credentials
+      // to another origin. The S3 destination may need its own signed query.
+      const safeHeaders = new Headers();
+      const requestHeaders = new Headers(currentInit.headers);
+      for (const name of ['accept', 'accept-language', 'user-agent']) {
+        const value = requestHeaders.get(name);
+        if (value !== null) safeHeaders.set(name, value);
+      }
+      const sourceUrl = currentUrl;
+      const sourceCredentialValues = new Set(
+        Array.from(sourceUrl.searchParams)
+          .filter(([name]) => /^(key|token|api[_-]?key|access[_-]?token)$/i.test(name))
+          .map(([, value]) => value),
+      );
+      let decodedPathname = nextUrl.pathname;
+      try {
+        decodedPathname = decodeURIComponent(decodedPathname);
+      } catch {
+        throw new UnsafeOutboundUrlError('Outbound redirect path is invalid');
+      }
+      if (Array.from(sourceCredentialValues).some((value) => value !== '' && decodedPathname.includes(value))) {
+        throw new UnsafeOutboundUrlError('Outbound redirect reflected a credential');
+      }
+      for (const [nextName, nextValue] of Array.from(nextUrl.searchParams)) {
+        if (
+          /^(key|token|api[_-]?key|access[_-]?token)$/i.test(nextName) ||
+          sourceCredentialValues.has(nextValue)
+        ) {
+          nextUrl.searchParams.delete(nextName);
+        }
+      }
+      currentInit = { ...currentInit, headers: safeHeaders };
+    }
+
+    currentUrl = nextUrl;
+    const method = (currentInit.method || 'GET').toUpperCase();
+    if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === 'POST')) {
+      const headers = new Headers(currentInit.headers);
+      headers.delete('content-length');
+      headers.delete('content-type');
+      currentInit = { ...currentInit, method: 'GET', body: undefined, headers };
+    }
+  }
+}
+
 /**
  * Sleep for specified milliseconds
  */
@@ -56,12 +205,13 @@ export async function fetchWithRetry(
   init?: RequestInit,
   options?: RetryOptions
 ): Promise<Response> {
+  parseAllowedOutboundUrl(url);
   const opts = { ...DEFAULT_OPTIONS, ...options };
   let lastError: any;
 
   for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
     try {
-      const response = await fetch(url, init);
+      const response = await fetchAllowedOutboundUrl(url, init);
 
       // If response is successful or non-retryable error, return immediately
       if (response.ok || !opts.retryableStatuses.includes(response.status)) {
@@ -99,6 +249,9 @@ export async function fetchWithRetry(
       await sleep(delayMs);
 
     } catch (error: any) {
+      if (error instanceof UnsafeOutboundUrlError) {
+        throw error;
+      }
       lastError = error;
 
       // Don't retry on last attempt

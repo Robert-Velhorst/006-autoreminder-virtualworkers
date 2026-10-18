@@ -1,7 +1,7 @@
 import sgMail from '@sendgrid/mail';
+import { areNotificationsEnabled } from './notificationPolicy';
 
-// Outbound email is disabled unless notifications are explicitly enabled.
-const EMAIL_NOTIFICATIONS_ENABLED = process.env.NOTIFICATIONS_ENABLED === 'true';
+const EMAIL_NOTIFICATIONS_ENABLED = areNotificationsEnabled();
 
 // Initialize SendGrid with API key
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;

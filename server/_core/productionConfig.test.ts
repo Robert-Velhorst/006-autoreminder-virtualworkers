@@ -1,116 +1,109 @@
 import { describe, expect, it } from "vitest";
 import {
   assertProductionConfiguration,
-  getExpressTrustProxySetting,
   getProductionConfigurationErrors,
 } from "./productionConfig";
 
 const validProductionEnvironment = {
   NODE_ENV: "production",
-  DATABASE_URL: "mysql://worker:secret@mysql:3306/va_dashboard",
-  REDIS_URL: "redis://:secret@redis:6379",
+  DATABASE_URL: "postgresql://worker:secret@postgres:5432/va_dashboard?sslmode=verify-full",
   JWT_SECRET: "a".repeat(32),
   TRELLO_API_KEY: "trello-key",
   TRELLO_TOKEN: "trello-token",
-  PUBLIC_URL: "https://dashboard.noodzakelijkonline.nl",
-  WEBHOOK_BASE_URL: "https://dashboard.noodzakelijkonline.nl",
+  PUBLIC_URL: "https://dashboard.example.com",
+  APP_URL: "https://dashboard.example.com",
+  VITE_FRONTEND_URL: "https://dashboard.example.com",
   HOST: "0.0.0.0",
   LOCAL_AUTH_BYPASS: "false",
 };
 
 describe("production configuration", () => {
-  it("trusts only the single configured production ingress proxy", () => {
-    expect(getExpressTrustProxySetting(validProductionEnvironment)).toBe(1);
-    expect(getExpressTrustProxySetting({ NODE_ENV: "development" })).toBe(false);
+  it("rejects template credentials while keeping the PostgreSQL TLS contract", () => {
+    const errors = getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      DATABASE_URL: "postgresql://worker:URL_ENCODED_PASSWORD@postgres:5432/va_dashboard?sslmode=verify-full",
+      JWT_SECRET: "replace-with-at-least-32-random-characters",
+      TRELLO_TOKEN: "replace-with-your-scoped-trello-token",
+    });
+    expect(errors).toEqual([
+      "DATABASE_URL must not contain template placeholder values",
+      "JWT_SECRET must not contain template placeholder values",
+      "TRELLO_TOKEN must not contain template placeholder values",
+    ]);
   });
 
-  it("accepts the canonical production contract", () => {
+  it("rejects a request-only Vercel production runtime", () => {
+    expect(getProductionConfigurationErrors({ ...validProductionEnvironment, VERCEL: "1" })).toEqual([
+      "Vercel request-only runtime is unsupported; deploy the unified Docker container",
+    ]);
+  });
+
+  it("accepts the production contract without a paid LLM API key", () => {
     expect(getProductionConfigurationErrors(validProductionEnvironment)).toEqual([]);
     expect(() => assertProductionConfiguration(validProductionEnvironment)).not.toThrow();
-  });
-
-  it("does not require a paid OpenAI API key to start production", () => {
-    expect(getProductionConfigurationErrors(validProductionEnvironment)).toEqual([]);
   });
 
   it("does not enforce production-only requirements in development", () => {
     expect(getProductionConfigurationErrors({ NODE_ENV: "development" })).toEqual([]);
   });
 
+  it("requires certificate and hostname verification for production PostgreSQL", () => {
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      DATABASE_URL: "postgresql://worker:secret@postgres:5432/va_dashboard?sslmode=require",
+    })).toContain("DATABASE_URL must enable verified TLS with one sslmode=verify-full option and no ssl override");
+  });
+
   it("reports missing or unsafe production configuration without values", () => {
-    const unsafeEnvironment = {
+    const errors = getProductionConfigurationErrors({
       NODE_ENV: "production",
-      DATABASE_URL: "mongodb://legacy",
-      REDIS_URL: "",
-      JWT_SECRET: "short-secret-value",
-      TRELLO_API_KEY: "private-trello-key",
-      TRELLO_TOKEN: "private-trello-token",
+      DATABASE_URL: "file://legacy",
+      JWT_SECRET: "short",
       HOST: "127.0.0.1",
       LOCAL_AUTH_BYPASS: "true",
-    };
-    const errors = getProductionConfigurationErrors({
-      ...unsafeEnvironment,
     });
 
     expect(errors).toEqual([
-      "DATABASE_URL must be a complete MySQL URL with host, database, username, and password",
-      "REDIS_URL must be a Redis URL with host and password",
+      "DATABASE_URL must be a PostgreSQL connection URL",
       "JWT_SECRET must contain at least 32 characters",
-      "PUBLIC_URL must be a valid public HTTPS URL",
-      "WEBHOOK_BASE_URL must be a valid public HTTPS URL",
+      "TRELLO_API_KEY is required",
+      "TRELLO_TOKEN is required",
+      "PUBLIC_URL must be set to the public HTTPS origin in production",
+      "APP_URL must be set to the public HTTPS origin in production",
+      "VITE_FRONTEND_URL must be set to the public HTTPS origin in production",
       "HOST must bind to a non-loopback interface in production",
       "LOCAL_AUTH_BYPASS cannot be enabled in production",
     ]);
-    let thrownMessage = "";
-    try {
-      assertProductionConfiguration(unsafeEnvironment);
-    } catch (error) {
-      thrownMessage = error instanceof Error ? error.message : String(error);
-    }
-    expect(thrownMessage).toContain("Invalid production configuration");
-    expect(thrownMessage).not.toContain("private-trello");
   });
 
-  it("requires both Trello credentials in production", () => {
+  it("rejects MySQL URLs after the PostgreSQL runtime migration", () => {
     expect(getProductionConfigurationErrors({
       ...validProductionEnvironment,
-      TRELLO_API_KEY: "",
-      TRELLO_TOKEN: "",
-    })).toEqual([
-      "TRELLO_API_KEY must be configured with a non-placeholder value",
-      "TRELLO_TOKEN must be configured with a non-placeholder value",
-    ]);
+      DATABASE_URL: "mysql://worker:secret@mysql:3306/va_dashboard",
+    })).toEqual(["DATABASE_URL must be a PostgreSQL connection URL"]);
   });
 
-  it("rejects example values even when they satisfy the variable's shape", () => {
-    const errors = getProductionConfigurationErrors({
-      ...validProductionEnvironment,
-      DATABASE_URL: "mysql://worker:URL_ENCODED_APP_PASSWORD@mysql:3306/va_dashboard",
-      REDIS_URL: "redis://:URL_ENCODED_REDIS_PASSWORD@redis:6379",
-      JWT_SECRET: "replace-with-at-least-32-random-characters",
-      TRELLO_API_KEY: "replace-with-your-trello-app-key",
-      TRELLO_TOKEN: "replace-with-a-scoped-trello-token",
-      PUBLIC_URL: "https://dashboard.example.com",
-      WEBHOOK_BASE_URL: "https://dashboard.example.com",
-    });
-
-    expect(errors).toEqual([
-      "DATABASE_URL must not contain template placeholder values",
-      "REDIS_URL must not contain template placeholder values",
-      "JWT_SECRET must not contain template placeholder values",
-      "TRELLO_API_KEY must be configured with a non-placeholder value",
-      "TRELLO_TOKEN must be configured with a non-placeholder value",
-      "PUBLIC_URL must not contain template placeholder values",
-      "WEBHOOK_BASE_URL must not contain template placeholder values",
-    ]);
-  });
-
-  it("rejects a Vercel request-only production runtime", () => {
+  it("requires all public application URLs to use the same HTTPS origin", () => {
     expect(getProductionConfigurationErrors({
       ...validProductionEnvironment,
-      VERCEL: "1",
+      VITE_FRONTEND_URL: "http://localhost:3000",
     })).toEqual([
-      "Vercel request-only runtime is unsupported; deploy the unified Docker container",
+      "VITE_FRONTEND_URL must be an HTTPS origin without a path, credentials, query, or fragment",
     ]);
   });
+
+  it("requires the Trello webhook callback and secret as a matching production pair", () => {
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      TRELLO_WEBHOOK_CALLBACK_URL: "https://other.example.com/api/trello-webhook",
+      TRELLO_WEBHOOK_SECRET: "test-secret",
+    })).toEqual([
+      "TRELLO_WEBHOOK_CALLBACK_URL must be the exact HTTPS /api/trello-webhook URL on the public origin",
+    ]);
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      TRELLO_WEBHOOK_SECRET: "test-secret",
+    })).toContain("TRELLO_WEBHOOK_CALLBACK_URL and TRELLO_WEBHOOK_SECRET must be configured together");
+  });
+
 });

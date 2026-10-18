@@ -85,7 +85,7 @@ import {
   upsertWorkerPerformance,
   getAutopilotLevel,
 } from "../aptlssPoliciesDb";
-import { appSettings, timeEntries } from "../../drizzle/schema";
+import { appSettings, timeEntries, vaProfiles } from "../../drizzle/schema.postgres";
 import { eq, and, gte, lte, sql } from "drizzle-orm";
 import { resolveWorkerOperatorContext } from "../workerOperatorContext";
 import { dateKeyInTimeZone, dateWindowInTimeZone, weekDateKeys } from "../../shared/workerTime";
@@ -259,7 +259,10 @@ export const trelloRouter = router({
       }
       await db.insert(appSettings)
         .values({ vaId, key: "trello_comment_token", value: input.token })
-        .onDuplicateKeyUpdate({ set: { value: input.token, updatedAt: new Date() } });
+        .onConflictDoUpdate({
+          target: appSettings.key,
+          set: { value: input.token, updatedAt: new Date() },
+        });
       return { success: true };
     }),
 });
@@ -499,16 +502,31 @@ export const aptlssRouter = router({
     return { items };
   }),
 
-  syncCheckItem: publicProcedure
+  syncCheckItem: protectedProcedure
     .input(z.object({
       trelloCheckItemId: z.string(),
       state: z.enum(["complete", "incomplete"]),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      let vaId: number | undefined;
+      if (ctx.user.role !== "admin") {
+        if (ctx.user.role !== "worker") {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        const [profile] = await db
+          .select({ id: vaProfiles.id })
+          .from(vaProfiles)
+          .where(eq(vaProfiles.userId, ctx.user.id))
+          .limit(1);
+        if (!profile) throw new TRPCError({ code: "FORBIDDEN" });
+        vaId = profile.id;
+      }
       if (input.state === "complete") {
-        await completeStepByCheckItemId(input.trelloCheckItemId);
+        await completeStepByCheckItemId(input.trelloCheckItemId, vaId);
       } else {
-        await uncompleteStepByCheckItemId(input.trelloCheckItemId);
+        await uncompleteStepByCheckItemId(input.trelloCheckItemId, vaId);
       }
       return { success: true };
     }),

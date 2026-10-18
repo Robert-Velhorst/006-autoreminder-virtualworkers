@@ -19,7 +19,7 @@ import {
   emailTasks,
   cardSnoozes,
   vaProfiles,
-} from "../../drizzle/schema";
+} from "../../drizzle/schema.postgres";
 import { eq, and, desc, asc, gte, lte, sql, isNull, isNotNull } from "drizzle-orm";
 import { collectComplianceSnapshot } from "../services/manus-scheduler";
 import { parseDateKey } from "../utils/date-only";
@@ -201,8 +201,9 @@ export const payLogRouter = router({
         await db.update(weeklyPayLog).set(values).where(eq(weeklyPayLog.id, existing[0].id));
         return { ...existing[0], ...values };
       } else {
-        const [result] = await db.insert(weeklyPayLog).values(values);
-        return { id: (result as any).insertId, ...values };
+        const [result] = await db.insert(weeklyPayLog).values(values)
+          .returning({ id: weeklyPayLog.id });
+        return { id: result?.id, ...values };
       }
     }),
 });
@@ -267,8 +268,9 @@ export const triageRouter = router({
         await db.update(dailyTriageState).set(values).where(eq(dailyTriageState.id, existing[0].id));
         return { ...existing[0], ...values };
       } else {
-        const [result] = await db.insert(dailyTriageState).values(values);
-        return { id: (result as any).insertId, ...values };
+        const [result] = await db.insert(dailyTriageState).values(values)
+          .returning({ id: dailyTriageState.id });
+        return { id: result?.id, ...values };
       }
     }),
 
@@ -467,8 +469,9 @@ export const sundayRouter = router({
         await db.update(sundayChecklist).set(values).where(eq(sundayChecklist.id, existing[0].id));
         return { ...existing[0], ...values };
       } else {
-        const [result] = await db.insert(sundayChecklist).values(values);
-        return { id: (result as any).insertId, ...values };
+        const [result] = await db.insert(sundayChecklist).values(values)
+          .returning({ id: sundayChecklist.id });
+        return { id: result?.id, ...values };
       }
     }),
 });
@@ -518,9 +521,9 @@ export const timerRouter = router({
         boardName: input.boardName,
         listName: input.listName,
         startTime,
-      });
+      }).returning({ id: timeEntries.id });
 
-      return { id: (result as any).insertId, cardId: input.cardId, cardName: input.cardName, startedAt: startTime };
+      return { id: result?.id, cardId: input.cardId, cardName: input.cardName, startedAt: startTime };
     }),
 
   stop: protectedProcedure
@@ -920,8 +923,9 @@ export const emailInboxRouter = router({
     const vaId = Number(ctx.user.id);
     const result = await db.update(emailTasks)
       .set({ status: "archived", archivedAt: new Date() })
-      .where(and(eq(emailTasks.vaId, vaId), eq(emailTasks.status, "pending")));
-    return { success: true, archived: (result as any).affectedRows || 0 };
+      .where(and(eq(emailTasks.vaId, vaId), eq(emailTasks.status, "pending")))
+      .returning({ id: emailTasks.id });
+    return { success: true, archived: result.length };
   }),
 
   upsertBatch: protectedProcedure
@@ -951,7 +955,8 @@ export const emailInboxRouter = router({
         await db.insert(emailTasks).values({
           vaId,
           ...task,
-        }).onDuplicateKeyUpdate({
+        }).onConflictDoUpdate({
+          target: emailTasks.gmailMessageId,
           set: {
             ...task,
           }
@@ -982,11 +987,6 @@ export const cardSnoozeRouter = router({
         cardUrl: input.cardUrl,
         snoozedUntil: input.snoozedUntil,
         isActive: true,
-      }).onDuplicateKeyUpdate({
-        set: {
-          snoozedUntil: input.snoozedUntil,
-          isActive: true,
-        }
       });
       return { success: true };
     }),

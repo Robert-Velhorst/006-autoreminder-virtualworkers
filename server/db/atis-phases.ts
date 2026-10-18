@@ -18,7 +18,7 @@ import {
   taskExternalDependencies,
   taskExecutionPlan,
   atisAnalysisSessions,
-} from '../../drizzle/schema';
+} from '../../drizzle/schema.postgres';
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 

@@ -1,76 +1,88 @@
-import express from 'express';
-import request from 'supertest';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import express from "express";
+import request from "supertest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { isDatabaseReachable } from "../db";
+import { isRedisAvailable } from "../services/redis";
+import healthRoutes from "./health";
 
-const { getDb, isRedisAvailable } = vi.hoisted(() => ({
-  getDb: vi.fn(),
-  isRedisAvailable: vi.fn(),
-}));
+vi.mock("../db", () => ({ isDatabaseReachable: vi.fn() }));
+vi.mock("../services/redis", () => ({ isRedisAvailable: vi.fn() }));
 
-vi.mock('../db', () => ({ getDb }));
-vi.mock('../services/redis', () => ({ isRedisAvailable }));
+const app = express().use("/api/health", healthRoutes);
 
-import healthRoutes from './health';
-
-describe('health route', () => {
-  const app = express().use('/api/health', healthRoutes);
-
+describe("health routes", () => {
   beforeEach(() => {
-    getDb.mockResolvedValue({});
-    isRedisAvailable.mockReturnValue(false);
-    vi.stubEnv('REDIS_URL', '');
+    vi.unstubAllEnvs();
+    vi.mocked(isDatabaseReachable).mockReset();
+    vi.mocked(isRedisAvailable).mockReturnValue(false);
   });
 
-  afterEach(() => {
-    vi.clearAllMocks();
+  it("reports a configured but unavailable Redis connection as unhealthy", async () => {
+    vi.stubEnv("REDIS_URL", "redis://cache.internal:6379");
+    vi.mocked(isDatabaseReachable).mockResolvedValue(true);
+    vi.mocked(isRedisAvailable).mockReturnValue(false);
+    const health = await request(app).get("/api/health/");
+    expect(health.status).toBe(503);
+    expect(health.body).toMatchObject({ status: "unhealthy", database: "connected", redis: "disconnected" });
     vi.unstubAllEnvs();
   });
 
-  it('allows health checks when Redis is not configured', async () => {
-    const response = await request(app).get('/api/health');
+  it("reports unhealthy and not ready when PostgreSQL cannot answer", async () => {
+    vi.mocked(isDatabaseReachable).mockResolvedValue(false);
 
-    expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({ status: 'healthy', database: 'connected', redis: 'not configured' });
+    const health = await request(app).get("/api/health/");
+    const ready = await request(app).get("/api/health/ready");
+
+    expect(health.status).toBe(503);
+    expect(health.body).toMatchObject({
+      status: "unhealthy",
+      database: "disconnected",
+    });
+    expect(ready.status).toBe(503);
+    expect(ready.body).toMatchObject({
+      ready: false,
+      reason: "Database not available",
+    });
   });
 
-  it('fails health checks when configured Redis is unavailable', async () => {
-    vi.stubEnv('REDIS_URL', 'redis://redis:6379');
+  it("reports healthy only after PostgreSQL responds", async () => {
+    vi.mocked(isDatabaseReachable).mockResolvedValue(true);
 
-    const response = await request(app).get('/api/health');
+    const health = await request(app).get("/api/health/");
+    const ready = await request(app).get("/api/health/ready");
 
-    expect(response.status).toBe(503);
-    expect(response.body).toMatchObject({ status: 'unhealthy', database: 'connected', redis: 'disconnected' });
+    expect(health.status).toBe(200);
+    expect(health.body).toMatchObject({
+      status: "healthy",
+      database: "connected",
+    });
+    expect(ready.status).toBe(200);
+    expect(ready.body.ready).toBe(true);
   });
 
-  it('passes health checks when configured Redis is available', async () => {
-    vi.stubEnv('REDIS_URL', 'redis://redis:6379');
-    isRedisAvailable.mockReturnValue(true);
+  it("keeps liveness independent of PostgreSQL", async () => {
+    vi.mocked(isDatabaseReachable).mockResolvedValue(false);
 
-    const response = await request(app).get('/api/health');
+    const live = await request(app).get("/api/health/live");
 
-    expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({ status: 'healthy', database: 'connected', redis: 'connected' });
+    expect(live.status).toBe(200);
+    expect(live.body.alive).toBe(true);
+    expect(isDatabaseReachable).not.toHaveBeenCalled();
   });
 
-  it('does not expose database connection errors from the public health check', async () => {
-    getDb.mockRejectedValue(new Error('connect ETIMEDOUT mysql.internal:3306 with credential details'));
+  it("does not expose internal dependency errors in public probe responses", async () => {
+    vi.mocked(isDatabaseReachable).mockRejectedValue(
+      new Error("postgres://user:password@internal-db:5432/app")
+    );
 
-    const response = await request(app).get('/api/health');
+    const health = await request(app).get("/api/health/");
+    const ready = await request(app).get("/api/health/ready");
 
-    expect(response.status).toBe(503);
-    expect(response.body).toMatchObject({ status: 'unhealthy', error: 'Health check failed' });
-    expect(JSON.stringify(response.body)).not.toContain('mysql.internal');
-    expect(JSON.stringify(response.body)).not.toContain('credential details');
-  });
-
-  it('does not expose database connection errors from the readiness check', async () => {
-    getDb.mockRejectedValue(new Error('connect ETIMEDOUT mysql.internal:3306 with credential details'));
-
-    const response = await request(app).get('/api/health/ready');
-
-    expect(response.status).toBe(503);
-    expect(response.body).toMatchObject({ ready: false, reason: 'Database not available' });
-    expect(JSON.stringify(response.body)).not.toContain('mysql.internal');
-    expect(JSON.stringify(response.body)).not.toContain('credential details');
+    expect(health.status).toBe(503);
+    expect(health.body.error).toBe("Health check failed");
+    expect(ready.status).toBe(503);
+    expect(ready.body.reason).toBe("Readiness check failed");
+    expect(JSON.stringify([health.body, ready.body])).not.toContain("password");
+    expect(JSON.stringify([health.body, ready.body])).not.toContain("internal-db");
   });
 });

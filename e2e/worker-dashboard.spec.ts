@@ -1,38 +1,16 @@
-import { test, expect } from '@playwright/test';
+import { expect, test } from "@playwright/test";
+import { signInAsWorker } from "./helpers";
 
-test.describe('Worker Dashboard', () => {
-  const username = `worker_${Date.now()}`;
-  const password = 'testpassword';
+test("worker can navigate the core dashboard views", async ({ page }) => {
+  await signInAsWorker(page);
 
-  test.beforeEach(async ({ page }) => {
-    // 1. Register a new user
-    await page.goto('/');
-    // Assuming there is a link or page to register, or we call the API.
-    // If registration UI exists, we can use it. Since it might not have registration UI,
-    // let's do a request-based registration using request utility, then login.
-  });
+  await expect(page.getByRole("heading", { name: "Today" })).toBeVisible();
+  const navigation = page.getByRole("navigation");
+  await expect(navigation.getByRole("button", { name: /Plan My Day/ })).toBeVisible();
+  await expect(navigation.getByRole("button", { name: /Decisions/ })).toBeVisible();
+  await expect(navigation.getByRole("button", { name: /Evidence/ })).toBeVisible();
 
-  test('should display worker dashboard and allow handoff notes', async ({ page }) => {
-    // We register the worker programmatically
-    const context = page.context();
-    const request = context.request;
-    
-    await request.post('/api/auth/register', {
-      data: {
-        username,
-        password,
-        name: 'Test Worker'
-      }
-    });
-
-    // Login as the registered worker
-    await page.goto('/');
-    await page.fill('input[type="text"]', username);
-    await page.fill('input[type="password"]', password);
-    await page.click('button[type="submit"]');
-
-    // Wait for redirect to worker page (due to RBAC ProtectedRoute redirecting role 'worker')
-    // Wait, role is initially 'user'. Let's see if page shows "Access Pending"
-    await expect(page.locator('text=Access Pending')).toBeVisible({ timeout: 5000 });
-  });
+  await navigation.getByRole("button", { name: /Evidence/ }).click();
+  await expect(page).toHaveURL(/\/worker\/evidence$/);
+  await expect(page.getByRole("heading", { name: "Evidence" })).toBeVisible();
 });

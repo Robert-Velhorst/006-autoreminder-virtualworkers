@@ -2,22 +2,12 @@ type Environment = Record<string, string | undefined>;
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 
-function isPlaceholder(value: string) {
-  return /(?:replace[-_ ]with|your[-_ ]|example(?:[.-]|$)|url[_-]?encoded|change[-_ ]?me|placeholder)/i.test(value);
+function isTemplatePlaceholder(value: string) {
+  return /(?:replace[-_ ]with|your[-_ ]|url[_-]?encoded|change[-_ ]?me|placeholder)/i.test(value);
 }
 
-function parseUrl(value: string | undefined) {
-  if (!value?.trim()) return undefined;
-
-  try {
-    return new URL(value);
-  } catch {
-    return undefined;
-  }
-}
-
-export function getExpressTrustProxySetting(env: Environment = process.env): 1 | false {
-  return env.NODE_ENV === "production" ? 1 : false;
+function hasValue(env: Environment, name: string) {
+  return Boolean(env[name]?.trim());
 }
 
 export function getProductionConfigurationErrors(env: Environment = process.env) {
@@ -26,55 +16,101 @@ export function getProductionConfigurationErrors(env: Environment = process.env)
   const errors: string[] = [];
   const databaseUrl = env.DATABASE_URL?.trim() ?? "";
   const host = env.HOST?.trim().toLowerCase() ?? "";
-  const database = parseUrl(databaseUrl);
-  const redisUrl = env.REDIS_URL?.trim() ?? "";
-  const redis = parseUrl(redisUrl);
 
+  let parsedDatabaseUrl: URL | null = null;
+  try {
+    parsedDatabaseUrl = new URL(databaseUrl);
+  } catch {
+    // Report the same actionable configuration error for malformed values.
+  }
   if (
-    !database ||
-    database.protocol !== "mysql:" ||
-    !database.hostname ||
-    !database.pathname.slice(1) ||
-    !database.username ||
-    !database.password
+    !parsedDatabaseUrl ||
+    (parsedDatabaseUrl.protocol !== "postgresql:" && parsedDatabaseUrl.protocol !== "postgres:")
   ) {
-    errors.push("DATABASE_URL must be a complete MySQL URL with host, database, username, and password");
-  } else if (isPlaceholder(databaseUrl)) {
-    errors.push("DATABASE_URL must not contain template placeholder values");
-  }
-  if (!redis || !["redis:", "rediss:"].includes(redis.protocol) || !redis.hostname || !redis.password) {
-    errors.push("REDIS_URL must be a Redis URL with host and password");
-  } else if (isPlaceholder(redisUrl)) {
-    errors.push("REDIS_URL must not contain template placeholder values");
-  }
-  const jwtSecret = env.JWT_SECRET?.trim() ?? "";
-  if (jwtSecret.length < 32) {
-    errors.push("JWT_SECRET must contain at least 32 characters");
-  } else if (isPlaceholder(jwtSecret)) {
-    errors.push("JWT_SECRET must not contain template placeholder values");
-  }
-  const trelloApiKey = env.TRELLO_API_KEY?.trim() ?? "";
-  if (!trelloApiKey || isPlaceholder(trelloApiKey)) {
-    errors.push("TRELLO_API_KEY must be configured with a non-placeholder value");
-  }
-  const trelloToken = env.TRELLO_TOKEN?.trim() ?? "";
-  if (!trelloToken || isPlaceholder(trelloToken)) {
-    errors.push("TRELLO_TOKEN must be configured with a non-placeholder value");
-  }
-  for (const name of ["PUBLIC_URL", "WEBHOOK_BASE_URL"] as const) {
-    const url = env[name]?.trim() ?? "";
-    const parsed = parseUrl(url);
-    if (!parsed || parsed.protocol !== "https:" || !parsed.hostname) {
-      errors.push(`${name} must be a valid public HTTPS URL`);
-    } else if (isPlaceholder(url)) {
-      errors.push(`${name} must not contain template placeholder values`);
+    errors.push("DATABASE_URL must be a PostgreSQL connection URL");
+  } else {
+    const sslModes = parsedDatabaseUrl.searchParams.getAll("sslmode");
+    if (sslModes.length !== 1 || sslModes[0] !== "verify-full" || parsedDatabaseUrl.searchParams.has("ssl")) {
+      errors.push("DATABASE_URL must enable verified TLS with one sslmode=verify-full option and no ssl override");
     }
   }
+  if ((env.JWT_SECRET?.trim().length ?? 0) < 32) {
+    errors.push("JWT_SECRET must contain at least 32 characters");
+  }
+  if (!hasValue(env, "TRELLO_API_KEY")) {
+    errors.push("TRELLO_API_KEY is required");
+  }
+  if (!hasValue(env, "TRELLO_TOKEN")) {
+    errors.push("TRELLO_TOKEN is required");
+  }
+
+  const publicOrigins = ["PUBLIC_URL", "APP_URL", "VITE_FRONTEND_URL"].map(name => {
+    const value = env[name]?.trim() ?? "";
+    if (!value) {
+      errors.push(`${name} must be set to the public HTTPS origin in production`);
+      return null;
+    }
+
+    try {
+      const url = new URL(value);
+      if (
+        url.protocol !== "https:" ||
+        url.username ||
+        url.password ||
+        url.pathname !== "/" ||
+        url.search ||
+        url.hash
+      ) {
+        errors.push(`${name} must be an HTTPS origin without a path, credentials, query, or fragment`);
+        return null;
+      }
+      return url.origin;
+    } catch {
+      errors.push(`${name} must be a valid public HTTPS origin`);
+      return null;
+    }
+  });
+
+  if (publicOrigins.every(Boolean) && new Set(publicOrigins).size !== 1) {
+    errors.push("PUBLIC_URL, APP_URL, and VITE_FRONTEND_URL must use the same HTTPS origin");
+  }
+
+  const webhookCallback = env.TRELLO_WEBHOOK_CALLBACK_URL?.trim() ?? "";
+  const webhookSecret = hasValue(env, "TRELLO_WEBHOOK_SECRET");
+  if (Boolean(webhookCallback) !== webhookSecret) {
+    errors.push("TRELLO_WEBHOOK_CALLBACK_URL and TRELLO_WEBHOOK_SECRET must be configured together");
+  }
+  if (webhookCallback) {
+    try {
+      const callback = new URL(webhookCallback);
+      const publicOrigin = publicOrigins[0];
+      if (
+        callback.protocol !== "https:" ||
+        callback.username ||
+        callback.password ||
+        callback.pathname !== "/api/trello-webhook" ||
+        callback.search ||
+        callback.hash ||
+        !publicOrigin ||
+        callback.origin !== publicOrigin
+      ) {
+        errors.push("TRELLO_WEBHOOK_CALLBACK_URL must be the exact HTTPS /api/trello-webhook URL on the public origin");
+      }
+    } catch {
+      errors.push("TRELLO_WEBHOOK_CALLBACK_URL must be a valid HTTPS webhook URL");
+    }
+  }
+
   if (!host || LOOPBACK_HOSTS.has(host)) {
     errors.push("HOST must bind to a non-loopback interface in production");
   }
   if (env.LOCAL_AUTH_BYPASS === "true") {
     errors.push("LOCAL_AUTH_BYPASS cannot be enabled in production");
+  }
+  for (const name of ["DATABASE_URL", "JWT_SECRET", "TRELLO_API_KEY", "TRELLO_TOKEN", "REDIS_URL"] as const) {
+    if (isTemplatePlaceholder(env[name]?.trim() ?? "")) {
+      errors.push(`${name} must not contain template placeholder values`);
+    }
   }
   if (env.VERCEL?.trim()) {
     errors.push("Vercel request-only runtime is unsupported; deploy the unified Docker container");

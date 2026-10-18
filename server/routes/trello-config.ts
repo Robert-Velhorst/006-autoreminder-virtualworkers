@@ -1,7 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { fetchWithRetry } from '../utils/retry';
+import { requireAuthenticated } from '../middleware/auth';
 
 const router = Router();
+router.use(requireAuthenticated);
 
 // In-memory storage for completion labels (in production, use database)
 const completionLabelsMap = new Map<string, string[]>();

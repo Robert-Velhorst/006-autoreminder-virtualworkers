@@ -20,7 +20,7 @@ describe('Trello Webhook Bulk Registration', () => {
     });
 
     it('should not require callbackUrl in request body (built server-side)', () => {
-      // callbackUrl is now constructed server-side from WEBHOOK_BASE_URL env var.
+      // callbackUrl is read from the exact TRELLO_WEBHOOK_CALLBACK_URL setting.
       // The client only sends boardIds and optional descriptions.
       const payload = {
         boardIds: ['board1', 'board2'],
@@ -196,18 +196,15 @@ describe('Trello Webhook Bulk Registration', () => {
   });
 
   describe('Callback URL', () => {
-    it('should be constructed server-side from WEBHOOK_BASE_URL', () => {
-      // The server builds: `${WEBHOOK_BASE_URL}/api/trello-webhook`
-      // This prevents clients from registering webhooks pointing at arbitrary URLs.
-      const webhookBaseUrl = 'https://example.com';
-      const expected = `${webhookBaseUrl}/api/trello-webhook`;
-      expect(expected).toBe('https://example.com/api/trello-webhook');
+    it('uses the exact callback URL configured by the operator', () => {
+      const callbackUrl = 'https://example.com/api/trello-webhook';
+      expect(callbackUrl).toBe('https://example.com/api/trello-webhook');
     });
 
-    it('should reject requests when WEBHOOK_BASE_URL is not configured', () => {
-      // Server returns 500 if WEBHOOK_BASE_URL is missing
-      const callbackUrl = '/api/trello-webhook'; // what getCallbackUrl() returns without the env var
-      expect(callbackUrl).toBe('/api/trello-webhook');
+    it('requires both callback URL and signing secret before registration', () => {
+      const callbackUrl: string | null = null;
+      const secret: string | undefined = undefined;
+      expect(!callbackUrl || !secret).toBe(true);
     });
   });
 

@@ -2,13 +2,13 @@
 
 ## Scope
 
-GitHub Secret Scanning currently has two open MongoDB Atlas URI alerts in this
+An earlier review recorded two MongoDB Atlas URI alerts in this
 repository: alert 1 points to `AutoReminder_Deployment_Guide.md` in an older
 commit, and alert 4 points to `Backend/.env` in an older commit. The values are
 not repeated here. Removing a secret from the current tree does not revoke it
 or remove it from Git history.
 
-The consolidated VA Dashboard uses MySQL and Redis; its Hetzner deployment
+The consolidated VA Dashboard now uses PostgreSQL with optional Redis; its Hetzner deployment
 does not need the retired application's MongoDB URI. The Atlas screenshot
 provided during this work showed one database user with `atlasAdmin` on all
 resources. Verify the live Atlas project and all consumers before changing or
@@ -58,4 +58,4 @@ instructions for the UI and available roles.
 | Required consumers migrated to scoped users | Not started | |
 | Exposed Atlas user deleted or otherwise revoked | Not started | |
 | Required services healthy after rotation | Not verified | |
-| GitHub alerts 1 and 4 closed as revoked | Open | |
+| GitHub alerts 1 and 4 closed as revoked | Current provider state unverified | |
