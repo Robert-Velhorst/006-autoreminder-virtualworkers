@@ -5,7 +5,7 @@
 
 import { nanoid } from 'nanoid';
 import { getDb } from '../db';
-import { batchOperations } from '../../drizzle/schema';
+import { batchOperations } from '../../drizzle/schema.postgres';
 import { and, eq, inArray } from 'drizzle-orm';
 import { websocketService } from './websocket';
 import { invalidateCache } from './trello-cache';
@@ -403,9 +403,10 @@ export async function cancelBatchOperation(operationId: string, ownerOpenId?: st
       status: 'cancelled',
       updatedAt: new Date(),
     })
-    .where(and(...filters));
+    .where(and(...filters))
+    .returning({ id: batchOperations.id });
 
-  const changed = Number((result as any)[0]?.affectedRows ?? 0) > 0;
+  const changed = result.length > 0;
   if (changed) log.info('Batch operation cancelled', { operationId, ownerOpenId });
   return changed;
 }

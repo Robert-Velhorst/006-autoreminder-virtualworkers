@@ -8,7 +8,7 @@ import {
   aptlssVerificationFollowups,
   workspaceEvidenceItems,
   workspaceEvidenceLinks,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { normalizeEvidenceDraft, resolveEvidenceConflict, type EvidenceDraft, type EvidenceTruth } from "./aptlssEvidenceGraph";
 import { getDb } from "./db";
 
@@ -67,7 +67,7 @@ export async function recordAptlssEvidence({
         reviewedAt: cardId ? new Date() : null,
         reviewedBy: cardId ? recordedBy ?? null : null,
         active: true,
-      }).$returningId();
+      }).returning({ id: workspaceEvidenceItems.id });
       evidenceId = created?.id;
     }
     if (!evidenceId) throw new AptlssEvidenceGraphError("Evidence could not be stored");
@@ -247,7 +247,7 @@ export async function createEvidenceConflict({
       sourceEvidenceId,
       assertedEvidenceId,
       status: conflict.status,
-    }).$returningId())[0]?.id;
+    }).returning({ id: aptlssEvidenceConflicts.id }))[0]?.id;
     if (!conflictId) throw new AptlssEvidenceGraphError("Conflict could not be stored");
 
     const existingFollowup = await tx.select({ id: aptlssVerificationFollowups.id })
@@ -338,6 +338,6 @@ export async function resolveVerificationFollowup({
     eq(aptlssVerificationFollowups.vaId, vaId),
     eq(aptlssVerificationFollowups.status, "open"),
   ));
-  if (update[0].affectedRows !== 1) throw new AptlssEvidenceGraphError("Verification follow-up is no longer open");
+  if (update.rowCount !== 1) throw new AptlssEvidenceGraphError("Verification follow-up is no longer open");
   return { followupId, resolvedAt };
 }

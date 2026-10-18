@@ -14,7 +14,7 @@ import {
   type InsertKeyboardShortcutsSettings,
   type InsertPerformanceMetricsSettings,
   type InsertSettingsSyncLog,
-} from '../../drizzle/schema';
+} from '../../drizzle/schema.postgres';
 import { eq, and } from 'drizzle-orm';
 
 // ============================================

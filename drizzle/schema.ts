@@ -1,3 +1,4 @@
+// Legacy MySQL source schema. Application runtime and migrations use schema.postgres.ts.
 import { int, mysqlEnum, mysqlTable, text, longtext, timestamp, varchar, decimal, boolean, date, uniqueIndex, index, foreignKey } from "drizzle-orm/mysql-core";
 
 /**

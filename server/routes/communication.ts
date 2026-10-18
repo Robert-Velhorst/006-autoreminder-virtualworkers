@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { and, eq } from "drizzle-orm";
-import { taskAssignments, vaProfiles } from "../../drizzle/schema";
+import { taskAssignments, vaProfiles } from "../../drizzle/schema.postgres";
 import { getDb } from "../db";
 import { requireAuthenticated, requestUser, resolveWorkerProfileId } from "../middleware/auth";
 import { storeConversation } from "../services/chatbot-history";

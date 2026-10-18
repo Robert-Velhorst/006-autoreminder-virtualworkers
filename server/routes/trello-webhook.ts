@@ -1,13 +1,45 @@
 import { Router, Response } from 'express';
+import { rateLimit } from 'express-rate-limit';
 import { getDb } from '../db';
-import { chatbotWebhooks, chatbotConversations, appSettings } from '../../drizzle/schema';
+import { chatbotWebhooks, chatbotConversations, appSettings } from '../../drizzle/schema.postgres';
 import { eq, inArray } from 'drizzle-orm';
 import { getCardConversations, storeConversation } from '../services/chatbot-history';
 import { postTrelloComment, sendScheduledCheckin } from '../services/trello-chatbot';
+import { requireAdmin, requireAuthenticated } from '../middleware/auth';
+import {
+  getConfiguredTrelloWebhookCallbackUrl,
+  isValidTrelloWebhookSignature,
+} from './trelloWebhookSignature';
 
 const router = Router();
 
+const registerWebhookRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many webhook registration attempts, please wait before retrying' },
+});
+
+router.use(rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many webhook requests, please slow down' },
+}));
+
 const TRELLO_API_BASE = 'https://api.trello.com/1';
+
+router.use((req: any, res: Response, next) => {
+  if ((req.method === 'GET' || req.method === 'HEAD') && req.path === '/') {
+    return next();
+  }
+  if (req.method === 'POST' && req.path === '/') {
+    return next();
+  }
+  return requireAuthenticated(req, res, next);
+});
 
 /**
  * Normalise a raw Trello API webhook object into the same shape as our DB row.
@@ -44,7 +76,7 @@ router.get('/', (_req: any, res: Response) => {
  * Register a webhook for a Trello board/workspace.
  * Fix #3 (duplicate detection): checks DB before calling Trello.
  */
-router.post('/register', async (req: any, res: Response) => {
+router.post('/register', requireAdmin, registerWebhookRateLimit, async (req: any, res: Response) => {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -80,31 +112,12 @@ router.post('/register', async (req: any, res: Response) => {
       return res.status(500).json({ error: 'Trello credentials not configured' });
     }
 
-    // Fix #4 — build callbackUrl server-side, never from client body
-    // Priority: WEBHOOK_BASE_URL → PUBLIC_URL → APP_URL → detect from request headers
-    let base =
-      process.env.WEBHOOK_BASE_URL ||
-      process.env.PUBLIC_URL ||
-      process.env.APP_URL ||
-      '';
-
-    // Fallback: detect from request headers (for deployed servers)
-    if (!base || base.startsWith('/')) {
-      const host = req.get('host');
-      const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
-      if (host) {
-        base = `${protocol}://${host}`;
-      }
-    }
-
-    if (!base || base.startsWith('/')) {
+    const callbackUrl = getConfiguredTrelloWebhookCallbackUrl();
+    if (!callbackUrl || !process.env.TRELLO_WEBHOOK_SECRET) {
       return res.status(500).json({
-        error:
-          'Server is not configured with a public URL. Set WEBHOOK_BASE_URL (e.g. https://your-domain.com) in your environment variables so Trello can reach the webhook callback.',
+        error: 'Set TRELLO_WEBHOOK_CALLBACK_URL to the exact public HTTPS callback and configure TRELLO_WEBHOOK_SECRET before registering Trello webhooks.',
       });
     }
-
-    const callbackUrl = `${base}/api/trello-webhook`;
 
     // Fix #3 — duplicate detection: check DB before calling Trello
     const db = await getDb();
@@ -201,21 +214,10 @@ router.get('/list', async (req: any, res: Response) => {
           const raw = await response.json();
           // Filter to only webhooks pointing at our callback URL so we don't
           // show unrelated webhooks registered under the same token.
-          let baseUrl = process.env.PUBLIC_URL || process.env.WEBHOOK_BASE_URL;
-          // Fallback: detect from request headers
-          if (!baseUrl || baseUrl.startsWith('/')) {
-            const host = req.get('host');
-            const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
-            if (host) {
-              baseUrl = `${protocol}://${host}`;
-            }
-          }
-          const ourBase = baseUrl && !baseUrl.startsWith('/')
-            ? `${baseUrl}/api/trello-webhook`
-            : null;
+          const ourBase = getConfiguredTrelloWebhookCallbackUrl();
           const filtered = ourBase
-            ? raw.filter((w: any) => (w.callbackURL ?? '').startsWith(ourBase))
-            : raw;
+            ? raw.filter((w: any) => w.callbackURL === ourBase)
+            : [];
           const webhooks = filtered.map(normaliseTrelloWebhook);
           console.log('[TrelloWebhook] Fetched webhooks from Trello API');
           return res.json({ webhooks });
@@ -245,7 +247,7 @@ router.get('/list', async (req: any, res: Response) => {
  * DELETE /api/trello-webhook/:webhookId
  * Delete a webhook from both Trello and the local DB.
  */
-router.delete('/:webhookId', async (req: any, res: Response) => {
+router.delete('/:webhookId', requireAdmin, async (req: any, res: Response) => {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -292,29 +294,41 @@ router.delete('/:webhookId', async (req: any, res: Response) => {
  */
 router.post('/', async (req: any, res: Response) => {
   try {
+    const callbackUrl = getConfiguredTrelloWebhookCallbackUrl();
+    if (!callbackUrl || !process.env.TRELLO_WEBHOOK_SECRET) {
+      return res.status(503).json({ error: 'Trello webhook verification is not configured' });
+    }
+    if (!isValidTrelloWebhookSignature({
+      body: req.body,
+      callbackUrl,
+      requestPath: req.originalUrl,
+      secret: process.env.TRELLO_WEBHOOK_SECRET,
+      signature: req.get('x-trello-webhook'),
+    })) {
+      return res.status(401).json({ error: 'Invalid Trello webhook signature' });
+    }
+
     const action = req.body;
     const actionType: string = action?.type ?? 'unknown';
 
     console.log('[TrelloWebhook] Received callback:', actionType);
 
     const db = await getDb();
-    if (db) {
-      await db
-        .insert(chatbotConversations)
-        .values({
-          cardTrelloId: action?.data?.card?.id ?? 'unknown',   // Fix #8 — correct column name
-          cardName: action?.data?.card?.name ?? null,
-          boardTrelloId: action?.data?.board?.id ?? null,
-          command: actionType,                                  // Fix #8 — required NOT NULL column
-          commandArgs: JSON.stringify(action?.data ?? {}),
-          authorTrelloId: action?.memberCreator?.id ?? null,
-          authorName: action?.memberCreator?.fullName ?? null,
-          responseStatus: 'pending',                           // Fix #8 — required NOT NULL column
-        })
-        .catch((err: any) =>
-          console.error('[TrelloWebhook] Error storing conversation:', err)
-        );
+    if (!db) {
+      return res.status(503).json({ error: 'Webhook storage is unavailable' });
     }
+    await db
+      .insert(chatbotConversations)
+      .values({
+        cardTrelloId: action?.data?.card?.id ?? 'unknown',
+        cardName: action?.data?.card?.name ?? null,
+        boardTrelloId: action?.data?.board?.id ?? null,
+        command: actionType,
+        commandArgs: JSON.stringify(action?.data ?? {}),
+        authorTrelloId: action?.memberCreator?.id ?? null,
+        authorName: action?.memberCreator?.fullName ?? null,
+        responseStatus: 'pending',
+      });
 
     res.json({ success: true });
   } catch (error: any) {
@@ -327,55 +341,28 @@ router.post('/', async (req: any, res: Response) => {
  * GET /api/trello-webhook/status
  * Get webhook configuration status.
  *
- * Fix #6: isReachable was always hardcoded to true. Now actually probes the
- * callback URL with a HEAD request to verify it's reachable.
+ * Reachability is not probed server-side: the callback URL is configurable,
+ * and making an outbound request here would create an SSRF primitive.
  */
 router.get('/status', async (req: any, res: Response) => {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
-    let baseUrl = process.env.PUBLIC_URL || process.env.WEBHOOK_BASE_URL || '';
-    // Fallback: detect from request headers
-    if (!baseUrl || baseUrl.startsWith('/')) {
-      const host = req.get('host');
-      const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
-      if (host) {
-        baseUrl = `${protocol}://${host}`;
-      }
-    }
-    const callbackUrl = `${baseUrl}/api/trello-webhook`;
-    const isConfigured = !!process.env.TRELLO_API_KEY && !!process.env.TRELLO_TOKEN;
+    const callbackUrl = getConfiguredTrelloWebhookCallbackUrl();
+    const isConfigured = !!process.env.TRELLO_API_KEY && !!process.env.TRELLO_TOKEN &&
+      !!callbackUrl && !!process.env.TRELLO_WEBHOOK_SECRET;
 
-    // Fix #6 — actually probe the endpoint instead of hardcoding true
-    let isReachable = false;
-    let recommendation = '';
-
-    if (!baseUrl || baseUrl.startsWith('/')) {
-      recommendation = 'Set PUBLIC_URL or WEBHOOK_BASE_URL in your environment to a publicly reachable URL.';
-    } else {
-      try {
-        const probe = await fetch(callbackUrl, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
-        isReachable = probe.ok || probe.status === 405; // 405 = endpoint exists but HEAD not allowed
-        recommendation = isReachable
-          ? 'Webhook endpoint is reachable and properly configured.'
-          : `Endpoint returned ${probe.status}. Ensure the server is publicly accessible.`;
-      } catch (err) {
-        console.error('[TrelloWebhook] Probe error:', err);
-        recommendation = 'Webhook endpoint is not reachable. Ensure the server is publicly accessible.';
-      }
-    }
-
-    if (!isConfigured) {
-      recommendation = 'Trello API credentials (TRELLO_API_KEY / TRELLO_TOKEN) are not set.';
-    }
+    const recommendation = isConfigured
+      ? 'Webhook settings are present. Live delivery has not been tested; verify by sending a test event from Trello.'
+      : 'Configure the Trello credentials, HTTPS callback URL, and webhook secret before enabling push updates.';
 
     res.json({
       status: {
         callbackUrl,
         publicUrl: callbackUrl,
         isConfigured,
-        isReachable,
+        isReachable: null,
         recommendation,
       },
     });
@@ -409,7 +396,7 @@ router.post('/conversation-counts', async (req: any, res: Response) => {
     }
 
     // Count conversations per card from chatbot_conversations table
-    const { chatbotConversations } = await import('../../drizzle/schema');
+    const { chatbotConversations } = await import('../../drizzle/schema.postgres');
     const { inArray, sql: drizzleSql } = await import('drizzle-orm');
 
     const rows = await db
@@ -462,7 +449,7 @@ router.get('/analytics', async (req: any, res: Response) => {
  * GET /api/trello-webhook/ai-settings
  * Get the global AI provider settings
  */
-router.get('/ai-settings', async (req: any, res: Response) => {
+router.get('/ai-settings', requireAdmin, async (req: any, res: Response) => {
   try {
     const db = await getDb();
     if (!db) return res.status(500).json({ error: 'Database not available' });
@@ -492,7 +479,7 @@ router.get('/ai-settings', async (req: any, res: Response) => {
  * POST /api/trello-webhook/ai-settings
  * Save the global AI provider settings
  */
-router.post('/ai-settings', async (req: any, res: Response) => {
+router.post('/ai-settings', requireAdmin, async (req: any, res: Response) => {
   try {
     const db = await getDb();
     if (!db) return res.status(500).json({ error: 'Database not available' });
@@ -588,7 +575,7 @@ router.get('/history/:cardId', async (req: any, res: Response) => {
  * POST /api/trello-webhook/send
  * Post a manual comment/message to a Trello card.
  */
-router.post('/send', async (req: any, res: Response) => {
+router.post('/send', requireAdmin, async (req: any, res: Response) => {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -625,7 +612,7 @@ router.post('/send', async (req: any, res: Response) => {
  * POST /api/trello-webhook/checkin
  * Send a scheduled progress check-in request to a Trello card.
  */
-router.post('/checkin', async (req: any, res: Response) => {
+router.post('/checkin', requireAdmin, async (req: any, res: Response) => {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ error: 'Unauthorized' });

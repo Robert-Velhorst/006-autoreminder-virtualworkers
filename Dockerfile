@@ -1,9 +1,9 @@
 # Multi-stage build for VA Dashboard
 # Stage 1: Build frontend and backend
-FROM node:22-alpine AS builder
+FROM node:26.12.0-alpine AS builder
 
 # Install pnpm
-RUN npm install -g pnpm@10.4.1
+RUN npm install -g pnpm@12.14.0
 
 # Set working directory
 WORKDIR /app
@@ -21,11 +21,18 @@ COPY . .
 # Build frontend and backend
 RUN pnpm build
 
-# Stage 2: Production image
-FROM node:22-alpine AS production
+# Stage 2: Install only runtime dependencies
+FROM node:26.12.0-alpine AS production-deps
 
-# Install pnpm
-RUN npm install -g pnpm@10.4.1
+RUN npm install -g pnpm@12.14.0
+
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches ./patches
+RUN pnpm install --frozen-lockfile --prod
+
+# Stage 3: Minimal production image
+FROM node:26.12.0-alpine AS production
 
 # Create app user
 RUN addgroup -g 1001 -S nodejs && \
@@ -34,12 +41,15 @@ RUN addgroup -g 1001 -S nodejs && \
 # Set working directory
 WORKDIR /app
 
-# Copy package files
-COPY --chown=nodejs:nodejs package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY --chown=nodejs:nodejs patches ./patches
+ENV NODE_ENV=production \
+    PORT=3000 \
+    HOST=0.0.0.0 \
+    LOCAL_AUTH_BYPASS=false
 
-# Install production dependencies only
-RUN pnpm install --frozen-lockfile --prod
+# Keep package.json for Node's ESM package scope; the package manager and
+# dependency manifests are not needed at runtime.
+COPY --chown=nodejs:nodejs package.json ./
+COPY --chown=nodejs:nodejs --from=production-deps /app/node_modules ./node_modules
 
 # Copy built artifacts from builder
 COPY --chown=nodejs:nodejs --from=builder /app/dist ./dist

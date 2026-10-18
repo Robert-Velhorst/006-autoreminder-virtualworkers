@@ -19,7 +19,7 @@ import {
   type ATISCard,
   type ATISAttachment,
   type ATISComment,
-} from '../../drizzle/schema';
+} from '../../drizzle/schema.postgres';
 import { eq, isNull, and, sql, desc } from 'drizzle-orm';
 import { invokeLLM } from '../_core/llm';
 
@@ -434,13 +434,13 @@ async function loadExtractedContent(cardId: number): Promise<ExtractedContent | 
   try {
     // Load extracted attachment content
     const attachmentsResult = await db.execute(sql`
-      SELECT id, extractedContent
+      SELECT id, "extractedContent"
       FROM atis_attachments
-      WHERE cardId = ${cardId}
+      WHERE "cardId" = ${cardId}
         AND extractionStatus = 'success'
         AND extractedContent IS NOT NULL
     `);
-    const attachments = ((attachmentsResult as any)[0] || []).map((a: any) => ({
+    const attachments = attachmentsResult.rows.map((a: any) => ({
       attachmentId: a.id,
       content: a.extractedContent || '',
       wordCount: 0,
@@ -454,7 +454,7 @@ async function loadExtractedContent(cardId: number): Promise<ExtractedContent | 
         FROM atis_chatbot_conversations
         WHERE card_id = ${cardId}
       `);
-      chatbotConversations = ((conversationsResult as any)[0] || []).map((c: any) => ({
+      chatbotConversations = conversationsResult.rows.map((c: any) => ({
         platform: c.platform,
         title: c.title || 'Untitled',
         content: c.full_content || '',

@@ -15,7 +15,7 @@ import {
   InsertCardState,
   PriorityScore,
   InsertPriorityScore,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
 
 // ─── aptlss_steps ─────────────────────────────────────────────────────────────
@@ -123,26 +123,32 @@ export async function getAllFounderDecisionSteps(vaId?: number): Promise<AptlssS
 
 /** Mark a step as complete by its Trello check-item ID. */
 export async function completeStepByCheckItemId(
-  trelloCheckItemId: string
+  trelloCheckItemId: string,
+  vaId?: number
 ): Promise<void> {
   const db = await getDb();
   if (!db) return;
+  const filters = [eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId)];
+  if (vaId !== undefined) filters.push(eq(aptlssSteps.vaId, vaId));
   await db
     .update(aptlssSteps)
     .set({ status: "complete", completedAt: new Date() })
-    .where(eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId));
+    .where(and(...filters));
 }
 
 /** Mark a step as open (unchecked) by its Trello check-item ID. */
 export async function uncompleteStepByCheckItemId(
-  trelloCheckItemId: string
+  trelloCheckItemId: string,
+  vaId?: number
 ): Promise<void> {
   const db = await getDb();
   if (!db) return;
+  const filters = [eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId)];
+  if (vaId !== undefined) filters.push(eq(aptlssSteps.vaId, vaId));
   await db
     .update(aptlssSteps)
     .set({ status: "open", completedAt: null })
-    .where(eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId));
+    .where(and(...filters));
 }
 
 /** Mark a Founder-required step as resolved (removes from Decision Queue). */

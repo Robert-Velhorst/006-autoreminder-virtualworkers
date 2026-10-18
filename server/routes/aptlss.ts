@@ -1,11 +1,11 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getDb } from '../db';
-import { generationJobs, generationItems, scheduledJobs, userWorkingHours, holidays, vaProfiles, taskAssignments, taskDependencies, clients } from '../../drizzle/schema';
+import { generationJobs, generationItems, scheduledJobs, userWorkingHours, holidays, vaProfiles, taskAssignments, taskDependencies, clients } from '../../drizzle/schema.postgres';
 import { eq, desc, and, inArray } from 'drizzle-orm';
 import { fetchWithRetry } from '../utils/retry';
 import { getCachedTasks, setCachedTasks, invalidateCache } from '../services/trello-cache';
@@ -13,7 +13,7 @@ import { requestQueue } from '../services/request-queue';
 import { websocketService } from '../services/websocket';
 import { parseAPTLSSItem, parseAPTLSSChecklist } from '../utils/aptlss-parser';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -160,9 +160,7 @@ async function fetchCardForAptlss(cardId: string) {
 async function generateAptlssChecklist(card: any, settings: any) {
   const pythonScript = path.join(__dirname, 'aptlss-bridge.py');
   const input = JSON.stringify({ cardData: card, settings });
-  const { stdout, stderr } = await execAsync(
-    `python3 "${pythonScript}" '${input.replace(/'/g, "'\\''")}' 2>&1`
-  );
+  const { stdout, stderr } = await execFileAsync('python3', [pythonScript, input]);
 
   if (stderr) {
     console.error('Python stderr:', stderr);
