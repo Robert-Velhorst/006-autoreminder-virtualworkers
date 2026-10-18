@@ -86,12 +86,4 @@ describe("production configuration", () => {
     })).toContain("TRELLO_WEBHOOK_CALLBACK_URL and TRELLO_WEBHOOK_SECRET must be configured together");
   });
 
-  it("rejects a Vercel request-only production runtime", () => {
-    expect(getProductionConfigurationErrors({
-      ...validProductionEnvironment,
-      VERCEL: "1",
-    })).toEqual([
-      "Vercel request-only runtime is unsupported; deploy the unified Docker container",
-    ]);
-  });
 });

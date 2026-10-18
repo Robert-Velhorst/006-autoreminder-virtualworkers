@@ -16,8 +16,8 @@ decisions.
   network placement still need to be provisioned and verified.
 - Redis: optional, external, and not part of the required single-container
   application deployment.
-- Hosting: Docker Compose behind a stable HTTPS reverse proxy. Vercel and
-  ngrok are not production targets.
+- Hosting: Docker Compose behind a stable HTTPS reverse proxy. Request-only
+  hosting and public tunnels are not production targets.
 
 ## Release blockers
 

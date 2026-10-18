@@ -100,7 +100,7 @@ pnpm test:e2e
 
 ## Deployment
 
-The full application needs a persistent container runtime with HTTPS and WebSocket support. It also runs scheduled work in the application process. Request-only serverless platforms such as the repository's former Vercel deployment are not supported and must not be presented as the production service.
+The full application needs a persistent container runtime with HTTPS and WebSocket support. It also runs scheduled work in the application process. Request-only serverless platforms are not supported and must not be presented as the production service.
 
 `Dockerfile` builds the application image. `docker-compose.yml` runs only the application container; PostgreSQL and optional Redis are external services. This keeps the Docker footprint to one VA Dashboard container. Run database migrations explicitly from a trusted administration environment with `pnpm db:migrate` before deploying the corresponding application version. For Hetzner production, use a dedicated PostgreSQL role and secret-managed connection string. Route the stable production domain through the host's HTTPS reverse proxy. The repository does not provide a public tunnel launcher.
 
