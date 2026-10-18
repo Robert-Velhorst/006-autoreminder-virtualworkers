@@ -181,25 +181,35 @@ Before the first production traffic is enabled:
 3. Do not transfer legacy data unless an actual source containing VA Dashboard
    data is identified and its import is approved. If the source is confirmed as
    MySQL, follow the conditional rehearsal below; otherwise design and review a
-   source-specific transfer before touching data. If no import is needed, record
-   the agreed initial-data/bootstrap approach.
-4. Test the PostgreSQL backup and restore, verify sequences and app read/write
+   source-specific transfer before touching data.
+4. Before starting the application, verify that the target has its initial
+   founder account and the authentication records required by the application.
+   For a fresh/no-import target, execute a documented, one-time,
+   operator-only bootstrap after migrations to create the founder account and
+   its required `users` and `va_profiles` rows. Do not rely on public
+   registration: production rejects `/api/auth/register`. If no supported
+   bootstrap path exists, implement and validate one before deployment. For an
+   approved import, verify that the imported account and profile records are
+   present and usable. Verify founder/admin/worker role boundaries without
+   local auth bypass, and retain only redacted evidence. Do not start the
+   production application until this bootstrap/import check succeeds.
+5. Test the PostgreSQL backup and restore, verify sequences and app read/write
    behavior, and document the exact rollback point before any traffic move.
-5. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and
+6. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and
    `LOCAL_AUTH_BYPASS=false`.
-6. Confirm the public origin variables resolve to the stable HTTPS domain and,
+7. Confirm the public origin variables resolve to the stable HTTPS domain and,
    when enabled, the Trello callback is the exact configured HTTPS URL.
-7. Confirm `/api/health` and `/api/health/ready` report healthy only after the
+8. Confirm `/api/health` and `/api/health/ready` report healthy only after the
    current PostgreSQL migration is applied; confirm `/api/health/live` remains
    independent of database availability. Then verify authenticated
    founder/admin/worker access, WebSockets, scheduled jobs, Trello, and each
    optional integration deliberately configured for production. Do not mark an
    unconfigured integration as verified or treat an unavailable optional
    integration as a successful smoke test.
-8. Confirm no unapproved Trello comment, move, email, or other external action
+9. Confirm no unapproved Trello comment, move, email, or other external action
    occurs during smoke testing.
-9. Point the public domain and Trello webhook callback at the new runtime.
-10. Retain tested database backups and the prior build through the rollback
+10. Point the public domain and Trello webhook callback at the new runtime.
+11. Retain tested database backups and the prior build through the rollback
     window. If data was imported, retain its source through acceptance.
 
 Compose does not provision or alter database storage. Keep verified database
