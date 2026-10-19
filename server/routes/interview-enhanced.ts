@@ -22,6 +22,7 @@ import {
 } from '../services/interview-persistence';
 import { analyzeCardBeforeInterview } from '../services/pre-interview-analysis';
 import { startInterview, processResponse } from '../services/conversational-interview';
+import { encodeTrelloPathSegment } from '../utils/trello-path';
 
 const router = Router();
 
@@ -32,8 +33,14 @@ const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
  * Helper to get Trello card with all details
  */
 async function getTrelloCard(cardId: string) {
+  const encodedCardId = encodeTrelloPathSegment(cardId);
+  if (!encodedCardId) {
+    throw new Error('Invalid Trello card ID');
+  }
+
   const cardResponse = await fetch(
-    `https://api.trello.com/1/cards/${cardId}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&attachments=true&checklists=all`
+    `https://api.trello.com/1/cards/${encodedCardId}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&attachments=true&checklists=all`,
+    { redirect: 'error' }
   );
 
   if (!cardResponse.ok) {
@@ -44,7 +51,8 @@ async function getTrelloCard(cardId: string) {
 
   // Get comments
   const actionsResponse = await fetch(
-    `https://api.trello.com/1/cards/${cardId}/actions?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&filter=commentCard`
+    `https://api.trello.com/1/cards/${encodedCardId}/actions?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&filter=commentCard`,
+    { redirect: 'error' }
   );
 
   const comments = actionsResponse.ok ? await actionsResponse.json() : [];
@@ -67,8 +75,8 @@ router.post('/start', async (req: Request, res: Response) => {
     }
 
     const { cardId } = req.body;
-    if (!cardId) {
-      return res.status(400).json({ error: 'Missing cardId' });
+    if (!encodeTrelloPathSegment(cardId)) {
+      return res.status(400).json({ error: 'A valid Trello card ID is required' });
     }
 
     // Get card data from Trello

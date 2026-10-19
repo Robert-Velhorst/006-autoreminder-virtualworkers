@@ -22,6 +22,7 @@ import { createAttachmentExtractor } from '../services/attachment-extractor';
 import { createChatbotExtractor } from '../services/chatbot-extractor';
 import { fetchWithRetry } from '../utils/retry';
 import { atisRateLimiter } from '../middleware/rate-limiter';
+import { encodeTrelloPathSegment } from '../utils/trello-path';
 
 const router = Router();
 const INACTIVE_LIST_KEYWORDS = ['done', 'completed', 'complete', 'archive', 'archived', 'info'];
@@ -573,6 +574,10 @@ router.post('/understanding/reprocess/:cardId', atisRateLimiter, async (req: Req
 router.post('/cards/:trelloId/reingest', async (req: Request, res: Response) => {
   try {
     const { trelloId } = req.params;
+    const encodedTrelloId = encodeTrelloPathSegment(trelloId);
+    if (!encodedTrelloId) {
+      return res.status(400).json({ error: 'Invalid Trello card ID' });
+    }
     const db = await getDb();
     
     if (!db) {
@@ -590,7 +595,8 @@ router.post('/cards/:trelloId/reingest', async (req: Request, res: Response) => 
 
     // Fetch fresh card data from Trello
     const cardResponse = await fetch(
-      `https://api.trello.com/1/cards/${trelloId}?key=${apiKey}&token=${token}&checklists=all&attachments=true`
+      `https://api.trello.com/1/cards/${encodedTrelloId}?key=${apiKey}&token=${token}&checklists=all&attachments=true`,
+      { redirect: 'error' }
     );
 
     if (!cardResponse.ok) {
@@ -624,7 +630,8 @@ router.post('/cards/:trelloId/reingest', async (req: Request, res: Response) => 
 
     // Fetch and update comments
     const commentsResponse = await fetch(
-      `https://api.trello.com/1/cards/${trelloId}/actions?filter=commentCard&key=${apiKey}&token=${token}`
+      `https://api.trello.com/1/cards/${encodedTrelloId}/actions?filter=commentCard&key=${apiKey}&token=${token}`,
+      { redirect: 'error' }
     );
     
     if (commentsResponse.ok) {

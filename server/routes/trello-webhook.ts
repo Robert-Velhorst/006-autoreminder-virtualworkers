@@ -10,6 +10,7 @@ import {
   getConfiguredTrelloWebhookCallbackUrl,
   isValidTrelloWebhookSignature,
 } from './trelloWebhookSignature';
+import { encodeTrelloPathSegment } from '../utils/trello-path';
 
 const router = Router();
 
@@ -253,14 +254,18 @@ router.delete('/:webhookId', requireAdmin, async (req: any, res: Response) => {
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
     const { webhookId } = req.params;
+    const encodedWebhookId = encodeTrelloPathSegment(webhookId);
+    if (!encodedWebhookId) {
+      return res.status(400).json({ error: 'Invalid Trello webhook ID' });
+    }
     const apiKey = process.env.TRELLO_API_KEY;
     const token = process.env.TRELLO_TOKEN;
 
     if (apiKey && token) {
       try {
         const response = await fetch(
-          `${TRELLO_API_BASE}/webhooks/${webhookId}?key=${apiKey}&token=${token}`,
-          { method: 'DELETE' }
+          `${TRELLO_API_BASE}/webhooks/${encodedWebhookId}?key=${apiKey}&token=${token}`,
+          { method: 'DELETE', redirect: 'error' }
         );
         if (response.ok) {
           console.log('[TrelloWebhook] Deleted webhook from Trello API');

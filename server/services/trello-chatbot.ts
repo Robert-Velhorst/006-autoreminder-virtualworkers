@@ -14,6 +14,7 @@ import {
   vaProfiles 
 } from '../../drizzle/schema.postgres';
 import { areNotificationsEnabled } from './notificationPolicy';
+import { encodeTrelloPathSegment } from '../utils/trello-path';
 
 const TRELLO_API_KEY = process.env.TRELLO_API_KEY;
 const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
@@ -70,6 +71,11 @@ const NOTIFICATIONS_ENABLED = areNotificationsEnabled();
  * Post a comment to a Trello card
  */
 export async function postTrelloComment(cardId: string, text: string): Promise<boolean> {
+  const encodedCardId = encodeTrelloPathSegment(cardId);
+  if (!encodedCardId) {
+    return false;
+  }
+
   // Check global kill switch
   if (!NOTIFICATIONS_ENABLED) {
     console.log('[TrelloChatbot] NOTIFICATIONS DISABLED - would have posted:', text.substring(0, 100) + '...');
@@ -78,9 +84,10 @@ export async function postTrelloComment(cardId: string, text: string): Promise<b
   
   try {
     const response = await fetch(
-      `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
+      `https://api.trello.com/1/cards/${encodedCardId}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
       {
         method: 'POST',
+        redirect: 'error',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
       }

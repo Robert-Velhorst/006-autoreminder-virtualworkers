@@ -12,6 +12,7 @@ import { getCachedTasks, setCachedTasks, invalidateCache } from '../services/tre
 import { requestQueue } from '../services/request-queue';
 import { websocketService } from '../services/websocket';
 import { parseAPTLSSItem, parseAPTLSSChecklist } from '../utils/aptlss-parser';
+import { encodeTrelloPathSegment } from '../utils/trello-path';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -138,6 +139,11 @@ async function fetchUserWorkspaceBoards(apiKey: string, token: string) {
 }
 
 async function fetchCardForAptlss(cardId: string) {
+  const encodedCardId = encodeTrelloPathSegment(cardId);
+  if (!encodedCardId) {
+    throw new Error('Invalid Trello card ID');
+  }
+
   const apiKey = process.env.TRELLO_API_KEY;
   const token = process.env.TRELLO_TOKEN;
 
@@ -146,7 +152,8 @@ async function fetchCardForAptlss(cardId: string) {
   }
 
   const response = await fetch(
-    `https://api.trello.com/1/cards/${cardId}?key=${apiKey}&token=${token}&checklists=all`
+    `https://api.trello.com/1/cards/${encodedCardId}?key=${apiKey}&token=${token}&checklists=all`,
+    { redirect: 'error' }
   );
 
   if (!response.ok) {
@@ -1580,9 +1587,16 @@ router.put('/trello/tasks/:taskId/complete', async (req: Request, res: Response)
       return res.status(400).json({ error: 'Missing required fields: cardId, checklistId, checkItemId' });
     }
 
+    const encodedCardId = encodeTrelloPathSegment(cardId);
+    const encodedChecklistId = encodeTrelloPathSegment(checklistId);
+    const encodedCheckItemId = encodeTrelloPathSegment(checkItemId);
+    if (!encodedCardId || !encodedChecklistId || !encodedCheckItemId) {
+      return res.status(400).json({ error: 'Invalid Trello card, checklist, or check item ID' });
+    }
+
     // Update checklist item state in Trello
     const state = isCompleted ? 'complete' : 'incomplete';
-    const updateUrl = `https://api.trello.com/1/cards/${cardId}/checkItem/${checkItemId}?state=${state}&key=${apiKey}&token=${apiToken}`;
+    const updateUrl = `https://api.trello.com/1/cards/${encodedCardId}/checkItem/${encodedCheckItemId}?state=${state}&key=${apiKey}&token=${apiToken}`;
     
     const response = await fetch(updateUrl, {
       method: 'PUT'
@@ -1724,9 +1738,14 @@ router.put('/trello/cards/:cardId/due', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing cardId parameter' });
     }
 
+    const encodedCardId = encodeTrelloPathSegment(cardId);
+    if (!encodedCardId) {
+      return res.status(400).json({ error: 'Invalid Trello card ID' });
+    }
+
     // Build Trello API URL to update due date
     // dueDate should be ISO 8601 format or null to remove
-    const updateUrl = `https://api.trello.com/1/cards/${cardId}?key=${apiKey}&token=${apiToken}`;
+    const updateUrl = `https://api.trello.com/1/cards/${encodedCardId}?key=${apiKey}&token=${apiToken}`;
     
     const response = await fetch(updateUrl, {
       method: 'PUT',
