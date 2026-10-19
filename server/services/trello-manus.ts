@@ -1,4 +1,5 @@
 import axios from "axios";
+import { areNotificationsEnabled } from "./notificationPolicy";
 import { dateKeyInTimeZone } from "../../shared/workerTime";
 
 const TRELLO_API_BASE = "https://api.trello.com/1";
@@ -474,6 +475,11 @@ export async function postCardComment(
   apiKey: string,
   apiToken: string
 ): Promise<{ id: string; date: string }> {
+  // Keep every service-backed Trello comment behind the same outbound kill switch.
+  if (!areNotificationsEnabled()) {
+    throw new Error("Outbound Trello comments are disabled");
+  }
+
   const response = await axios.post(
     `${TRELLO_API_BASE}/cards/${cardId}/actions/comments`,
     null,

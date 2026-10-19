@@ -109,3 +109,11 @@ Those projects must not be repointed to the repository root. The consolidated
 server requires a persistent container runtime for Express, tRPC, scheduled
 work, Redis, and WebSockets. Retire obsolete hosting Git integrations only
 after the public container replacement passes the production cutover gate.
+
+## Deployment branch reconciliation (2026-10-19)
+
+PR #103 keeps the current PostgreSQL runtime, verified TLS, source/release gates,
+notification policy, and working-day regression tests. Its obsolete MySQL
+Compose alternative is retired. Placeholder rejection, configured Redis health,
+Docker credential/data exclusions and the missing Trello comment opt-in guard
+are retained. No live cutover or credential rotation was performed.

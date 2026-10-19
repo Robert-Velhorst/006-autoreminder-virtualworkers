@@ -20,14 +20,16 @@ router.get("/", async (req: Request, res: Response) => {
     const dbHealthy = await isDatabaseReachable();
 
     // Check Redis connection (optional)
+    const redisConfigured = Boolean(process.env.REDIS_URL?.trim());
     const redisHealthy = isRedisAvailable();
+    const healthy = dbHealthy && (!redisConfigured || redisHealthy);
 
     const health = {
-      status: dbHealthy ? "healthy" : "unhealthy",
+      status: healthy ? "healthy" : "unhealthy",
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       database: dbHealthy ? "connected" : "disconnected",
-      redis: redisHealthy ? "connected" : "not configured",
+      redis: !redisConfigured ? "not configured" : redisHealthy ? "connected" : "disconnected",
       memory: {
         used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
         total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
@@ -35,7 +37,7 @@ router.get("/", async (req: Request, res: Response) => {
       },
     };
 
-    const statusCode = dbHealthy ? 200 : 503;
+    const statusCode = healthy ? 200 : 503;
     res.status(statusCode).json(health);
   } catch (error) {
     logger.error("Health check failed", error instanceof Error ? error : undefined);

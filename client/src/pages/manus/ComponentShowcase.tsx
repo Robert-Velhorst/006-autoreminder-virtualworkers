@@ -1157,6 +1157,9 @@ export default function ComponentsShowcase() {
                     <HoverCardContent>
                       <div className="space-y-2">
                         <h4 className="text-sm font-semibold">@nextjs</h4>
+                        <p className="text-sm">
+                          The React framework maintained by the Next.js team.
+                        </p>
                       </div>
                     </HoverCardContent>
                   </HoverCard>

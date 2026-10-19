@@ -2,6 +2,10 @@ type Environment = Record<string, string | undefined>;
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 
+function isTemplatePlaceholder(value: string) {
+  return /(?:replace[-_ ]with|your[-_ ]|url[_-]?encoded|change[-_ ]?me|placeholder)/i.test(value);
+}
+
 function hasValue(env: Environment, name: string) {
   return Boolean(env[name]?.trim());
 }
@@ -102,6 +106,14 @@ export function getProductionConfigurationErrors(env: Environment = process.env)
   }
   if (env.LOCAL_AUTH_BYPASS === "true") {
     errors.push("LOCAL_AUTH_BYPASS cannot be enabled in production");
+  }
+  for (const name of ["DATABASE_URL", "JWT_SECRET", "TRELLO_API_KEY", "TRELLO_TOKEN", "REDIS_URL"] as const) {
+    if (isTemplatePlaceholder(env[name]?.trim() ?? "")) {
+      errors.push(`${name} must not contain template placeholder values`);
+    }
+  }
+  if (env.VERCEL?.trim()) {
+    errors.push("Vercel request-only runtime is unsupported; deploy the unified Docker container");
   }
   return errors;
 }
