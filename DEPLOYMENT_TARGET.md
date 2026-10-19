@@ -24,4 +24,4 @@ Use the repository's Docker Compose deployment and cutover checklist as the
 operational source of truth. Keep database credentials, integration tokens,
 and private operational data out of this file and source control.
 
-Inventory existing Vercel or ngrok production services and migrate them to the verified Hetzner target before retiring them. Preserve local development and test tooling when still needed.
+Inventory any legacy production hosting or public-tunnel services and migrate them to the verified Hetzner target before retiring them. Preserve local development and test tooling when still needed.
