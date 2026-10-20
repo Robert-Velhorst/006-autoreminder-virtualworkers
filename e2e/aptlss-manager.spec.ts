@@ -17,6 +17,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       realtime?: boolean;
       reviewed?: boolean;
       proof?: boolean;
+      evidenceUnavailable?: boolean;
       waiting?: boolean;
       calibration?: boolean;
       sourceCheck?: boolean;
@@ -203,6 +204,10 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
           ? superjson.deserialize(envelope)
           : undefined;
         calls.push({ method, input });
+        if (method === "operator.getCardEvidence" && options.evidenceUnavailable) {
+          return { error: superjson.serialize({ message: "Synthetic retained source unavailable", code: -32603,
+            data: { code: "INTERNAL_SERVER_ERROR", httpStatus: 500, path: method } }) };
+        }
         let value: unknown = null;
         if (method === "auth.me")
           value = {
@@ -1111,6 +1116,24 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     await expect(manager.getByText("Which deadline?", { exact: true })).toHaveCount(0);
     await manager.getByRole("button", { name: "Send answer to APTLSS" }).click();
     await expect.poll(() => calls.find(call => call.method === "operator.submitManagerUpdate")?.input.interventionId).toBe("urgent");
+  });
+
+  test("source loading failure stays distinct from absent evidence and can be retried", async ({ page }) => {
+    const options = { proof: true, evidenceUnavailable: true };
+    await managerFixture(page, "worker", options);
+    await page.goto("/worker");
+    await page.getByRole("button", { name: "Open details", exact: true }).click();
+    const inspector = page.getByRole("dialog");
+    await inspector.getByRole("button", { name: /Raw linked evidence/ }).click();
+    await expect(inspector.getByRole("alert").filter({ hasText: "Source details could not be loaded" })).toBeVisible();
+    await expect(inspector.getByText("No graph-linked evidence has been retained for this card yet.")).toHaveCount(0);
+    options.evidenceUnavailable = false;
+    await inspector.getByRole("button", { name: "Retry loading sources" }).click();
+    await expect(inspector.getByText("Retained payment confirmation", { exact: true })).toBeVisible();
+    await expect(inspector.getByText("Source details could not be loaded.", { exact: false })).toHaveCount(0);
+    const errors = browserErrors.get(page) ?? [];
+    expect(errors.some(error => error.includes("Synthetic retained source unavailable"))).toBe(true);
+    browserErrors.set(page, errors.filter(error => !error.includes("Synthetic retained source unavailable")));
   });
 
   test("waiting task cannot start a timer through task details", async ({ page }) => {
