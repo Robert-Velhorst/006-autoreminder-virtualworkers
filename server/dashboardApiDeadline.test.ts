@@ -19,4 +19,16 @@ describe("dashboard API deadlines", () => {
     expect(dashboardApiDeadline(request, undefined, origin)).toBe(450_000);
     expect(dashboardApiDeadline(request, { method: "GET" }, origin)).toBe(30_000);
   });
+  it.each(["/api/atis/sync", "/api/atis/understanding/process"])("keeps the short transport budget for future async start/poll on %s", path => {
+    expect(dashboardApiDeadline(path, { method: "POST" }, origin)).toBe(30_000);
+    expect(dashboardApiDeadline(new URL(path, origin), { method: "post" }, origin)).toBe(30_000);
+    const request = new Request(new URL(path, origin), { method: "POST" });
+    expect(dashboardApiDeadline(request, undefined, origin)).toBe(30_000);
+    expect(dashboardApiDeadline(request, { method: "GET" }, origin)).toBe(30_000);
+    expect(dashboardApiDeadline(path, undefined, origin)).toBe(30_000);
+    expect(dashboardApiDeadline(new URL(path, "https://other.example"), { method: "POST" }, origin)).toBeNull();
+  });
+  it.each(["/api/atis/sync-extra", "/api/atis/sync/", "/api/atis/understanding/process-extra", "/api/atis/understanding/stats"])("preserves the short default for adjacent endpoint %s", path => {
+    expect(dashboardApiDeadline(path, { method: "POST" }, origin)).toBe(30_000);
+  });
 });

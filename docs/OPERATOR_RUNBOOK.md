@@ -41,6 +41,21 @@ rather than rebuilding unrelated source on the production host.
 4. Retry only idempotent jobs. Review external actions before retrying.
 5. Back up the database before a repair migration.
 
+## Verification Output Safety
+
+Use the safety verifier's default `artifacts` and `test-results` destinations.
+Its output-path environment overrides are trusted operator configuration, not a
+filesystem sandbox. In particular, Playwright clears its configured output
+directory before running: `APTLSS_BROWSER_OUTPUT_DIR` must designate disposable
+test output only, never a source checkout, home directory, private configuration,
+or backup directory. Report and attestation files may also be overwritten.
+
+The historical review-index rehearsal is not a production migration command.
+Its directory and backup-hash checks do not sandbox SQL or make untrusted backups
+safe, and it may change a server-wide MySQL event-scheduler setting. Run it only
+against a separately verified, dedicated rehearsal server, never a shared or
+operational database service.
+
 ## Rollback
 
 Do not automatically restore an older database snapshot when changing application

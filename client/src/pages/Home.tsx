@@ -29,6 +29,7 @@ import { ConversationDialog } from "@/components/ConversationDialog";
 import { BulkTaskActions } from "@/components/BulkTaskActions";
 import { GoalInterviewDialog } from "@/components/GoalInterviewDialog";
 import { taskCache, CACHE_KEYS } from "@/lib/taskCache";
+import { AtisOperationClient, canStartAtisOperation, INITIAL_ATIS_OPERATION_VIEW, type AtisOperationView } from "@/lib/atis-operation";
 
 // No longer using mock data - fetch from Trello API
 
@@ -51,7 +52,9 @@ export default function Home() {
   const [taskLoadFailed, setTaskLoadFailed] = useState(false);
   const taskRequestInFlight = useRef(false);
   const taskSourceAvailable = useRef(false);
-  const [isSyncing, setIsSyncing] = useState(false);
+  const [atisOperation, setAtisOperation] = useState<AtisOperationView>(INITIAL_ATIS_OPERATION_VIEW);
+  const atisClient = useRef<AtisOperationClient | null>(null);
+  const isSyncing = !canStartAtisOperation(atisOperation);
   const [searchQuery, setSearchQuery] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -345,18 +348,6 @@ export default function Home() {
       taskSourceAvailable.current = true;
       console.log('[TaskCache] Cached tasks for 5 minutes');
 
-      // Auto-refresh when background AI analysis completes for cards missing breakdowns
-      const pendingCount = atisData.pendingAnalysis || 0;
-      if (pendingCount > 0) {
-        console.log(`[AutoAnalysis] ${pendingCount} cards are being auto-analyzed in the background. Will refresh in 15s...`);
-        // The server auto-triggered analysis when it saw cards without breakdowns.
-        // We just need to wait a bit and refresh to show the new detailed steps.
-        setTimeout(() => {
-          taskCache.invalidate(CACHE_KEYS.TIMELINE_TASKS);
-          void fetchTasks();
-        }, 15000); // Refresh after 15 seconds to pick up new breakdowns
-      }
-
       try {
         const typesResponse = await fetch('/api/atis/task-types', {
           credentials: 'include',
@@ -386,59 +377,35 @@ export default function Home() {
     }
   }, [fetchTasks, isAuthenticated, user]);
 
+  useEffect(() => {
+    if (!isAuthenticated || !user) return;
+    const client = new AtisOperationClient({
+      onState: setAtisOperation,
+      onCompleted: async operation => {
+        const counts = operation.result;
+        if (operation.kind === 'sync') {
+          const hasCounts = [counts?.totalBoards, counts?.totalCards].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0);
+          toast.success(hasCounts ? `Synced ${counts!.totalBoards} boards and ${counts!.totalCards} cards from Trello` : 'Trello sync completed.');
+        } else {
+          const processed = counts?.processed;
+          toast.success(typeof processed === 'number' && Number.isFinite(processed) && processed >= 0 ? `AI analyzed ${processed} cards` : 'Card analysis completed.', {
+            description: typeof counts?.failed === 'number' && counts.failed > 0 ? `${counts.failed} cards could not be analyzed.` : undefined,
+          });
+        }
+        await fetchTasks(true);
+      },
+    });
+    atisClient.current = client;
+    void client.resume();
+    return () => {
+      client.stop();
+      if (atisClient.current === client) atisClient.current = null;
+    };
+  }, [fetchTasks, isAuthenticated, user?.id]);
+
   const syncFromTrello = useCallback(async () => {
     if (!taskSourceAvailable.current) return;
-    setIsSyncing(true);
-    try {
-      const res = await fetch('/api/atis/sync', {
-        method: 'POST',
-        credentials: 'include',
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        toast.error(`Sync failed: ${data.error || res.statusText}`);
-        return;
-      }
-      toast.success(
-        `Synced ${data.totalBoards} boards and ${data.totalCards} cards from Trello`,
-        { description: `${data.newBoards} new boards, ${data.newCards} new cards added.` }
-      );
-      // Clear client-side cache so fetchTasks re-fetches fresh data
-      taskCache.invalidate(CACHE_KEYS.TIMELINE_TASKS);
-      await fetchTasks();
-
-      // Automatically trigger AI analysis for all cards without understanding (background, non-blocking)
-      const analysisToastId = 'auto-analysis';
-      toast.loading('AI is analyzing your cards in the background...', { id: analysisToastId, duration: 60000 });
-      fetch('/api/atis/understanding/process', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ limit: 50 }),
-      })
-        .then(r => r.json())
-        .then(result => {
-          if (result.processed > 0) {
-            toast.success(`AI analyzed ${result.processed} cards`, {
-              id: analysisToastId,
-              description: result.failed > 0 ? `${result.failed} failed — will retry on next sync.` : 'All cards analyzed successfully.',
-            });
-            // Refresh tasks to show newly analyzed cards
-            taskCache.invalidate(CACHE_KEYS.TIMELINE_TASKS);
-            void fetchTasks();
-          } else {
-            toast.dismiss(analysisToastId);
-          }
-        })
-        .catch(err => {
-          console.warn('[Auto-Analysis] Background analysis failed:', err);
-          toast.dismiss(analysisToastId);
-        });
-    } catch (err) {
-      toast.error('Sync failed — is the server running?');
-    } finally {
-      setIsSyncing(false);
-    }
+    await atisClient.current?.startSync();
   }, [fetchTasks]);
 
   const handleOpenInterview = (task: Task) => {
@@ -704,6 +671,27 @@ export default function Home() {
       </header>
 
       <main className="flex-1 container py-4 md:py-8">
+        {atisOperation.status !== 'idle' && (
+          <section role={['unconfirmed', 'failed', 'interrupted'].includes(atisOperation.status) ? 'alert' : 'status'} className="mb-4 border-b pb-4 space-y-2" aria-label="Sync and analysis status">
+            <p className="text-sm">{atisOperation.message}</p>
+            {atisOperation.operation && <p className="text-xs text-muted-foreground">Operation #{atisOperation.operation.id}</p>}
+            {atisOperation.status === 'unconfirmed' && (
+              <Button variant="outline" size="sm" disabled={atisOperation.busy} onClick={() => void atisClient.current?.resume()}>
+                <RefreshCw className="size-4 mr-2" /> Check status
+              </Button>
+            )}
+            {atisOperation.status === 'interrupted' && (
+              <Button variant="outline" size="sm" disabled={atisOperation.busy} onClick={() => void atisClient.current?.acknowledgeAndRestart()}>
+                <RefreshCw className="size-4 mr-2" /> Acknowledge interruption and restart {atisOperation.operation?.kind === 'sync' ? 'sync' : 'analysis'}
+              </Button>
+            )}
+            {atisOperation.status === 'completed' && atisOperation.operation?.kind === 'sync' && !atisOperation.busy && (
+              <Button variant="outline" size="sm" onClick={() => void atisClient.current?.startUnderstanding()}>
+                <RefreshCw className="size-4 mr-2" /> Analyze synced cards
+              </Button>
+            )}
+          </section>
+        )}
         {taskLoadFailed && (
           <section role="alert" aria-labelledby="work-queue-error-heading" className="mb-4 border border-destructive/40 rounded-lg p-4 space-y-2">
             <h2 id="work-queue-error-heading" className="text-lg font-semibold">Work queue unavailable</h2>

@@ -22,6 +22,7 @@ import {
 } from '../../drizzle/schema.postgres';
 import { eq, isNull, and, sql, desc } from 'drizzle-orm';
 import { invokeLLM } from '../_core/llm';
+import { ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader, type ScheduledJobTransaction } from '../scheduledJobRuntime';
 
 // atis-understanding uses the same LLM provider chain as the rest of the app:
 // GROQ_API_KEY (free) → OPENAI_API_KEY → BUILT_IN_FORGE_API_KEY
@@ -71,7 +72,18 @@ interface UnderstandingProgress {
   status: 'processing' | 'success' | 'failed';
 }
 
-type ProgressCallback = (progress: UnderstandingProgress) => void;
+type ProgressCallback = (progress: UnderstandingProgress) => void | Promise<void>;
+
+async function assertUnderstandingOwnership(context?: ScheduledJobContext, transaction?: ScheduledJobOwnershipReader): Promise<void> {
+  if (!context) return;
+  if (context.signal.aborted) throw new ScheduledJobLeaseLostError();
+  await context.assertOwnership(transaction);
+  if (context.signal.aborted) throw new ScheduledJobLeaseLostError();
+}
+
+function rethrowUnderstandingCancellation(error: unknown, context?: ScheduledJobContext): void {
+  if (context && (error instanceof ScheduledJobLeaseLostError || (error instanceof Error && error.name === 'AbortError'))) throw error;
+}
 
 interface InterviewGuidance {
   goal?: string;
@@ -218,7 +230,8 @@ interface ExtractedContent {
 async function analyzeWithAI(
   context: CardContext,
   extractedContent?: ExtractedContent,
-  interviewGuidance?: InterviewGuidance
+  interviewGuidance?: InterviewGuidance,
+  jobContext?: ScheduledJobContext
 ): Promise<TaskUnderstanding> {
   const contextText = formatContextForAI(context, extractedContent, interviewGuidance);
 
@@ -313,6 +326,7 @@ Guidelines:
 
 Return ONLY valid JSON, no markdown formatting or explanation.`;
 
+  await assertUnderstandingOwnership(jobContext);
   try {
     const result = await invokeLLM({
       messages: [
@@ -323,6 +337,7 @@ Return ONLY valid JSON, no markdown formatting or explanation.`;
       responseFormat: { type: 'json_object' },
     });
 
+    await assertUnderstandingOwnership(jobContext);
     const content = result.choices?.[0]?.message?.content;
     if (!content) throw new Error('No content in AI response');
 
@@ -357,6 +372,8 @@ Return ONLY valid JSON, no markdown formatting or explanation.`;
 
     return parsed;
   } catch (error: any) {
+    rethrowUnderstandingCancellation(error, jobContext);
+    await assertUnderstandingOwnership(jobContext);
     console.error('[ATIS Understanding] AI analysis error:', error);
 
     // Return a safe default on error
@@ -384,15 +401,9 @@ Return ONLY valid JSON, no markdown formatting or explanation.`;
 /**
  * Save understanding to database
  */
-async function saveUnderstanding(cardId: number, cardTrelloId: string, understanding: TaskUnderstanding): Promise<void> {
+async function saveUnderstanding(cardId: number, cardTrelloId: string, understanding: TaskUnderstanding, context?: ScheduledJobContext): Promise<void> {
   const db = await getDb();
   if (!db) throw new Error('Database not available');
-
-  // Check if understanding already exists
-  const [existing] = await db.select()
-    .from(atisCardUnderstanding)
-    .where(eq(atisCardUnderstanding.cardId, cardId))
-    .limit(1);
 
   const data = {
     cardId,
@@ -415,13 +426,22 @@ async function saveUnderstanding(cardId: number, cardTrelloId: string, understan
     generatedAt: new Date(),
   };
 
-  if (existing) {
-    await db.update(atisCardUnderstanding)
-      .set(data)
-      .where(eq(atisCardUnderstanding.cardId, cardId));
-  } else {
-    await db.insert(atisCardUnderstanding).values(data);
-  }
+  const persist = async (connection: NonNullable<Awaited<ReturnType<typeof getDb>>> | ScheduledJobTransaction) => {
+    // The ownership lock is held on this connection through transaction commit.
+    await assertUnderstandingOwnership(context, connection);
+    const [existing] = await connection.select().from(atisCardUnderstanding)
+      .where(eq(atisCardUnderstanding.cardId, cardId)).limit(1);
+    await assertUnderstandingOwnership(context, connection);
+    if (existing) {
+      await connection.update(atisCardUnderstanding).set(data)
+        .where(eq(atisCardUnderstanding.cardId, cardId));
+    } else {
+      await connection.insert(atisCardUnderstanding).values(data);
+    }
+    await assertUnderstandingOwnership(context, connection);
+  };
+  if (context) await db.transaction(persist);
+  else await persist(db);
 }
 
 /**
@@ -479,9 +499,15 @@ async function loadExtractedContent(cardId: number): Promise<ExtractedContent | 
  */
 export async function processCardUnderstanding(
   cardId: number,
-  interviewGuidance?: InterviewGuidance
+  interviewGuidanceOrContext?: InterviewGuidance | ScheduledJobContext
 ): Promise<TaskUnderstanding | null> {
+  const jobContext = interviewGuidanceOrContext && 'assertOwnership' in interviewGuidanceOrContext
+    ? interviewGuidanceOrContext : undefined;
+  const interviewGuidance = interviewGuidanceOrContext && !('assertOwnership' in interviewGuidanceOrContext)
+    ? interviewGuidanceOrContext : undefined;
+  await assertUnderstandingOwnership(jobContext);
   const context = await buildCardContext(cardId);
+  await assertUnderstandingOwnership(jobContext);
   if (!context) {
     console.error(`[ATIS Understanding] Card ${cardId} not found`);
     return null;
@@ -497,8 +523,8 @@ export async function processCardUnderstanding(
     console.log(`[ATIS Understanding] Including ${attachCount} extracted attachments, ${convCount} chatbot conversations`);
   }
 
-  const understanding = await analyzeWithAI(context, extractedContent, interviewGuidance);
-  await saveUnderstanding(cardId, context.card.trelloId, understanding);
+  const understanding = await analyzeWithAI(context, extractedContent, interviewGuidance, jobContext);
+  await saveUnderstanding(cardId, context.card.trelloId, understanding, jobContext);
 
   return understanding;
 }
@@ -508,8 +534,10 @@ export async function processCardUnderstanding(
  */
 export async function processAllCardsUnderstanding(
   onProgress?: ProgressCallback,
-  limit?: number
+  limit?: number,
+  context?: ScheduledJobContext
 ): Promise<{ processed: number; failed: number }> {
+  await assertUnderstandingOwnership(context);
   const db = await getDb();
   if (!db) throw new Error('Database not available');
 
@@ -569,10 +597,11 @@ export async function processAllCardsUnderstanding(
   let failed = 0;
 
   for (let i = 0; i < allCards.length; i++) {
+    await assertUnderstandingOwnership(context);
     const card = allCards[i];
 
     if (onProgress) {
-      onProgress({
+      await onProgress({
         current: i + 1,
         total: allCards.length,
         cardName: card.name,
@@ -580,38 +609,29 @@ export async function processAllCardsUnderstanding(
       });
     }
 
+    let status: 'success' | 'failed';
     try {
-      await processCardUnderstanding(card.id);
+      await processCardUnderstanding(card.id, context);
       processed++;
-
-      if (onProgress) {
-        onProgress({
-          current: i + 1,
-          total: allCards.length,
-          cardName: card.name,
-          status: 'success',
-        });
-      }
+      status = 'success';
 
       console.log(`[ATIS Understanding] [${i + 1}/${allCards.length}] Processed: ${card.name.substring(0, 50)}...`);
     } catch (error: any) {
+      rethrowUnderstandingCancellation(error, context);
+      await assertUnderstandingOwnership(context);
       failed++;
+      status = 'failed';
       console.error(`[ATIS Understanding] Failed to process card ${card.id}:`, error.message);
 
-      if (onProgress) {
-        onProgress({
-          current: i + 1,
-          total: allCards.length,
-          cardName: card.name,
-          status: 'failed',
-        });
-      }
     }
+    await assertUnderstandingOwnership(context);
+    if (onProgress) await onProgress({ current: i + 1, total: allCards.length, cardName: card.name, status });
 
     // Rate limiting: wait 500ms between AI calls to avoid hitting API rate limits
     await new Promise(resolve => setTimeout(resolve, 500));
   }
 
+  await assertUnderstandingOwnership(context);
   return { processed, failed };
 }
 

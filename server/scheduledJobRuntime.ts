@@ -23,6 +23,8 @@ export type ScheduledJobTransaction = Parameters<Parameters<ScheduledJobDatabase
 export type ScheduledJobOwnershipReader = Pick<ScheduledJobDatabase, "select">;
 
 export type ScheduledJobContext = {
+  /** Available only after the durable run insert has committed. */
+  runId?: number;
   signal: AbortSignal;
   assertOwnership: (transaction?: ScheduledJobOwnershipReader) => Promise<void>;
 };
@@ -40,6 +42,7 @@ export async function runScheduledJob(
     trigger?: ScheduledJobTrigger;
     leaseMs?: number;
     skipIfSuccessful?: boolean;
+    initialDetail?: string;
     shouldRun?: (context: ScheduledJobContext, transaction: ScheduledJobTransaction) => Promise<boolean>;
   },
   work: (context: ScheduledJobContext) => Promise<ScheduledJobWorkResult | void>,
@@ -115,7 +118,9 @@ export async function runScheduledJob(
       await tx.update(scheduledJobRuns).set({ status: "abandoned", finishedAt: databaseNow,
         errorMessage: "Previous owner interrupted; task outcome is not verified.",
       }).where(and(eq(scheduledJobRuns.jobKey, jobKey), eq(scheduledJobRuns.status, "running")));
-      return tx.insert(scheduledJobRuns).values({ jobKey, trigger, status: "running", startedAt: databaseNow }).returning({ id: scheduledJobRuns.id });
+      return tx.insert(scheduledJobRuns).values({ jobKey, trigger, status: "running", startedAt: databaseNow,
+        ...(input.initialDetail === undefined ? {} : { detail: input.initialDetail.slice(0, 8_000) }),
+      }).returning({ id: scheduledJobRuns.id });
     });
     if (!runResult) return { state: "skipped", reason: "not_due" };
     runId = runResult[0]?.id ?? 0;
@@ -132,7 +137,7 @@ export async function runScheduledJob(
         }).finally(() => { heartbeatPending = undefined; });
     }, heartbeatEveryMs);
     heartbeatTimer.unref?.();
-    const result = await work({ signal: controller.signal, assertOwnership });
+    const result = await work({ signal: controller.signal, assertOwnership, runId });
     const finishedAt = new Date();
     const recordsProcessed = Math.max(0, Math.round(result?.recordsProcessed ?? 0));
     // Lock ownership through the success write: an expired owner cannot claim

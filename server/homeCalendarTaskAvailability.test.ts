@@ -83,6 +83,7 @@ vi.mock("@/components/GoalInterviewDialog", () => ({ GoalInterviewDialog: () => 
 
 import Home from "../client/src/pages/Home";
 import Calendar from "../client/src/pages/Calendar";
+import { ATIS_POLL_INTERVAL_MS } from "../client/src/lib/atis-operation";
 
 const previousReact = (globalThis as any).React;
 beforeAll(() => Object.assign(globalThis, { React }));
@@ -135,6 +136,144 @@ const pages = [
     populated: { tasks: [card] }, emptyData: [] },
 ] as const;
 
+describe("Home async sync and analysis UI contract", () => {
+  let cleanups: Array<() => void>;
+  let active: Array<{ id: number; kind: string; state: string }>;
+  let syncStatus: () => Response;
+  let analysisStatus: () => Response;
+  const op = (kind: string, state: string, id = kind === "sync" ? 8 : 9) => ({ id, kind, state });
+  const taskReads = () => mocks.fetch.mock.calls.filter(([url]) => url === "/api/atis/timeline-tasks?filter=all");
+  const postCalls = () => mocks.fetch.mock.calls.filter(([, init]) => init?.method === "POST");
+  const mountHome = () => {
+    render(Home);
+    for (const effect of [...mocks.effects]) {
+      const cleanup = effect();
+      if (typeof cleanup === "function") cleanups.push(cleanup as () => void);
+    }
+  };
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    cleanups = []; active = [];
+    syncStatus = () => json({ operation: { ...op("sync", "completed"), result: { totalBoards: 2, totalCards: 10 } } });
+    analysisStatus = () => json({ operation: { ...op("understanding", "completed"), result: { processed: 10, failed: 0 } } });
+    mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === "/api/atis/timeline-tasks?filter=all") return json(pages[0].populated);
+      if (url === "/api/atis/task-types") return json([]);
+      if (url === "/api/atis/operations/active") return json({ operations: active });
+      if (url === "/api/atis/operations/8") return syncStatus();
+      if (url === "/api/atis/operations/9") return analysisStatus();
+      if (url === "/api/atis/sync" && init?.method === "POST") return json({ operation: op("sync", "running") }, 202);
+      if (url === "/api/atis/understanding/process" && init?.method === "POST") return json({ operation: op("understanding", "running") }, 202);
+      throw new Error(`Unexpected endpoint: ${url}`);
+    });
+  });
+  afterEach(() => { for (const cleanup of cleanups) cleanup(); vi.useRealTimers(); });
+
+  it("keeps both pending stages disabled, prevents duplicate clicks, and refreshes/toasts only after completion", async () => {
+    mountHome(); await settle(); render(Home);
+    const retained = mocks.timeline;
+    expect(retained.isSyncing).toBe(false);
+    retained.onSync(); retained.onSync(); await settle();
+    expect(render(Home)).toContain("Trello sync is running on the server.");
+    expect(mocks.timeline.isSyncing).toBe(true);
+    expect(postCalls()).toHaveLength(1);
+    expect(taskReads()).toHaveLength(1);
+    expect(mocks.toast.success).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(ATIS_POLL_INTERVAL_MS);
+    expect(render(Home)).toContain("Card analysis is running on the server.");
+    expect(mocks.timeline.isSyncing).toBe(true);
+    expect(postCalls()).toHaveLength(2);
+    expect(taskReads()).toHaveLength(2);
+    expect(mocks.toast.success).toHaveBeenCalledExactlyOnceWith("Synced 2 boards and 10 cards from Trello");
+    await vi.advanceTimersByTimeAsync(ATIS_POLL_INTERVAL_MS);
+    expect(render(Home)).toContain("Card analysis completed.");
+    expect(mocks.timeline.isSyncing).toBe(false);
+    expect(taskReads()).toHaveLength(3);
+    expect(mocks.toast.success).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a status timeout unconfirmed and requires explicit status recovery without retrying the POST", async () => {
+    mountHome(); await settle(); render(Home);
+    mocks.timeline.onSync(); await settle();
+    syncStatus = () => { throw new DOMException("private diagnostic", "TimeoutError"); };
+    await vi.advanceTimersByTimeAsync(ATIS_POLL_INTERVAL_MS);
+    const html = render(Home);
+    expect(html).toContain("Cannot confirm the server operation status");
+    expect(html).not.toMatch(/sync failed|private diagnostic/i);
+    expect(mocks.timeline.isSyncing).toBe(true);
+    mocks.timeline.onSync(); await settle();
+    expect(postCalls()).toHaveLength(1);
+    expect(taskReads()).toHaveLength(1);
+    expect(mocks.toast.success).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(postCalls()).toHaveLength(1);
+    syncStatus = () => json({ operation: op("sync", "interrupted") });
+    click("Check status"); await settle();
+    expect(render(Home)).toContain("Trello sync was interrupted on the server. Completion is unverified");
+    expect(mocks.timeline.isSyncing).toBe(false);
+    expect(postCalls()).toHaveLength(1);
+    expect(mocks.toast.success).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(postCalls()).toHaveLength(1);
+  });
+
+  it("resumes existing sync on reload without posting, leaving analysis as an explicit action", async () => {
+    active = [op("sync", "running")];
+    mountHome(); await settle();
+    expect(render(Home)).toContain("Trello sync is running on the server.");
+    expect(mocks.timeline.isSyncing).toBe(true);
+    expect(postCalls()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(ATIS_POLL_INTERVAL_MS);
+    expect(render(Home)).toContain("Trello sync completed.");
+    expect(postCalls()).toHaveLength(0);
+    click("Analyze synced cards"); await settle();
+    expect(postCalls()).toHaveLength(1);
+    expect(postCalls()[0][0]).toBe("/api/atis/understanding/process");
+    await vi.advanceTimersByTimeAsync(ATIS_POLL_INTERVAL_MS);
+    expect(render(Home)).toContain("Card analysis completed.");
+  });
+
+  it("shows a retained interrupted operation on reload without refreshing or automatically posting", async () => {
+    active = [op("sync", "interrupted")];
+    mountHome(); await settle();
+    const html = render(Home);
+    expect(html).toContain("Trello sync was interrupted on the server. Completion is unverified");
+    expect(html).toContain("Operation #8");
+    expect(mocks.timeline.isSyncing).toBe(false);
+    expect(postCalls()).toHaveLength(0);
+    expect(taskReads()).toHaveLength(1);
+    expect(mocks.toast.success).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(postCalls()).toHaveLength(0);
+    click("Acknowledge interruption and restart sync"); await settle();
+    expect(postCalls()).toHaveLength(1);
+    expect(JSON.parse(String(postCalls()[0][1]?.body))).toEqual({ acknowledgeInterruptedOperationId: 8 });
+  });
+
+  it("does not toast or refresh a rejected analysis request when a different analysis is already running", async () => {
+    active = [op("sync", "running")];
+    mountHome(); await settle(); await vi.advanceTimersByTimeAsync(ATIS_POLL_INTERVAL_MS);
+    render(Home);
+    const originalFetch = mocks.fetch.getMockImplementation()!;
+    mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === "/api/atis/understanding/process") return json({ operation: op("understanding", "running"), requestedNotStarted: true }, 409);
+      return originalFetch(url, init);
+    });
+    const reads = taskReads().length;
+    const successes = mocks.toast.success.mock.calls.length;
+    click("Analyze synced cards"); await settle();
+    expect(render(Home)).toContain("Your request was not started");
+    expect(mocks.timeline.isSyncing).toBe(true);
+    expect(taskReads()).toHaveLength(reads);
+    expect(mocks.toast.success).toHaveBeenCalledTimes(successes);
+    click("Check status"); await settle();
+    expect(render(Home)).toContain("Your different request was not started");
+    expect(taskReads()).toHaveLength(reads);
+    expect(mocks.toast.success).toHaveBeenCalledTimes(successes);
+    expect(postCalls()).toHaveLength(1);
+  });
+});
+
 for (const page of pages) describe(`${page.name} task availability`, () => {
   let result: () => Response | Promise<Response>;
   const taskCalls = () => mocks.fetch.mock.calls.filter(([url]) => url === page.endpoint);
@@ -145,6 +284,7 @@ for (const page of pages) describe(`${page.name} task availability`, () => {
       if (url === "/api/working-hours/settings") return Promise.resolve(json({ workingDays: [2, 4] }));
       if (url === "/api/holidays") return Promise.resolve(json(["2026-12-25"]));
       if (url === "/api/atis/task-types") return Promise.resolve(json([]));
+      if (url === "/api/atis/operations/active") return Promise.resolve(json({ operations: [] }));
       throw new Error(`Unexpected endpoint: ${url}`);
     });
   });
