@@ -123,6 +123,18 @@
     </div>
 
     <script>
+        function statusElement(tag, text) {
+            const element = document.createElement(tag);
+            if (text !== undefined) element.textContent = text;
+            return element;
+        }
+
+        function setStatus(statusDiv, ...parts) {
+            statusDiv.replaceChildren(...parts.map(part =>
+                typeof part === 'string' ? document.createTextNode(part) : part
+            ));
+        }
+
         function clearCookies() {
             const statusDiv = document.getElementById('status');
             const clearBtn = document.getElementById('clearBtn');
@@ -153,26 +165,26 @@
                 // Check if we're on localhost:3001
                 if (window.location.hostname === 'localhost' && window.location.port === '3001') {
                     statusDiv.className = 'status success';
-                    statusDiv.innerHTML = `
-                        ✅ Success! Cleared ${clearedCount} cookie(s).<br>
-                        Click "Go to Dashboard" to test the login form.
-                    `;
+                    setStatus(statusDiv,
+                        `✅ Success! Cleared ${clearedCount} cookie(s).`, statusElement('br'),
+                        'Click "Go to Dashboard" to test the login form.'
+                    );
                     clearBtn.disabled = true;
                     goBtn.disabled = false;
                 } else {
                     statusDiv.className = 'status error';
-                    statusDiv.innerHTML = `
-                        ⚠️ Warning: This page is not opened from localhost:3001.<br>
-                        Current location: ${window.location.href}<br><br>
-                        Please open this file at: <code>http://localhost:3001/clear-cookies.html</code>
-                    `;
+                    setStatus(statusDiv,
+                        '⚠️ Warning: This page is not opened from localhost:3001.', statusElement('br'),
+                        `Current location: ${window.location.href}`, statusElement('br'), statusElement('br'),
+                        'Please open this file at: ', statusElement('code', 'http://localhost:3001/clear-cookies.html')
+                    );
                 }
             } catch (error) {
                 statusDiv.className = 'status error';
-                statusDiv.innerHTML = `
-                    ❌ Error clearing cookies: ${error.message}<br>
-                    Please use the manual method below.
-                `;
+                setStatus(statusDiv,
+                    `❌ Error clearing cookies: ${error.message}`, statusElement('br'),
+                    'Please use the manual method below.'
+                );
             }
         }
 
@@ -185,12 +197,13 @@
             const statusDiv = document.getElementById('status');
             if (window.location.hostname !== 'localhost' || window.location.port !== '3001') {
                 statusDiv.className = 'status error';
-                statusDiv.innerHTML = `
-                    ⚠️ This page must be opened from the dev server!<br><br>
-                    <strong>Current location:</strong> ${window.location.href}<br>
-                    <strong>Required location:</strong> <code>http://localhost:3001/clear-cookies.html</code><br><br>
-                    Please copy this file to <code>va-dashboard/client/public/</code> and access it through the dev server.
-                `;
+                setStatus(statusDiv,
+                    '⚠️ This page must be opened from the dev server!', statusElement('br'), statusElement('br'),
+                    statusElement('strong', 'Current location:'), ` ${window.location.href}`, statusElement('br'),
+                    statusElement('strong', 'Required location:'), ' ', statusElement('code', 'http://localhost:3001/clear-cookies.html'),
+                    statusElement('br'), statusElement('br'),
+                    'Please copy this file to ', statusElement('code', 'va-dashboard/client/public/'), ' and access it through the dev server.'
+                );
                 document.getElementById('clearBtn').disabled = true;
             }
         });

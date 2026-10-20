@@ -34,6 +34,8 @@ The application currently runs on PostgreSQL. The old MySQL schema and transfer 
 
 Compose binds the application to `127.0.0.1` by default. Do not publish it directly to the public network. `docker compose down` stops the app without touching PostgreSQL or Redis data.
 
+For a fresh database, also follow [first-owner provisioning](docs/OWNER_PROVISIONING.md) from the trusted administration environment. Preview before executing and complete the one-time owner setup UI before inviting workers. Provisioning does not create a worker profile or enable public registration.
+
 ## Deploy a published release to Hetzner
 
 The repository has a manual GitHub Actions workflow named **Deploy to Hetzner**. It accepts stable `vMAJOR.MINOR.PATCH` releases only, verifies the image's GitHub provenance, deploys the immutable GHCR digest, and restores the previous application image if the new container does not become healthy. It does not run database migrations or change application secrets.

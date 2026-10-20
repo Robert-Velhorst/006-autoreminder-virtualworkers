@@ -14,6 +14,7 @@ import { getDb } from '../db';
 import { and, isNotNull, ne, sql } from 'drizzle-orm';
 import { atisCards, atisComments } from '../../drizzle/schema.postgres';
 import { fetchWithRetry } from '../utils/retry';
+import { convert } from 'html-to-text';
 
 interface ChatbotConversation {
   platform: 'chatgpt' | 'gemini' | 'claude' | 'unknown';
@@ -245,28 +246,22 @@ export class ChatbotExtractorService {
   }
 
   /**
-   * Extract visible text from HTML (basic implementation)
+   * Extract conversation text without executable page content.
    */
   private extractVisibleText(html: string): string {
-    // Remove script and style tags
-    let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
-    text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
-    
-    // Remove HTML tags
-    text = text.replace(/<[^>]+>/g, ' ');
-    
-    // Decode HTML entities
-    text = text.replace(/&nbsp;/g, ' ');
-    text = text.replace(/&amp;/g, '&');
-    text = text.replace(/&lt;/g, '<');
-    text = text.replace(/&gt;/g, '>');
-    text = text.replace(/&quot;/g, '"');
-    
-    // Clean up whitespace
-    text = text.replace(/\s+/g, ' ').trim();
-    
-    // Limit length
-    return text.substring(0, 10000);
+    const text = convert(html, {
+      wordwrap: false,
+      selectors: [
+        { selector: 'script', format: 'skip' },
+        { selector: 'style', format: 'skip' },
+        { selector: 'img', format: 'skip' },
+        { selector: 'a', options: { ignoreHref: true } },
+        { selector: 'h1', options: { uppercase: false } },
+        { selector: 'h2', options: { uppercase: false } },
+        { selector: 'h3', options: { uppercase: false } },
+      ],
+    });
+    return text.replace(/\s+/g, ' ').trim().substring(0, 10000);
   }
 
   /**

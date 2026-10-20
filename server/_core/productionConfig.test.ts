@@ -55,6 +55,18 @@ describe("production configuration", () => {
     })).toContain("DATABASE_URL must enable verified TLS with one sslmode=verify-full option and no ssl override");
   });
 
+  it.each([
+    "postgresql://postgres/va_dashboard?sslmode=verify-full",
+    "postgresql://worker@postgres/va_dashboard?sslmode=verify-full",
+    "postgresql://:secret@postgres/va_dashboard?sslmode=verify-full",
+    "postgresql://worker:secret@postgres/?sslmode=verify-full",
+    "postgresql://worker:secret@postgres?sslmode=verify-full",
+    "postgresql://worker:secret@postgres/va_dashboard?sslmode=verify-full#ignored",
+  ])("rejects incomplete or ambiguous database configuration without printing values", databaseUrl => {
+    expect(getProductionConfigurationErrors({ ...validProductionEnvironment, DATABASE_URL: databaseUrl }))
+      .toEqual(["DATABASE_URL must include a host, database, username and password without a fragment"]);
+  });
+
   it("reports missing or unsafe production configuration without values", () => {
     const errors = getProductionConfigurationErrors({
       NODE_ENV: "production",

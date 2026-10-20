@@ -39,7 +39,7 @@ describe.skipIf(!testUrl)("pending owner native PostgreSQL transactions", () => 
       ${column.notNull ? sql`NOT NULL` : sql``}
       ${column.default === undefined ? sql`` : sql`DEFAULT ${column.default}`}
       ${column.isUnique ? sql`UNIQUE` : sql``}`);
-    await execute(sql`CREATE TABLE ${users} (${sql.join(columns, sql`, `)})`);
+    await execute(sql`CREATE TABLE ${users} (${sql.join(columns, sql`, `)})`.inlineParams());
   });
   afterEach(async () => {
     if (admin) {

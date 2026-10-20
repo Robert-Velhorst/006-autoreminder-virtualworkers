@@ -45,6 +45,10 @@ export function getProductionConfigurationErrors(env: Environment = process.env)
   ) {
     errors.push("DATABASE_URL must be a PostgreSQL connection URL");
   } else {
+    if (!parsedDatabaseUrl.hostname || !parsedDatabaseUrl.username || !parsedDatabaseUrl.password
+      || parsedDatabaseUrl.pathname === "/" || !parsedDatabaseUrl.pathname || parsedDatabaseUrl.hash) {
+      errors.push("DATABASE_URL must include a host, database, username and password without a fragment");
+    }
     const sslModes = parsedDatabaseUrl.searchParams.getAll("sslmode");
     if (sslModes.length !== 1 || sslModes[0] !== "verify-full" || parsedDatabaseUrl.searchParams.has("ssl")) {
       errors.push("DATABASE_URL must enable verified TLS with one sslmode=verify-full option and no ssl override");
