@@ -3,6 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { send } = vi.hoisted(() => ({ send: vi.fn() }));
 const { axiosPost } = vi.hoisted(() => ({ axiosPost: vi.fn() }));
 
+vi.mock("../googleEvidence", () => ({
+  getGoogleMailDeliveryStatus: vi.fn(async () => ({ connected: false })),
+  sendGoogleMail: vi.fn(async () => { throw new Error("Unexpected Gmail delivery in SendGrid policy test"); }),
+  validateGoogleMailDeliveryConnection: vi.fn(),
+}));
+
 vi.mock("@sendgrid/mail", () => ({
   default: {
     setApiKey: vi.fn(),

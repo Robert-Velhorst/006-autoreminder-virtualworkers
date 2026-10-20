@@ -12,7 +12,7 @@ describe("saveHandoffNote", () => {
   });
 
   it("does not report success when no assignment belongs to the worker", async () => {
-    const where = vi.fn().mockResolvedValue([{ affectedRows: 0 }]);
+    const where = vi.fn().mockResolvedValue({ rowCount: 0 });
     const set = vi.fn().mockReturnValue({ where });
     getDb.mockResolvedValue({ update: vi.fn().mockReturnValue({ set }) });
 
@@ -20,7 +20,7 @@ describe("saveHandoffNote", () => {
   });
 
   it("reports success only after updating the worker-owned assignment", async () => {
-    const where = vi.fn().mockResolvedValue([{ affectedRows: 1 }]);
+    const where = vi.fn().mockResolvedValue({ rowCount: 1 });
     const set = vi.fn().mockReturnValue({ where });
     getDb.mockResolvedValue({ update: vi.fn().mockReturnValue({ set }) });
 
