@@ -969,11 +969,18 @@ for (const scenario of [
         ).some(row => row.detail === update)
       ).toBe(true);
       await assertUnchanged();
+      await expect(assessmentToast).toHaveCount(0);
       await expect(manager.getByText(/technical assessment|AI review|semantic review/i)).toHaveCount(0);
       await expect(manager.getByText(/\d+%/)).toHaveCount(0);
       await assertAccessibility(page, testInfo, `${scenario.name}-worker-today`);
       if (page.viewportSize()!.width < 768) {
         await activateByKeyboard(page, page.getByRole("button", { name: "Open navigation" }));
+        await expect(
+          page.getByRole("dialog", { name: "Worker navigation" })
+        ).toBeVisible();
+        await expect(
+          page.getByRole("button", { name: /Today/ }).first()
+        ).toBeFocused();
       }
       await activateByKeyboard(page, page.getByRole("button", { name: /Plan My Day/ }).first());
       await expect(page).toHaveURL(/\/worker\/plan$/);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useLocation } from "wouter";
 import {
   Activity,
@@ -31,6 +31,7 @@ import {
   ShieldCheck,
   Sun,
   Timer,
+  X,
 } from "lucide-react";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc, type RouterOutputs } from "@/lib/trpc";
@@ -339,6 +340,43 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
   const { theme, toggleTheme } = useTheme();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const mobileNavRef = useRef<HTMLElement>(null);
+  const mobileTriggerRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (mobileOpen) {
+      mobileNavRef.current?.querySelector<HTMLElement>("[data-worker-nav-item]")?.focus();
+    }
+  }, [mobileOpen]);
+
+  function closeMobileNavigation() {
+    setMobileOpen(false);
+    mobileTriggerRef.current?.focus();
+  }
+
+  function handleMobileNavigationKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMobileNavigation();
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const focusable = Array.from(
+      mobileNavRef.current?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      ) ?? []
+    ).filter(element => element.getClientRects().length > 0);
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
   const context = trpc.operator.getContext.useQuery(undefined, { staleTime: 5 * 60_000 });
   const apiHealth = trpc.system.health.useQuery(
     { timestamp: 0 },
@@ -350,11 +388,20 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <aside className={`fixed inset-y-0 left-0 z-50 flex border-r bg-background transition-[width,transform] duration-200 ${collapsed ? "w-16" : "w-60"} ${mobileOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}>
+      <aside
+        id="worker-navigation"
+        ref={mobileNavRef}
+        role={mobileOpen ? "dialog" : undefined}
+        aria-label={mobileOpen ? "Worker navigation" : undefined}
+        aria-modal={mobileOpen ? true : undefined}
+        onKeyDown={mobileOpen ? handleMobileNavigationKeyDown : undefined}
+        className={`fixed inset-y-0 left-0 z-50 flex border-r bg-background transition-[width,transform] duration-200 ${collapsed ? "w-16" : "w-60"} ${mobileOpen ? "visible translate-x-0" : "invisible -translate-x-full md:visible md:translate-x-0"}`}
+      >
         <div className="flex w-full flex-col">
           <div className="flex h-16 items-center gap-3 border-b px-3">
             <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-blue-600 font-semibold text-white">{initials(workerName)}</div>
             {!collapsed && <div className="min-w-0"><div className="truncate font-semibold">{workerName}</div><div className="truncate text-xs text-muted-foreground">Worker operator</div></div>}
+            <Button variant="ghost" size="icon" className="ml-auto md:hidden" onClick={closeMobileNavigation} aria-label="Close navigation"><X className="size-4" /></Button>
           </div>
           <nav className="flex-1 space-y-1 p-2">
             {NAVIGATION.map((item) => {
@@ -363,7 +410,8 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
                 <button
                   key={item.path}
                   type="button"
-                  onClick={() => { navigate(item.path); setMobileOpen(false); }}
+                  data-worker-nav-item
+                  onClick={() => { navigate(item.path); if (mobileOpen) closeMobileNavigation(); }}
                   title={collapsed ? item.label : undefined}
                   className={`flex h-12 w-full items-center gap-3 rounded-md px-3 text-left transition-colors ${active ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"}`}
                 >
@@ -395,12 +443,12 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
           </button>
         </div>
       </aside>
-      {mobileOpen && <button type="button" aria-label="Close navigation" className="fixed inset-0 z-40 bg-black/50 md:hidden" onClick={() => setMobileOpen(false)} />}
+      {mobileOpen && <button type="button" aria-label="Close navigation" className="fixed inset-0 z-40 bg-black/50 md:hidden" onClick={closeMobileNavigation} />}
 
       <div className={`transition-[padding] duration-200 ${collapsed ? "md:pl-16" : "md:pl-60"}`}>
         <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b bg-background/95 px-4 backdrop-blur md:px-6">
           <div className="flex items-center gap-3">
-            <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setMobileOpen(true)} aria-label="Open navigation"><Menu className="size-4" /></Button>
+            <Button ref={mobileTriggerRef} variant="ghost" size="icon" className="md:hidden" onClick={() => setMobileOpen(true)} aria-label="Open navigation" aria-expanded={mobileOpen} aria-controls="worker-navigation"><Menu className="size-4" /></Button>
             <div><div className="text-sm font-semibold">Worker Operator</div><div className="text-xs text-muted-foreground">{workerName} · {formatWorkerDate(new Date(), timeZone)}</div></div>
           </div>
           <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">{theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}</Button>
