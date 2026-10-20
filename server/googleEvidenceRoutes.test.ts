@@ -40,8 +40,9 @@ const envBefore = {
   nodeEnv: process.env.NODE_ENV,
 };
 
-function appAs(user: TestUser | null) {
+function appAs(user: TestUser | null, trustProxy = false) {
   const app = express();
+  app.set("trust proxy", trustProxy ? 1 : false);
   app.use((req: Request, _res: Response, next: NextFunction) => {
     Object.assign(req, { user });
     next();
@@ -113,6 +114,40 @@ afterEach(() => {
 });
 
 describe("Google evidence OAuth route security", () => {
+  describe.each([
+    { purpose: "worker evidence", user: { id: 17, role: "worker" as const },
+      path: "/api/google-evidence/connect", cookieName: "google_evidence_oauth" },
+    { purpose: "admin mail delivery", user: { id: 99, role: "admin" as const },
+      path: "/api/google-evidence/mail-delivery/connect", cookieName: "google_mail_delivery_oauth" },
+  ])("$purpose OAuth cookie headers", ({ user, path, cookieName }) => {
+    it.each([
+      { scenario: "production behind a trusted HTTPS proxy", nodeEnv: "production", trustProxy: true, forwardedProto: "https", secure: true },
+      { scenario: "production even when the request appears to be HTTP", nodeEnv: "production", trustProxy: false, forwardedProto: "http", secure: true },
+      { scenario: "local development over HTTP", nodeEnv: "development", trustProxy: false, forwardedProto: "http", secure: false },
+      { scenario: "development behind a trusted HTTPS proxy", nodeEnv: "development", trustProxy: true, forwardedProto: "https", secure: true },
+      { scenario: "development ignoring an untrusted HTTPS forwarding header", nodeEnv: "development", trustProxy: false, forwardedProto: "https", secure: false },
+    ])("preserves HttpOnly and protocol policy in $scenario", async ({ nodeEnv, trustProxy, forwardedProto, secure }) => {
+      process.env.NODE_ENV = nodeEnv;
+      if (user.role === "worker") routeMocks.activeWorkerIds.add(user.id);
+      const fetchMock = vi.fn<typeof fetch>();
+      vi.stubGlobal("fetch", fetchMock);
+      const response = await request(appAs(user, trustProxy)).get(path).set("X-Forwarded-Proto", forwardedProto);
+      expect(response.status).toBe(302);
+      const cookies = response.headers["set-cookie"] as string[];
+      expect(cookies).toHaveLength(1);
+      const cookie = cookies[0];
+      expect(cookie.startsWith(`${cookieName}=`)).toBe(true);
+      expect(cookie).toMatch(/; HttpOnly(?:;|$)/);
+      expect(/; Secure(?:;|$)/.test(cookie)).toBe(secure);
+      expect(cookie).toMatch(/; SameSite=Lax(?:;|$)/);
+      expect(cookie).toMatch(/; Path=\/(?:;|$)/);
+      expect(cookie).toMatch(/; Max-Age=600(?:;|$)/);
+      expect(new URL(response.headers.location).origin).toBe("https://accounts.google.com");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(routeMocks.saveGoogleOAuthState).toHaveBeenCalledOnce();
+    });
+  });
+
   it("requires an active worker before exposing worker or delivery OAuth routes", async () => {
     const anonymousApp = appAs(null);
     const anonymous = await request(anonymousApp).get("/api/google-evidence/connect");

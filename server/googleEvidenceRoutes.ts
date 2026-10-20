@@ -188,7 +188,12 @@ router.get("/connect", async (req: Request & { user?: { id: number; role: string
     const codeChallenge = googlePkceChallenge(codeVerifier);
     const cookie: OAuthCookie = { ...statePayload, state, codeVerifier };
     await saveGoogleOAuthState("worker", statePayload.vaId, statePayload.nonce, statePayload.expiresAt);
-    res.cookie(OAUTH_COOKIE, encodeSignedJson(cookie), { ...getSessionCookieOptions(req), maxAge: OAUTH_MAX_AGE_MS });
+    res.cookie(OAUTH_COOKIE, encodeSignedJson(cookie), {
+      ...getSessionCookieOptions(req),
+      httpOnly: true,
+      secure: getSessionCookieOptions(req).secure,
+      maxAge: OAUTH_MAX_AGE_MS,
+    });
 
     const authorization = new URL(GOOGLE_AUTHORIZE_URL);
     authorization.search = new URLSearchParams({
@@ -270,7 +275,12 @@ router.get("/mail-delivery/connect", async (req: Request & { user?: { id: number
     const codeChallenge = googlePkceChallenge(codeVerifier);
     const cookie: MailDeliveryOAuthCookie = { ...statePayload, state, codeVerifier };
     await saveGoogleOAuthState("mail-delivery", statePayload.userId, statePayload.nonce, statePayload.expiresAt);
-    res.cookie(MAIL_DELIVERY_OAUTH_COOKIE, encodeSignedJson(cookie), { ...getSessionCookieOptions(req), maxAge: OAUTH_MAX_AGE_MS });
+    res.cookie(MAIL_DELIVERY_OAUTH_COOKIE, encodeSignedJson(cookie), {
+      ...getSessionCookieOptions(req),
+      httpOnly: true,
+      secure: getSessionCookieOptions(req).secure,
+      maxAge: OAUTH_MAX_AGE_MS,
+    });
 
     const authorization = new URL(GOOGLE_AUTHORIZE_URL);
     authorization.search = new URLSearchParams({

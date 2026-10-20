@@ -1,12 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { createContext, runInContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
+import { installCookieHelper } from '../../client/public/clear-cookies.js';
 
 class TestNode {
   children: TestNode[] = [];
   className = '';
   disabled = false;
+  listeners = new Map<string, () => void>();
+  addEventListener(event: string, callback: () => void) { this.listeners.set(event, callback); }
   constructor(readonly tag: string, private text = '') {}
   get textContent(): string { return this.text + this.children.map(node => node.textContent).join(''); }
   set textContent(value: string) { this.text = value; this.children = []; }
@@ -25,14 +27,30 @@ function loadPage(path: string, location = { hostname: 'example.invalid', port: 
     createTextNode: (text: string) => new TestNode('#text', text),
     createElement: (tag: string) => { const node = new TestNode(tag); elements.push(node); return node; },
   };
-  const context = createContext({ document, window: { location, addEventListener: (event: string, callback: () => void) => listeners.set(event, callback) } });
+  const window = {
+    location,
+    addEventListener: (event: string, callback: () => void) => listeners.set(event, callback),
+  };
   const html = readFileSync(resolve(process.cwd(), path), 'utf8');
-  const script = html.slice(html.indexOf('<script>') + '<script>'.length, html.indexOf('</script>'));
-  runInContext(script, context);
-  return { nodes, elements, document, location, listeners, clear: () => runInContext('clearCookies()', context), go: () => runInContext('goToDashboard()', context) };
+  const modulePath = path === 'clear-cookies.html' ? './client/public/clear-cookies.js' : './clear-cookies.js';
+  expect(html).toContain(`<script type="module" src="${modulePath}"></script>`);
+  expect(html).not.toContain('onclick=');
+  installCookieHelper(document as unknown as Document, window as unknown as Parameters<typeof installCookieHelper>[1]);
+  return { nodes, elements, document, window, location, listeners,
+    clear: () => nodes.clearBtn.listeners.get('click')!(), go: () => nodes.goBtn.listeners.get('click')!() };
 }
 
 describe.each(['clear-cookies.html', 'client/public/clear-cookies.html'])('%s DOM status messages', path => {
+  it('registers both click listeners without inline handlers or window functions', () => {
+    const page = loadPage(path);
+    expect([...page.nodes.clearBtn.listeners.keys()]).toEqual(['click']);
+    expect([...page.nodes.goBtn.listeners.keys()]).toEqual(['click']);
+    expect(page.window).not.toHaveProperty('clearCookies');
+    expect(page.window).not.toHaveProperty('goToDashboard');
+    page.go();
+    expect(page.location.href).toBe('/');
+  });
+
   it('shows an untrusted location as text on load and on a wrong-host clear attempt', () => {
     const page = loadPage(path);
     page.listeners.get('load')!();

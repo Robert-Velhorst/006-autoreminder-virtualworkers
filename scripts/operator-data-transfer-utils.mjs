@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import pg from "pg";
 
 export const TRANSFER_EXPORT_FORMAT = "joyce-operator-export-v2";
 const CREDENTIAL_REASON = "credential-setting-private-restoration-required";
@@ -55,7 +56,7 @@ export function redactSensitiveSettings(rows) {
 
 export function quoteIdentifier(value) {
   if (typeof value !== "string" || !value || value.includes("\0")) throw new Error("Invalid SQL identifier");
-  return `"${value.replaceAll('"', '""')}"`;
+  return pg.escapeIdentifier(value);
 }
 
 function positiveId(value) {
@@ -241,6 +242,7 @@ export async function advanceTransferSequences(connection, table, columns) {
     const state = await connection.query(`SELECT last_value::text, is_called FROM ${sequence}`);
     const maximum = await connection.query(`SELECT MAX(${quoteIdentifier(column.column_name)})::text AS maximum FROM ${quoteIdentifier(table)}`);
     const next = sequenceRestartValue(maximum.rows[0].maximum, state.rows[0].last_value, state.rows[0].is_called);
+    if (!/^[1-9][0-9]*$/.test(next)) throw new Error(`Invalid identity sequence restart: ${table}.${column.column_name}`);
     if (BigInt(next) > BigInt(rows[0].maximum)) throw new Error(`Identity sequence exhausted: ${table}.${column.column_name}`);
     // RESTART is transactional; setval would survive a later rollback.
     await connection.query(`ALTER SEQUENCE ${sequence} RESTART WITH ${next}`);

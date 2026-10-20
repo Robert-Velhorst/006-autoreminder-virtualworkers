@@ -1,8 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import pg, { escapeIdentifier } from "pg";
 import { redactSensitiveSettings } from "./operator-data-transfer-utils.mjs";
 import {
-  canonicalColumnValue, prepareTransferRow, sameTransferRecord, sequenceRestartValue,
+  canonicalColumnValue, prepareTransferRow, quoteIdentifier, sameTransferRecord, sequenceRestartValue,
   sourceIdentity, transferIdentity, transferOperatorRecords, validateTransferPayload,
 } from "./operator-data-transfer-utils.mjs";
 import { TABLES, exportOperatorData, parseTransferArguments, verifyExport } from "./operator-data-transfer.mjs";
@@ -121,6 +122,25 @@ function database(options = {}) {
     throw new Error(`Unexpected fixture query: ${sql}`);
   } };
 }
+
+describe("PostgreSQL identifier sanitization", () => {
+  it("uses the installed driver sanitizer for quotes, qualification and injection-shaped identifiers", () => {
+    assert.equal(typeof pg.escapeIdentifier, "function");
+    assert.equal(pg.escapeIdentifier, escapeIdentifier);
+    for (const name of ["normal", 'embedded"quote', "schema.sequence", "semi;colon", 'x"; DROP TABLE users; --', "a\\b", "line\nbreak"]) {
+      assert.equal(quoteIdentifier(name), pg.escapeIdentifier(name));
+    }
+    assert.equal(quoteIdentifier('x"; DROP TABLE users; --'), '"x""; DROP TABLE users; --"');
+    assert.equal(quoteIdentifier("schema.sequence"), '"schema.sequence"');
+    assert.equal(`${quoteIdentifier('schema"name')}.${quoteIdentifier('seq"name')}`, '"schema""name"."seq""name"');
+  });
+
+  it("rejects empty, nonstring and NUL-bearing identifiers before calling the driver", () => {
+    for (const value of [null, undefined, "", 0, {}, ["users"], "\0", "prefix\0suffix"]) {
+      assert.throws(() => quoteIdentifier(value), /Invalid SQL identifier/);
+    }
+  });
+});
 
 describe("redactSensitiveSettings", () => {
   it("redacts secret-bearing values but keeps non-secret settings", () => {
@@ -379,6 +399,13 @@ describe("operator import/reconciliation transactions", () => {
 });
 
 describe("identity sequence arithmetic", () => {
+  it("rejects SQL-shaped sequence inputs and preserves bigint decimal-only output", () => {
+    for (const value of ["8; DROP TABLE users", "1 OR 1=1", "1.5", "1e3"]) {
+      assert.throws(() => sequenceRestartValue(value, "1", false));
+      assert.throws(() => sequenceRestartValue("8", value, true));
+    }
+    assert.match(sequenceRestartValue("9007199254740993", "1", true), /^[1-9][0-9]*$/);
+  });
   it("handles uncalled, ahead, empty and bigint high-water marks without rewinding", () => {
     assert.equal(sequenceRestartValue("8", "1", false), "9");
     assert.equal(sequenceRestartValue("8", "100", true), "101");

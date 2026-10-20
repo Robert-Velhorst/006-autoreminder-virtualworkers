@@ -32,4 +32,10 @@ The original 17 obsolete local branch heads are now local archive tags; their en
 
 These receipts do not establish real legacy-data reconciliation, restored credentials, target-host acceptance or the required five-working-day/100-reviewed-proposal shadow trial. Keep automatic planning in shadow mode until its separate acceptance criteria are met.
 
+### Security Scan Follow-Up
+
+The subsequent PR scan reported nine new annotations: dynamic sequence SQL, dynamic evaluation in a DOM test, and OAuth cookie options hidden behind an options spread. Identifiers now use the PostgreSQL driver's escaping utility and sequence restart values have an explicit decimal guard. The cookie helper uses a statically imported browser module and event listeners; neither inline handlers nor dynamic evaluation are needed. The OAuth cookie helper already enforced HttpOnly and production Secure behavior; both flags are now also explicit at the two call sites.
+
+The updated driver path passed all 20 ownership/native transfer tests and 26 utility tests. Focused DOM/cookie tests and type checking pass; both cookie-helper pages were exercised in Chromium with intercepted responses under the production CSP. No external provider was called. Scanner clearance remains unverified until the scan on the new exact commit completes; no query or finding was suppressed.
+
 Hosted PostgreSQL 18.6 has applied the appended migration chain and passed complete runtime table/column parity. A first real database test run passed 3,467 assertions and exposed remaining fixture/transfer compatibility issues; those corrections are committed for a fresh run. Final database, browser, source-attestation and container gates remain required before merge. The dependency audit reports no known vulnerabilities after the selector-parser patch.
