@@ -11,7 +11,7 @@ describe("worker waiting reason personalization", () => {
       { workerName: "Amina", founderName: "Daan", timeZone: "Europe/Amsterdam" },
     );
 
-    expect(result.waitingOn).toBe("joyce");
+    expect(result.waitingOn).toBe("worker");
     expect(result.waitingOnName).toBe("Amina");
     expect(result.nextAction).toContain("Amina");
     expect(result.nextAction).not.toContain("Joyce");
@@ -29,5 +29,18 @@ describe("worker waiting reason personalization", () => {
     expect(result.requiresRobert).toBe(true);
     expect(result.nextAction).toContain("Daan");
     expect(result.nextAction).not.toContain("Robert");
+  });
+
+  it("keeps legacy worker names readable without emitting a person-specific actor", () => {
+    const result = interpretWaitingReasonForWorker(
+      "Joyce still needs to upload the signed brief.",
+      { nowMs },
+      { workerName: "Amina", founderName: "Daan", timeZone: "Europe/Amsterdam" },
+    );
+
+    expect(result.waitingOn).toBe("worker");
+    expect(result.waitingOnName).toBe("Amina");
+    expect(result.nextAction).toContain("Amina");
+    expect(result.nextAction).not.toContain("Joyce");
   });
 });

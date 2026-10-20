@@ -4,13 +4,129 @@
  */
 import express, { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
+import { createHash, timingSafeEqual } from 'crypto';
+import { and, eq, isNull } from 'drizzle-orm';
 import { COOKIE_NAME, ONE_YEAR_MS } from '@shared/const';
+import { users } from '../../drizzle/schema';
 import { sdk } from '../_core/sdk';
 import { getSessionCookieOptions } from '../_core/cookies';
 import * as db from '../db';
 import { isLocalRegistrationAllowed } from '../_core/localRegistration';
+import { PASSWORD_MIN_LENGTH, validatePassword } from '../passwordPolicy';
 
 const router = express.Router();
+const TRELLO_LOGIN_REQUEST_TIMEOUT_MS = 15_000;
+
+// A browser-issued token is tied to the API key that requested it. Keep this
+// separate from the server integration key so replacing the login Power-Up
+// does not invalidate the trusted background collector token.
+function trelloLoginApiKey() {
+  return process.env.TRELLO_LOGIN_API_KEY?.trim() || process.env.TRELLO_API_KEY?.trim() || null;
+}
+
+/**
+ * Trello validates the authorization return URL before issuing a browser token.
+ * Keep that URL configuration-owned in production instead of trusting a Host
+ * header or whatever public origin happened to serve the login form.
+ */
+export function trelloLoginReturnUrl(env: NodeJS.ProcessEnv = process.env) {
+  const explicit = env.TRELLO_LOGIN_RETURN_URL?.trim();
+  if (explicit) {
+    try {
+      const parsed = new URL(explicit);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return parsed.toString();
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  const publicBase = [
+    env.PUBLIC_URL,
+    env.WEBHOOK_BASE_URL,
+    env.APP_URL,
+    env.VITE_FRONTEND_URL,
+    env.TRELLO_WEBHOOK_CALLBACK_URL,
+  ].find(value => Boolean(value?.trim()));
+  if (!publicBase) return null;
+
+  try {
+    const parsed = new URL(publicBase);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return `${parsed.origin}/trello-callback`;
+  } catch {
+    return null;
+  }
+}
+
+function ownerBootstrapConfig() {
+  return {
+    openId: process.env.OWNER_BOOTSTRAP_OPEN_ID?.trim() || null,
+    token: process.env.OWNER_BOOTSTRAP_TOKEN?.trim() || null,
+  };
+}
+
+export function ownerBootstrapTokenMatches(expected: string, supplied: string) {
+  const expectedDigest = createHash('sha256').update(expected).digest();
+  const suppliedDigest = createHash('sha256').update(supplied).digest();
+  return timingSafeEqual(expectedDigest, suppliedDigest);
+}
+
+async function getPendingOwnerBootstrap() {
+  const config = ownerBootstrapConfig();
+  if (!config.openId || !config.token || config.token.length < 24) return null;
+  const database = await db.getDb();
+  if (!database) return null;
+  const [owner] = await database.select({ id: users.id, openId: users.openId, name: users.name })
+    .from(users)
+    .where(and(eq(users.openId, config.openId), eq(users.role, 'admin'), isNull(users.passwordHash)))
+    .limit(1);
+  return owner ? { ...owner, token: config.token } : null;
+}
+
+router.get('/owner-bootstrap/status', async (_req: Request, res: Response) => {
+  try {
+    return res.json({ available: Boolean(await getPendingOwnerBootstrap()) });
+  } catch {
+    return res.json({ available: false });
+  }
+});
+
+router.post('/owner-bootstrap', async (req: Request, res: Response) => {
+  try {
+    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    try {
+      validatePassword(password);
+    } catch {
+      return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters` });
+    }
+    const owner = await getPendingOwnerBootstrap();
+    if (!owner || !token || !ownerBootstrapTokenMatches(owner.token, token)) {
+      return res.status(403).json({ error: 'Owner setup is unavailable or the setup token is invalid' });
+    }
+    const database = await db.getDb();
+    if (!database) return res.status(503).json({ error: 'Database not available' });
+    const passwordHash = await bcrypt.hash(password, 12);
+    await database.update(users)
+      .set({ passwordHash, loginMethod: 'local', lastSignedIn: new Date() })
+      .where(and(eq(users.id, owner.id), isNull(users.passwordHash)));
+
+    const sessionToken = await sdk.createSessionToken(owner.openId, {
+      name: owner.name || owner.openId,
+      expiresInMs: ONE_YEAR_MS,
+    });
+    const cookieOptions = getSessionCookieOptions(req);
+    res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+    console.info('[LocalAuth] One-time owner access configured');
+    return res.json({ success: true, message: 'Owner access configured' });
+  } catch (error) {
+    console.error('[LocalAuth] Owner bootstrap error:', error);
+    return res.status(500).json({ error: 'Owner setup failed' });
+  }
+});
 
 /**
  * POST /api/auth/register
@@ -39,9 +155,11 @@ router.post('/register', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Username and password are required' });
     }
 
-    if (password.length < 6) {
+    try {
+      validatePassword(password);
+    } catch {
       console.log('[LocalAuth] Validation failed: password too short');
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+      return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters` });
     }
 
     // Check if user already exists
@@ -119,7 +237,7 @@ router.post('/login', async (req: Request, res: Response) => {
 
     // Verify password
     if (!user.passwordHash) {
-      return res.status(401).json({ error: 'This account does not have a local password. Please use OAuth login.' });
+      return res.status(401).json({ error: 'This account does not have a local password. Use Sign in with Trello.' });
     }
 
     const valid = await bcrypt.compare(password, user.passwordHash);
@@ -161,13 +279,16 @@ router.post('/trello/login-token', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Trello token is required' });
     }
 
-    const apiKey = process.env.TRELLO_API_KEY;
+    const apiKey = trelloLoginApiKey();
     if (!apiKey) {
       return res.status(500).json({ error: 'Trello API key not configured' });
     }
 
     // Verify token with Trello API
-    const response = await fetch(`https://api.trello.com/1/members/me?key=${apiKey}&token=${token}`);
+    const response = await fetch(
+      `https://api.trello.com/1/members/me?key=${apiKey}&token=${token}`,
+      { signal: AbortSignal.timeout(TRELLO_LOGIN_REQUEST_TIMEOUT_MS) },
+    );
     if (!response.ok) {
       return res.status(401).json({ error: 'Invalid Trello token' });
     }
@@ -228,11 +349,11 @@ router.post('/trello/login-token', async (req: Request, res: Response) => {
  * Get Trello API key for client-side login.
  */
 router.get('/trello/client-key', (req: Request, res: Response) => {
-  const apiKey = process.env.TRELLO_API_KEY;
+  const apiKey = trelloLoginApiKey();
   if (!apiKey) {
     return res.status(500).json({ error: 'Trello API key not configured' });
   }
-  return res.json({ apiKey });
+  return res.json({ apiKey, returnUrl: trelloLoginReturnUrl() });
 });
 
 export default router;

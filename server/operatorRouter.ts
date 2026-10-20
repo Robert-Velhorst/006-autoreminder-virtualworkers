@@ -26,14 +26,22 @@ import { getDb } from "./db";
 import { DecisionOutcomeError, getDecisionHistory, recordDecisionOutcome } from "./decisionOutcomesDb";
 import { generateOperatorDailyPlan, getOperatorDailyPlan, updateOperatorDailyPlan, type OperatorDailyPlanPayload } from "./operatorDailyPlan";
 import {
+  clearGoogleRefreshToken,
+  getGoogleEvidenceStatus,
+  syncWorkerGoogleEvidence,
+  updateGoogleEvidenceSettings,
+} from "./googleEvidence";
+import {
   buildOperatorEvidenceSummary,
   type OperatorAssessmentEvidence,
   type OperatorEvidenceSourceKey,
   type OperatorIntelligenceSnapshot,
 } from "./operatorEvidence";
 import { protectedProcedure, router } from "./_core/trpc";
+import { indexWorkQueueSteps } from "./operatorWorkQueueIndex";
 import { resolveWorkerOperatorContext } from "./workerOperatorContext";
 import { interpretWaitingReasonForWorker } from "./workerWaitingReason";
+import { canRecordWaitingReasonForCard } from "./timerAccess";
 
 const operatorProcedure = protectedProcedure.use(async ({ ctx, next }) => {
   if (ctx.user.role !== "worker") {
@@ -121,16 +129,16 @@ export const operatorRouter = router({
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Database unavailable" });
     const vaId = Number(ctx.user.id);
-    const [plans, states, scores, steps, waitingReasons] = await Promise.all([
+    const [plans, waitingReasons] = await Promise.all([
       db.select().from(aptlssPlans).where(eq(aptlssPlans.vaId, vaId)),
-      db.select().from(cardStates).where(eq(cardStates.vaId, vaId)),
-      db.select().from(priorityScores).where(eq(priorityScores.vaId, vaId)),
-      db.select().from(aptlssSteps).where(eq(aptlssSteps.vaId, vaId)),
       getActiveWaitingReasons(vaId),
     ]);
     const cardIds = plans.map((plan) => plan.cardId);
-    const [assessments, linkedEvidence, linkedCommunication, linkedEmails, completedTimeEntries] = cardIds.length
+    const [states, scores, steps, assessments, linkedEvidence, linkedCommunication, linkedEmails, completedTimeEntries] = cardIds.length
       ? await Promise.all([
+          db.select().from(cardStates).where(and(eq(cardStates.vaId, vaId), inArray(cardStates.cardId, cardIds))),
+          db.select().from(priorityScores).where(and(eq(priorityScores.vaId, vaId), inArray(priorityScores.cardId, cardIds))),
+          db.select().from(aptlssSteps).where(and(eq(aptlssSteps.vaId, vaId), inArray(aptlssSteps.cardId, cardIds))),
           db.select().from(aptlssAssessments)
             .where(inArray(aptlssAssessments.cardId, cardIds))
             .orderBy(desc(aptlssAssessments.assessedAt)),
@@ -140,12 +148,16 @@ export const operatorRouter = router({
           }).from(workspaceEvidenceLinks)
             .innerJoin(workspaceEvidenceItems, eq(workspaceEvidenceItems.id, workspaceEvidenceLinks.evidenceId))
             .where(and(
+              eq(workspaceEvidenceItems.vaId, vaId),
               inArray(workspaceEvidenceLinks.cardId, cardIds),
               eq(workspaceEvidenceItems.active, true),
             )),
           db.select({ cardId: communicationEvidence.linkedCardId })
             .from(communicationEvidence)
-            .where(inArray(communicationEvidence.linkedCardId, cardIds)),
+            .where(and(
+              eq(communicationEvidence.vaId, vaId),
+              inArray(communicationEvidence.linkedCardId, cardIds),
+            )),
           db.select({ cardId: emailTasks.trelloCardId })
             .from(emailTasks)
             .where(and(
@@ -161,13 +173,14 @@ export const operatorRouter = router({
               inArray(timeEntries.cardId, cardIds),
             )),
         ])
-      : [[], [], [], [], []];
+      : [[], [], [], [], [], [], [], []];
     const latestAssessment = new Map<string, typeof assessments[number]>();
     assessments.forEach((assessment) => {
       if (!latestAssessment.has(assessment.cardId)) latestAssessment.set(assessment.cardId, assessment);
     });
     const stateMap = new Map(states.map((item) => [item.cardId, item]));
     const scoreMap = new Map(scores.map((item) => [item.cardId, item]));
+    const stepsByCardId = indexWorkQueueSteps(steps);
     const waitingMap = new Map(waitingReasons.map((item) => [item.cardId, item]));
     const sourceCounts = new Map<string, Partial<Record<Exclude<OperatorEvidenceSourceKey, "time">, number>>>();
     const completedTimeSamples = new Map<string, number>();
@@ -194,7 +207,7 @@ export const operatorRouter = router({
         const state = stateMap.get(plan.cardId);
         const score = scoreMap.get(plan.cardId);
         const assessment = latestAssessment.get(plan.cardId);
-        const cardSteps = steps.filter((step) => step.cardId === plan.cardId);
+        const cardSteps = stepsByCardId.get(plan.cardId) ?? [];
         const assessmentEvidence = assessment
           ? parseJson<OperatorAssessmentEvidence[]>(assessment.evidenceJson, [])
           : [];
@@ -284,6 +297,14 @@ export const operatorRouter = router({
       due: z.string().nullable().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Database unavailable" });
+      const plannedCard = await db.select({ cardId: aptlssPlans.cardId }).from(aptlssPlans)
+        .where(and(eq(aptlssPlans.vaId, ctx.user.id), eq(aptlssPlans.cardId, input.cardId)))
+        .limit(1);
+      if (!canRecordWaitingReasonForCard(Boolean(plannedCard[0]))) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "You can only record a waiting reason for a card in your work queue" });
+      }
       const worker = await resolveWorkerOperatorContext(ctx.user);
       const interpretation = interpretWaitingReasonForWorker(input.reason, input, {
         workerName: worker.displayName,
@@ -365,4 +386,31 @@ export const operatorRouter = router({
   getBrowserTabEvidenceHistory: operatorProcedure
     .input(z.object({ limit: z.number().int().min(1).max(366).default(30) }).optional())
     .query(({ input, ctx }) => getBrowserTabEvidenceHistory(ctx.user.id, input?.limit ?? 30)),
+
+  getGoogleEvidenceStatus: operatorProcedure.query(({ ctx }) => getGoogleEvidenceStatus(ctx.user.id)),
+  updateGoogleEvidenceSettings: workerMutation
+    .input(z.object({
+      gmail: z.object({
+        enabled: z.boolean().optional(),
+        intervalMinutes: z.number().int().min(15).max(1_440).optional(),
+        lookbackDays: z.number().int().min(1).max(90).optional(),
+      }).optional(),
+      drive: z.object({
+        enabled: z.boolean().optional(),
+        intervalMinutes: z.number().int().min(15).max(1_440).optional(),
+        lookbackDays: z.number().int().min(1).max(90).optional(),
+        folderId: z.string().trim().max(256).nullable().optional(),
+      }).optional(),
+    }))
+    .mutation(({ input, ctx }) => updateGoogleEvidenceSettings(ctx.user.id, input)),
+  syncGoogleEvidence: workerMutation
+    .input(z.object({
+      gmail: z.boolean().optional(),
+      drive: z.boolean().optional(),
+    }).optional())
+    .mutation(({ input, ctx }) => syncWorkerGoogleEvidence(ctx.user.id, input)),
+  disconnectGoogleEvidence: workerMutation.mutation(async ({ ctx }) => {
+    await clearGoogleRefreshToken(ctx.user.id);
+    return { success: true };
+  }),
 });

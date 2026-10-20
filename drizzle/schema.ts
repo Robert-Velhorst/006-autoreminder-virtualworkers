@@ -1,4 +1,4 @@
-import { int, mysqlEnum, mysqlTable, text, longtext, timestamp, varchar, decimal, boolean, date, uniqueIndex, index, foreignKey } from "drizzle-orm/mysql-core";
+import { int, mysqlEnum, mysqlTable, text, longtext, mediumtext, timestamp, varchar, decimal, boolean, date, uniqueIndex, index, foreignKey } from "drizzle-orm/mysql-core";
 
 /**
  * Core user table backing auth flow.
@@ -149,7 +149,7 @@ export const trelloCachedTasks = mysqlTable('trello_cached_tasks', {
   id: int('id').primaryKey().autoincrement(),
   userId: int('userId').notNull(),
   userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
-  taskData: text('taskData').notNull(), // JSON serialized task data
+  taskData: mediumtext('taskData').notNull(), // JSON serialized schedule response
   cachedAt: timestamp('cachedAt').defaultNow().notNull(),
   expiresAt: timestamp('expiresAt').notNull(),
 });
@@ -214,6 +214,28 @@ export const vaProfiles = mysqlTable('va_profiles', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
+
+export const workerInvitations = mysqlTable('worker_invitations', {
+  id: int('id').primaryKey().autoincrement(),
+  userId: int('userId').notNull(),
+  vaId: int('vaId').notNull(),
+  founderId: int('founderId').notNull(),
+  email: varchar('email', { length: 320 }).notNull(),
+  tokenHash: varchar('tokenHash', { length: 64 }).notNull(),
+  expiresAt: timestamp('expiresAt').notNull(),
+  sentAt: timestamp('sentAt'),
+  acceptedAt: timestamp('acceptedAt'),
+  revokedAt: timestamp('revokedAt'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
+}, (table) => ({
+  tokenHashUnique: uniqueIndex('worker_invitations_token_hash_unique').on(table.tokenHash),
+  userStatusIdx: index('worker_invitations_user_status_idx').on(table.userId, table.acceptedAt, table.revokedAt),
+  founderCreatedIdx: index('worker_invitations_founder_created_idx').on(table.founderId, table.createdAt),
+}));
+
+export type WorkerInvitation = typeof workerInvitations.$inferSelect;
+export type InsertWorkerInvitation = typeof workerInvitations.$inferInsert;
 
 // Task assignments linking tasks to VAs
 export const taskAssignments = mysqlTable('task_assignments', {
@@ -351,6 +373,7 @@ export const timeEntries = mysqlTable('time_entries', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 }, (table) => [
   index('time_entries_period_idx').on(table.startTime, table.endTime),
+  index('va_time_entries_period_idx').on(table.vaId, table.startTime, table.endTime),
   index('time_entries_plan_block_idx').on(table.planDateKey, table.planBlockId),
   index('time_entries_step_idx').on(table.aptlssStepId),
 ]);
@@ -569,7 +592,7 @@ export const replyThreads = mysqlTable("reply_threads", {
   lastNonWorkerAuthor: varchar("lastNonWorkerAuthor", { length: 256 }).notNull().default(""),
   lastNonWorkerText: text("lastNonWorkerText"),
   lastWorkerReplyAt: timestamp("lastWorkerReplyAt"),
-  status: mysqlEnum("status", ["pending", "replied", "overdue"]).notNull().default("pending"),
+  status: mysqlEnum("status", ["pending", "replied", "overdue", "inactive"]).notNull().default("pending"),
   demerited: boolean("demerited").notNull().default(false),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -639,7 +662,10 @@ export const emailTasks = mysqlTable("email_tasks", {
   archivedAt: timestamp("archivedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
-});
+}, (table) => [
+  index("email_tasks_va_status_received_idx").on(table.vaId, table.status, table.receivedAt),
+  index("email_tasks_va_trello_card_idx").on(table.vaId, table.trelloCardId),
+]);
 
 // Card snoozes per worker
 export const cardSnoozes = mysqlTable("card_snoozes", {
@@ -766,6 +792,17 @@ export const atisCards = mysqlTable('atis_cards', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
+
+export const atisChecklistCompletion = mysqlTable('atis_checklist_completion', {
+  id: int('id').primaryKey().autoincrement(),
+  cardId: int('card_id').notNull(),
+  stepIndex: int('step_index').notNull(),
+  userId: int('user_id').notNull(),
+  completedAt: timestamp('completed_at').defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex('card_step_user_unique').on(table.cardId, table.stepIndex, table.userId),
+  index('atis_checklist_user_completed_idx').on(table.userId, table.completedAt),
+]);
 
 // Attachments with extracted content
 export const atisAttachments = mysqlTable('atis_attachments', {
@@ -951,6 +988,153 @@ export const digestJobs = mysqlTable('digest_jobs', {
 
 export type DigestJob = typeof digestJobs.$inferSelect;
 export type InsertDigestJob = typeof digestJobs.$inferInsert;
+
+// Durable reminder orchestration. These tables form one auditable path from a
+// source commitment through policy review, delivery, escalation, and closure.
+export const commitments = mysqlTable('commitments', {
+  id: int('id').primaryKey().autoincrement(),
+  workspaceOwnerId: int('workspaceOwnerId').notNull(),
+  assignedUserId: int('assignedUserId'),
+  createdByUserId: int('createdByUserId').notNull(),
+  sourceType: mysqlEnum('sourceType', ['manual', 'trello', 'gmail', 'google_drive', 'system']).notNull(),
+  sourceId: varchar('sourceId', { length: 255 }),
+  sourceUrl: varchar('sourceUrl', { length: 1024 }),
+  title: varchar('title', { length: 500 }).notNull(),
+  context: text('context'),
+  dueAt: timestamp('dueAt').notNull(),
+  status: mysqlEnum('status', ['open', 'completed', 'cancelled']).default('open').notNull(),
+  completedAt: timestamp('completedAt'),
+  cancelledAt: timestamp('cancelledAt'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex('commitments_workspace_source_unique').on(table.workspaceOwnerId, table.sourceType, table.sourceId),
+  index('commitments_workspace_status_due_idx').on(table.workspaceOwnerId, table.status, table.dueAt),
+  index('commitments_assignee_status_due_idx').on(table.assignedUserId, table.status, table.dueAt),
+]);
+
+export const reminderRules = mysqlTable('reminder_rules', {
+  id: int('id').primaryKey().autoincrement(),
+  workspaceOwnerId: int('workspaceOwnerId').notNull(),
+  createdByUserId: int('createdByUserId').notNull(),
+  name: varchar('name', { length: 255 }).notNull(),
+  triggerType: mysqlEnum('triggerType', ['before_due', 'at_due', 'after_due', 'no_update', 'manual']).default('before_due').notNull(),
+  offsetMinutes: int('offsetMinutes').default(60).notNull(),
+  channel: mysqlEnum('channel', ['in_app', 'email']).default('in_app').notNull(),
+  requireApproval: boolean('requireApproval').default(true).notNull(),
+  maxAttempts: int('maxAttempts').default(1).notNull(),
+  cooldownMinutes: int('cooldownMinutes').default(60).notNull(),
+  active: boolean('active').default(true).notNull(),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index('reminder_rules_workspace_active_idx').on(table.workspaceOwnerId, table.active),
+]);
+
+export const reminderPolicies = mysqlTable('reminder_policies', {
+  id: int('id').primaryKey().autoincrement(),
+  userId: int('userId').notNull(),
+  enabled: boolean('enabled').default(true).notNull(),
+  inAppEnabled: boolean('inAppEnabled').default(true).notNull(),
+  emailEnabled: boolean('emailEnabled').default(false).notNull(),
+  maxPerDay: int('maxPerDay').default(3).notNull(),
+  minIntervalMinutes: int('minIntervalMinutes').default(60).notNull(),
+  quietHoursStart: varchar('quietHoursStart', { length: 5 }).default('22:00').notNull(),
+  quietHoursEnd: varchar('quietHoursEnd', { length: 5 }).default('08:00').notNull(),
+  timezone: varchar('timezone', { length: 64 }).default('UTC').notNull(),
+  allowWeekends: boolean('allowWeekends').default(false).notNull(),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex('reminder_policies_user_unique').on(table.userId),
+]);
+
+export const reminderSchedules = mysqlTable('reminder_schedules', {
+  id: int('id').primaryKey().autoincrement(),
+  commitmentId: int('commitmentId').notNull(),
+  ruleId: int('ruleId').notNull(),
+  recipientUserId: int('recipientUserId').notNull(),
+  scheduledFor: timestamp('scheduledFor').notNull(),
+  state: mysqlEnum('state', [
+    'scheduled',
+    'preparing',
+    'draft_ready',
+    'sending',
+    'sent',
+    'failed',
+    'needs_review',
+    'escalated',
+    'skipped',
+    'cancelled',
+  ]).default('scheduled').notNull(),
+  channel: mysqlEnum('channel', ['in_app', 'email']).notNull(),
+  idempotencyKey: varchar('idempotencyKey', { length: 64 }).notNull(),
+  draftTitle: varchar('draftTitle', { length: 500 }),
+  draftContent: text('draftContent'),
+  policyReason: text('policyReason'),
+  attemptCount: int('attemptCount').default(0).notNull(),
+  lastAttemptAt: timestamp('lastAttemptAt'),
+  approvedAt: timestamp('approvedAt'),
+  approvedByUserId: int('approvedByUserId'),
+  sentAt: timestamp('sentAt'),
+  escalatedAt: timestamp('escalatedAt'),
+  error: text('error'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex('reminder_schedules_idempotency_unique').on(table.idempotencyKey),
+  index('reminder_schedules_due_state_idx').on(table.state, table.scheduledFor),
+  index('reminder_schedules_recipient_state_idx').on(table.recipientUserId, table.state, table.scheduledFor),
+  index('reminder_schedules_commitment_idx').on(table.commitmentId),
+]);
+
+export const reminderAuditEvents = mysqlTable('reminder_audit_events', {
+  id: int('id').primaryKey().autoincrement(),
+  workspaceOwnerId: int('workspaceOwnerId').notNull(),
+  commitmentId: int('commitmentId'),
+  scheduleId: int('scheduleId'),
+  actorUserId: int('actorUserId'),
+  eventType: varchar('eventType', { length: 64 }).notNull(),
+  detailsJson: longtext('detailsJson'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+}, (table) => [
+  index('reminder_audit_workspace_created_idx').on(table.workspaceOwnerId, table.createdAt),
+  index('reminder_audit_commitment_created_idx').on(table.commitmentId, table.createdAt),
+  index('reminder_audit_schedule_created_idx').on(table.scheduleId, table.createdAt),
+]);
+
+// Revocable, read-only credentials for HAI to consume the owner-scoped worker
+// control feed. Only a SHA-256 digest and a display prefix are persisted.
+export const haiConnectorTokens = mysqlTable('hai_connector_tokens', {
+  id: int('id').primaryKey().autoincrement(),
+  workspaceOwnerId: int('workspaceOwnerId').notNull(),
+  createdByUserId: int('createdByUserId').notNull(),
+  label: varchar('label', { length: 128 }).default('HAI Worker Control').notNull(),
+  tokenPrefix: varchar('tokenPrefix', { length: 24 }).notNull(),
+  tokenHash: varchar('tokenHash', { length: 64 }).notNull(),
+  scopes: varchar('scopes', { length: 255 }).default('worker_control:read').notNull(),
+  lastUsedAt: timestamp('lastUsedAt'),
+  expiresAt: timestamp('expiresAt'),
+  revokedAt: timestamp('revokedAt'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex('hai_connector_tokens_hash_unique').on(table.tokenHash),
+  index('hai_connector_tokens_owner_active_idx').on(table.workspaceOwnerId, table.revokedAt, table.createdAt),
+]);
+
+export type Commitment = typeof commitments.$inferSelect;
+export type InsertCommitment = typeof commitments.$inferInsert;
+export type ReminderRule = typeof reminderRules.$inferSelect;
+export type InsertReminderRule = typeof reminderRules.$inferInsert;
+export type ReminderPolicy = typeof reminderPolicies.$inferSelect;
+export type InsertReminderPolicy = typeof reminderPolicies.$inferInsert;
+export type ReminderSchedule = typeof reminderSchedules.$inferSelect;
+export type InsertReminderSchedule = typeof reminderSchedules.$inferInsert;
+export type ReminderAuditEvent = typeof reminderAuditEvents.$inferSelect;
+export type InsertReminderAuditEvent = typeof reminderAuditEvents.$inferInsert;
+export type HaiConnectorToken = typeof haiConnectorTokens.$inferSelect;
+export type InsertHaiConnectorToken = typeof haiConnectorTokens.$inferInsert;
 
 
 // ============================================
@@ -1171,6 +1355,8 @@ export type InsertInterviewResult = typeof interviewResults.$inferInsert;
 export const taskScheduleHistory = mysqlTable('task_schedule_history', {
   id: varchar('id', { length: 64 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
+  founderId: int('founderId'),
+  assignmentId: int('assignmentId'),
   cardTrelloId: varchar('cardTrelloId', { length: 64 }),
   
   // Previous schedule
@@ -1824,7 +2010,9 @@ export const aptlssSteps = mysqlTable("aptlss_steps", {
   lastSyncedAt: timestamp("lastSyncedAt").defaultNow().notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
-});
+}, (table) => [
+  index("va_aptlss_step_card_idx").on(table.vaId, table.cardId),
+]);
 
 export const cardStates = mysqlTable("card_states", {
   id: int("id").autoincrement().primaryKey(),
@@ -2085,6 +2273,7 @@ export const decisionOutcomes = mysqlTable("decision_outcomes", {
 
 export const workspaceEvidenceItems = mysqlTable("workspace_evidence_items", {
   id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId"),
   source: mysqlEnum("source", ["gmail", "google_drive", "trello", "communication"]).notNull(),
   sourceId: varchar("sourceId", { length: 256 }).notNull(),
   sourceContainerId: varchar("sourceContainerId", { length: 256 }),
@@ -2105,10 +2294,10 @@ export const workspaceEvidenceItems = mysqlTable("workspace_evidence_items", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, (table) => [
-  uniqueIndex("workspace_evidence_source_id_unique").on(table.source, table.sourceId),
-  index("workspace_evidence_source_modified_idx").on(table.source, table.modifiedAt),
-  index("workspace_evidence_active_observed_idx").on(table.active, table.observedAt),
-  index("workspace_evidence_review_idx").on(table.reviewStatus, table.modifiedAt),
+  uniqueIndex("workspace_evidence_va_source_id_unique").on(table.vaId, table.source, table.sourceId),
+  index("workspace_evidence_va_source_modified_idx").on(table.vaId, table.source, table.modifiedAt),
+  index("workspace_evidence_va_active_observed_idx").on(table.vaId, table.active, table.observedAt),
+  index("workspace_evidence_va_review_idx").on(table.vaId, table.reviewStatus, table.modifiedAt),
 ]);
 
 export const workspaceEvidenceLinks = mysqlTable("workspace_evidence_links", {
@@ -2132,6 +2321,7 @@ export const workspaceEvidenceLinks = mysqlTable("workspace_evidence_links", {
 
 export const communicationEvidence = mysqlTable("communication_evidence", {
   id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId"),
   channel: varchar("channel", { length: 64 }).notNull(),
   externalId: varchar("externalId", { length: 256 }).notNull(),
   threadId: varchar("threadId", { length: 256 }),
@@ -2149,13 +2339,14 @@ export const communicationEvidence = mysqlTable("communication_evidence", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, (table) => [
-  uniqueIndex("communication_evidence_channel_external_unique").on(table.channel, table.externalId),
-  index("communication_evidence_card_occurred_idx").on(table.linkedCardId, table.occurredAt),
-  index("communication_evidence_response_idx").on(table.responseRequired, table.respondedAt),
+  uniqueIndex("communication_evidence_va_channel_external_unique").on(table.vaId, table.channel, table.externalId),
+  index("communication_evidence_va_card_occurred_idx").on(table.vaId, table.linkedCardId, table.occurredAt),
+  index("communication_evidence_va_response_idx").on(table.vaId, table.responseRequired, table.respondedAt),
 ]);
 
 export const complianceCardEvidence = mysqlTable("compliance_card_evidence", {
   id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId"),
   snapshotDate: date("snapshotDate").notNull(),
   cardId: varchar("cardId", { length: 64 }).notNull(),
   cardName: varchar("cardName", { length: 512 }).notNull(),
@@ -2164,6 +2355,7 @@ export const complianceCardEvidence = mysqlTable("compliance_card_evidence", {
   listName: varchar("listName", { length: 256 }).notNull().default(""),
   category: varchar("category", { length: 16 }).notNull(),
   assignedToJoyce: boolean("assignedToJoyce").notNull().default(true),
+  assignedToWorker: boolean("assignedToWorker").notNull().default(true),
   compliant: boolean("compliant").notNull().default(false),
   evidenceType: varchar("evidenceType", { length: 32 }).notNull().default("none"),
   evidenceActionId: varchar("evidenceActionId", { length: 64 }),
@@ -2173,13 +2365,14 @@ export const complianceCardEvidence = mysqlTable("compliance_card_evidence", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, (table) => [
-  uniqueIndex("compliance_evidence_date_card_unique").on(table.snapshotDate, table.cardId),
-  index("compliance_evidence_card_date_idx").on(table.cardId, table.snapshotDate),
-  index("compliance_evidence_date_compliant_idx").on(table.snapshotDate, table.compliant),
+  uniqueIndex("compliance_evidence_va_date_card_unique").on(table.vaId, table.snapshotDate, table.cardId),
+  index("compliance_evidence_va_card_date_idx").on(table.vaId, table.cardId, table.snapshotDate),
+  index("compliance_evidence_va_date_compliant_idx").on(table.vaId, table.snapshotDate, table.compliant),
 ]);
 
 export const complianceCommunicationEvidence = mysqlTable("compliance_communication_evidence", {
   id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId"),
   snapshotDate: date("snapshotDate").notNull(),
   evidenceKey: varchar("evidenceKey", { length: 256 }).notNull(),
   kind: mysqlEnum("kind", ["message_response", "email_processing"]).notNull(),
@@ -2197,13 +2390,14 @@ export const complianceCommunicationEvidence = mysqlTable("compliance_communicat
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, (table) => [
-  uniqueIndex("compliance_comm_date_key_unique").on(table.snapshotDate, table.evidenceKey),
-  index("compliance_comm_date_kind_outcome_idx").on(table.snapshotDate, table.kind, table.outcome),
-  index("compliance_comm_external_idx").on(table.channel, table.externalId),
+  uniqueIndex("compliance_comm_va_date_key_unique").on(table.vaId, table.snapshotDate, table.evidenceKey),
+  index("compliance_comm_va_date_kind_outcome_idx").on(table.vaId, table.snapshotDate, table.kind, table.outcome),
+  index("compliance_comm_va_external_idx").on(table.vaId, table.channel, table.externalId),
 ]);
 
 export const complianceClarificationRequests = mysqlTable("compliance_clarification_requests", {
   id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId"),
   snapshotDate: date("snapshotDate").notNull(),
   evidenceKey: varchar("evidenceKey", { length: 256 }).notNull(),
   kind: mysqlEnum("kind", ["message_response", "email_processing"]).notNull(),
@@ -2221,8 +2415,8 @@ export const complianceClarificationRequests = mysqlTable("compliance_clarificat
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, (table) => [
-  uniqueIndex("compliance_clarification_date_key_unique").on(table.snapshotDate, table.evidenceKey),
-  index("compliance_clarification_status_requested_idx").on(table.status, table.requestedAt),
+  uniqueIndex("compliance_clarification_va_date_key_unique").on(table.vaId, table.snapshotDate, table.evidenceKey),
+  index("compliance_clarification_va_status_requested_idx").on(table.vaId, table.status, table.requestedAt),
 ]);
 
 export const timeEntryEvents = mysqlTable("time_entry_events", {
@@ -2304,6 +2498,15 @@ export const scheduledJobLeases = mysqlTable("scheduled_job_leases", {
 }, (table) => [
   index("scheduled_job_leases_expiry_idx").on(table.leaseExpiresAt),
 ]);
+
+export const maintenanceJobSettings = mysqlTable("maintenance_job_settings", {
+  jobKey: varchar("jobKey", { length: 96 }).primaryKey(),
+  enabled: boolean("enabled").notNull().default(true),
+  intervalMinutes: int("intervalMinutes").notNull(),
+  lastScheduledAt: timestamp("lastScheduledAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
 
 export const browserTabStates = mysqlTable("browser_tab_states", {
   id: int("id").autoincrement().primaryKey(),
@@ -2392,6 +2595,8 @@ export type TimeReconciliationItem = typeof timeReconciliationItems.$inferSelect
 export type InsertTimeReconciliationItem = typeof timeReconciliationItems.$inferInsert;
 export type ScheduledJobRun = typeof scheduledJobRuns.$inferSelect;
 export type InsertScheduledJobRun = typeof scheduledJobRuns.$inferInsert;
+export type MaintenanceJobSetting = typeof maintenanceJobSettings.$inferSelect;
+export type InsertMaintenanceJobSetting = typeof maintenanceJobSettings.$inferInsert;
 export type ScheduledJobLease = typeof scheduledJobLeases.$inferSelect;
 export type InsertScheduledJobLease = typeof scheduledJobLeases.$inferInsert;
 export type BrowserTabState = typeof browserTabStates.$inferSelect;

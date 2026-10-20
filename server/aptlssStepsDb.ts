@@ -87,6 +87,21 @@ export async function getOpenStepsForCard(vaId: number, cardId: string): Promise
     .orderBy(aptlssSteps.stepNumber);
 }
 
+/** Get open steps for a group of cards in one worker-scoped query. */
+export async function getOpenStepsForCards(vaId: number, cardIds: string[]): Promise<AptlssStep[]> {
+  const db = await getDb();
+  if (!db || cardIds.length === 0) return [];
+  return db
+    .select()
+    .from(aptlssSteps)
+    .where(and(
+      eq(aptlssSteps.vaId, vaId),
+      inArray(aptlssSteps.cardId, cardIds),
+      sql`${aptlssSteps.status} != 'obsolete'`,
+    ))
+    .orderBy(aptlssSteps.cardId, aptlssSteps.stepNumber);
+}
+
 /** Get all manual (human-added) steps for a card — used to preserve them during checklist sync. */
 export async function getManualStepsForCard(vaId: number, cardId: string): Promise<AptlssStep[]> {
   const db = await getDb();
@@ -145,6 +160,32 @@ export async function uncompleteStepByCheckItemId(
     .where(eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId));
 }
 
+function affectedRows(result: unknown): number {
+  const value = Array.isArray(result) ? result[0] : result;
+  return Number((value as { affectedRows?: unknown } | undefined)?.affectedRows ?? 0);
+}
+
+/** Update a Trello-backed step only when it belongs to the active worker. */
+export async function setStepCompletionForWorker(
+  vaId: number,
+  trelloCheckItemId: string,
+  complete: boolean,
+): Promise<boolean> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db
+    .update(aptlssSteps)
+    .set({
+      status: complete ? "complete" : "open",
+      completedAt: complete ? new Date() : null,
+    })
+    .where(and(
+      eq(aptlssSteps.vaId, vaId),
+      eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId),
+    ));
+  return affectedRows(result) === 1;
+}
+
 /** Mark a Founder-required step as resolved (removes from Decision Queue). */
 export async function resolveFounderStep(stepId: number): Promise<void> {
   const db = await getDb();
@@ -153,6 +194,25 @@ export async function resolveFounderStep(stepId: number): Promise<void> {
     .update(aptlssSteps)
     .set({ requiresRobert: false, status: "complete", completedAt: new Date() })
     .where(eq(aptlssSteps.id, stepId));
+}
+
+/** Resolve a Founder-required step only when it belongs to the active worker. */
+export async function resolveFounderStepForWorker(
+  vaId: number,
+  stepId: number,
+): Promise<boolean> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db
+    .update(aptlssSteps)
+    .set({ requiresRobert: false, status: "complete", completedAt: new Date() })
+    .where(and(
+      eq(aptlssSteps.id, stepId),
+      eq(aptlssSteps.vaId, vaId),
+      eq(aptlssSteps.requiresRobert, true),
+      eq(aptlssSteps.status, "open"),
+    ));
+  return affectedRows(result) === 1;
 }
 
 /** Get progress summary for a card: { total, completed, openFounder, openBlocked, estimatedRemainingMinutes } */
@@ -176,8 +236,22 @@ export async function getCardStepProgress(vaId: number, cardId: string) {
 export async function upsertCardState(state: InsertCardState): Promise<void> {
   const db = await getDb();
   if (!db) return;
-  await db.delete(cardStates).where(and(eq(cardStates.cardId, state.cardId), eq(cardStates.vaId, state.vaId)));
-  await db.insert(cardStates).values(state);
+  await db.insert(cardStates).values(state).onDuplicateKeyUpdate({
+    set: {
+      cardName: state.cardName ?? "",
+      boardName: state.boardName ?? "",
+      listName: state.listName ?? "",
+      state: state.state ?? "NEW_UNTRIAGED",
+      stateReason: state.stateReason ?? null,
+      daysSinceProgress: state.daysSinceProgress ?? 0,
+      hasUnansweredQuestion: state.hasUnansweredQuestion ?? false,
+      isOverdue: state.isOverdue ?? false,
+      checklistComplete: state.checklistComplete ?? false,
+      hasFinalSummary: state.hasFinalSummary ?? false,
+      calculatedAt: state.calculatedAt ?? new Date(),
+      updatedAt: new Date(),
+    },
+  });
 }
 
 /** Get the current state for a card (null if never computed). */
@@ -207,10 +281,19 @@ export async function upsertPriorityScore(
 ): Promise<void> {
   const db = await getDb();
   if (!db) return;
-  await db
-    .delete(priorityScores)
-    .where(and(eq(priorityScores.cardId, score.cardId), eq(priorityScores.vaId, score.vaId)));
-  await db.insert(priorityScores).values(score);
+  await db.insert(priorityScores).values(score).onDuplicateKeyUpdate({
+    set: {
+      cardName: score.cardName ?? "",
+      score: score.score ?? 0,
+      breakdown: score.breakdown ?? null,
+      tier: score.tier ?? "MEDIUM",
+      estimatedRemainingMinutes: score.estimatedRemainingMinutes ?? 0,
+      openSteps: score.openSteps ?? 0,
+      completedSteps: score.completedSteps ?? 0,
+      calculatedAt: score.calculatedAt ?? new Date(),
+      updatedAt: new Date(),
+    },
+  });
 }
 
 /** Get the priority score for a card (null if never computed). */

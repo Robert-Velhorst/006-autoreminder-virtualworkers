@@ -36,6 +36,9 @@ export function NotificationBell() {
   const [unreadCount, setUnreadCount] = useState(0);
   const [isOpen, setIsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [isDocumentVisible, setIsDocumentVisible] = useState(
+    () => document.visibilityState === 'visible',
+  );
 
   const fetchNotifications = async () => {
     try {
@@ -66,11 +69,19 @@ export function NotificationBell() {
   };
 
   useEffect(() => {
-    fetchUnreadCount();
-    // Poll for new notifications every 30 seconds
+    const syncVisibility = () => {
+      setIsDocumentVisible(document.visibilityState === 'visible');
+    };
+    document.addEventListener('visibilitychange', syncVisibility);
+    return () => document.removeEventListener('visibilitychange', syncVisibility);
+  }, []);
+
+  useEffect(() => {
+    if (!isDocumentVisible) return;
+    void fetchUnreadCount();
     const interval = setInterval(fetchUnreadCount, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isDocumentVisible]);
 
   useEffect(() => {
     if (isOpen) {

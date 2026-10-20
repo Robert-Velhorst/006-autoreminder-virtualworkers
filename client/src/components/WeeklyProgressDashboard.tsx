@@ -5,6 +5,7 @@ import { TrendingUp, TrendingDown, Target, Calendar, Clock, ChevronDown, Chevron
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { describeWeeklyTimeEvidence } from '../../../shared/weeklyProgressEvidence';
 
 interface WeeklyProgressData {
   weekStart: string;
@@ -45,21 +46,8 @@ export function WeeklyProgressDashboard() {
         const data = await response.json();
         setProgress(data);
       } else {
-        // If API returns error, use defaults
-        setProgress({
-          weekStart: getWeekStart(),
-          weekEnd: getWeekEnd(),
-          actualHours: 0,
-          actualMinutes: 0,
-          weeklyHoursMin: 55,
-          weeklyHoursMax: 60,
-          dailyHoursMin: 9.5,
-          dailyHoursMax: 11.5,
-          dailyHours: {},
-          progressPercent: 0,
-          onTrack: false,
-          status: 'under'
-        });
+        setProgress(null);
+        setError('Unable to load weekly progress');
       }
     } catch (err) {
       console.error('Error fetching weekly progress:', err);
@@ -172,6 +160,10 @@ export function WeeklyProgressDashboard() {
   const targetMidpoint = (progress.weeklyHoursMin + progress.weeklyHoursMax) / 2;
   const scheduledTotal = scheduledHours?.totalScheduledHours || 0;
   const scheduledProgressPercent = Math.min(100, Math.round((scheduledTotal / targetMidpoint) * 100));
+  const timeEvidence = describeWeeklyTimeEvidence(
+    progress.actualHours,
+    scheduledHours ? scheduledTotal : null,
+  );
 
   // Generate week days for the chart
   const weekDays: string[] = [];
@@ -287,15 +279,19 @@ export function WeeklyProgressDashboard() {
               </div>
             </div>
 
-            {/* Time Accuracy */}
+            {/* Source-backed time evidence only. */}
             <div className="flex items-center justify-between pt-2 border-t text-sm">
               <div className="flex items-center gap-2">
                 <Target className="h-4 w-4 text-muted-foreground" />
-                <span>Time Accuracy</span>
+                <span>Time evidence</span>
               </div>
-              <span className="font-bold text-green-500">100%</span>
+              <span className={cn("font-bold", timeEvidence.tone === "attention" ? "text-destructive" : "text-foreground")}>
+                {timeEvidence.label}
+              </span>
             </div>
-            <p className="text-xs text-muted-foreground -mt-2">Estimates are accurate</p>
+            <p className={cn("text-xs -mt-2", timeEvidence.tone === "attention" ? "text-destructive" : "text-muted-foreground")}>
+              {timeEvidence.detail}
+            </p>
           </CardContent>
         </CollapsibleContent>
       </Collapsible>

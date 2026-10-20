@@ -136,6 +136,8 @@ describe("WebSocket Service", () => {
 describe("WebSocket origin policy", () => {
   it("accepts configured origins and rejects untrusted browser origins", () => {
     expect(isAllowedWebSocketOrigin("https://dashboard.example", ["https://dashboard.example/app"])).toBe(true);
+    expect(isAllowedWebSocketOrigin("http://127.0.0.1:3025", ["http://127.0.0.1:3025"])).toBe(true);
+    expect(isAllowedWebSocketOrigin("http://127.0.0.1:4040", ["http://127.0.0.1:3025"])).toBe(false);
     expect(isAllowedWebSocketOrigin("https://attacker.example", ["https://dashboard.example"])).toBe(false);
     expect(isAllowedWebSocketOrigin(undefined, [])).toBe(true);
   });

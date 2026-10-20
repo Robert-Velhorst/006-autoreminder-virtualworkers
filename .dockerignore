@@ -20,6 +20,11 @@ pnpm-debug.log*
 # Testing
 coverage
 .nyc_output
+playwright-report
+test-results
+
+# Local runtime state and database backups
+.local
 
 # IDE
 .vscode

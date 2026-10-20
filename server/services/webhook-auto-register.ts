@@ -9,11 +9,18 @@ import { getDb } from '../db';
 import { eq, sql, and, isNull } from 'drizzle-orm';
 import { atisBoards, chatbotWebhooks } from '../../drizzle/schema';
 
-const TRELLO_API_KEY = process.env.TRELLO_API_KEY;
-const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
+const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
 
 // Store the callback URL - will be set on server startup
 let callbackUrl: string | null = null;
+let syncInterval: NodeJS.Timeout | null = null;
+
+function trelloCredentials() {
+  const key = process.env.TRELLO_API_KEY?.trim();
+  const token = process.env.TRELLO_TOKEN?.trim();
+  if (!key || !token) return null;
+  return { key, token };
+}
 
 /**
  * Set the callback URL for webhooks (called on server startup)
@@ -41,13 +48,19 @@ async function registerTrelloWebhook(
     console.error('[WebhookAutoRegister] Callback URL not set');
     return null;
   }
+  const credentials = trelloCredentials();
+  if (!credentials) {
+    console.error('[WebhookAutoRegister] Trello credentials are not configured');
+    return null;
+  }
 
   try {
     const response = await fetch(
-      `https://api.trello.com/1/webhooks?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
+      `https://api.trello.com/1/webhooks?key=${credentials.key}&token=${credentials.token}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS),
         body: JSON.stringify({
           idModel: modelId,
           callbackURL: callbackUrl,
@@ -82,10 +95,15 @@ async function registerTrelloWebhook(
  * Find an existing webhook for a model
  */
 async function findExistingWebhook(modelId: string): Promise<{ id: string; active: boolean } | null> {
+  const credentials = trelloCredentials();
+  if (!credentials) return null;
   try {
     const response = await fetch(
-      `https://api.trello.com/1/tokens/${TRELLO_TOKEN}/webhooks?key=${TRELLO_API_KEY}`,
-      { method: 'GET' }
+      `https://api.trello.com/1/tokens/${credentials.token}/webhooks?key=${credentials.key}`,
+      {
+        method: 'GET',
+        signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS),
+      }
     );
 
     if (!response.ok) {
@@ -109,10 +127,15 @@ async function findExistingWebhook(modelId: string): Promise<{ id: string; activ
  * Delete a webhook from Trello
  */
 async function deleteTrelloWebhook(webhookId: string): Promise<boolean> {
+  const credentials = trelloCredentials();
+  if (!credentials) return false;
   try {
     const response = await fetch(
-      `https://api.trello.com/1/webhooks/${webhookId}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-      { method: 'DELETE' }
+      `https://api.trello.com/1/webhooks/${webhookId}?key=${credentials.key}&token=${credentials.token}`,
+      {
+        method: 'DELETE',
+        signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS),
+      }
     );
     return response.ok;
   } catch (error) {
@@ -352,9 +375,16 @@ export async function removeWebhookForBoard(boardTrelloId: string): Promise<bool
 /**
  * Initialize webhook auto-registration on server startup
  */
-export async function initializeWebhookAutoRegister(serverUrl: string): Promise<void> {
+export async function initializeWebhookAutoRegister(serverUrl: string, autoSync = false): Promise<void> {
   // Set the callback URL
-  setWebhookCallbackUrl(`${serverUrl}/api/trello-webhook`);
+  const exactCallback = serverUrl.endsWith('/api/trello-webhook')
+    ? serverUrl
+    : `${serverUrl.replace(/\/$/, '')}/api/trello-webhook`;
+  setWebhookCallbackUrl(exactCallback);
+  if (!autoSync) {
+    console.log('[WebhookAutoRegister] Automatic external registration is disabled; use the explicit Settings action');
+    return;
+  }
   
   // Skip webhook auto-registration in development mode to prevent memory leaks
   // from failed webhook registrations when localhost is not reachable from Trello
@@ -368,17 +398,26 @@ export async function initializeWebhookAutoRegister(serverUrl: string): Promise<
   await syncWebhooks();
   
   // Set up periodic sync (every hour)
-  setInterval(async () => {
+  if (syncInterval) clearInterval(syncInterval);
+  syncInterval = setInterval(async () => {
     console.log('[WebhookAutoRegister] Running periodic sync...');
     await syncWebhooks();
   }, 60 * 60 * 1000); // 1 hour
+  syncInterval.unref();
+}
+
+export function stopWebhookAutoRegister(): void {
+  if (!syncInterval) return;
+  clearInterval(syncInterval);
+  syncInterval = null;
 }
 
 export default {
   setWebhookCallbackUrl,
   getWebhookCallbackUrl,
   syncWebhooks,
+  initializeWebhookAutoRegister,
+  stopWebhookAutoRegister,
   registerWebhookForBoard,
   removeWebhookForBoard,
-  initializeWebhookAutoRegister,
 };

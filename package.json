@@ -10,6 +10,7 @@
     "check": "tsc --noEmit",
     "format": "prettier --write .",
     "test": "vitest run",
+    "audit:prod": "pnpm audit --prod --audit-level=high",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
@@ -23,7 +24,8 @@
     "docker:run": "docker compose --env-file .env.db.local up -d",
     "docker:public": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-public-dashboard.ps1",
     "docker:stop": "docker compose --env-file .env.db.local --profile public down",
-    "docker:logs": "docker compose --env-file .env.db.local --profile public logs -f app ngrok"
+    "docker:logs": "docker compose --env-file .env.db.local --profile public logs -f app ngrok",
+    "doctor": "node scripts/doctor.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1100.0",
@@ -69,6 +71,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
+    "compression": "1.8.1",
     "cookie": "^1.0.2",
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.2",
@@ -81,8 +84,9 @@
     "jose": "6.1.0",
     "lucide-react": "^0.453.0",
     "mysql2": "^3.15.0",
-    "nanoid": "^5.1.5",
+    "nanoid": "^5.1.16",
     "next-themes": "^0.4.6",
+    "nodemailer": "^9.0.3",
     "pdf-parse": "^2.4.5",
     "react": "^19.1.1",
     "react-day-picker": "^9.11.1",
@@ -111,9 +115,11 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/bcryptjs": "^3.0.0",
+    "@types/compression": "1.8.1",
     "@types/express": "4.17.21",
     "@types/google.maps": "^3.58.1",
     "@types/node": "^24.7.0",
+    "@types/nodemailer": "^8.0.1",
     "@types/react": "^19.1.16",
     "@types/react-dom": "^19.1.9",
     "@types/supertest": "^7.2.0",
@@ -136,23 +142,5 @@
     "vitest": "^2.1.4",
     "vitest-dom": "^0.1.1"
   },
-  "packageManager": "pnpm@10.4.1+sha512.c753b6c3ad7afa13af388fa6d808035a008e30ea9993f58c6663e2bc5ff21679aa834db094987129aa4d488b86df57f7b634981b2f827cdcacc698cc0cfb88af",
-  "pnpm": {
-    "patchedDependencies": {
-      "wouter@3.7.1": "patches/wouter@3.7.1.patch"
-    },
-    "overrides": {
-      "tailwindcss>nanoid": "3.3.7",
-      "dompurify": "3.4.12",
-      "engine.io": "6.6.7",
-      "lodash": "4.18.1",
-      "lodash-es": "4.18.1",
-      "mdast-util-to-hast": "13.2.1",
-      "mermaid": "11.16.0",
-      "path-to-regexp": "0.1.13",
-      "socket.io-parser": "4.2.6",
-      "uuid": "13.0.2",
-      "ws": "8.21.1"
-    }
-  }
+  "packageManager": "pnpm@11.19.0"
 }

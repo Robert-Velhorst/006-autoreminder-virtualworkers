@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import { getCacheStats } from '../services/trello-cache';
 import { requestQueue } from '../services/request-queue';
 import { websocketService } from '../services/websocket';
+import { requireAdmin } from '../middleware/auth';
 
 interface AggregatedCacheStats {
   hits: number;
@@ -11,6 +12,7 @@ interface AggregatedCacheStats {
 }
 
 const router = express.Router();
+router.use('/metrics', requireAdmin);
 
 /**
  * Get comprehensive performance metrics
@@ -65,8 +67,9 @@ router.get('/metrics/performance', async (req: Request, res: Response) => {
 
     // Estimate API calls saved
     const apiCallsSaved = cacheStats.hits + (queueStats.totalRequests - queueStats.uniqueRequests);
-    const apiCallReduction = cacheStats.totalRequests > 0
-      ? (apiCallsSaved / cacheStats.totalRequests) * 100
+    const observedRequests = cacheStats.totalRequests + queueStats.totalRequests;
+    const apiCallReduction = observedRequests > 0
+      ? (apiCallsSaved / observedRequests) * 100
       : 0;
 
     // Response time improvements (estimated)
@@ -146,8 +149,9 @@ router.get('/metrics/history', async (req: Request, res: Response) => {
     const currentCacheHitRate = cacheStats.totalRequests > 0
       ? (cacheStats.hits / cacheStats.totalRequests) * 100
       : 0;
-    const currentApiReduction = cacheStats.totalRequests > 0
-      ? ((cacheStats.hits + (queueMetrics.totalRequests - queueMetrics.deduplicatedRequests)) / cacheStats.totalRequests) * 100
+    const observedRequests = cacheStats.totalRequests + queueMetrics.totalRequests;
+    const currentApiReduction = observedRequests > 0
+      ? ((cacheStats.hits + queueMetrics.deduplicatedRequests) / observedRequests) * 100
       : 0;
 
     res.json({

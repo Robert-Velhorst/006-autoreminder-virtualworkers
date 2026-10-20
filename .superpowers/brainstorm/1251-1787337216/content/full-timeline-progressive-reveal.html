@@ -1,0 +1,47 @@
+<h2>APTLSS: volledige dagtijdlijn, zonder ruis</h2>
+<p class="subtitle">De hele dag blijft zichtbaar. Alleen het huidige blok is open; de rest toont precies genoeg om te scannen. Een detailpaneel opent pas wanneer de VA bewust een item kiest.</p>
+
+<div class="mockup" style="margin-top:24px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;border-radius:10px;overflow:hidden;">
+  <div class="mockup-header" style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid #334155;">
+    <div><strong>Wed 29 Jul</strong><span style="margin-left:12px;color:#94a3b8;font-size:13px;">Plan is current · 4h 30m focused work</span></div>
+    <span style="font-size:13px;background:#134e4a;color:#a7f3d0;padding:5px 9px;border-radius:999px;">92% evidence coverage</span>
+  </div>
+  <div class="mockup-body" style="display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:0;">
+    <section style="padding:16px 18px;">
+      <div class="label">DAY TIMELINE</div>
+      <div style="margin-top:10px;border-left:2px solid #334155;padding-left:15px;">
+        <div style="display:grid;grid-template-columns:64px 1fr auto;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid #1e293b;">
+          <span style="color:#94a3b8;">09:00</span><div><strong>Morning triage</strong><br><small style="color:#94a3b8;">No new risks. Completed.</small></div><span style="color:#34d399;font-size:13px;">Done</span>
+        </div>
+        <div style="margin-left:-23px;padding:15px 16px 15px 21px;border:1px solid #2563eb;border-left:4px solid #3b82f6;border-radius:8px;background:#111c33;">
+          <div style="display:grid;grid-template-columns:64px 1fr auto;gap:12px;align-items:start;">
+            <span style="color:#bfdbfe;">09:30</span>
+            <div><div class="label" style="color:#60a5fa;">NOW · 55 MIN REMAINING</div><h3 style="margin:5px 0 6px;">Prepare client decision brief</h3><p style="margin:0;color:#cbd5e1;font-size:14px;">Compare submitted documents with the requested criteria. One email attachment still needs a check.</p><div style="margin-top:10px;color:#94a3b8;font-size:13px;">Evidence: Trello card · 2 emails · 1 Drive file · active timer</div></div>
+            <button class="mock-button" style="background:#2563eb;color:#fff;border:0;border-radius:6px;padding:8px 10px;">Open detail</button>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:64px 1fr auto;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid #1e293b;">
+          <span style="color:#94a3b8;">10:30</span><div><strong>Follow up on pending reply</strong><br><small style="color:#fbbf24;">Waiting reason will be rechecked in 12 min</small></div><span style="color:#fbbf24;font-size:13px;">Review</span>
+        </div>
+        <div style="display:grid;grid-template-columns:64px 1fr auto;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid #1e293b;">
+          <span style="color:#94a3b8;">11:00</span><div><strong>Update project evidence</strong><br><small style="color:#94a3b8;">Planning may shift if the review stays unresolved</small></div><span style="color:#60a5fa;font-size:13px;">Planned</span>
+        </div>
+        <div style="display:grid;grid-template-columns:64px 1fr auto;gap:12px;align-items:center;padding:11px 0;">
+          <span style="color:#94a3b8;">13:00</span><div><strong>Decision checkpoint</strong><br><small style="color:#94a3b8;">External actions remain approval-gated</small></div><span style="color:#a78bfa;font-size:13px;">Decision</span>
+        </div>
+      </div>
+    </section>
+    <aside style="border-left:1px solid #334155;padding:16px;background:#0b1220;">
+      <div class="label">NEEDS ATTENTION</div>
+      <div style="margin-top:10px;border:1px solid #7f1d1d;border-radius:8px;padding:12px;background:#231016;"><strong style="color:#fecaca;">Evidence conflict</strong><p style="margin:6px 0;color:#fecaca;font-size:13px;">Email may answer a card still marked waiting.</p><a href="#" style="color:#fda4af;font-size:13px;">Compare facts</a></div>
+      <div style="margin-top:12px;border:1px solid #334155;border-radius:8px;padding:12px;"><strong>Plan health</strong><p style="margin:6px 0;color:#94a3b8;font-size:13px;">No overlaps. 30 min buffer remains.</p></div>
+      <div style="margin-top:12px;border:1px solid #334155;border-radius:8px;padding:12px;"><strong>Quick update</strong><p style="margin:6px 0;color:#94a3b8;font-size:13px;">Free-text update becomes evidence, never an untraceable note.</p><button class="mock-button" style="background:#1e293b;color:#e2e8f0;border:1px solid #475569;border-radius:6px;padding:8px 10px;">Add update</button></div>
+    </aside>
+  </div>
+</div>
+
+<h3 style="margin-top:26px;">Waar moet het bewijsdetail openen?</h3>
+<div class="options">
+  <div class="option" data-choice="side-inspector" onclick="toggleSelect(this)"><div class="letter">A</div><div class="content"><h3>Rechter detailpaneel</h3><p>De tijdlijn blijft in beeld terwijl de VA bewijs, context en goedgekeurde acties bekijkt.</p></div></div>
+  <div class="option" data-choice="full-detail-page" onclick="toggleSelect(this)"><div class="letter">B</div><div class="content"><h3>Volledige detailpagina</h3><p>Meer ruimte voor diep onderzoek, maar de VA verlaat de dagtijdlijn tijdelijk.</p></div></div>
+</div>

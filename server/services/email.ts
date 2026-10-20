@@ -1,12 +1,133 @@
 import sgMail from '@sendgrid/mail';
+import nodemailer, { type Transporter } from 'nodemailer';
+import {
+  getGoogleMailDeliveryStatus,
+  sendGoogleMail,
+  validateGoogleMailDeliveryConnection,
+} from '../googleEvidence';
 
-// GLOBAL KILL SWITCH - Set to false to disable all email notifications
-const EMAIL_NOTIFICATIONS_ENABLED = process.env.NOTIFICATIONS_ENABLED === 'true' || process.env.NODE_ENV === 'production' || true;
+// Delivery must be explicitly enabled. Running in production alone must never
+// make the application send email with an unverified sender configuration.
+const EMAIL_NOTIFICATIONS_ENABLED = process.env.NOTIFICATIONS_ENABLED === 'true';
 
-// Initialize SendGrid with API key
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
+const SENDGRID_FROM_EMAIL = process.env.SENDGRID_FROM_EMAIL?.trim();
+const GMAIL_SMTP_USER = process.env.GMAIL_SMTP_USER?.trim();
+const GMAIL_SMTP_APP_PASSWORD = process.env.GMAIL_SMTP_APP_PASSWORD?.trim();
+const GMAIL_SMTP_HOST = process.env.GMAIL_SMTP_HOST?.trim() || 'smtp.gmail.com';
+const GMAIL_SMTP_PORT = Number(process.env.GMAIL_SMTP_PORT || '465');
+const GMAIL_SMTP_SECURE = process.env.GMAIL_SMTP_SECURE
+  ? process.env.GMAIL_SMTP_SECURE === 'true'
+  : GMAIL_SMTP_PORT === 465;
+
 if (SENDGRID_API_KEY) {
   sgMail.setApiKey(SENDGRID_API_KEY);
+}
+
+type EmailProvider = 'gmail_api' | 'sendgrid' | 'gmail_smtp';
+
+interface EmailProviderStatus {
+  provider: EmailProvider | null;
+  enabled: boolean;
+  ready: boolean;
+  reason?: string;
+}
+
+let gmailTransporter: Transporter | null = null;
+
+export async function getEmailProviderStatus(): Promise<EmailProviderStatus> {
+  if (!EMAIL_NOTIFICATIONS_ENABLED) {
+    return {
+      provider: null,
+      enabled: false,
+      ready: false,
+      reason: 'Email notifications are disabled',
+    };
+  }
+
+  const configuredProvider = process.env.EMAIL_PROVIDER?.trim().toLowerCase();
+  const provider = configuredProvider === 'gmail_api'
+    ? 'gmail_api'
+    : configuredProvider === 'gmail_smtp' || configuredProvider === 'gmail'
+      ? 'gmail_smtp'
+      : configuredProvider === 'sendgrid'
+        ? 'sendgrid'
+        : (await getGoogleMailDeliveryStatus()).connected
+          ? 'gmail_api'
+          : SENDGRID_API_KEY || SENDGRID_FROM_EMAIL
+            ? 'sendgrid'
+            : GMAIL_SMTP_USER || GMAIL_SMTP_APP_PASSWORD
+              ? 'gmail_smtp'
+              : null;
+
+  if (!provider) {
+    return {
+      provider: null,
+      enabled: true,
+      ready: false,
+      reason: 'No email provider is configured',
+    };
+  }
+
+  if (provider === 'gmail_api') {
+    const status = await getGoogleMailDeliveryStatus();
+    if (!status.connected) {
+      return {
+        provider,
+        enabled: true,
+        ready: false,
+        reason: status.setupMessage ?? 'Gmail API delivery is not connected',
+      };
+    }
+    return { provider, enabled: true, ready: true };
+  }
+
+  if (provider === 'sendgrid') {
+    if (!SENDGRID_API_KEY || !SENDGRID_FROM_EMAIL) {
+      return {
+        provider,
+        enabled: true,
+        ready: false,
+        reason: 'SendGrid requires an API key and verified sender address',
+      };
+    }
+    return { provider, enabled: true, ready: true };
+  }
+
+  if (!GMAIL_SMTP_USER || !GMAIL_SMTP_APP_PASSWORD) {
+    return {
+      provider,
+      enabled: true,
+      ready: false,
+      reason: 'Gmail SMTP requires an account and an app password',
+    };
+  }
+
+  if (!Number.isInteger(GMAIL_SMTP_PORT) || GMAIL_SMTP_PORT < 1 || GMAIL_SMTP_PORT > 65535) {
+    return {
+      provider,
+      enabled: true,
+      ready: false,
+      reason: 'Gmail SMTP port must be between 1 and 65535',
+    };
+  }
+
+  return { provider, enabled: true, ready: true };
+}
+
+function getGmailTransporter(): Transporter {
+  if (!gmailTransporter) {
+    gmailTransporter = nodemailer.createTransport({
+      host: GMAIL_SMTP_HOST,
+      port: GMAIL_SMTP_PORT,
+      secure: GMAIL_SMTP_SECURE,
+      auth: {
+        user: GMAIL_SMTP_USER!,
+        pass: GMAIL_SMTP_APP_PASSWORD!,
+      },
+    });
+  }
+  return gmailTransporter;
 }
 
 interface EmailOptions {
@@ -16,32 +137,78 @@ interface EmailOptions {
   text?: string;
 }
 
+function escapeEmailHtml(value: string) {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[character] ?? character));
+}
+
 export async function sendEmail(options: EmailOptions): Promise<boolean> {
-  // Check global kill switch
-  if (!EMAIL_NOTIFICATIONS_ENABLED) {
-    console.log(`[Email] NOTIFICATIONS DISABLED - would have sent to ${options.to}: ${options.subject}`);
-    return false;
-  }
-  
-  if (!SENDGRID_API_KEY) {
-    console.warn('SendGrid API key not configured, email not sent');
+  const status = await getEmailProviderStatus();
+  if (!status.ready || !status.provider) {
+    console.log(`[Email] Not sent: ${status.reason}`);
     return false;
   }
 
   try {
-    await sgMail.send({
-      to: options.to,
-      from: process.env.SENDGRID_FROM_EMAIL || 'noreply@vadashboard.app',
-      subject: options.subject,
-      html: options.html,
-      text: options.text || options.html.replace(/<[^>]*>/g, ''),
-    });
-    console.log(`Email sent to ${options.to}: ${options.subject}`);
+    const text = options.text || options.html.replace(/<[^>]*>/g, '');
+    if (status.provider === 'gmail_api') {
+      await sendGoogleMail({ to: options.to, subject: options.subject, html: options.html, text });
+    } else if (status.provider === 'sendgrid') {
+      await sgMail.send({
+        to: options.to,
+        from: SENDGRID_FROM_EMAIL!,
+        subject: options.subject,
+        html: options.html,
+        text,
+      });
+    } else {
+      await getGmailTransporter().sendMail({
+        to: options.to,
+        from: GMAIL_SMTP_USER!,
+        subject: options.subject,
+        html: options.html,
+        text,
+      });
+    }
+    console.log(`[Email] ${status.provider} delivery succeeded: ${options.subject}`);
     return true;
   } catch (error) {
-    console.error('Failed to send email:', error);
+    console.error(`[Email] ${status.provider} delivery failed:`, error);
     return false;
   }
+}
+
+export async function sendWorkerInvitationEmail({
+  email,
+  workerName,
+  inviteUrl,
+  expiresAt,
+}: {
+  email: string;
+  workerName: string;
+  inviteUrl: string;
+  expiresAt: Date;
+}) {
+  const safeName = escapeEmailHtml(workerName);
+  const safeUrl = escapeEmailHtml(inviteUrl);
+  const expiry = expiresAt.toISOString();
+  return sendEmail({
+    to: email,
+    subject: "Set up your Virtual Worker account",
+    text: `Hello ${workerName},\n\nUse this one-time link to set up your Virtual Worker account: ${inviteUrl}\n\nThe link expires at ${expiry}.`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#111827">
+      <h1 style="font-size:22px;margin:0 0 16px">Set up your worker account</h1>
+      <p>Hello ${safeName},</p>
+      <p>You have been invited to the Virtual Worker dashboard. Choose your own password, then connect your work evidence sources from the protected settings page.</p>
+      <p style="margin:24px 0"><a href="${safeUrl}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 18px;text-decoration:none;border-radius:6px;font-weight:600">Accept invitation</a></p>
+      <p style="font-size:13px;color:#6b7280">This one-time link expires at ${escapeEmailHtml(expiry)}. If you were not expecting this invitation, ignore this email.</p>
+    </div>`,
+  });
 }
 
 interface Task {
@@ -279,12 +446,31 @@ export async function sendEODReport(
   });
 }
 
-// Validate SendGrid API key by checking if it's configured
-export async function validateSendGridApiKey(): Promise<boolean> {
-  if (!SENDGRID_API_KEY) {
+export async function validateEmailProvider(): Promise<boolean> {
+  const status = await getEmailProviderStatus();
+  if (!status.ready || !status.provider) {
     return false;
   }
-  // SendGrid doesn't have a simple validation endpoint, so we just check if the key is set
-  // A real validation would require sending a test email
-  return SENDGRID_API_KEY.startsWith('SG.');
+
+  if (status.provider === 'gmail_api') {
+    return validateGoogleMailDeliveryConnection();
+  }
+
+  if (status.provider === 'gmail_smtp') {
+    try {
+      await getGmailTransporter().verify();
+      return true;
+    } catch (error) {
+      console.error('[Email] Gmail SMTP verification failed:', error);
+      return false;
+    }
+  }
+
+  return SENDGRID_API_KEY?.startsWith('SG.') ?? false;
+}
+
+// Backward-compatible SendGrid-specific check for existing callers.
+export async function validateSendGridApiKey(): Promise<boolean> {
+  const status = await getEmailProviderStatus();
+  return status.provider === 'sendgrid' && status.ready && (SENDGRID_API_KEY?.startsWith('SG.') ?? false);
 }

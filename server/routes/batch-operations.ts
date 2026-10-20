@@ -17,6 +17,8 @@ import { log } from '../utils/logger';
 import { expensiveOperationRateLimiter } from '../middleware/rate-limiter';
 import { requireAuthenticated, requestUser } from '../middleware/auth';
 import { resolveBatchSchedule } from '../schedulingApi';
+import { findUnownedBatchTaskIds } from '../batchOperationAuthorization';
+import * as schedulingDb from '../db/scheduling';
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -61,6 +63,18 @@ router.post('/start', expensiveOperationRateLimiter, async (req: any, res: Respo
     if (operationType === 'reschedule' && normalizedTaskIds.some((taskId) => !resolveBatchSchedule(parameters, taskId))) {
       return res.status(400).json({
         error: 'Batch reschedule requires a valid schedule per task or a preferredDate with a duration between 0.25 and 24 hours',
+      });
+    }
+
+    const assignedTasks = await schedulingDb.getUserTasks({
+      id: user.id,
+      openId: user.openId,
+      role: user.role,
+    });
+    const unownedTaskIds = findUnownedBatchTaskIds(assignedTasks, normalizedTaskIds);
+    if (unownedTaskIds.length > 0) {
+      return res.status(403).json({
+        error: 'Every batch task must be assigned to your account',
       });
     }
 

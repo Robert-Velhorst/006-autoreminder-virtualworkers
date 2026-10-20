@@ -430,6 +430,7 @@ router.get('/batch/:jobId', async (req: Request, res: Response) => {
     const failedTasks = liveProgress?.failedTasks ?? operation?.failedTasks ?? 0;
     const currentTaskName = liveProgress?.currentTaskName ?? operation?.currentTaskName;
     const elapsedTimeSeconds = liveProgress?.elapsedSeconds ?? operation?.elapsedTimeSeconds;
+    const estimatedTimeSeconds = liveProgress?.estimatedTimeSeconds ?? operation?.estimatedTimeSeconds;
     const isPaused = liveProgress?.isPaused ?? false;
     const pausedAt = liveProgress?.pausedAt ? new Date(liveProgress.pausedAt) : undefined;
 
@@ -444,6 +445,7 @@ router.get('/batch/:jobId', async (req: Request, res: Response) => {
       currentTaskName,
       elapsedSeconds,
       elapsedTimeSeconds,
+      estimatedTimeSeconds,
       isPaused,
       pausedAt
     });

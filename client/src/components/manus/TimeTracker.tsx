@@ -333,19 +333,18 @@ export default function TimeTracker() {
   const utils = trpc.useUtils();
 
   // ── queries ──────────────────────────────────────────────────────────────────
-  // All timer queries are now driven by SSE "timer-invalidate" events broadcast by the
-  // server after every start/stop/delete/update mutation. No polling needed.
-  // A 30-min fallback staleTime ensures data is refreshed after long idle periods.
+  // Timer mutations invalidate these local query keys directly. This avoids a
+  // subscription to an SSE endpoint that the server does not provide.
   const { data: activeTimer } = trpc.timer.getActive.useQuery(undefined, {
-    staleTime: 30 * 60_000, // no polling; SSE handles invalidation
+    staleTime: 30 * 60_000,
   });
 
   const { data: dailySummary = [] } = trpc.timer.getDailySummary.useQuery(
     { date: todayDate },
-    { staleTime: 30 * 60_000 } // no polling; SSE handles invalidation
+    { staleTime: 30 * 60_000 }
   );
 
-  // Weekly totals: no polling. Only change when a timer stops (SSE-driven) or on edit.
+  // Weekly totals change after a timer mutation or an edited session.
   const { data: weeklyTotal } = trpc.timer.getWeeklyTotal.useQuery(weekBounds, {
     staleTime: 30 * 60_000,
   });
@@ -354,22 +353,21 @@ export default function TimeTracker() {
     staleTime: 30 * 60_000,
   });
 
+  const { data: weeklyTarget } = trpc.trello.weeklyHours.useQuery(undefined, {
+    staleTime: 30 * 60_000,
+  });
+
   const { data: goalData } = trpc.settings.getDailyGoal.useQuery(undefined, {
     staleTime: 30 * 60_000,
   });
 
-  // ── SSE listener: invalidate all timer queries on server push ─────────────────
-  useEffect(() => {
-    const es = new EventSource("/api/sse/trello");
-    es.addEventListener("timer-invalidate", () => {
-      utils.timer.getActive.invalidate();
-      utils.timer.getDailySummary.invalidate();
-      utils.timer.getWeeklyTotal.invalidate();
-      utils.timer.getWeeklyBreakdown.invalidate();
-      utils.trello.weeklyHours.invalidate();
-    });
-    return () => { es.close(); };
-  }, [utils]);
+  const refreshTimerData = useCallback(() => Promise.all([
+    utils.timer.getActive.invalidate(),
+    utils.timer.getDailySummary.invalidate(),
+    utils.timer.getWeeklyTotal.invalidate(),
+    utils.timer.getWeeklyBreakdown.invalidate(),
+    utils.trello.weeklyHours.invalidate(),
+  ]), [utils]);
 
   const dailyGoalSeconds = (goalData?.hours ?? 9) * 3600;
 
@@ -391,8 +389,7 @@ export default function TimeTracker() {
     onSuccess: () => {
       toast.success("Timer stopped");
       setBannerDismissed(false); // reset banner state
-      // SSE "timer-invalidate" event handles cache invalidation automatically.
-      // refetchActive/refetchDaily/invalidate calls are no longer needed here.
+      void refreshTimerData();
     },
     onError: (e) => toast.error(`Failed to stop: ${e.message}`),
   });
@@ -403,15 +400,16 @@ export default function TimeTracker() {
   }, [activeTimer, stopMutation]);
 
   const handleEditSaved = useCallback(() => {
-    // SSE "timer-invalidate" event handles cache invalidation automatically.
-    // No manual invalidation needed here.
-  }, []);
+    void refreshTimerData();
+  }, [refreshTimerData]);
 
   // ── derived ───────────────────────────────────────────────────────────────────
   const todayTotalSeconds = dailySummary.reduce((s, r) => s + r.totalSeconds, 0)
     + (activeTimer ? elapsedSeconds : 0);
 
   const weeklyHours = weeklyTotal?.totalHours ?? 0;
+  const weeklyHoursMin = weeklyTarget?.targetMin ?? 55;
+  const weeklyHoursMax = weeklyTarget?.targetMax ?? 60;
 
   // Show the resume banner if a timer is running and it hasn't been dismissed this session
   const showResumeBanner = !!activeTimer && !bannerDismissed;
@@ -553,10 +551,8 @@ export default function TimeTracker() {
               // Overtime → amber ring; goal met → green; progressing → violet; early → amber
               const ringColor = isOvertime ? "#f59e0b" : pct >= 1 ? "#22c55e" : pct >= 0.6 ? "#a78bfa" : "#f59e0b";
               const goalHours = (dailyGoalSeconds / 3600).toFixed(0);
-              // Weekly OT: above 55h
-              const WEEKLY_OT_THRESHOLD = 55;
-              const weeklyOtHours = Math.max(weeklyHours - WEEKLY_OT_THRESHOLD, 0);
-              const isWeeklyOT = weeklyHours > WEEKLY_OT_THRESHOLD;
+              const weeklyOtHours = Math.max(weeklyHours - weeklyHoursMax, 0);
+              const isWeeklyOT = weeklyHours > weeklyHoursMax;
               return (
                 <div className="grid grid-cols-3 gap-3">
                   <div className="p-3 bg-violet-500/10 border border-violet-500/20 rounded-lg text-center">
@@ -618,9 +614,9 @@ export default function TimeTracker() {
                     )}
                     {!isWeeklyOT && (
                       <p className="text-[10px] text-muted-foreground mt-0.5">
-                        {Math.max(50 - weeklyHours, 0) > 0
-                          ? `${(50 - weeklyHours).toFixed(1)}h to min`
-                          : `${(55 - weeklyHours).toFixed(1)}h to max`}
+                        {Math.max(weeklyHoursMin - weeklyHours, 0) > 0
+                          ? `${(weeklyHoursMin - weeklyHours).toFixed(1)}h to min`
+                          : `${(weeklyHoursMax - weeklyHours).toFixed(1)}h to max`}
                       </p>
                     )}
                   </div>

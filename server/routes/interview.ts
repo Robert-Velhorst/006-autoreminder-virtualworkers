@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { publicProcedure, router } from '../_core/trpc';
+import { TRPCError } from '@trpc/server';
+import { protectedProcedure, router } from '../_core/trpc';
 import { analyzeCardBeforeInterview } from '../services/pre-interview-analysis';
 import { startInterview, processResponse } from '../services/conversational-interview';
 import {
@@ -10,54 +11,39 @@ import {
   recordInterviewResponse,
   completeInterview,
 } from '../services/interview-persistence';
-const TRELLO_API_KEY = process.env.TRELLO_API_KEY;
-const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
+import { fetchAuthorizedTrelloCardWithComments, TrelloAccessError } from '../trelloCardAccess';
+import type { User } from '../../drizzle/schema';
 
 // In-memory cache is kept only as a short-lived convenience layer.
-const interviewStates = new Map<string, { sessionId: string; state: any; preAnalysis: any }>();
+const interviewStates = new Map<string, { sessionId: string; userOpenId: string; state: any; preAnalysis: any }>();
 
 // Helper to get Trello card with all details
-async function getTrelloCard(cardId: string) {
-  const cardResponse = await fetch(
-    `https://api.trello.com/1/cards/${cardId}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&attachments=true&checklists=all`
-  );
-  
-  if (!cardResponse.ok) {
-    throw new Error(`Failed to fetch card: ${cardResponse.statusText}`);
+async function getTrelloCard(cardId: string, user: User) {
+  try {
+    return await fetchAuthorizedTrelloCardWithComments<any>(user, cardId);
+  } catch (error) {
+    if (error instanceof TrelloAccessError) {
+      const code = error.status === 403 ? 'FORBIDDEN' : error.status === 404 ? 'NOT_FOUND' : 'BAD_GATEWAY';
+      throw new TRPCError({ code, message: error.message });
+    }
+    throw error;
   }
-  
-  const card = await cardResponse.json();
-  
-  // Get comments
-  const actionsResponse = await fetch(
-    `https://api.trello.com/1/cards/${cardId}/actions?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&filter=commentCard`
-  );
-  
-  const comments = actionsResponse.ok ? await actionsResponse.json() : [];
-  
-  return {
-    ...card,
-    comments,
-  };
 }
 
 export const interviewRouter = router({
   /**
    * Start a new interview for a card
    */
-  start: publicProcedure
+  start: protectedProcedure
     .input(z.object({
       cardId: z.string(),
     }))
     .mutation(async ({ input, ctx }) => {
       const { cardId } = input;
       const user = ctx.user;
-      if (!user) {
-        throw new Error('Unauthorized');
-      }
 
       // Get card data from Trello
-      const card = await getTrelloCard(cardId);
+      const card = await getTrelloCard(cardId, user);
       if (!card) {
         throw new Error('Card not found');
       }
@@ -83,7 +69,7 @@ export const interviewRouter = router({
       });
 
       // Store state
-      interviewStates.set(cardId, { sessionId, state, preAnalysis });
+      interviewStates.set(cardId, { sessionId, userOpenId: user.openId, state, preAnalysis });
 
       return {
         sessionId,
@@ -96,7 +82,7 @@ export const interviewRouter = router({
   /**
    * Process user response and get next question
    */
-  respond: publicProcedure
+  respond: protectedProcedure
     .input(z.object({
       cardId: z.string(),
       sessionId: z.string().optional(),
@@ -105,14 +91,12 @@ export const interviewRouter = router({
     .mutation(async ({ input, ctx }) => {
       const { cardId, response, sessionId: providedSessionId } = input;
       const user = ctx.user;
-      if (!user) {
-        throw new Error('Unauthorized');
-      }
 
       // Get stored state
       let stored = providedSessionId
-        ? Array.from(interviewStates.values()).find(entry => entry.sessionId === providedSessionId)
+        ? Array.from(interviewStates.values()).find(entry => entry.sessionId === providedSessionId && entry.userOpenId === user.openId)
         : interviewStates.get(cardId);
+      if (stored?.userOpenId !== user.openId) stored = undefined;
 
       let session = null as any;
       if (!stored) {
@@ -130,7 +114,7 @@ export const interviewRouter = router({
           throw new Error('Interview state not found. Please restart the interview.');
         }
 
-        stored = { sessionId: session.id, state: sessionState, preAnalysis: null };
+        stored = { sessionId: session.id, userOpenId: user.openId, state: sessionState, preAnalysis: null };
         interviewStates.set(cardId, stored);
       } else {
         session = await getInterviewSession(stored.sessionId);
@@ -143,17 +127,20 @@ export const interviewRouter = router({
       if (!session) {
         throw new Error('Interview session not found.');
       }
+      if (session.userOpenId !== user.openId) {
+        throw new Error('Interview session does not belong to this account.');
+      }
 
       const { state } = stored;
 
-      const card = await getTrelloCard(cardId);
+      const card = await getTrelloCard(cardId, user);
       const preAnalysis = await analyzeCardBeforeInterview(card);
 
       // Process response
       const result = await processResponse(state, response, preAnalysis);
 
       // Update stored state
-      interviewStates.set(cardId, { sessionId: stored.sessionId, state, preAnalysis });
+      interviewStates.set(cardId, { sessionId: stored.sessionId, userOpenId: user.openId, state, preAnalysis });
 
       const latestQuestion = state.messages[state.messages.length - 2]?.content || '';
       const questionNumber = Math.max(0, state.validations.length - 1);
@@ -215,17 +202,20 @@ export const interviewRouter = router({
   /**
    * Get current interview state
    */
-  getState: publicProcedure
+  getState: protectedProcedure
     .input(z.object({
       cardId: z.string(),
     }))
-    .query(async ({ input }: { input: { cardId: string } }) => {
+    .query(async ({ input, ctx }) => {
       const { cardId } = input;
+      const user = ctx.user;
 
       const stored = interviewStates.get(cardId);
-      if (!stored) {
+      if (!stored || stored.userOpenId !== user.openId) {
         const sessions = await getCardInterviewSessions(cardId);
-        const session = sessions.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+        const session = sessions
+          .filter((candidate: any) => candidate.userOpenId === user.openId)
+          .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
         if (!session) {
           return null;
         }
@@ -252,13 +242,14 @@ export const interviewRouter = router({
   /**
    * Cancel interview
    */
-  cancel: publicProcedure
+  cancel: protectedProcedure
     .input(z.object({
       cardId: z.string(),
     }))
-    .mutation(async ({ input }: { input: { cardId: string } }) => {
+    .mutation(async ({ input, ctx }) => {
       const { cardId } = input;
-      interviewStates.delete(cardId);
+      const stored = interviewStates.get(cardId);
+      if (stored?.userOpenId === ctx.user.openId) interviewStates.delete(cardId);
       return { success: true };
     }),
 });

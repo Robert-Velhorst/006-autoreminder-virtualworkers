@@ -17,10 +17,20 @@ import {
   runAllPhases,
 } from '../services/atis-phases-service';
 import * as atisDb from '../db/atis-phases';
-import { requireAuthenticated, requestUser } from '../middleware/auth';
+import { requireAdmin, requestUser } from '../middleware/auth';
 
 const router = express.Router();
-router.use(requireAuthenticated);
+// This portal starts multi-phase LLM analyses and exposes their full output.
+// Its only client route is administrator-protected, so enforce the same rule
+// at the API boundary instead of relying on the frontend route guard.
+router.use(requireAdmin);
+
+function sendPhaseFailure(res: Response) {
+  return res.status(500).json({
+    success: false,
+    error: 'Could not complete the ATIS analysis request. Retry shortly.',
+  });
+}
 
 function ownsSession(user: NonNullable<ReturnType<typeof requestUser>>, session: { userId: string }) {
   return user.role === 'admin' || session.userId === user.openId || session.userId === String(user.id);
@@ -58,10 +68,7 @@ router.post('/start', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[ATIS Phases] Error starting analysis:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 
@@ -85,10 +92,7 @@ router.post('/phase3', async (req: Request, res: Response) => {
     res.json(result);
   } catch (error) {
     console.error('[ATIS Phase 3] Error:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 
@@ -112,10 +116,7 @@ router.post('/phase4', async (req: Request, res: Response) => {
     res.json(result);
   } catch (error) {
     console.error('[ATIS Phase 4] Error:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 
@@ -139,10 +140,7 @@ router.post('/phase5', async (req: Request, res: Response) => {
     res.json(result);
   } catch (error) {
     console.error('[ATIS Phase 5] Error:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 
@@ -166,10 +164,7 @@ router.post('/phase6', async (req: Request, res: Response) => {
     res.json(result);
   } catch (error) {
     console.error('[ATIS Phase 6] Error:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 
@@ -193,10 +188,7 @@ router.post('/phase7', async (req: Request, res: Response) => {
     res.json(result);
   } catch (error) {
     console.error('[ATIS Phase 7] Error:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 
@@ -220,10 +212,7 @@ router.post('/phase8', async (req: Request, res: Response) => {
     res.json(result);
   } catch (error) {
     console.error('[ATIS Phase 8] Error:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 
@@ -247,10 +236,7 @@ router.post('/phase9', async (req: Request, res: Response) => {
     res.json(result);
   } catch (error) {
     console.error('[ATIS Phase 9] Error:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 
@@ -274,10 +260,7 @@ router.post('/phase10', async (req: Request, res: Response) => {
     res.json(result);
   } catch (error) {
     console.error('[ATIS Phase 10] Error:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 
@@ -307,10 +290,7 @@ router.get('/session/:sessionId', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[ATIS] Error fetching session:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 
@@ -332,10 +312,53 @@ router.get('/task/:taskId', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[ATIS] Error fetching task analysis:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
+    sendPhaseFailure(res);
+  }
+});
+
+/**
+ * GET /api/atis/phases/analyze/:taskId
+ * Compatibility read model for the retained phase-analysis dashboard. This
+ * reads the latest persisted run only; it never starts a new analysis.
+ */
+router.get('/analyze/:taskId', async (req: Request, res: Response) => {
+  try {
+    const { taskId } = req.params;
+    if (!(await canAccessTask(req, taskId))) {
+      return res.status(403).json({ success: false, error: 'Task access denied' });
+    }
+
+    const [session] = await atisDb.getAnalysisSessionByTask(taskId);
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Analysis not found' });
+    }
+
+    let sessionData: Record<string, unknown> = {};
+    try {
+      const parsed = session.sessionData ? JSON.parse(session.sessionData) : {};
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        sessionData = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Older rows can contain malformed data. Preserve the session metadata
+      // rather than failing the complete operator page.
+    }
+
+    return res.json({
+      ...sessionData,
+      sessionId: session.id,
+      taskId,
+      taskTitle: typeof sessionData.taskTitle === 'string' ? sessionData.taskTitle : taskId,
+      status: session.status,
+      currentPhase: session.currentPhase,
+      phasesCompleted: session.phasesCompleted,
+      overallConfidence: Number(sessionData.overallConfidence ?? 0),
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
     });
+  } catch (error) {
+    console.error('[ATIS] Error loading analysis:', error);
+    return sendPhaseFailure(res);
   }
 });
 
@@ -357,10 +380,7 @@ router.get('/subtasks/:taskId', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[ATIS] Error fetching subtasks:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 
@@ -382,10 +402,7 @@ router.get('/risks/:taskId', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[ATIS] Error fetching risks:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 
@@ -407,10 +424,7 @@ router.get('/resources/:taskId', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[ATIS] Error fetching resources:', error);
-    res.status(500).json({
-      success: false,
-      error: String(error),
-    });
+    sendPhaseFailure(res);
   }
 });
 

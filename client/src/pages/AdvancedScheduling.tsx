@@ -16,7 +16,7 @@ import {
 import { AdvancedSchedulingCalendar } from '@/components/AdvancedSchedulingCalendar';
 import { BatchOperationsQueue } from '@/components/BatchOperationsQueue';
 import { useBatchOperations } from '@/hooks/useBatchOperations';
-import { getBatchOperationsClient } from '@/lib/batch-operations-client';
+import { getBatchOperationsClient, selectBatchOperationForPause } from '@/lib/batch-operations-client';
 import { ConflictDetectionSettings, type ConflictDetectionConfig } from '@/components/scheduling-settings/ConflictDetectionSettings';
 import { BatchOperationDefaults, type BatchOperationDefaultsConfig } from '@/components/scheduling-settings/BatchOperationDefaults';
 import { KeyboardShortcutsSettings, type KeyboardShortcut } from '@/components/scheduling-settings/KeyboardShortcutsSettings';
@@ -242,8 +242,8 @@ export default function AdvancedScheduling() {
     return operations.find(op => op.status === 'running') || null;
   }, [operations]);
 
-  const handlePauseToggle = useCallback(async () => {
-    const active = getPrimaryRunningOperation();
+  const handlePauseToggle = useCallback(async (requestedJobId?: string) => {
+    const active = selectBatchOperationForPause(operations, requestedJobId);
     if (!active) return;
 
     if (active.isPaused) {
@@ -251,7 +251,7 @@ export default function AdvancedScheduling() {
     } else {
       await pauseBatchOperation(active.jobId);
     }
-  }, [getPrimaryRunningOperation, pauseBatchOperation, resumeBatchOperation]);
+  }, [operations, pauseBatchOperation, resumeBatchOperation]);
 
   // Handle keyboard shortcuts
   React.useEffect(() => {
@@ -446,7 +446,7 @@ export default function AdvancedScheduling() {
         {/* Batch Queue Tab */}
         <TabsContent value="queue" className="space-y-4">
           <BatchOperationsQueue
-            operations={operations as any}
+            operations={operations}
             onCancel={cancelBatchOperation}
             onPauseToggle={handlePauseToggle}
             isLoading={isLoadingOps}

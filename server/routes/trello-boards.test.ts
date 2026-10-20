@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { trelloBoardsErrorMessage } from './trello-boards';
 
 describe('Trello Boards API - Logic Tests', () => {
   beforeEach(() => {
@@ -146,6 +147,11 @@ describe('Trello Boards API - Logic Tests', () => {
     it('should provide error message for API errors', () => {
       const error = 'Failed to fetch Trello boards. Please try again later.';
       expect(error).toContain('Failed to fetch');
+    });
+
+    it('does not echo provider response bodies to the browser', () => {
+      expect(trelloBoardsErrorMessage(500)).toBe('Failed to fetch Trello boards. Please try again later.');
+      expect(trelloBoardsErrorMessage(429)).toContain('rate-limiting');
     });
   });
 

@@ -1,0 +1,75 @@
+<h2>APTLSS: het werkmoment van een VA</h2>
+<p class="subtitle">Het dashboard toont slechts wat nu nodig is. Bewijs, uitzonderingen en de volledige historie blijven direct bereikbaar zonder de dagelijkse uitvoering te overladen.</p>
+
+<div class="mockup" style="margin-top:24px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; border-radius:10px; overflow:hidden;">
+  <div class="mockup-header" style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid #334155;">
+    <strong>Worker Control</strong>
+    <span style="font-size:13px;color:#94a3b8;">APTLSS is monitoring 48 linked evidence items</span>
+  </div>
+  <div class="mockup-body" style="display:grid;grid-template-columns:minmax(0,1.65fr) minmax(280px,.8fr);gap:16px;padding:18px;">
+    <div>
+      <div class="label">NOW</div>
+      <div style="border:1px solid #2563eb;border-left:4px solid #3b82f6;border-radius:8px;padding:18px;margin:8px 0 18px;background:#111c33;">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
+          <div>
+            <h3 style="margin:0 0 6px;">Prepare client decision brief</h3>
+            <p style="margin:0;color:#cbd5e1;">Exact next action: compare the submitted documents with the requested criteria and write the missing-evidence question.</p>
+          </div>
+          <span style="background:#7f1d1d;color:#fecaca;padding:4px 8px;border-radius:999px;font-size:12px;white-space:nowrap;">High risk</span>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;">
+          <button class="mock-button" style="background:#2563eb;color:white;border:none;padding:9px 13px;border-radius:6px;">Start focused timer</button>
+          <button class="mock-button" style="background:transparent;color:#e2e8f0;border:1px solid #475569;padding:9px 13px;border-radius:6px;">Open evidence</button>
+          <button class="mock-button" style="background:transparent;color:#e2e8f0;border:1px solid #475569;padding:9px 13px;border-radius:6px;">Report progress</button>
+        </div>
+      </div>
+
+      <div class="label">NEXT IN THE PLAN</div>
+      <div style="border:1px solid #334155;border-radius:8px;overflow:hidden;margin-top:8px;">
+        <div style="display:grid;grid-template-columns:72px 1fr auto;gap:12px;padding:12px 14px;border-bottom:1px solid #334155;align-items:center;">
+          <span style="color:#94a3b8;">10:30</span><div><strong>Follow up on pending reply</strong><br><small style="color:#94a3b8;">Waiting reason needs verification at 10:15</small></div><span style="color:#fbbf24;">Review</span>
+        </div>
+        <div style="display:grid;grid-template-columns:72px 1fr auto;gap:12px;padding:12px 14px;border-bottom:1px solid #334155;align-items:center;">
+          <span style="color:#94a3b8;">11:00</span><div><strong>Update project evidence</strong><br><small style="color:#94a3b8;">Scheduled after the active decision brief</small></div><span style="color:#60a5fa;">Planned</span>
+        </div>
+        <div style="display:grid;grid-template-columns:72px 1fr auto;gap:12px;padding:12px 14px;align-items:center;">
+          <span style="color:#94a3b8;">13:00</span><div><strong>Decision checkpoint</strong><br><small style="color:#94a3b8;">No external action is automatic</small></div><span style="color:#a78bfa;">Decision</span>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="label">APTLSS SIGNALS</div>
+      <div style="border:1px solid #334155;border-radius:8px;padding:14px;margin:8px 0 14px;">
+        <strong>Assessment confidence</strong>
+        <div style="font-size:28px;color:#34d399;margin:6px 0;">92%</div>
+        <small style="color:#94a3b8;">Strong source coverage. Last verified 8 min ago.</small>
+      </div>
+      <div style="border:1px solid #7f1d1d;border-radius:8px;padding:14px;margin-bottom:14px;background:#231016;">
+        <strong style="color:#fecaca;">1 evidence conflict</strong>
+        <p style="margin:7px 0;color:#fecaca;font-size:13px;">Trello says “waiting”; a newer email may contain the requested answer.</p>
+        <button class="mock-button" style="background:transparent;color:#fecaca;border:1px solid #991b1b;padding:8px 10px;border-radius:6px;">Compare facts</button>
+      </div>
+      <div style="border:1px solid #334155;border-radius:8px;padding:14px;">
+        <strong>Quick update</strong>
+        <p style="margin:7px 0;color:#94a3b8;font-size:13px;">Tell APTLSS what changed in your own words.</p>
+        <div class="mock-input" style="border:1px solid #475569;padding:10px;border-radius:6px;color:#64748b;">“I am waiting for...”</div>
+        <button class="mock-button" style="margin-top:8px;background:#1e293b;color:#e2e8f0;border:1px solid #475569;padding:8px 10px;border-radius:6px;">Assess update</button>
+      </div>
+    </div>
+  </div>
+  <div style="padding:12px 18px;border-top:1px solid #334155;color:#94a3b8;font-size:13px;">All recommendations are source-linked. The worker confirms any external message, card move or other side effect.</div>
+</div>
+
+<div class="section" style="margin-top:22px;">
+  <div class="options">
+    <div class="option" data-choice="operator-cockpit" onclick="toggleSelect(this)">
+      <div class="letter">A</div>
+      <div class="content"><h3>Operator cockpit</h3><p>One dominant task, a short next queue and a narrow evidence rail. This is the proposed default.</p></div>
+    </div>
+    <div class="option" data-choice="full-timeline" onclick="toggleSelect(this)">
+      <div class="letter">B</div>
+      <div class="content"><h3>Full timeline</h3><p>Show the whole day and evidence status together. More overview, less focus.</p></div>
+    </div>
+  </div>
+</div>

@@ -8,7 +8,7 @@ const policy = normalizeBrowserTabPolicy({
 });
 
 describe("browser tab hygiene policy", () => {
-  it("does not interrupt Joyce before the end-of-day warning window", () => {
+  it("does not interrupt a worker before the end-of-day warning window", () => {
     const result = evaluateBrowserTabHygiene({
       now: new Date("2026-07-16T18:00:00Z"),
       workEnd: "23:00",

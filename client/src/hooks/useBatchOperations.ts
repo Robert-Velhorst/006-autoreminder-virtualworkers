@@ -1,26 +1,18 @@
 import { useState, useCallback, useEffect } from 'react';
-import { getBatchOperationsClient, BatchOperationRequest, BatchOperationResponse } from '@/lib/batch-operations-client';
+import {
+  getBatchOperationsClient,
+  normalizeBatchOperationResponse,
+  type BatchOperationRequest,
+  type NormalizedBatchOperation,
+} from '@/lib/batch-operations-client';
 import { useBatchOperationUpdates } from './useBatchOperationUpdates';
 
-interface BatchOperation {
-  jobId: string;
-  operationType: 're_analyze' | 'reschedule' | 'conflict_resolution' | 'optimization';
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-  progress: number;
-  totalTasks: number;
-  completedTasks: number;
-  failedTasks: number;
-  currentTaskName?: string;
-  currentTaskIndex: number;
-  elapsedTimeSeconds?: number;
-  estimatedTimeSeconds?: number;
-  errorLog?: string[];
-  results?: Record<string, any>;
-  isPaused?: boolean;
-  pausedAt?: string;
-  createdAt: Date;
-  startedAt?: Date;
-  completedAt?: Date;
+type BatchOperation = NormalizedBatchOperation;
+
+export function shouldPollBatchOperations(
+  operations: readonly Pick<BatchOperation, 'status'>[],
+) {
+  return operations.some(operation => operation.status === 'pending' || operation.status === 'running');
 }
 
 interface UseBatchOperationsOptions {
@@ -42,20 +34,7 @@ export const useBatchOperations = (options: UseBatchOperationsOptions = {}) => {
       setIsLoading(true);
       setError(null);
       const ops = await client.getAllBatchOperations();
-      setOperations(
-        ops.map(op => ({
-          ...op,
-          createdAt: new Date(op.createdAt),
-          startedAt: op.startedAt ? new Date(op.startedAt) : undefined,
-          completedAt: op.completedAt ? new Date(op.completedAt) : undefined,
-          isPaused: op.isPaused,
-          pausedAt: op.pausedAt,
-          progress: 0,
-          completedTasks: 0,
-          failedTasks: 0,
-          currentTaskIndex: 0,
-        } as BatchOperation))
-      );
+      setOperations(ops.map(normalizeBatchOperationResponse));
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       setError(error);
@@ -71,17 +50,7 @@ export const useBatchOperations = (options: UseBatchOperationsOptions = {}) => {
       try {
         setError(null);
         const response = await client.startBatchOperation(request);
-        const newOp: BatchOperation = {
-          ...(response as any),
-          createdAt: new Date(response.createdAt),
-          startedAt: response.startedAt ? new Date(response.startedAt) : undefined,
-          completedAt: response.completedAt ? new Date(response.completedAt) : undefined,
-          isPaused: false,
-          progress: 0,
-          completedTasks: 0,
-          failedTasks: 0,
-          currentTaskIndex: 0,
-        }
+        const newOp = normalizeBatchOperationResponse(response);
         setOperations(prev => [newOp, ...prev]);
         return response;
       } catch (err) {
@@ -186,16 +155,19 @@ export const useBatchOperations = (options: UseBatchOperationsOptions = {}) => {
     }
   }, [autoLoad, loadOperations]);
 
-  // Poll for updates periodically
+  const shouldPoll = shouldPollBatchOperations(operations);
+
+  // WebSocket handles real-time updates. Poll only while a job is active so
+  // an idle scheduling page does not request batch history every five seconds.
   useEffect(() => {
-    if (!autoLoad) return;
+    if (!autoLoad || !shouldPoll) return;
 
     const interval = setInterval(() => {
       loadOperations();
     }, pollInterval);
 
     return () => clearInterval(interval);
-  }, [autoLoad, pollInterval, loadOperations]);
+  }, [autoLoad, shouldPoll, pollInterval, loadOperations]);
 
   // One stable Socket.IO subscription handles all active jobs. Polling remains
   // as a durable fallback when real-time transport is unavailable.

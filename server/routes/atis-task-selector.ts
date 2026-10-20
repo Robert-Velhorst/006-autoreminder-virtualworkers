@@ -1,4 +1,4 @@
-import { protectedProcedure } from '../_core/trpc';
+import { adminProcedure } from '../_core/trpc';
 import { z } from 'zod';
 import { fetchWithRetry } from '../utils/retry';
 
@@ -13,7 +13,7 @@ import { fetchWithRetry } from '../utils/retry';
  * Returns: Array of tasks with id, name, board, and list info
  */
 export const atisTaskSelectorRouter = {
-  getTasks: protectedProcedure.query(async () => {
+  getTasks: adminProcedure.query(async () => {
     try {
       const apiKey = process.env.TRELLO_API_KEY;
       const token = process.env.TRELLO_TOKEN;
@@ -82,7 +82,7 @@ export const atisTaskSelectorRouter = {
         success: false,
         tasks: [],
         count: 0,
-        error: error instanceof Error ? error.message : 'Failed to fetch tasks',
+        error: 'Could not load Trello tasks. Retry shortly.',
       };
     }
   }),
@@ -90,7 +90,7 @@ export const atisTaskSelectorRouter = {
   /**
    * Get tasks from a specific board
    */
-  getTasksByBoard: protectedProcedure
+  getTasksByBoard: adminProcedure
     .input(z.object({ boardId: z.string() }))
     .query(async ({ input }) => {
       try {
@@ -137,7 +137,7 @@ export const atisTaskSelectorRouter = {
           success: false,
           tasks: [],
           count: 0,
-          error: error instanceof Error ? error.message : 'Failed to fetch tasks',
+          error: 'Could not load Trello tasks. Retry shortly.',
         };
       }
     }),
@@ -145,7 +145,7 @@ export const atisTaskSelectorRouter = {
   /**
    * Search tasks by name across all boards
    */
-  searchTasks: protectedProcedure
+  searchTasks: adminProcedure
     .input(z.object({ query: z.string() }))
     .query(async ({ input }) => {
       try {
@@ -217,7 +217,7 @@ export const atisTaskSelectorRouter = {
           success: false,
           tasks: [],
           count: 0,
-          error: error instanceof Error ? error.message : 'Failed to search tasks',
+          error: 'Could not search Trello tasks. Retry shortly.',
         };
       }
     }),

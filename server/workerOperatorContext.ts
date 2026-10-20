@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { users, userWorkingHours, vaProfiles, type User } from "../drizzle/schema";
 import { getDb } from "./db";
+import { normalizeBreakLabel } from "./dailySchedule";
 
 export type WorkerBreak = {
   name: string;
@@ -20,7 +21,39 @@ export type WorkerOperatorContext = {
   workEndTime: string;
   workingDays: number[];
   breaks: WorkerBreak[];
+  weeklyHoursMin: number;
+  weeklyHoursMax: number;
+  dailyHoursMin: number;
+  dailyHoursMax: number;
 };
+
+export const DEFAULT_WORKER_HOUR_TARGETS = {
+  weeklyHoursMin: 55,
+  weeklyHoursMax: 60,
+  dailyHoursMin: 9.5,
+  dailyHoursMax: 11.5,
+} as const;
+
+type WorkerHourTargetInput = {
+  weeklyHoursMin?: unknown;
+  weeklyHoursMax?: unknown;
+  dailyHoursMin?: unknown;
+  dailyHoursMax?: unknown;
+};
+
+export function workerHourTargetsFromSettings(input: WorkerHourTargetInput | null | undefined) {
+  const weeklyHoursMin = Number(input?.weeklyHoursMin);
+  const weeklyHoursMax = Number(input?.weeklyHoursMax);
+  const dailyHoursMin = Number(input?.dailyHoursMin);
+  const dailyHoursMax = Number(input?.dailyHoursMax);
+  if (!Number.isFinite(weeklyHoursMin) || !Number.isFinite(weeklyHoursMax)
+    || weeklyHoursMin < 1 || weeklyHoursMax > 168 || weeklyHoursMin > weeklyHoursMax
+    || !Number.isFinite(dailyHoursMin) || !Number.isFinite(dailyHoursMax)
+    || dailyHoursMin < 0.5 || dailyHoursMax > 16 || dailyHoursMin > dailyHoursMax) {
+    return DEFAULT_WORKER_HOUR_TARGETS;
+  }
+  return { weeklyHoursMin, weeklyHoursMax, dailyHoursMin, dailyHoursMax };
+}
 
 function hourTime(hour: number | null | undefined, minute = 0) {
   const safeHour = Math.min(23, Math.max(0, Math.round(hour ?? 0)));
@@ -43,7 +76,11 @@ function addBreak(
   duration: number | null | undefined,
 ) {
   if (!time || !/^\d{2}:\d{2}$/.test(time) || !duration || duration < 5) return;
-  target.push({ name, startTime: time, durationMinutes: Math.min(240, Math.round(duration)) });
+  target.push({
+    name: normalizeBreakLabel(name, time),
+    startTime: time,
+    durationMinutes: Math.min(240, Math.round(duration)),
+  });
 }
 
 function missingTable(error: unknown) {
@@ -67,6 +104,7 @@ export async function resolveWorkerOperatorContext(user: User): Promise<WorkerOp
       workEndTime: "18:00",
       workingDays: [1, 2, 3, 4, 5],
       breaks: [],
+      ...DEFAULT_WORKER_HOUR_TARGETS,
     };
   }
 
@@ -84,15 +122,19 @@ export async function resolveWorkerOperatorContext(user: User): Promise<WorkerOp
   ]);
   const profile = profileRows[0] ?? null;
   const hours = hoursRows[0] ?? null;
+  const founderHours = profile && !hours
+    ? (await db.select().from(userWorkingHours).where(eq(userWorkingHours.userId, profile.founderId)).limit(1))[0] ?? null
+    : null;
+  const effectiveHours = hours ?? founderHours;
   const founder = profile
     ? (await db.select({ name: users.name }).from(users).where(eq(users.id, profile.founderId)).limit(1))[0]
     : null;
 
   const breaks: WorkerBreak[] = [];
-  if (hours?.enableBreaks) {
-    addBreak(breaks, "Breakfast", hours.breakfastTime, hours.breakfastDuration);
-    addBreak(breaks, "Lunch", hours.lunchTime, hours.lunchDuration);
-    addBreak(breaks, "Dinner", hours.dinnerTime, hours.dinnerDuration);
+  if (effectiveHours?.enableBreaks) {
+    addBreak(breaks, "Breakfast", effectiveHours.breakfastTime, effectiveHours.breakfastDuration);
+    addBreak(breaks, "Lunch", effectiveHours.lunchTime, effectiveHours.lunchDuration);
+    addBreak(breaks, "Dinner", effectiveHours.dinnerTime, effectiveHours.dinnerDuration);
   } else if (profile) {
     addBreak(breaks, "Breakfast", profile.breakfastTime == null ? null : hourTime(profile.breakfastTime), profile.breakfastDuration);
     addBreak(breaks, "Lunch", profile.lunchTime == null ? null : hourTime(profile.lunchTime), profile.lunchDuration);
@@ -106,15 +148,16 @@ export async function resolveWorkerOperatorContext(user: User): Promise<WorkerOp
     trelloMemberId: profile?.trelloMemberId?.trim() || null,
     displayName: profile?.name?.trim() || fallbackName,
     founderName: founder?.name?.trim() || "Founder",
-    timezone: hours?.timezone || profile?.timezone || "UTC",
-    workStartTime: hours
-      ? hourTime(hours.workStartHour, hours.workStartMinute)
+    timezone: effectiveHours?.timezone || profile?.timezone || "UTC",
+    workStartTime: effectiveHours
+      ? hourTime(effectiveHours.workStartHour, effectiveHours.workStartMinute)
       : hourTime(profile?.workStartHour ?? 9),
-    workEndTime: hours
-      ? hourTime(hours.workEndHour, hours.workEndMinute)
+    workEndTime: effectiveHours
+      ? hourTime(effectiveHours.workEndHour, effectiveHours.workEndMinute)
       : hourTime(profile?.workEndHour ?? 18),
-    workingDays: parseWorkingDays(hours?.workingDays || profile?.workingDays),
+    workingDays: parseWorkingDays(effectiveHours?.workingDays || profile?.workingDays),
     breaks,
+    ...workerHourTargetsFromSettings(effectiveHours),
   };
 }
 

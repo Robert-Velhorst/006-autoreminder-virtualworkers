@@ -1,23 +1,32 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { getDb } from '../db';
 import { generationJobs, generationItems, scheduledJobs, userWorkingHours, holidays, vaProfiles, taskAssignments, taskDependencies, clients } from '../../drizzle/schema';
 import { eq, desc, and, inArray } from 'drizzle-orm';
 import { fetchWithRetry } from '../utils/retry';
 import { getCachedTasks, setCachedTasks, invalidateCache } from '../services/trello-cache';
 import { requestQueue } from '../services/request-queue';
-import { websocketService } from '../services/websocket';
 import { parseAPTLSSItem, parseAPTLSSChecklist } from '../utils/aptlss-parser';
-
-const execAsync = promisify(exec);
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { requestUser, requireAuthenticated } from '../middleware/auth';
+import {
+  fetchAptlssSourceCard,
+  generateAptlssForCard,
+} from '../services/aptlss-generation';
+import { executeAptlssGenerationBatch } from '../services/aptlss-scheduled-generation';
 
 const router = Router();
+const LEGACY_APTLSS_PREFIXES = ['/trello', '/aptlss'];
+
+// This router is mounted at /api because it exposes both legacy Trello and
+// APTLSS endpoints. Scope its guard to those prefixes so unrelated routes,
+// especially the public tRPC auth.me query, can continue through Express.
+router.use(LEGACY_APTLSS_PREFIXES, requireAuthenticated);
+router.use(LEGACY_APTLSS_PREFIXES, (req, res, next) => {
+  if (requestUser(req)?.role !== 'admin') {
+    return res.status(403).json({ error: 'Legacy APTLSS administration requires an admin account' });
+  }
+  next();
+});
 
 const INACTIVE_LIST_KEYWORDS = ['done', 'completed', 'complete', 'archive', 'archived', 'info'];
 
@@ -67,8 +76,9 @@ function clearExpiredCache(): void {
   entriesToDelete.forEach(boardId => boardCardsCache.delete(boardId));
 }
 
-// Clear expired cache every 5 minutes
-setInterval(clearExpiredCache, 5 * 60 * 1000);
+// Clear expired cache every 5 minutes without keeping the process alive.
+const cacheCleanupTimer = setInterval(clearExpiredCache, 5 * 60 * 1000);
+cacheCleanupTimer.unref?.();
 
 function isInactiveListName(listName?: string | null) {
   if (!listName) return false;
@@ -138,46 +148,18 @@ async function fetchUserWorkspaceBoards(apiKey: string, token: string) {
 }
 
 async function fetchCardForAptlss(cardId: string) {
-  const apiKey = process.env.TRELLO_API_KEY;
-  const token = process.env.TRELLO_TOKEN;
-
-  if (!apiKey || !token) {
-    throw new Error('Trello credentials not configured');
-  }
-
-  const response = await fetch(
-    `https://api.trello.com/1/cards/${cardId}?key=${apiKey}&token=${token}&checklists=all`
-  );
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Failed to fetch card ${cardId}: ${errorText}`);
-  }
-
-  return response.json();
+  return fetchAptlssSourceCard(cardId);
 }
 
 async function generateAptlssChecklist(card: any, settings: any) {
-  const pythonScript = path.join(__dirname, 'aptlss-bridge.py');
-  const input = JSON.stringify({ cardData: card, settings });
-  const { stdout, stderr } = await execAsync(
-    `python3 "${pythonScript}" '${input.replace(/'/g, "'\\''")}' 2>&1`
-  );
-
-  if (stderr) {
-    console.error('Python stderr:', stderr);
-  }
-
-  const result = JSON.parse(stdout);
-  if (!result.success) {
-    throw new Error(result.error || 'APTLSS generation failed');
-  }
-
-  return result;
+  return generateAptlssForCard(card, {
+    ...(settings && typeof settings === 'object' ? settings : {}),
+    applyToTrello: true,
+  });
 }
 
 // Enhanced task scheduling algorithm with break times and task type optimization
-interface SchedulingOptions {
+export interface SchedulingOptions {
   workStartHour: number;
   workEndHour: number;
   workingDays: number[];
@@ -201,14 +183,14 @@ interface SchedulingOptions {
 // FIXED VERSION - Prevents overbooking by enforcing daily capacity limits
 // See SCHEDULING_ANALYSIS.md for detailed explanation of all 7 fixes
 // Worker settings type for per-worker scheduling
-interface WorkerSettings {
+export interface WorkerSettings {
   workStartHour: number;
   workEndHour: number;
   workingDays: number[];
   schedulingOptions: Partial<SchedulingOptions>;
 }
 
-function scheduleTasksByTime(
+export function scheduleTasksByTime(
   tasks: any[], 
   workStartHour: number = 9, 
   workEndHour: number = 18, 
@@ -217,6 +199,31 @@ function scheduleTasksByTime(
   options?: Partial<SchedulingOptions>,
   workerSettingsMap?: Map<number, WorkerSettings>
 ) {
+  const breakFitsWorkWindow = (
+    breakStart: number | undefined,
+    breakDuration: number,
+    startHour: number,
+    endHour: number,
+  ) => {
+    if (!Number.isInteger(breakStart) || breakStart! < 0 || breakStart! > 23 || !Number.isFinite(breakDuration) || breakDuration <= 0) {
+      return false;
+    }
+    const workStartMinutes = startHour * 60;
+    const workEndMinutes = endHour * 60;
+    const breakStartMinutes = breakStart! * 60;
+    return breakStartMinutes >= workStartMinutes && breakStartMinutes + breakDuration <= workEndMinutes;
+  };
+  const breakMinutesWithinWorkWindow = (
+    breaks: Array<readonly [number | undefined, number | undefined]>,
+    startHour: number,
+    endHour: number,
+  ) => breaks.reduce((total, [breakStart, breakDuration]) => {
+    const duration = breakDuration ?? 0;
+    return breakFitsWorkWindow(breakStart, duration, startHour, endHour)
+      ? total + duration
+      : total;
+  }, 0);
+
   // Working hours configurable per user
   const WORK_START_HOUR = workStartHour;
   const WORK_END_HOUR = workEndHour;
@@ -234,7 +241,7 @@ function scheduleTasksByTime(
   const SHORT_BREAK_DURATION = options?.shortBreakDuration ?? 10;
   
   // NEW: Flexible daily hours (configurable per user)
-  // Joyce's schedule: 55-60h/week, 9.5-11.5h/day
+  // Default worker schedule: 55-60h/week, 9.5-11.5h/day
   const DAILY_HOURS_MIN = options?.dailyHoursMin ?? 9.5; // Default 9.5 hours minimum
   const DAILY_HOURS_MAX = options?.dailyHoursMax ?? 11.5; // Default 11.5 hours maximum
   const WEEKLY_HOURS_MIN = options?.weeklyHoursMin ?? 55; // Default 55 hours/week
@@ -242,7 +249,11 @@ function scheduleTasksByTime(
 
   // FIX #1: Calculate available capacity UPFRONT (accounting for all breaks)
   // Now uses flexible daily hours instead of fixed work start/end
-  const TOTAL_BREAK_MINUTES = LUNCH_DURATION + BREAKFAST_DURATION + DINNER_DURATION;
+  const TOTAL_BREAK_MINUTES = breakMinutesWithinWorkWindow([
+    [LUNCH_START, LUNCH_DURATION],
+    [BREAKFAST_START, BREAKFAST_DURATION],
+    [DINNER_START, DINNER_DURATION],
+  ], WORK_START_HOUR, WORK_END_HOUR);
   const TOTAL_WORK_MINUTES = (WORK_END_HOUR - WORK_START_HOUR) * 60;
   
   // Use DAILY_HOURS_MAX for maximum capacity per day (in minutes)
@@ -309,8 +320,16 @@ function scheduleTasksByTime(
     
     // Calculate effective daily capacity for this worker
     const effectiveTotalWorkMinutes = (effectiveWorkEnd - effectiveWorkStart) * 60;
-    const effectiveTotalBreakMinutes = effectiveLunchDuration + (effectiveBreakfastDuration || 0) + (effectiveDinnerDuration || 0);
-    const effectiveAvailableMinutes = Math.min(effectiveTotalWorkMinutes - effectiveTotalBreakMinutes, MAX_DAILY_WORK_MINUTES);
+    const effectiveTotalBreakMinutes = breakMinutesWithinWorkWindow([
+      [effectiveLunchStart, effectiveLunchDuration],
+      [effectiveBreakfastStart, effectiveBreakfastDuration],
+      [effectiveDinnerStart, effectiveDinnerDuration],
+    ], effectiveWorkStart, effectiveWorkEnd);
+    const effectiveMaxDailyWorkMinutes = Math.round((effectiveOptions?.dailyHoursMax ?? DAILY_HOURS_MAX) * 60);
+    const effectiveAvailableMinutes = Math.min(
+      effectiveTotalWorkMinutes - effectiveTotalBreakMinutes,
+      effectiveMaxDailyWorkMinutes,
+    );
     
     if (workerSettings) {
       console.log(`[Scheduling] Worker ${workerId}: ${effectiveWorkStart}:00-${effectiveWorkEnd}:00, capacity: ${effectiveAvailableMinutes}min`);
@@ -381,28 +400,33 @@ function scheduleTasksByTime(
     const toMinutes = (h: number, m: number) => h * 60 + m;
     
     // Use worker-specific meal break times
+    const hasLunchBreak = breakFitsWorkWindow(effectiveLunchStart, effectiveLunchDuration, effectiveWorkStart, effectiveWorkEnd);
+    const hasBreakfastBreak = breakFitsWorkWindow(effectiveBreakfastStart, effectiveBreakfastDuration, effectiveWorkStart, effectiveWorkEnd);
+    const hasDinnerBreak = breakFitsWorkWindow(effectiveDinnerStart, effectiveDinnerDuration, effectiveWorkStart, effectiveWorkEnd);
+
     const isDuringLunch = (h: number, m: number) => {
+      if (!hasLunchBreak) return false;
       const mins = toMinutes(h, m);
       const lunchEndMins = toMinutes(effectiveLunchStart, 0) + effectiveLunchDuration;
       return mins >= toMinutes(effectiveLunchStart, 0) && mins < lunchEndMins;
     };
     
     const isDuringBreakfast = (h: number, m: number) => {
-      if (!effectiveBreakfastStart || !effectiveBreakfastDuration) return false;
+      if (!hasBreakfastBreak || effectiveBreakfastStart === undefined) return false;
       const mins = toMinutes(h, m);
       const breakfastEndMins = toMinutes(effectiveBreakfastStart, 0) + effectiveBreakfastDuration;
       return mins >= toMinutes(effectiveBreakfastStart, 0) && mins < breakfastEndMins;
     };
     
     const isDuringDinner = (h: number, m: number) => {
-      if (!effectiveDinnerStart || !effectiveDinnerDuration) return false;
+      if (!hasDinnerBreak || effectiveDinnerStart === undefined) return false;
       const mins = toMinutes(h, m);
       const dinnerEndMins = toMinutes(effectiveDinnerStart, 0) + effectiveDinnerDuration;
       return mins >= toMinutes(effectiveDinnerStart, 0) && mins < dinnerEndMins;
     };
     
     const skipMealBreak = () => {
-      if (isDuringBreakfast(currentHour, currentMinute) && effectiveBreakfastStart) {
+      if (isDuringBreakfast(currentHour, currentMinute) && effectiveBreakfastStart !== undefined) {
         const breakfastEndMins = toMinutes(effectiveBreakfastStart, 0) + effectiveBreakfastDuration;
         currentHour = Math.floor(breakfastEndMins / 60);
         currentMinute = breakfastEndMins % 60;
@@ -414,7 +438,7 @@ function scheduleTasksByTime(
         currentMinute = lunchEndMins % 60;
         minutesSinceBreak = 0;
       }
-      if (isDuringDinner(currentHour, currentMinute) && effectiveDinnerStart) {
+      if (isDuringDinner(currentHour, currentMinute) && effectiveDinnerStart !== undefined) {
         const dinnerEndMins = toMinutes(effectiveDinnerStart, 0) + effectiveDinnerDuration;
         currentHour = Math.floor(dinnerEndMins / 60);
         currentMinute = dinnerEndMins % 60;
@@ -522,7 +546,7 @@ function scheduleTasksByTime(
       const endMins = toMinutes(endHour, endMinute);
       
       const checkAndPushPastMealBreak = (breakStart: number | undefined, breakDuration: number) => {
-        if (!breakStart || !breakDuration) return false;
+        if (!breakFitsWorkWindow(breakStart, breakDuration, effectiveWorkStart, effectiveWorkEnd) || breakStart === undefined) return false;
         const breakStartMins = toMinutes(breakStart, 0);
         const breakEndMins = breakStartMins + breakDuration;
         if (startMins < breakStartMins && endMins > breakStartMins) {
@@ -540,16 +564,16 @@ function scheduleTasksByTime(
         return false;
       };
       
-      checkAndPushPastMealBreak(BREAKFAST_START, BREAKFAST_DURATION);
-      checkAndPushPastMealBreak(LUNCH_START, LUNCH_DURATION);
-      checkAndPushPastMealBreak(DINNER_START, DINNER_DURATION);
+      checkAndPushPastMealBreak(effectiveBreakfastStart, effectiveBreakfastDuration);
+      checkAndPushPastMealBreak(effectiveLunchStart, effectiveLunchDuration);
+      checkAndPushPastMealBreak(effectiveDinnerStart, effectiveDinnerDuration);
 
       // FIX #6: Final validation - does task fit in work hours?
-      if (endHour > WORK_END_HOUR || (endHour === WORK_END_HOUR && endMinute > 0)) {
+      if (endHour > effectiveWorkEnd || (endHour === effectiveWorkEnd && endMinute > 0)) {
         // Task pushed past end time - REJECT
         overflowTasks.push({
           ...task,
-          rejectionReason: `Task end time (${String(endHour).padStart(2, '0')}:${String(endMinute).padStart(2, '0')}) exceeds work end time (${WORK_END_HOUR}:00)`
+          rejectionReason: `Task end time (${String(endHour).padStart(2, '0')}:${String(endMinute).padStart(2, '0')}) exceeds work end time (${effectiveWorkEnd}:00)`
         });
         continue;
       }
@@ -613,13 +637,6 @@ function scheduleTasksByTime(
     }
   }
 }
-
-// Mock data for development
-const mockBoards = [
-  { id: 'board1', name: 'VA Tasks - Operations', cardCount: 45 },
-  { id: 'board2', name: 'VA Tasks - Finance', cardCount: 32 },
-  { id: 'board3', name: 'VA Tasks - Marketing', cardCount: 28 },
-];
 
 // Get all workspaces (organizations)
 router.get('/trello/workspaces', async (req: Request, res: Response) => {
@@ -830,15 +847,12 @@ router.post('/aptlss/generate', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Card ID or card data is required' });
     }
 
-    let card = cardData;
-    if (!card && cardId) {
-      card = await fetchCardForAptlss(cardId);
-    }
+    const card = cardId ? await fetchCardForAptlss(cardId) : cardData;
 
     // Content sufficiency check — per docs: do NOT generate for cards with just a title
     const hasDescription = card.desc && card.desc.trim().length > 0;
     const hasChecklists = Array.isArray(card.checklists) && card.checklists.length > 0;
-    const hasAttachments = (card.badges?.attachments || 0) > 0;
+    const hasAttachments = Array.isArray(card.attachments) && card.attachments.length > 0;
     if (!hasDescription && !hasChecklists && !hasAttachments) {
       return res.status(422).json({
         error: 'insufficient_content',
@@ -850,11 +864,14 @@ router.post('/aptlss/generate', async (req: Request, res: Response) => {
 
     console.log(`Generating APTLSS for card ${card.id} with settings:`, settings);
 
-    const result = await generateAptlssChecklist(card, settings);
+    const result = await generateAptlssForCard(card, {
+      ...(settings && typeof settings === 'object' ? settings : {}),
+      applyToTrello: Boolean(cardId),
+    });
     res.json(result);
   } catch (error: any) {
     console.error('Error generating APTLSS:', error);
-    res.status(500).json({ error: error.message || 'Failed to generate APTLSS' });
+    res.status(500).json({ error: 'Failed to generate APTLSS. Retry shortly or check the service configuration.' });
   }
 });
 
@@ -955,7 +972,7 @@ router.post('/aptlss/history/:jobId/retry', async (req: Request, res: Response) 
           jobId: newJobId,
           cardId: card.id,
           cardName: card.name,
-          boardName: card.idBoard,
+          boardName: card.board?.name ?? null,
           status: 'completed',
           attempts: 1,
           maxAttempts: 3,
@@ -1032,97 +1049,14 @@ router.post('/aptlss/generate-batch', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    console.log(`Batch generating APTLSS for ${cardIds.length} cards`);
-
-    const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-
     const jobId = `aptlss_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    await db.insert(generationJobs).values({
-      id: jobId,
-      totalCards: cardIds.length,
-      completedCards: 0,
-      failedCards: 0,
-      status: 'running',
-      settings: JSON.stringify(settings || {}),
+    const result = await executeAptlssGenerationBatch({
+      jobId,
+      cardIds,
+      settings: settings && typeof settings === 'object' ? settings : {},
       createdBy: user.openId,
     });
-
-    const results: any[] = [];
-    let completedCards = 0;
-    let failedCards = 0;
-
-    for (let index = 0; index < cardIds.length; index++) {
-      const cardId = cardIds[index];
-      const itemId = `item_${jobId}_${index}`;
-      try {
-        const card = await fetchCardForAptlss(cardId);
-        const result = await generateAptlssChecklist(card, settings);
-
-        await db.insert(generationItems).values({
-          id: itemId,
-          jobId,
-          cardId: card.id,
-          cardName: card.name,
-          boardName: card.idBoard,
-          status: 'completed',
-          attempts: 1,
-          maxAttempts: 3,
-          result: JSON.stringify(result),
-        });
-
-        completedCards++;
-        results.push({
-          cardId: card.id,
-          success: true,
-          checklistId: result.checklistId || null,
-        });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        failedCards++;
-        results.push({
-          cardId,
-          success: false,
-          error: errorMessage,
-        });
-
-        await db.insert(generationItems).values({
-          id: itemId,
-          jobId,
-          cardId,
-          cardName: `Card ${cardId}`,
-          boardName: null,
-          status: 'failed',
-          attempts: 1,
-          maxAttempts: 3,
-          error: errorMessage,
-          result: null,
-        });
-      }
-
-      await db.update(generationJobs).set({
-        completedCards,
-        failedCards,
-      }).where(eq(generationJobs.id, jobId));
-    }
-
-    await db.update(generationJobs).set({
-      status: failedCards > 0 ? 'completed_with_errors' : 'completed',
-      completedCards,
-      failedCards,
-      completedAt: new Date(),
-    }).where(eq(generationJobs.id, jobId));
-
-    res.json({
-      success: true,
-      jobId,
-      total: cardIds.length,
-      completed: completedCards,
-      failed: failedCards,
-      results,
-    });
+    res.json(result);
   } catch (error) {
     console.error('Error in batch generation:', error);
     res.status(500).json({ error: 'Failed to batch generate APTLSS' });
@@ -1171,20 +1105,21 @@ router.get('/trello/tasks', async (req: any, res: Response) => {
     }
 
     const forceRefresh = req.query.refresh === 'true';
-    const cacheTTL = parseInt(req.query.ttl as string) || 300; // 5 minutes default
+    const requestedTtl = Number(req.query.ttl);
+    const cacheTTL = Number.isInteger(requestedTtl) && requestedTtl >= 30 && requestedTtl <= 3600
+      ? requestedTtl
+      : 300;
 
-    // Try to get from cache first - DISABLED: taskData column too small for large datasets
-    // const cachedData = await getCachedTasks(user.id, user.openId, { 
-    //   ttlSeconds: cacheTTL, 
-    //   forceRefresh 
-    // });
-    // if (cachedData && !forceRefresh) {
-    //   console.log('Cache hit for tasks');
-    //   return res.json(cachedData);
-    // }
-    const cachedData = null;
+    const cachedData = await getCachedTasks(user.id, user.openId, {
+      ttlSeconds: cacheTTL,
+      forceRefresh,
+    });
+    if (cachedData && !forceRefresh) {
+      console.log('Cache hit for tasks');
+      return res.json(cachedData);
+    }
 
-    console.log('Cache miss for tasks - fetching from Trello API (caching disabled)');
+    console.log('Cache miss for tasks - fetching from Trello API');
 
     const apiKey = process.env.TRELLO_API_KEY;
     const apiToken = process.env.TRELLO_TOKEN;
@@ -1550,10 +1485,7 @@ router.get('/trello/tasks', async (req: any, res: Response) => {
         timezone: userTimezone
       };
 
-      // Save to cache - DISABLED: taskData column too small for large datasets
-      // TODO: Implement pagination or use LONGTEXT column type
-      // await setCachedTasks(user.id, user.openId, responseData, cacheTTL);
-      console.log(`Skipping cache for ${schedulingResult.scheduled.length} tasks (${schedulingResult.overflow.length} overflow) - column size limit`);
+      await setCachedTasks(user.id, user.openId, responseData, cacheTTL);
 
       return responseData;
     }); // End of requestQueue.execute
@@ -1565,65 +1497,6 @@ router.get('/trello/tasks', async (req: any, res: Response) => {
   }
 });
 
-// Update task completion status in Trello
-router.put('/trello/tasks/:taskId/complete', async (req: Request, res: Response) => {
-  try {
-    const { taskId } = req.params;
-    const { isCompleted, cardId, checklistId, checkItemId } = req.body;
-
-    const apiKey = process.env.TRELLO_API_KEY;
-    const apiToken = process.env.TRELLO_TOKEN;
-
-    if (!apiKey || !apiToken) {
-      return res.status(500).json({ error: 'Trello credentials not configured' });
-    }
-
-    if (!cardId || !checklistId || !checkItemId) {
-      return res.status(400).json({ error: 'Missing required fields: cardId, checklistId, checkItemId' });
-    }
-
-    // Update checklist item state in Trello
-    const state = isCompleted ? 'complete' : 'incomplete';
-    const updateUrl = `https://api.trello.com/1/cards/${cardId}/checkItem/${checkItemId}?state=${state}&key=${apiKey}&token=${apiToken}`;
-    
-    const response = await fetch(updateUrl, {
-      method: 'PUT'
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Trello API error:', errorText);
-      return res.status(response.status).json({ error: 'Failed to update task in Trello', details: errorText });
-    }
-
-    const result = await response.json();
-    
-    // Broadcast task completion to all connected clients
-    const user = (req as any).user;
-    if (user) {
-      websocketService.emitToUser(user.openId, 'task:completed', {
-        taskId,
-        isCompleted,
-        cardId,
-        checklistId,
-        checkItemId,
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    res.json({ 
-      success: true, 
-      taskId,
-      isCompleted,
-      trelloResponse: result
-    });
-  } catch (error) {
-    console.error('Error updating task status:', error);
-    res.status(500).json({ error: 'Failed to update task status' });
-  }
-});
-
-
 // Schedule generation endpoint
 router.post('/aptlss/schedule', async (req: any, res: Response) => {
   try {
@@ -1632,6 +1505,20 @@ router.post('/aptlss/schedule', async (req: any, res: Response) => {
 
     if (!user) {
       return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const normalizedCardIds = Array.isArray(cardIds)
+      ? Array.from(new Set(cardIds.map((value: unknown) => typeof value === 'string' ? value.trim() : '').filter(Boolean))).slice(0, 250)
+      : [];
+    if (normalizedCardIds.length === 0) {
+      return res.status(400).json({ error: 'At least one valid Trello card ID is required' });
+    }
+    const runAt = new Date(scheduledTime);
+    if (!scheduledTime || Number.isNaN(runAt.getTime())) {
+      return res.status(400).json({ error: 'A valid scheduledTime is required' });
+    }
+    if (runAt.getTime() < Date.now() - 60_000) {
+      return res.status(400).json({ error: 'scheduledTime cannot be in the past' });
     }
 
     const db = await getDb();
@@ -1643,10 +1530,10 @@ router.post('/aptlss/schedule', async (req: any, res: Response) => {
 
     await db.insert(scheduledJobs).values({
       id: jobId,
-      cardIds: JSON.stringify(cardIds),
-      scheduledTime: new Date(scheduledTime),
+      cardIds: JSON.stringify(normalizedCardIds),
+      scheduledTime: runAt,
       status: 'pending',
-      settings: JSON.stringify(settings),
+      settings: JSON.stringify(settings && typeof settings === 'object' ? settings : {}),
       createdBy: user.openId
     });
 
@@ -1693,11 +1580,19 @@ router.delete('/aptlss/scheduled/:id', async (req: any, res: Response) => {
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
     }
+    const [existing] = await db.select({ status: scheduledJobs.status }).from(scheduledJobs)
+      .where(and(eq(scheduledJobs.id, id), eq(scheduledJobs.createdBy, user.openId)))
+      .limit(1);
+    if (!existing) return res.status(404).json({ error: 'Scheduled job not found' });
+    if (existing.status !== 'pending') {
+      return res.status(409).json({ error: `Only pending jobs can be cancelled (current status: ${existing.status})` });
+    }
     await db.update(scheduledJobs)
       .set({ status: 'cancelled' })
       .where(and(
         eq(scheduledJobs.id, id),
-        eq(scheduledJobs.createdBy, user.openId)
+        eq(scheduledJobs.createdBy, user.openId),
+        eq(scheduledJobs.status, 'pending')
       ));
     res.json({ success: true });
   } catch (error) {
@@ -1706,109 +1601,4 @@ router.delete('/aptlss/scheduled/:id', async (req: any, res: Response) => {
   }
 });
 
-/**
- * PUT /api/trello/cards/:cardId/due
- * Update card due date in Trello (for calendar drag-and-drop sync)
- */
-router.put('/trello/cards/:cardId/due', async (req: Request, res: Response) => {
-  try {
-    const { cardId } = req.params;
-    const { dueDate } = req.body;
-
-    const apiKey = process.env.TRELLO_API_KEY;
-    const apiToken = process.env.TRELLO_TOKEN;
-
-    if (!apiKey || !apiToken) {
-      return res.status(500).json({ error: 'Trello credentials not configured' });
-    }
-
-    if (!cardId) {
-      return res.status(400).json({ error: 'Missing cardId parameter' });
-    }
-
-    // Build Trello API URL to update due date
-    // dueDate should be ISO 8601 format or null to remove
-    const updateUrl = `https://api.trello.com/1/cards/${cardId}?key=${apiKey}&token=${apiToken}`;
-    
-    const response = await fetch(updateUrl, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        due: dueDate || null,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('[Trello] Failed to update card due date:', errorText);
-      return res.status(response.status).json({ 
-        error: 'Failed to update due date in Trello', 
-        details: errorText 
-      });
-    }
-
-    const result = await response.json();
-    
-    console.log(`[Trello] Updated card ${cardId} due date to ${dueDate}`);
-    
-    // Broadcast the update to connected clients
-    const user = (req as any).user;
-    if (user) {
-      websocketService.emitToUser(user.openId, 'card:rescheduled', {
-        cardId,
-        dueDate,
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    res.json({ 
-      success: true, 
-      cardId,
-      dueDate,
-      trelloCard: {
-        id: result.id,
-        name: result.name,
-        due: result.due,
-      }
-    });
-  } catch (error) {
-    console.error('[Trello] Error updating card due date:', error);
-    res.status(500).json({ error: 'Failed to update card due date' });
-  }
-});
-
 export default router;
-// Fallback endpoint: Update card status directly (when checklist fields are missing)
-router.put('/trello/cards/:cardId/status', async (req: Request, res: Response) => {
-  try {
-    const { cardId } = req.params;
-    const { isCompleted } = req.body;
-
-    const apiKey = process.env.TRELLO_API_KEY;
-    const apiToken = process.env.TRELLO_TOKEN;
-
-    if (!apiKey || !apiToken) {
-      return res.status(500).json({ error: 'Trello credentials not configured' });
-    }
-
-    if (!cardId) {
-      return res.status(400).json({ error: 'Missing cardId' });
-    }
-
-    // This endpoint has been deprecated - use /api/trello/cards/:cardId/status from trello-config.ts instead
-    // For now, just acknowledge the request
-    console.log(`[APTLSS] Card status update requested for cardId: ${cardId}, isCompleted: ${isCompleted}`);
-    
-    res.json({ 
-      success: true, 
-      cardId,
-      isCompleted,
-      message: 'Card status acknowledged'
-    });
-  } catch (error) {
-    console.error('Error updating card status:', error);
-    res.status(500).json({ error: 'Failed to update card status' });
-  }
-});

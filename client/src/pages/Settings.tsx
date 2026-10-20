@@ -6,6 +6,7 @@ import { ArrowLeft } from 'lucide-react';
 import { IntegrationAutomationSection } from '@/components/IntegrationAutomationSection';
 import { SchedulingTimeSection } from '@/components/SchedulingTimeSection';
 import { PerformanceMonitoringSection } from '@/components/PerformanceMonitoringSection';
+import { MaintenanceCenter } from '@/components/MaintenanceCenter';
 import { SettingsSearch, SearchResult } from '@/components/SettingsSearch';
 import { useSettingsSearch } from '@/hooks/useSettingsSearch';
 
@@ -13,6 +14,7 @@ const SECTION_TO_TAB: Record<string, string> = {
   'Integration & Automation': 'integration',
   'Scheduling & Time': 'scheduling',
   'Performance & Monitoring': 'performance',
+  'Maintenance': 'maintenance',
 };
 
 export default function Settings() {
@@ -84,10 +86,11 @@ export default function Settings() {
 
         {/* Super Tabs */}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="grid w-full grid-cols-3 mb-6">
+          <TabsList className="grid h-auto w-full grid-cols-2 md:grid-cols-4 mb-6">
             <TabsTrigger value="integration">Integration & Automation</TabsTrigger>
             <TabsTrigger value="scheduling">Scheduling & Time</TabsTrigger>
             <TabsTrigger value="performance">Performance & Monitoring</TabsTrigger>
+            <TabsTrigger value="maintenance">Maintenance</TabsTrigger>
           </TabsList>
 
           {/* Integration & Automation Tab */}
@@ -109,6 +112,10 @@ export default function Settings() {
             <div data-settings-section="Performance & Monitoring">
               <PerformanceMonitoringSection />
             </div>
+          </TabsContent>
+
+          <TabsContent value="maintenance" className="space-y-6">
+            <MaintenanceCenter />
           </TabsContent>
         </Tabs>
       </main>

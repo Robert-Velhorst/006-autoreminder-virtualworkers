@@ -252,12 +252,14 @@ export default function Home() {
       const atisResponse = await fetch(`/api/atis/timeline-tasks?filter=all`, {
         credentials: 'include',
       });
-      if (atisResponse.ok) {
-        const atisData = await atisResponse.json();
-        const scheduledTasks = atisData.scheduled || atisData.tasks || [];
-        const overflowTasks = atisData.overflow || [];
-        if (scheduledTasks && scheduledTasks.length > 0) {
-          const atisTasks: Task[] = scheduledTasks.map((t: any) => ({
+      if (!atisResponse.ok) {
+        const errorData = await atisResponse.json().catch(() => ({ error: atisResponse.statusText }));
+        throw new Error(errorData.error || 'Failed to load the ATIS work queue');
+      }
+      const atisData = await atisResponse.json();
+      const scheduledTasks = atisData.scheduled || atisData.tasks || [];
+      const overflowTasks = atisData.overflow || [];
+      const atisTasks: Task[] = scheduledTasks.map((t: any) => ({
             id: `atis-${t.id}`,
             cardId: t.trelloId,
             cardName: t.name,
@@ -287,111 +289,70 @@ export default function Home() {
             atisCardId: t.atisCardId || t.id,
             memberIds: t.memberIds || [],
             synced: false,
-          }));
-          setTasks(atisTasks);
+      }));
+      setTasks(atisTasks);
 
-          const clientCounts = new Map<string, number>();
-          atisTasks.forEach(t => {
-            if (t.client) {
-              clientCounts.set(t.client, (clientCounts.get(t.client) || 0) + 1);
-            }
-          });
-          const clientsList = Array.from(clientCounts.entries())
-            .map(([client, count]) => ({ client, count }))
-            .sort((a, b) => b.count - a.count);
-          setClients(clientsList);
-
-          const metrics = atisData.metrics || {};
-          const totalTasksCount = metrics.totalScheduled || atisData.total || atisTasks.length;
-          const completedTasks = atisTasks.filter(t => t.isCompleted).length;
-          const totalHours = (metrics.totalScheduledMinutes || 0) / 60;
-          const completedHours = atisTasks.filter(t => t.isCompleted).reduce((acc, t) => acc + t.durationHours, 0);
-
-          setOverflowTasks(overflowTasks && overflowTasks.length > 0 ? overflowTasks : []);
-          const stats = {
-            totalTasks: totalTasksCount,
-            completedTasks,
-            totalHours,
-            completedHours,
-            accuracy: 100
-          };
-          setStats(stats);
-
-          // Cache the fetched data for 5 minutes
-          const cacheData = {
-            tasks: atisTasks,
-            clients: clientsList,
-            stats,
-            overflowTasks: overflowTasks && overflowTasks.length > 0 ? overflowTasks : [],
-          };
-          taskCache.set(CACHE_KEYS.TIMELINE_TASKS, cacheData);
-          console.log('[TaskCache] Cached tasks for 5 minutes');
-
-          // Auto-refresh when background AI analysis completes for cards missing breakdowns
-          const pendingCount = atisData.pendingAnalysis || 0;
-          if (pendingCount > 0) {
-            console.log(`[AutoAnalysis] ${pendingCount} cards are being auto-analyzed in the background. Will refresh in 15s...`);
-            // The server auto-triggered analysis when it saw cards without breakdowns.
-            // We just need to wait a bit and refresh to show the new detailed steps.
-            setTimeout(() => {
-              taskCache.invalidate(CACHE_KEYS.TIMELINE_TASKS);
-              void fetchTasks();
-            }, 15000); // Refresh after 15 seconds to pick up new breakdowns
-          }
-
-          try {
-            const typesResponse = await fetch('/api/atis/task-types', {
-              credentials: 'include',
-            });
-            if (typesResponse.ok) {
-              const types = await typesResponse.json();
-              setTaskTypes(types);
-            }
-          } catch (e) {
-            console.error('Failed to fetch task types:', e);
-          }
-          return;
+      const clientCounts = new Map<string, number>();
+      atisTasks.forEach(t => {
+        if (t.client) {
+          clientCounts.set(t.client, (clientCounts.get(t.client) || 0) + 1);
         }
-      }
+      });
+      const clientsList = Array.from(clientCounts.entries())
+        .map(([client, count]) => ({ client, count }))
+        .sort((a, b) => b.count - a.count);
+      setClients(clientsList);
 
-      const response = await fetch('/api/trello/tasks');
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-        console.error('Error fetching tasks:', errorData);
-        if (response.status !== 401) {
-          toast.error(`Failed to load tasks: ${errorData.error || response.statusText}`);
-        }
-        return;
-      }
-      const data = await response.json();
+      const metrics = atisData.metrics || {};
+      const totalTasksCount = metrics.totalScheduled || atisData.total || atisTasks.length;
+      const completedTasks = atisTasks.filter(t => t.isCompleted).length;
+      const totalHours = (metrics.totalScheduledMinutes || 0) / 60;
+      const completedHours = atisTasks.filter(t => t.isCompleted).reduce((acc, t) => acc + t.durationHours, 0);
 
-      if (data.error) {
-        console.error('Error fetching tasks:', data.error);
-        toast.error(`Failed to load tasks: ${data.error}`);
-        return;
-      }
-
-      const tasksArray = Array.isArray(data) ? data : (data.tasks || []);
-      if (!Array.isArray(tasksArray)) {
-        console.error('Invalid tasks data:', data);
-        toast.error('Invalid tasks data received from server');
-        return;
-      }
-
-      const loadedTasks = (tasksArray as Task[]).filter(t => !t.isArchived);
-      setTasks(loadedTasks);
-      const totalTasks = loadedTasks.length;
-      const completedTasks = loadedTasks.filter(t => t.isCompleted).length;
-      const totalHours = loadedTasks.reduce((acc, t) => acc + t.durationHours, 0);
-      const completedHours = loadedTasks.filter(t => t.isCompleted).reduce((acc, t) => acc + t.durationHours, 0);
-
-      setStats({
-        totalTasks,
+      setOverflowTasks(overflowTasks && overflowTasks.length > 0 ? overflowTasks : []);
+      const stats = {
+        totalTasks: totalTasksCount,
         completedTasks,
         totalHours,
         completedHours,
         accuracy: 100
-      });
+      };
+      setStats(stats);
+
+      // Cache the fetched data for 5 minutes
+      const cacheData = {
+        tasks: atisTasks,
+        clients: clientsList,
+        stats,
+        overflowTasks: overflowTasks && overflowTasks.length > 0 ? overflowTasks : [],
+      };
+      taskCache.set(CACHE_KEYS.TIMELINE_TASKS, cacheData);
+      console.log('[TaskCache] Cached tasks for 5 minutes');
+
+      // Auto-refresh when background AI analysis completes for cards missing breakdowns
+      const pendingCount = atisData.pendingAnalysis || 0;
+      if (pendingCount > 0) {
+        console.log(`[AutoAnalysis] ${pendingCount} cards are being auto-analyzed in the background. Will refresh in 15s...`);
+        // The server auto-triggered analysis when it saw cards without breakdowns.
+        // We just need to wait a bit and refresh to show the new detailed steps.
+        setTimeout(() => {
+          taskCache.invalidate(CACHE_KEYS.TIMELINE_TASKS);
+          void fetchTasks();
+        }, 15000); // Refresh after 15 seconds to pick up new breakdowns
+      }
+
+      try {
+        const typesResponse = await fetch('/api/atis/task-types', {
+          credentials: 'include',
+        });
+        if (typesResponse.ok) {
+          const types = await typesResponse.json();
+          setTaskTypes(types);
+        }
+      } catch (e) {
+        console.error('Failed to fetch task types:', e);
+      }
+      return;
     } catch (error) {
       let errorMessage = 'Unknown error';
       if (error instanceof Error) {

@@ -17,9 +17,11 @@ import {
 } from "./trello-manus";
 import { notifyOwner } from "../_core/notification";
 import { parseDateKey } from "../utils/date-only";
-import { dateKeyInTimeZone, dateWindowInTimeZone, dayOfWeekInTimeZone } from "../../shared/workerTime";
+import { dateKeyInTimeZone, dateWindowInTimeZone } from "../../shared/workerTime";
 import { calculateScheduledTargetSeconds } from "../complianceMetrics";
 import { resolveWorkerOperatorContextById } from "../workerOperatorContext";
+import { runScheduledJob } from "../scheduledJobRuntime";
+import { createNonOverlappingRunner } from "./non-overlapping-runner";
 
 let schedulerInterval: NodeJS.Timeout | null = null;
 
@@ -27,13 +29,19 @@ export function startManusScheduler() {
   if (schedulerInterval) clearInterval(schedulerInterval);
 
   console.log("[ManusScheduler] Starting Manus background cron scheduler");
-  schedulerInterval = setInterval(async () => {
+  const run = createNonOverlappingRunner(async () => {
     try {
       await runBackgroundTasks();
     } catch (error) {
       console.error("[ManusScheduler] Error in runBackgroundTasks:", error);
     }
+  });
+
+  schedulerInterval = setInterval(() => {
+    void run();
   }, 60 * 1000);
+  schedulerInterval.unref?.();
+  void run();
 }
 
 export function stopManusScheduler() {
@@ -62,12 +70,14 @@ async function runBackgroundTasks() {
       const parts = formatter.formatToParts(new Date());
       const currentHour = Number(parts.find(part => part.type === "hour")?.value ?? 0);
       const currentMinute = Number(parts.find(part => part.type === "minute")?.value ?? 0);
+      const now = new Date();
+      const dateKey = dateKeyInTimeZone(now, worker.timezone);
 
-      if (currentHour === 0 && currentMinute === 0) {
-        await runAutoStopForWorker(worker);
-      }
-      if (currentHour === 22 && currentMinute === 30) {
-        await runComplianceSnapshotForWorker(worker);
+      if (currentHour === 0 && currentMinute <= 4) {
+        await runScheduledJob({ jobKey: `auto-stop:${worker.userId}:${dateKey}` }, async () => {
+          const recordsProcessed = await runAutoStopForWorker(worker);
+          return { recordsProcessed, detail: `Timer reconciliation for ${dateKey}` };
+        });
       }
     } catch (error) {
       console.error(`[ManusScheduler] Error processing worker ${worker.id}:`, error);
@@ -78,7 +88,7 @@ async function runBackgroundTasks() {
 async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect) {
   console.log(`[ManusScheduler] Running auto-stop for worker ${worker.name}...`);
   const db = await getDb();
-  if (!db) return;
+  if (!db) return 0;
 
   const maxSeconds = 12 * 3600;
   const now = new Date();
@@ -102,9 +112,9 @@ async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect) {
     stopped.push({ ...entry, durationSeconds, wasCapped });
   }
 
-  if (stopped.length === 0) return;
+  if (stopped.length === 0) return 0;
   const founder = await db.select().from(users).where(eq(users.id, worker.founderId)).limit(1);
-  if (founder.length === 0) return;
+  if (founder.length === 0) return stopped.length;
 
   const lines = stopped.map(entry => {
     const hours = Math.floor(entry.durationSeconds / 3600);
@@ -124,15 +134,7 @@ async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect) {
         : "All durations are below the 12-hour safety cap.",
     ].join("\n"),
   });
-}
-
-async function runComplianceSnapshotForWorker(worker: typeof vaProfiles.$inferSelect) {
-  if (dayOfWeekInTimeZone(new Date(), worker.timezone) === 0) return;
-  try {
-    await collectComplianceSnapshot(worker, "auto");
-  } catch (error) {
-    console.error(`[ManusScheduler] Error creating compliance snapshot for ${worker.name}:`, error);
-  }
+  return stopped.length;
 }
 
 export async function collectComplianceSnapshot(

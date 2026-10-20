@@ -21,7 +21,8 @@ function replaceName(value: string, source: string, target: string) {
 
 function personalizeText(value: string, names: WorkerNames) {
   return value
-    .replace(/\bJoyce\b/g, names.workerName)
+    .replace(/\b(?:Joyce|Worker)\b/g, names.workerName)
+    .replace(/\bthe assigned worker\b/gi, names.workerName)
     .replace(/\bRobert\b/g, names.founderName)
     .replace(/\bthe VA\b/g, names.workerName)
     .replace(/\bEAT\b/g, names.timeZone || "EAT");
@@ -33,7 +34,7 @@ export function interpretWaitingReasonForWorker(
   names: WorkerNames,
 ): WaitingReasonInterpretation {
   const canonicalReason = replaceName(
-    replaceName(reason, names.workerName, "Joyce"),
+    replaceName(reason, names.workerName, "Worker"),
     names.founderName,
     "Robert",
   );
@@ -42,7 +43,7 @@ export function interpretWaitingReasonForWorker(
     ...result,
     rawReason: reason.trim(),
     normalizedReason: reason.trim().replace(/\s+/g, " "),
-    waitingOnName: result.waitingOn === "joyce"
+    waitingOnName: result.waitingOn === "worker" || result.waitingOn === "joyce"
       ? names.workerName
       : result.waitingOn === "robert"
         ? names.founderName

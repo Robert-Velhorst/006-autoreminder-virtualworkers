@@ -92,28 +92,48 @@ foreach ($name in $required) {
   }
 }
 
-$compose = @("compose", "--env-file", $composeEnvPath, "--profile", "public")
-Invoke-Checked ($compose + @("config", "--quiet"))
+$compose = @("compose", "--env-file", $composeEnvPath)
+$publicCompose = $compose + @("--profile", "public")
+Invoke-Checked ($publicCompose + @("config", "--quiet"))
+
+$configuredPublicUrl = [Environment]::GetEnvironmentVariable("NGROK_URL", "Process")
+if ($configuredPublicUrl) {
+  $publicUrl = $configuredPublicUrl.Trim().TrimEnd("/")
+  $env:PUBLIC_URL = $publicUrl
+  $env:WEBHOOK_BASE_URL = $publicUrl
+  $env:TRELLO_WEBHOOK_CALLBACK_URL = "$publicUrl/api/trello-webhook"
+}
+
+# Do not leave ngrok pointing at an app container while Docker replaces it.
+# A reserved URL comes back after the app health check instead of serving
+# ERR_NGROK_8012 to a worker during deployment.
+Invoke-Checked ($publicCompose + @("stop", "ngrok"))
 
 $upArguments = $compose + @("up", "-d")
 if (-not $NoBuild) { $upArguments += "--build" }
+$upArguments += @("mysql", "redis", "migrate", "app")
 Invoke-Checked $upArguments
 
 $localHealth = "http://127.0.0.1:$($env:PORT)/api/health"
 Wait-Http $localHealth | Out-Null
 
-$configuredPublicUrl = [Environment]::GetEnvironmentVariable("NGROK_URL", "Process")
 if ($configuredPublicUrl) {
   $publicUrl = $configuredPublicUrl.Trim().TrimEnd("/")
 } else {
+  # Dynamic ngrok URLs are discovered only after the app is healthy. Restart
+  # the app once with that server-owned callback origin before exposing it.
+  Invoke-Checked ($publicCompose + @("up", "-d", "--no-deps", "ngrok"))
   $inspectUrl = "http://127.0.0.1:$($env:NGROK_INSPECT_PORT)/api/tunnels"
   $publicUrl = Wait-NgrokTunnel $inspectUrl
+  Invoke-Checked ($publicCompose + @("stop", "ngrok"))
+  $env:PUBLIC_URL = $publicUrl
+  $env:WEBHOOK_BASE_URL = $publicUrl
+  $env:TRELLO_WEBHOOK_CALLBACK_URL = "$publicUrl/api/trello-webhook"
+  Invoke-Checked ($compose + @("up", "-d", "--no-deps", "--force-recreate", "app"))
+  Wait-Http $localHealth | Out-Null
 }
 
-$env:PUBLIC_URL = $publicUrl
-$env:WEBHOOK_BASE_URL = $publicUrl
-$env:TRELLO_WEBHOOK_CALLBACK_URL = "$publicUrl/api/trello-webhook"
-Invoke-Checked ($compose + @("up", "-d", "--force-recreate", "app"))
+Invoke-Checked ($publicCompose + @("up", "-d", "--no-deps", "ngrok"))
 
 Wait-Http $localHealth | Out-Null
 $publicHealth = "$publicUrl/api/health"
@@ -129,6 +149,6 @@ New-Item -ItemType Directory -Force -Path $stateDirectory | Out-Null
   statusCode = $health.StatusCode
 } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
 
-Write-Output "Joyce dashboard is healthy: $publicUrl"
+Write-Output "Virtual worker dashboard is healthy: $publicUrl"
 Write-Output "Local fallback: http://127.0.0.1:$($env:PORT)"
 Write-Output "Runtime state: $statePath"

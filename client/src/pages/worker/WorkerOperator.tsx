@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   Archive,
   BrainCircuit,
+  BellRing,
   CalendarDays,
   Check,
   ChevronDown,
@@ -51,6 +52,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { getWorkLaneRank } from "@shared/workLanePriority";
 import { formatWorkerDate } from "@shared/workerTime";
 import { toast } from "sonner";
+import WorkerReminders from "./WorkerReminders";
 
 type OperatorCard = {
   cardId: string;
@@ -121,6 +123,7 @@ const NAVIGATION = [
   { path: "/worker/plan", label: "Plan My Day", description: "Time blocks", icon: CalendarDays },
   { path: "/worker/decisions", label: "Decisions", description: "Required outcomes", icon: BrainCircuit },
   { path: "/worker/evidence", label: "Evidence", description: "Connected facts", icon: FileCheck2 },
+  { path: "/worker/reminders", label: "Reminders", description: "Commitments and follow-up", icon: BellRing },
 ] as const;
 
 function priorityTone(tier: string) {
@@ -141,6 +144,49 @@ function evidenceTone(status: "linked" | "live" | "missing") {
   return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
 }
 
+type BrowserConnectionSnapshot = {
+  connected?: boolean;
+  collectorConfigured?: boolean;
+  status?: string | null;
+  capturedAt?: Date | string | null;
+  actionableTabs?: number;
+};
+
+function describeBrowserConnection(status?: BrowserConnectionSnapshot) {
+  if (status?.connected) {
+    return {
+      label: "Connected",
+      detail: `${status.actionableTabs ?? 0} actionable tabs are currently visible.`,
+      healthy: true,
+    };
+  }
+
+  if (status?.status === "stale") {
+    const lastInventory = status.capturedAt
+      ? `The last inventory was ${new Date(status.capturedAt).toLocaleString()}.`
+      : "The last inventory is outside the configured freshness window.";
+    return {
+      label: "Stale",
+      detail: `${lastInventory} Reopen the browser collector to refresh tab compliance.`,
+      healthy: false,
+    };
+  }
+
+  if (status?.collectorConfigured) {
+    return {
+      label: "Waiting for data",
+      detail: "The collector token is configured, but no browser inventory has been received yet.",
+      healthy: false,
+    };
+  }
+
+  return {
+    label: "Setup required",
+    detail: "Install and authorize the local collector before tab compliance can be trusted.",
+    healthy: false,
+  };
+}
+
 function uncertaintyTone(severity: "high" | "medium" | "low") {
   if (severity === "high") return "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300";
   if (severity === "medium") return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
@@ -155,7 +201,7 @@ function formatDuration(minutes: number | null) {
   return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
 }
 
-export default function WorkerOperator({ view = "today" }: { view?: "today" | "plan" | "decisions" | "evidence" | "settings" }) {
+export default function WorkerOperator({ view = "today" }: { view?: "today" | "plan" | "decisions" | "evidence" | "reminders" | "settings" }) {
   const [, navigate] = useLocation();
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
@@ -241,6 +287,7 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
           {view === "plan" && <PlanView founderName={founderName} timeZone={timeZone} />}
           {view === "decisions" && <DecisionsView founderName={founderName} />}
           {view === "evidence" && <EvidenceView />}
+          {view === "reminders" && <WorkerReminders />}
           {view === "settings" && <WorkerSettingsView />}
         </main>
       </div>
@@ -747,7 +794,10 @@ function DecisionsView({ founderName }: { founderName: string }) {
   const history = trpc.operator.getDecisionHistory.useQuery({ limit: 20 }, { staleTime: 30_000 });
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [outcome, setOutcome] = useState("");
+  const [showAllDecisions, setShowAllDecisions] = useState(false);
   const selected = queue.data?.items.find((item) => item.stepId === selectedId) ?? queue.data?.items[0] ?? null;
+  const decisionItems = queue.data?.items ?? [];
+  const visibleDecisionItems = showAllDecisions ? decisionItems : decisionItems.slice(0, 8);
   const mutation = trpc.operator.recordDecisionOutcome.useMutation({
     onSuccess: () => {
       setOutcome("");
@@ -766,13 +816,20 @@ function DecisionsView({ founderName }: { founderName: string }) {
           <Card className="gap-0 rounded-lg py-0">
             <CardHeader className="border-b py-4"><CardTitle className="text-sm">Decision inbox</CardTitle><CardDescription>Highest-priority unresolved decision first.</CardDescription></CardHeader>
             <CardContent className="p-0">
-              {queue.isLoading ? <div className="p-4"><QueueSkeleton /></div> : queue.data?.items.length ? queue.data.items.map((item, index) => (
-                <button key={item.stepId} type="button" onClick={() => setSelectedId(item.stepId)} className={`grid w-full grid-cols-[28px_minmax(0,1fr)_auto] gap-3 border-b px-4 py-3 text-left last:border-b-0 hover:bg-accent/40 ${selected?.stepId === item.stepId ? "bg-accent/50" : ""}`}>
-                  <span className="flex size-6 items-center justify-center rounded border text-xs">{index + 1}</span>
-                  <span className="min-w-0"><span className="block truncate text-sm font-medium">{item.cardName}</span><span className="block truncate text-xs text-muted-foreground">{item.stepTitle}</span></span>
-                  <Badge variant="outline" className={priorityTone(item.tier)}>{item.tier}</Badge>
-                </button>
-              )) : <EmptyState title="Decision inbox is clear" detail={`New ${founderName}-required APTLSS steps will appear here.`} />}
+              {queue.isLoading ? <div className="p-4"><QueueSkeleton /></div> : decisionItems.length ? <>
+                {visibleDecisionItems.map((item, index) => (
+                  <button key={item.stepId} type="button" onClick={() => setSelectedId(item.stepId)} className={`grid w-full grid-cols-[28px_minmax(0,1fr)_auto] gap-3 border-b px-4 py-3 text-left hover:bg-accent/40 ${selected?.stepId === item.stepId ? "bg-accent/50" : ""}`}>
+                    <span className="flex size-6 items-center justify-center rounded border text-xs">{index + 1}</span>
+                    <span className="min-w-0"><span className="block truncate text-sm font-medium">{item.cardName}</span><span className="block truncate text-xs text-muted-foreground">{item.stepTitle}</span></span>
+                    <Badge variant="outline" className={priorityTone(item.tier)}>{item.tier}</Badge>
+                  </button>
+                ))}
+                {decisionItems.length > 8 && <div className="p-3">
+                  <Button className="w-full" variant="ghost" onClick={() => setShowAllDecisions((value) => !value)}>
+                    {showAllDecisions ? "Show fewer decisions" : `Show ${decisionItems.length - 8} more decisions`}
+                  </Button>
+                </div>}
+              </> : <EmptyState title="Decision inbox is clear" detail={`New ${founderName}-required APTLSS steps will appear here.`} />}
             </CardContent>
           </Card>
           <RecentOutcomes rows={history.data ?? []} />
@@ -803,14 +860,16 @@ function EvidenceView() {
   const intelligence = trpc.operator.getWorkQueueContext.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const compliance = trpc.compliance.getHistory.useQuery({ limit: 7 }, { retry: false, staleTime: 60_000 });
   const email = trpc.emailInbox.getPendingCount.useQuery(undefined, { retry: false, staleTime: 60_000 });
+  const google = trpc.operator.getGoogleEvidenceStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const latest = compliance.data?.[0] ?? null;
+  const browserConnection = describeBrowserConnection(status.data);
   return (
     <div className="space-y-5">
       <PageHeading title="Evidence" description="Connected facts are visible here; execution actions remain in Today and Decisions." />
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <ContextMetric icon={ShieldCheck} label="APTLSS cards" value={`${intelligence.data?.cards.length ?? 0}`} detail="Plans joined to states and scores" />
         <ContextMetric icon={Clock3} label="Waiting reasons" value={`${waiting.data?.length ?? 0}`} detail="Free-flow reasons interpreted" />
-        <ContextMetric icon={Archive} label="Browser collector" value={status.data?.connected ? "Connected" : "Disconnected"} detail={status.data?.capturedAt ? `Last seen ${new Date(status.data.capturedAt).toLocaleTimeString()}` : "No inventory received"} />
+        <ContextMetric icon={Archive} label="Browser collector" value={browserConnection.label} detail={browserConnection.detail} />
         <ContextMetric icon={History} label="Daily compliance" value={latest ? `${latest.compliancePct}%` : "No snapshot"} detail={latest ? `${latest.evidenceCount} source facts checked` : "Record a verified snapshot"} />
       </div>
       <Card className="gap-0 rounded-lg py-0">
@@ -818,9 +877,10 @@ function EvidenceView() {
         <CardContent className="divide-y p-0">
           <EvidenceRow label="Trello and APTLSS" status={intelligence.error ? "Needs attention" : "Connected"} detail={intelligence.error?.message ?? "Plans, card state, priority and open steps are joined by card ID."} />
           <EvidenceRow label="Waiting reasons" status="Operational" detail="Free-text is classified into actor, missing item, follow-up and next action with confidence and missing-information flags." />
-          <EvidenceRow label="Browser tabs" status={status.data?.connected ? "Connected" : "Setup required"} detail={status.data?.connected ? `${status.data.actionableTabs} actionable tabs are currently visible.` : "Install and authorize the local collector before tab compliance can be trusted."} />
+          <EvidenceRow label="Browser tabs" status={browserConnection.label} detail={browserConnection.detail} />
           <EvidenceRow label="Communication" status={latest?.verificationStatus ?? "No snapshot"} detail={latest ? `${latest.messageReplied}/${latest.messageTotal} messages answered; ${latest.messageNeedsClarification} need clarification.` : "No verified communication snapshot is available yet."} />
-          <EvidenceRow label="Gmail processing" status={email.error ? "Needs attention" : `${email.data?.count ?? 0} pending`} detail={latest ? `${latest.emailCompleted}/${latest.emailTotal} retained emails were processed or archived for the latest snapshot.` : "Inbox tasks are retained without changing Gmail automatically."} />
+          <EvidenceRow label="Gmail processing" status={!google.data?.credentialsReady ? "Setup required" : email.error ? "Needs attention" : `${email.data?.count ?? 0} pending`} detail={!google.data?.credentialsReady ? google.data?.setupMessage ?? "Google credentials have not been checked yet." : latest ? `${latest.emailCompleted}/${latest.emailTotal} retained emails were processed or archived for the latest snapshot.` : "Inbox tasks are retained without changing Gmail automatically."} />
+          <EvidenceRow label="Google Drive" status={!google.data?.credentialsReady ? "Setup required" : google.data.drive.lastSyncedAt ? "Connected" : "Waiting for first sync"} detail={!google.data?.credentialsReady ? google.data?.setupMessage ?? "Google credentials have not been checked yet." : google.data.drive.lastSyncedAt ? `Metadata last checked ${new Date(google.data.drive.lastSyncedAt).toLocaleString()}. Files are linked only by exact card ID or title.` : "No Drive metadata has been collected for this worker yet."} />
           <EvidenceRow label="Time accountability" status={latest ? `${Math.round(latest.trackedSeconds / 360) / 10}h tracked` : "No snapshot"} detail={latest ? `${Math.round(latest.overtimeSeconds / 360) / 10}h overtime against the configured worker schedule.` : "Completed timer entries are included in the next snapshot."} />
           <EvidenceRow label="Browser history" status={`${history.data?.length ?? 0} days`} detail="End-of-day browser snapshots are retained separately from task and communication evidence." />
         </CardContent>
@@ -835,6 +895,7 @@ function WorkerSettingsView() {
   const policy = trpc.operator.getBrowserTabPolicy.useQuery(undefined, { staleTime: 60_000 });
   const browser = trpc.operator.getBrowserTabStatus.useQuery(undefined, { retry: false, staleTime: 30_000 });
   const email = trpc.emailInbox.getPendingCount.useQuery(undefined, { retry: false, staleTime: 60_000 });
+  const google = trpc.operator.getGoogleEvidenceStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const apiHealth = trpc.system.health.useQuery(
     { timestamp: 0 },
     { retry: 1, staleTime: 30_000, refetchInterval: 60_000 },
@@ -844,6 +905,13 @@ function WorkerSettingsView() {
   const [warningMinutes, setWarningMinutes] = useState(30);
   const [staleMinutes, setStaleMinutes] = useState(10);
   const [includePinnedTabs, setIncludePinnedTabs] = useState(false);
+  const [gmailEnabled, setGmailEnabled] = useState(true);
+  const [gmailInterval, setGmailInterval] = useState(60);
+  const [gmailLookback, setGmailLookback] = useState(30);
+  const [driveEnabled, setDriveEnabled] = useState(true);
+  const [driveInterval, setDriveInterval] = useState(180);
+  const [driveLookback, setDriveLookback] = useState(30);
+  const [driveFolderId, setDriveFolderId] = useState("");
 
   useEffect(() => {
     if (!policy.data) return;
@@ -853,6 +921,17 @@ function WorkerSettingsView() {
     setStaleMinutes(policy.data.staleAfterMinutes);
     setIncludePinnedTabs(policy.data.includePinnedTabs);
   }, [policy.data]);
+
+  useEffect(() => {
+    if (!google.data) return;
+    setGmailEnabled(google.data.settings.gmail.enabled);
+    setGmailInterval(google.data.settings.gmail.intervalMinutes);
+    setGmailLookback(google.data.settings.gmail.lookbackDays);
+    setDriveEnabled(google.data.settings.drive.enabled);
+    setDriveInterval(google.data.settings.drive.intervalMinutes);
+    setDriveLookback(google.data.settings.drive.lookbackDays);
+    setDriveFolderId(google.data.settings.drive.folderId ?? "");
+  }, [google.data]);
 
   const savePolicy = trpc.operator.setBrowserTabPolicy.useMutation({
     onSuccess: () => {
@@ -873,7 +952,37 @@ function WorkerSettingsView() {
     },
     onError: (error) => toast.error(error.message),
   });
+  const saveGoogle = trpc.operator.updateGoogleEvidenceSettings.useMutation({
+    onSuccess: () => {
+      void utils.operator.getGoogleEvidenceStatus.invalidate();
+      toast.success("Google evidence settings saved");
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const syncGoogle = trpc.operator.syncGoogleEvidence.useMutation({
+    onSuccess: (result) => {
+      void utils.operator.getGoogleEvidenceStatus.invalidate();
+      void utils.emailInbox.getPendingCount.invalidate();
+      void utils.operator.getWorkQueueContext.invalidate();
+      if (!result.configured) {
+        toast.error(result.message ?? "Google evidence is not configured");
+      } else if (result.message) {
+        toast.error(result.message);
+      } else {
+        toast.success(`Evidence refreshed: ${result.gmail.imported} emails and ${result.drive.imported} Drive files checked`);
+      }
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const disconnectGoogle = trpc.operator.disconnectGoogleEvidence.useMutation({
+    onSuccess: () => {
+      void utils.operator.getGoogleEvidenceStatus.invalidate();
+      toast.success("Google worker connection removed");
+    },
+    onError: (error) => toast.error(error.message),
+  });
   const worker = context.data;
+  const browserConnection = describeBrowserConnection(browser.data);
   const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
   return (
@@ -938,12 +1047,48 @@ function WorkerSettingsView() {
                 healthy={apiHealth.data?.runtime === "unified-node"}
               />
               <ConnectionRow label="Trello identity" value={worker?.trelloMemberId ? "Configured" : "Uses token owner"} healthy={Boolean(worker?.trelloMemberId)} />
-              <ConnectionRow label="Gmail queue" value={`${email.data?.count ?? 0} pending`} healthy={!email.error} />
-              <ConnectionRow label="Browser collector" value={browser.data?.connected ? "Connected" : browser.data?.collectorConfigured ? "Waiting for data" : "Setup required"} healthy={Boolean(browser.data?.connected)} />
+              <ConnectionRow label="Gmail evidence" value={!google.data?.credentialsReady ? "Setup required" : `${email.data?.count ?? 0} pending`} healthy={Boolean(google.data?.credentialsReady) && !email.error} />
+              <ConnectionRow label="Google Drive" value={!google.data?.credentialsReady ? "Setup required" : google.data.drive.lastSyncedAt ? "Connected" : "Waiting for sync"} healthy={Boolean(google.data?.credentialsReady && google.data.drive.lastSyncedAt)} />
+              <ConnectionRow label="Browser collector" value={browserConnection.label} healthy={browserConnection.healthy} />
             </CardContent>
           </Card>
         </div>
       </div>
+      <Card className="gap-0 rounded-lg py-0">
+        <CardHeader className="border-b py-4">
+          <CardTitle className="text-sm">Google evidence intake</CardTitle>
+          <CardDescription>Read-only Gmail and Drive metadata supports cross-source assessment. Nothing is sent, archived, labelled, or moved in Google.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5 p-5">
+          {!google.data?.credentialsReady && <Alert>
+            <AlertTriangle className="size-4" />
+            <AlertTitle>Google connection needs setup</AlertTitle>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{google.data?.setupMessage ?? "Checking the Google connection."}</span>{google.data?.clientConfigured && <Button size="sm" asChild><a href="/api/google-evidence/connect">Connect Google</a></Button>}</AlertDescription>
+          </Alert>}
+          {google.data?.lastError && <Alert variant="destructive">
+            <AlertTriangle className="size-4" />
+            <AlertTitle>Last Google sync needs attention</AlertTitle>
+            <AlertDescription>{google.data.lastError}</AlertDescription>
+          </Alert>}
+          <div className="grid gap-5 lg:grid-cols-2">
+            <section className="space-y-4 rounded-md border p-4">
+              <div className="flex items-center justify-between gap-4"><div><Label htmlFor="gmail-evidence-enabled">Gmail intake</Label><p className="mt-1 text-xs text-muted-foreground">Keeps only the newest message in each inbox thread.</p></div><Switch id="gmail-evidence-enabled" checked={gmailEnabled} onCheckedChange={setGmailEnabled} /></div>
+              <div className="grid gap-4 sm:grid-cols-2"><NumberSetting id="gmail-interval" label="Check every" value={gmailInterval} min={15} max={1440} suffix="min" onChange={setGmailInterval} /><NumberSetting id="gmail-lookback" label="Look back" value={gmailLookback} min={1} max={90} suffix="days" onChange={setGmailLookback} /></div>
+              <p className="text-xs text-muted-foreground">{google.data?.gmail.lastSyncedAt ? `Last checked ${new Date(google.data.gmail.lastSyncedAt).toLocaleString()}.` : "No Gmail data collected yet."}</p>
+            </section>
+            <section className="space-y-4 rounded-md border p-4">
+              <div className="flex items-center justify-between gap-4"><div><Label htmlFor="drive-evidence-enabled">Drive metadata</Label><p className="mt-1 text-xs text-muted-foreground">Links files only when the card ID or full card title matches exactly.</p></div><Switch id="drive-evidence-enabled" checked={driveEnabled} onCheckedChange={setDriveEnabled} /></div>
+              <div className="grid gap-4 sm:grid-cols-2"><NumberSetting id="drive-interval" label="Check every" value={driveInterval} min={15} max={1440} suffix="min" onChange={setDriveInterval} /><NumberSetting id="drive-lookback" label="Look back" value={driveLookback} min={1} max={90} suffix="days" onChange={setDriveLookback} /></div>
+              <div className="space-y-2"><Label htmlFor="drive-folder-id">Optional folder ID</Label><Input id="drive-folder-id" value={driveFolderId} onChange={(event) => setDriveFolderId(event.target.value)} placeholder="All accessible files when empty" /><p className="text-xs text-muted-foreground">{google.data?.drive.lastSyncedAt ? `Last checked ${new Date(google.data.drive.lastSyncedAt).toLocaleString()}.` : "No Drive metadata collected yet."}</p></div>
+            </section>
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            {google.data?.connectionMode === "worker" && <Button variant="outline" onClick={() => disconnectGoogle.mutate()} disabled={disconnectGoogle.isPending}>{disconnectGoogle.isPending && <Loader2 className="size-4 animate-spin" />}Disconnect Google</Button>}
+            <Button variant="outline" onClick={() => syncGoogle.mutate({ gmail: gmailEnabled, drive: driveEnabled })} disabled={syncGoogle.isPending}>{syncGoogle.isPending && <Loader2 className="size-4 animate-spin" />}Sync now</Button>
+            <Button onClick={() => saveGoogle.mutate({ gmail: { enabled: gmailEnabled, intervalMinutes: gmailInterval, lookbackDays: gmailLookback }, drive: { enabled: driveEnabled, intervalMinutes: driveInterval, lookbackDays: driveLookback, folderId: driveFolderId.trim() || null } })} disabled={saveGoogle.isPending}>{saveGoogle.isPending && <Loader2 className="size-4 animate-spin" />}Save intake settings</Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

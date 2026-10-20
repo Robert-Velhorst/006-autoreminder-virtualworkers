@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { requestQueue } from '../services/request-queue';
+import { requireAdmin } from '../middleware/auth';
 
 const router = Router();
+router.use('/queue', requireAdmin);
 
 // Get queue metrics
 router.get('/queue/metrics', async (req: any, res: Response) => {

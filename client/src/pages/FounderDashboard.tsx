@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'wouter';
 import { 
-  ArrowLeft, Plus, Users, Clock, CheckCircle, AlertTriangle, Loader2, 
+  ArrowLeft, Plus, Users, Clock, CheckCircle, AlertTriangle, Loader2, Copy,
   MoreVertical, Mail, Globe, DollarSign, Search, Flag, ExternalLink,
   Star, MessageSquare, Calendar, Send, RefreshCw, Filter, Briefcase,
   Timer, AlertCircle, CheckSquare, XCircle, ArrowUpCircle,
@@ -141,7 +141,6 @@ export default function FounderDashboard() {
   const [newWorker, setNewWorker] = useState({
     name: '',
     email: '',
-    password: '',
     timezone: 'Asia/Manila',
     hourlyRate: '',
     currency: 'USD',
@@ -156,6 +155,7 @@ export default function FounderDashboard() {
     dinnerDuration: '45',
     trelloMemberId: '',
   });
+  const [createdInvitation, setCreatedInvitation] = useState<{ inviteUrl: string; emailSent: boolean; expiresAt: string } | null>(null);
   const [showEditWorker, setShowEditWorker] = useState(false);
   const [editingWorker, setEditingWorker] = useState<VirtualWorker | null>(null);
   const [editWorkerPassword, setEditWorkerPassword] = useState('');
@@ -184,7 +184,9 @@ export default function FounderDashboard() {
   // Set default worker once workload is loaded
   useEffect(() => {
     if (workload.length > 0 && selectedWorkerId === null) {
-      const firstActiveWorker = workload.find(w => w.worker.userId !== null);
+      const firstActiveWorker = workload.find(
+        w => w.worker.userId !== null && w.worker.status === 'active',
+      );
       if (firstActiveWorker && firstActiveWorker.worker.userId) {
         setSelectedWorkerId(firstActiveWorker.worker.userId);
       } else {
@@ -288,25 +290,15 @@ export default function FounderDashboard() {
       toast.error('Please enter an email');
       return;
     }
-    if (!newWorker.password.trim()) {
-      toast.error('Please enter a password');
-      return;
-    }
-    if (newWorker.password.length < 6) {
-      toast.error('Password must be at least 6 characters');
-      return;
-    }
-
     setSaving(true);
     try {
-      const res = await fetch('/api/va/vas', {
+      const res = await fetch('/api/va/vas/invite', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
           name: newWorker.name,
           email: newWorker.email,
-          password: newWorker.password,
           timezone: newWorker.timezone,
           hourlyRate: newWorker.hourlyRate ? parseInt(newWorker.hourlyRate) * 100 : null,
           currency: newWorker.currency,
@@ -323,20 +315,24 @@ export default function FounderDashboard() {
         }),
       });
 
+      const result = await res.json();
       if (res.ok) {
-        toast.success('Worker added successfully');
-        setShowAddWorker(false);
-        setNewWorker({ name: '', email: '', password: '', timezone: 'Asia/Manila', hourlyRate: '', currency: 'USD', workStartHour: '9', workEndHour: '18', workingDays: '1,2,3,4,5', breakfastTime: '7', breakfastDuration: '30', lunchTime: '12', lunchDuration: '60', dinnerTime: '19', dinnerDuration: '45', trelloMemberId: '' });
-        fetchWorkload();
+        setCreatedInvitation({ inviteUrl: result.inviteUrl, emailSent: result.emailSent, expiresAt: result.expiresAt });
+        toast.success(result.emailSent ? 'Worker invitation sent' : 'Worker created; copy the invitation link');
+        void fetchWorkload();
       } else {
-        const err = await res.json();
-        toast.error('Failed to add worker', { description: err.error });
+        toast.error('Failed to invite worker', { description: result.error });
       }
     } catch (error) {
       toast.error('Failed to add worker');
     } finally {
       setSaving(false);
     }
+  };
+
+  const resetWorkerInvitation = () => {
+    setCreatedInvitation(null);
+    setNewWorker({ name: '', email: '', timezone: 'Asia/Manila', hourlyRate: '', currency: 'USD', workStartHour: '9', workEndHour: '18', workingDays: '1,2,3,4,5', breakfastTime: '7', breakfastDuration: '30', lunchTime: '12', lunchDuration: '60', dinnerTime: '19', dinnerDuration: '45', trelloMemberId: '' });
   };
 
   const handleUpdateStatus = async (workerId: number, status: string) => {
@@ -436,8 +432,8 @@ export default function FounderDashboard() {
   const handleSaveWorkerSettings = async () => {
     if (!editingWorker) return;
     
-    if (editWorkerPassword && editWorkerPassword.length < 6) {
-      toast.error('Password must be at least 6 characters');
+    if (editWorkerPassword && editWorkerPassword.length < 12) {
+      toast.error('Password must be at least 12 characters');
       return;
     }
 
@@ -639,7 +635,10 @@ export default function FounderDashboard() {
               <ArrowUpCircle className="h-4 w-4 mr-2" />
               Re-analyze All
             </Button>
-            <Dialog open={showAddWorker} onOpenChange={setShowAddWorker}>
+            <Dialog open={showAddWorker} onOpenChange={(open) => {
+              setShowAddWorker(open);
+              if (!open) resetWorkerInvitation();
+            }}>
               <DialogTrigger asChild>
                 <Button>
                   <Plus className="h-4 w-4 mr-2" />
@@ -650,6 +649,39 @@ export default function FounderDashboard() {
                 <DialogHeader>
                   <DialogTitle>Add Virtual Worker</DialogTitle>
                 </DialogHeader>
+                {createdInvitation ? (
+                  <div className="space-y-5 py-4">
+                    <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-4">
+                      <div className="flex items-center gap-2 font-medium text-emerald-700 dark:text-emerald-300">
+                        <CheckCircle className="size-4" />
+                        {createdInvitation.emailSent ? 'Invitation sent' : 'Invitation ready'}
+                      </div>
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        {createdInvitation.emailSent
+                          ? 'The worker received a one-time setup link by email.'
+                          : 'Email delivery is not active. Share the one-time link through a trusted channel.'}
+                      </p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="worker-invitation-url">One-time invitation link</Label>
+                      <div className="flex gap-2">
+                        <Input id="worker-invitation-url" readOnly value={createdInvitation.inviteUrl} />
+                        <Button type="button" variant="outline" size="icon" aria-label="Copy invitation link" onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(createdInvitation.inviteUrl);
+                            toast.success('Invitation link copied');
+                          } catch {
+                            toast.error('Could not copy the invitation link. Select the link and copy it manually.');
+                          }
+                        }}><Copy className="size-4" /></Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">Expires {new Date(createdInvitation.expiresAt).toLocaleString()}.</p>
+                    </div>
+                    <DialogFooter>
+                      <Button onClick={() => { resetWorkerInvitation(); setShowAddWorker(false); }}>Done</Button>
+                    </DialogFooter>
+                  </div>
+                ) : <>
                 <div className="space-y-4 py-4">
                   <div className="space-y-2">
                     <Label>Name *</Label>
@@ -666,15 +698,6 @@ export default function FounderDashboard() {
                       value={newWorker.email}
                       onChange={(e) => setNewWorker({ ...newWorker, email: e.target.value })}
                       placeholder="va@example.com"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Password *</Label>
-                    <Input
-                      type="password"
-                      value={newWorker.password}
-                      onChange={(e) => setNewWorker({ ...newWorker, password: e.target.value })}
-                      placeholder="Min 6 characters"
                     />
                   </div>
                   <div className="space-y-2">
@@ -896,12 +919,13 @@ export default function FounderDashboard() {
                   </div>
                 </div>
                 <DialogFooter>
-                  <Button variant="outline" onClick={() => setShowAddWorker(false)}>Cancel</Button>
+                  <Button variant="outline" onClick={() => { resetWorkerInvitation(); setShowAddWorker(false); }}>Cancel</Button>
                   <Button onClick={handleAddWorker} disabled={saving}>
                     {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                    Add Worker
+                    Send Invitation
                   </Button>
                 </DialogFooter>
+                </>}
               </DialogContent>
             </Dialog>
           </div>
