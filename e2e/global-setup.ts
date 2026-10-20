@@ -41,7 +41,7 @@ export default async function globalSetup() {
       [E2E_USERNAME, passwordHash]
     );
     await pool.query(`INSERT INTO users ("openId", name, role)
-      VALUES ('va-dashboard-ci-founder', 'CI Founder', 'founder')
+      VALUES ('va-dashboard-ci-founder', 'CI Founder', 'admin')
       ON CONFLICT ("openId") DO NOTHING`);
     await pool.query(`DELETE FROM va_profiles WHERE "userId" = (SELECT id FROM users WHERE "openId" = $1)`, [E2E_USERNAME]);
     await pool.query(`INSERT INTO va_profiles ("userId", "founderId", name, timezone, status)
