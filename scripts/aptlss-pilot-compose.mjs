@@ -1,4 +1,3 @@
-import { confinedLocalPath } from "../shared/local-filesystem-policy.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -12,6 +11,7 @@ import {
 const mode = process.argv[2] || "check";
 assertAptlssPilotOperationAllowed(mode);
 const pilotWorkerId = assertSingleAptlssPilotWorkerId(process.env.APTLSS_MANAGER_PILOT_WORKER_IDS);
+const { confinedLocalPath } = await import("../shared/local-filesystem-policy.mjs");
 const root = path.resolve(".local/pilot");
 const main = path.resolve("../joyce-work-schedule");
 const runtime = JSON.parse(fs.readFileSync(path.join(root, "runtime-compose.json"), "utf8"));
