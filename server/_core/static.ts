@@ -1,4 +1,5 @@
 import express, { type Express } from "express";
+import { rateLimit } from "express-rate-limit";
 import fs from "fs";
 import path from "path";
 
@@ -15,6 +16,13 @@ export function staticAssetResourcePolicy(requestPath: string) {
 }
 
 export function serveStatic(app: Express) {
+  app.use(rateLimit({
+    windowMs: 60_000,
+    limit: 1_000,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    message: { error: "Too many asset requests, please slow down" },
+  }));
   const distPath =
     process.env.NODE_ENV === "development"
       ? path.resolve(import.meta.dirname, "../..", "dist", "public")

@@ -75,9 +75,10 @@ async function registerTrelloWebhook(
   await checkpoint(context);
   try {
     const response = await fetch(
-      `https://api.trello.com/1/webhooks?key=${credentials.key}&token=${credentials.token}`,
+      `https://api.trello.com/1/webhooks?${new URLSearchParams({ key: credentials.key, token: credentials.token })}`,
       {
         method: 'POST',
+        redirect: 'error',
         headers: { 'Content-Type': 'application/json' },
         signal: requestSignal(context),
         body: JSON.stringify({
@@ -123,9 +124,10 @@ async function findExistingWebhook(modelId: string, context?: ScheduledJobContex
   await checkpoint(context);
   try {
     const response = await fetch(
-      `https://api.trello.com/1/tokens/${credentials.token}/webhooks?key=${credentials.key}`,
+      `https://api.trello.com/1/tokens/${encodeURIComponent(credentials.token)}/webhooks?${new URLSearchParams({ key: credentials.key })}`,
       {
         method: 'GET',
+        redirect: 'error',
         signal: requestSignal(context),
       }
     );
@@ -159,9 +161,10 @@ async function deleteTrelloWebhook(webhookId: string, context?: ScheduledJobCont
   await checkpoint(context);
   try {
     const response = await fetch(
-      `https://api.trello.com/1/webhooks/${webhookId}?key=${credentials.key}&token=${credentials.token}`,
+      `https://api.trello.com/1/webhooks/${encodeURIComponent(webhookId)}?${new URLSearchParams({ key: credentials.key, token: credentials.token })}`,
       {
         method: 'DELETE',
+        redirect: 'error',
         signal: requestSignal(context),
       }
     );
