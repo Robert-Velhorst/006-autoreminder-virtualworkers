@@ -16,34 +16,14 @@ import {
   Zap
 } from 'lucide-react';
 import { format, formatDistanceToNow } from 'date-fns';
+import {
+  getBatchTaskPosition,
+  type BatchOperationTask,
+  type NormalizedBatchOperation,
+} from '@/lib/batch-operations-client';
 
-interface Task {
-  id: string;
-  name: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  progress?: number;
-  error?: string;
-}
-
-interface BatchOperation {
-  jobId: string;
-  operationType: 're_analyze' | 'reschedule' | 'conflict_resolution' | 'optimization';
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-  progress: number;
-  totalTasks: number;
-  completedTasks: number;
-  failedTasks: number;
-  currentTaskName?: string;
-  currentTaskIndex: number;
-  elapsedTimeSeconds?: number;
-  estimatedTimeSeconds?: number;
-  tasks: Task[];
-  results?: Record<string, any>;
-  errorLog?: string[];
-  createdAt: Date;
-  startedAt?: Date;
-  completedAt?: Date;
-}
+type Task = BatchOperationTask;
+type BatchOperation = NormalizedBatchOperation;
 
 interface BatchOperationsProgressProps {
   operation: BatchOperation;
@@ -111,8 +91,19 @@ export const BatchOperationsProgress: React.FC<BatchOperationsProgressProps> = (
 }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [expandedTasks, setExpandedTasks] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
-  const elapsedTime = operation.elapsedTimeSeconds || 0;
+  useEffect(() => {
+    if (operation.status !== 'running' || !operation.startedAt) return;
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [operation.status, operation.startedAt]);
+
+  const persistedElapsed = operation.elapsedTimeSeconds || 0;
+  const startedAt = operation.startedAt?.getTime();
+  const elapsedTime = operation.status === 'running' && startedAt
+    ? Math.max(persistedElapsed, Math.floor((now - startedAt) / 1000))
+    : persistedElapsed;
   const estimatedTotal = operation.estimatedTimeSeconds || 0;
   const remainingTime = Math.max(0, estimatedTotal - elapsedTime);
   const successRate = operation.totalTasks > 0 
@@ -296,7 +287,7 @@ export const BatchOperationsProgress: React.FC<BatchOperationsProgressProps> = (
               {operation.currentTaskName}
             </div>
             <div className="text-xs text-blue-600 mt-1">
-              Task {operation.currentTaskIndex + 1} of {operation.totalTasks}
+              Task {getBatchTaskPosition(operation.currentTaskIndex, operation.totalTasks)} of {operation.totalTasks}
             </div>
           </div>
         )}
@@ -324,7 +315,7 @@ export const BatchOperationsProgress: React.FC<BatchOperationsProgressProps> = (
         )}
 
         {/* Task List */}
-        <div className="space-y-2">
+        {operation.tasks.length > 0 && <div className="space-y-2">
           <button
             onClick={() => setExpandedTasks(!expandedTasks)}
             className="flex items-center gap-2 text-sm font-medium hover:text-primary transition-colors"
@@ -369,13 +360,15 @@ export const BatchOperationsProgress: React.FC<BatchOperationsProgressProps> = (
               ))}
             </div>
           )}
-        </div>
+        </div>}
 
         {/* Results Summary */}
         {operation.status === 'completed' && operation.results && (
           <div className="bg-green-50 border border-green-200 rounded-lg p-3">
             <div className="text-sm font-semibold text-green-900 mb-2">
-              ✓ Batch operation completed successfully
+              {operation.failedTasks > 0
+                ? 'Batch operation completed with issues'
+                : '✓ Batch operation completed successfully'}
             </div>
             <div className="text-xs text-green-700">
               Processed {operation.completedTasks} tasks in{' '}

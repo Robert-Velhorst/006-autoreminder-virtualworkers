@@ -13,21 +13,43 @@ import {
   users,
   atisCards,
   atisBoards,
-  atisCardUnderstanding
+  atisCardUnderstanding,
+  trelloCachedCards,
 } from '../../drizzle/schema.postgres';
 import { eq, and, desc, sql, inArray } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
-import { sendMorningBriefing, sendEODReport, validateSendGridApiKey } from '../services/email';
+import { PASSWORD_MIN_LENGTH, validatePassword } from '../passwordPolicy';
+import { sendMorningBriefing, sendEODReport, sendWorkerInvitationEmail, validateEmailProvider } from '../services/email';
 import { websocketService } from '../services/websocket';
 import { invalidateCache } from '../services/trello-cache';
 import { fetchWithRetry } from '../utils/retry';
+import { fetchVerifiedTrelloBoardIds, TrelloBoardInventoryUnavailableError } from '../trelloBoardInventory';
 import { requestUser, requireAuthenticated } from '../middleware/auth';
+import { didUpdateSingleTaskAssignment } from '../taskAssignmentMutation';
+import {
+  createWorkerInvitation,
+  markWorkerInvitationSent,
+  WorkerInvitationError,
+} from '../workerInvitations';
+import {
+  BriefingSettingsValidationError,
+  getBriefingSettings,
+  saveBriefingSettings,
+} from '../briefingSettings';
+import { mapWithConcurrency } from '../utils/concurrency';
+import { selectWorkerProfile } from '../workerOperatorContext';
+import { isManagerPilotWorker } from '../aptlssManagerPilot';
+import { getGoogleEvidenceStatus } from '../googleEvidence';
+import { managerActionNeedsSourceVerification, managerActionSourceRequirements } from '../timerAccess';
+import { readCurrentManagerHistory } from '../aptlssManagerHistoryDb';
+import { WORKER_EXECUTION_HOLD_MESSAGE } from '../../shared/aptlssManager';
 
 const router = Router();
 router.use(requireAuthenticated);
 router.use((req, res, next) => {
   const user = requestUser(req)!;
-  const isWorkerRoute = req.path === '/worker' || req.path.startsWith('/worker/');
+  const routePath = req.path.toLowerCase();
+  const isWorkerRoute = routePath === '/worker' || routePath.startsWith('/worker/');
   if (isWorkerRoute && user.role !== 'worker') {
     return res.status(403).json({ error: 'Worker access required' });
   }
@@ -36,6 +58,43 @@ router.use((req, res, next) => {
   }
   next();
 });
+
+type Database = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+
+const workerProfileUpdateFields = new Set([
+  'name', 'email', 'timezone', 'skills', 'hourlyRate', 'currency',
+  'workStartHour', 'workEndHour', 'workingDays',
+  'breakfastTime', 'breakfastDuration', 'lunchTime', 'lunchDuration',
+  'dinnerTime', 'dinnerDuration', 'trelloMemberId', 'status',
+]);
+
+async function getWorkerProfileForAccount(db: Database, userId: number) {
+  const profiles = await db.select().from(vaProfiles).where(eq(vaProfiles.userId, userId)).orderBy(vaProfiles.id);
+  return { profiles, profile: selectWorkerProfile(profiles) };
+}
+
+function ambiguousWorkerProfileResponse(profiles: unknown[]) {
+  return profiles.length > 0
+    ? { status: 409, body: { error: 'Your worker profile is ambiguous. Ask an administrator to resolve it before continuing.' } }
+    : null;
+}
+
+function pilotCompletionResponse(userId: number, res: import('express').Response) {
+  if (!isManagerPilotWorker(userId)) return false;
+  res.status(409).json({ error: 'This older task action cannot close APTLSS pilot work. The task remains open; ask the founder to review the completion.' });
+  return true;
+}
+
+async function getFounderWorker(db: Database, founderId: number, rawVaId: unknown) {
+  const vaId = Number(rawVaId);
+  if (!Number.isSafeInteger(vaId) || vaId <= 0) return null;
+
+  const workers = await db.select({ id: vaProfiles.id })
+    .from(vaProfiles)
+    .where(and(eq(vaProfiles.id, vaId), eq(vaProfiles.founderId, founderId)))
+    .limit(1);
+  return workers[0] ?? null;
+}
 
 async function fetchTrelloCardSummary(taskId: string) {
   const apiKey = process.env.TRELLO_API_KEY;
@@ -47,10 +106,13 @@ async function fetchTrelloCardSummary(taskId: string) {
 
   const cardId = taskId.split(':')[0];
   if (!cardId) return null;
+  const encodedCardId = encodeURIComponent(cardId);
 
   try {
     const response = await fetchWithRetry(
-      `https://api.trello.com/1/cards/${cardId}?key=${apiKey}&token=${apiToken}&fields=name,desc,due,labels`
+      `https://api.trello.com/1/cards/${encodedCardId}?key=${apiKey}&token=${apiToken}&fields=name,desc,due,labels`,
+      undefined,
+      { maxRetries: 1, timeoutMs: 15_000 },
     );
 
     if (!response.ok) {
@@ -110,6 +172,64 @@ router.get('/vas', async (req: any, res) => {
 });
 
 // Create a new VA profile
+router.post('/vas/invite', async (req: any, res) => {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const configuredBaseUrl = process.env.PUBLIC_URL?.trim()
+      || process.env.WEBHOOK_BASE_URL?.trim()
+      || process.env.APP_URL?.trim()
+      || process.env.TRELLO_WEBHOOK_CALLBACK_URL?.trim();
+    if (!configuredBaseUrl && process.env.NODE_ENV === 'production') {
+      return res.status(503).json({ error: 'A public dashboard URL is required before worker invitations can be sent.' });
+    }
+    const baseUrl = new URL(configuredBaseUrl || `${req.protocol}://${req.get('host')}`).origin;
+
+    const invitation = await createWorkerInvitation(user.id, {
+      name: typeof req.body?.name === 'string' ? req.body.name : '',
+      email: typeof req.body?.email === 'string' ? req.body.email : '',
+      timezone: typeof req.body?.timezone === 'string' ? req.body.timezone : undefined,
+      hourlyRate: Number.isInteger(req.body?.hourlyRate) ? req.body.hourlyRate : null,
+      currency: typeof req.body?.currency === 'string' ? req.body.currency : undefined,
+      workStartHour: Number.isInteger(req.body?.workStartHour) ? req.body.workStartHour : undefined,
+      workEndHour: Number.isInteger(req.body?.workEndHour) ? req.body.workEndHour : undefined,
+      workingDays: typeof req.body?.workingDays === 'string' ? req.body.workingDays : undefined,
+      breakfastTime: Number.isInteger(req.body?.breakfastTime) ? req.body.breakfastTime : null,
+      breakfastDuration: Number.isInteger(req.body?.breakfastDuration) ? req.body.breakfastDuration : undefined,
+      lunchTime: Number.isInteger(req.body?.lunchTime) ? req.body.lunchTime : null,
+      lunchDuration: Number.isInteger(req.body?.lunchDuration) ? req.body.lunchDuration : undefined,
+      dinnerTime: Number.isInteger(req.body?.dinnerTime) ? req.body.dinnerTime : null,
+      dinnerDuration: Number.isInteger(req.body?.dinnerDuration) ? req.body.dinnerDuration : undefined,
+      trelloMemberId: typeof req.body?.trelloMemberId === 'string' ? req.body.trelloMemberId : null,
+    });
+    const inviteUrl = `${baseUrl}/accept-invite/${encodeURIComponent(invitation.token)}`;
+    const emailSent = await sendWorkerInvitationEmail({
+      email: invitation.email,
+      workerName: invitation.name,
+      inviteUrl,
+      expiresAt: invitation.expiresAt,
+    });
+    if (emailSent) await markWorkerInvitationSent(invitation.invitationId);
+
+    return res.status(201).json({
+      success: true,
+      workerId: invitation.vaId,
+      invitationId: invitation.invitationId,
+      emailSent,
+      inviteUrl,
+      expiresAt: invitation.expiresAt,
+    });
+  } catch (error) {
+    if (error instanceof WorkerInvitationError) {
+      const status = error.code === 'conflict' ? 409 : error.code === 'database' ? 503 : 400;
+      return res.status(status).json({ error: error.message });
+    }
+    console.error('Error inviting worker:', error);
+    return res.status(500).json({ error: 'Failed to create worker invitation' });
+  }
+});
+
 router.post('/vas', async (req: any, res) => {
   try {
     const user = req.user;
@@ -130,8 +250,10 @@ router.post('/vas', async (req: any, res) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    try {
+      validatePassword(password);
+    } catch {
+      return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters` });
     }
 
     const db = await getDb();
@@ -199,7 +321,14 @@ router.put('/vas/:id', async (req: any, res) => {
     }
 
     const vaId = parseInt(req.params.id);
-    const { password, ...updates } = req.body;
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+    const { password, ...requestedUpdates } = body;
+    if (['id', 'userId', 'founderId'].some((field) => Object.prototype.hasOwnProperty.call(requestedUpdates, field))) {
+      return res.status(400).json({ error: 'Worker account and founder ownership cannot be changed' });
+    }
+    const updates: Record<string, any> = Object.fromEntries(
+      Object.entries(requestedUpdates).filter(([field]) => workerProfileUpdateFields.has(field)),
+    );
 
     const db = await getDb();
     if (!db) {
@@ -216,16 +345,29 @@ router.put('/vas/:id', async (req: any, res) => {
     }
 
     const linkedUserId = existing[0].userId;
+    const changesCredentials = Boolean(password)
+      || (updates.email && updates.email !== existing[0].email);
+    if (changesCredentials) {
+      const linkedAccount = await db.select({ id: users.id, role: users.role })
+        .from(users)
+        .where(eq(users.id, linkedUserId))
+        .limit(1);
+      if (linkedAccount[0]?.role !== 'worker') {
+        return res.status(409).json({ error: 'The linked account is not a worker account' });
+      }
+    }
 
     // Handle password update if provided
     if (password) {
-      if (password.length < 6) {
-        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+      try {
+        validatePassword(password);
+      } catch {
+        return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters` });
       }
       const passwordHash = await bcrypt.hash(password, 10);
       await db.update(users)
         .set({ passwordHash })
-        .where(eq(users.id, linkedUserId));
+        .where(and(eq(users.id, linkedUserId), eq(users.role, 'worker')));
     }
 
     // Handle email update if provided
@@ -240,7 +382,7 @@ router.put('/vas/:id', async (req: any, res) => {
       // Update system user login credentials
       await db.update(users)
         .set({ openId: updates.email, email: updates.email })
-        .where(eq(users.id, linkedUserId));
+        .where(and(eq(users.id, linkedUserId), eq(users.role, 'worker')));
     }
 
     await db.update(vaProfiles)
@@ -396,13 +538,23 @@ router.post('/assignments', async (req: any, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { taskId, vaId, notes } = req.body;
+    const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId.trim() : '';
+    const vaId = Number(req.body?.vaId);
+    const notes = typeof req.body?.notes === 'string' ? req.body.notes : null;
+    if (!taskId || !Number.isSafeInteger(vaId) || vaId <= 0) {
+      return res.status(400).json({ error: 'A task ID and valid worker profile are required' });
+    }
 
     const db = await getDb();
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
     }
     
+    const worker = await getFounderWorker(db, user.id, vaId);
+    if (!worker) {
+      return res.status(404).json({ error: 'Worker profile not found' });
+    }
+
     // Check if already assigned
     const existing = await db.select().from(taskAssignments).where(
       and(eq(taskAssignments.taskId, taskId), eq(taskAssignments.founderId, user.id))
@@ -690,16 +842,49 @@ router.post('/communication', async (req: any, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { taskId, toUserId, messageType, message, context } = req.body;
+    const taskId = typeof req.body?.taskId === 'string' && req.body.taskId.trim()
+      ? req.body.taskId.trim()
+      : null;
+    const recipientId = req.body?.toUserId == null ? null : Number(req.body.toUserId);
+    const messageType = req.body?.messageType;
+    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+    const context = req.body?.context;
+    const allowedMessageTypes = new Set(['question', 'decision', 'update', 'handoff', 'feedback']);
+
+    if (!message || !allowedMessageTypes.has(messageType)) {
+      return res.status(400).json({ error: 'A message and valid message type are required' });
+    }
+    if (recipientId !== null && (!Number.isSafeInteger(recipientId) || recipientId <= 0)) {
+      return res.status(400).json({ error: 'Recipient must be a valid user ID' });
+    }
 
     const db = await getDb();
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
     }
+
+    if (taskId) {
+      const assignments = await db.select({ id: taskAssignments.id }).from(taskAssignments)
+        .where(and(eq(taskAssignments.taskId, taskId), eq(taskAssignments.founderId, user.id)))
+        .limit(1);
+      if (!assignments[0]) {
+        return res.status(404).json({ error: 'Task assignment not found' });
+      }
+    }
+
+    if (recipientId !== null && recipientId !== user.id) {
+      const recipients = await db.select({ id: vaProfiles.id }).from(vaProfiles)
+        .where(and(eq(vaProfiles.userId, recipientId), eq(vaProfiles.founderId, user.id)))
+        .limit(1);
+      if (!recipients[0]) {
+        return res.status(404).json({ error: 'Recipient is not a worker in this workspace' });
+      }
+    }
+
     await db.insert(communicationLog).values({
       taskId,
       fromUserId: user.id,
-      toUserId,
+      toUserId: recipientId,
       messageType,
       message,
       context: context ? JSON.stringify(context) : null,
@@ -720,10 +905,20 @@ router.get('/communication/:taskId', async (req: any, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { taskId } = req.params;
+    const taskId = typeof req.params.taskId === 'string' ? req.params.taskId.trim() : '';
+    if (!taskId) {
+      return res.status(400).json({ error: 'Task ID is required' });
+    }
     const db = await getDb();
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
+    }
+
+    const assignments = await db.select({ id: taskAssignments.id }).from(taskAssignments)
+      .where(and(eq(taskAssignments.taskId, taskId), eq(taskAssignments.founderId, user.id)))
+      .limit(1);
+    if (!assignments[0]) {
+      return res.status(404).json({ error: 'Task assignment not found' });
     }
 
     const messages = await db.select().from(communicationLog)
@@ -749,11 +944,55 @@ router.post('/time-entries/start', async (req: any, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { taskId, vaId } = req.body;
+    const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId.trim() : '';
+    const vaId = Number(req.body?.vaId);
+    if (!taskId || !Number.isInteger(vaId) || vaId <= 0) {
+      return res.status(400).json({ error: 'A task ID and valid worker profile are required' });
+    }
 
     const db = await getDb();
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
+    }
+    const worker = await db.select({ id: vaProfiles.id, userId: vaProfiles.userId })
+      .from(vaProfiles)
+      .where(and(eq(vaProfiles.id, vaId), eq(vaProfiles.founderId, user.id)))
+      .limit(1);
+    if (!worker[0]) {
+      return res.status(404).json({ error: 'Worker profile not found' });
+    }
+    if (isManagerPilotWorker(worker[0].userId)) {
+      const cardId = taskId.split(':')[0];
+      try {
+        const { snapshot } = await readCurrentManagerHistory(db, worker[0].userId);
+        if (!snapshot) return res.status(409).json({ error: WORKER_EXECUTION_HOLD_MESSAGE });
+        const sourceRequirements = managerActionSourceRequirements(JSON.stringify(snapshot), cardId);
+        let googleStatus: Awaited<ReturnType<typeof getGoogleEvidenceStatus>> | null = null;
+        if (sourceRequirements.sourceKeys.some(key => key === 'gmail' || key === 'google_drive')) {
+          try { googleStatus = await getGoogleEvidenceStatus(worker[0].userId); }
+          catch { googleStatus = null; }
+        }
+        let trelloCache: { cachedAt: string; expiresAt: string } | null = null;
+        if (sourceRequirements.sourceKeys.includes('trello')) {
+          const [cached] = await db.select({ cachedAt: trelloCachedCards.cachedAt, expiresAt: trelloCachedCards.expiresAt })
+            .from(trelloCachedCards)
+            .where(and(eq(trelloCachedCards.userId, worker[0].userId), eq(trelloCachedCards.cardId, cardId)))
+            .orderBy(desc(trelloCachedCards.cachedAt))
+            .limit(1);
+          if (cached) trelloCache = { cachedAt: cached.cachedAt.toISOString(), expiresAt: cached.expiresAt.toISOString() };
+        }
+        if (managerActionNeedsSourceVerification(sourceRequirements, {
+          trelloCache,
+          gmail: googleStatus?.gmail ?? null,
+          drive: googleStatus?.drive ?? null,
+          googleConnectionReady: googleStatus?.credentialsReady ?? null,
+          now: Date.now(),
+        })) {
+          return res.status(409).json({ error: 'A source required by the next step is out of date or not verified. Check that source before starting work.' });
+        }
+      } catch {
+        return res.status(409).json({ error: WORKER_EXECUTION_HOLD_MESSAGE });
+      }
     }
     const [result] = await db.insert(timeEntries).values({
       taskId,
@@ -778,14 +1017,19 @@ router.put('/time-entries/:id/stop', async (req: any, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const entryId = parseInt(req.params.id);
+    const entryId = Number(req.params.id);
     const { notes } = req.body;
+    if (!Number.isInteger(entryId) || entryId <= 0) {
+      return res.status(400).json({ error: 'A valid time entry ID is required' });
+    }
 
     const db = await getDb();
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
     }
-    const existing = await db.select().from(timeEntries).where(eq(timeEntries.id, entryId));
+    const existing = await db.select().from(timeEntries).where(
+      and(eq(timeEntries.id, entryId), eq(timeEntries.founderId, user.id))
+    );
     
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Time entry not found' });
@@ -793,11 +1037,11 @@ router.put('/time-entries/:id/stop', async (req: any, res) => {
 
     const endTime = new Date();
     const startTime = new Date(existing[0].startTime);
-    const durationMinutes = Math.round((endTime.getTime() - startTime.getTime()) / 60000);
+    const durationMinutes = Math.max(0, Math.round((endTime.getTime() - startTime.getTime()) / 60000));
 
     await db.update(timeEntries)
       .set({ endTime, durationMinutes, notes })
-      .where(eq(timeEntries.id, entryId));
+      .where(and(eq(timeEntries.id, entryId), eq(timeEntries.founderId, user.id)));
 
     res.json({ success: true, durationMinutes });
   } catch (error) {
@@ -846,12 +1090,40 @@ router.post('/handoff', async (req: any, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { taskId, fromVaId, toVaId, whereLeftOff, nextSteps, blockers } = req.body;
+    const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId.trim() : '';
+    const fromVaId = Number(req.body?.fromVaId);
+    const toVaId = req.body?.toVaId == null ? null : Number(req.body.toVaId);
+    const whereLeftOff = typeof req.body?.whereLeftOff === 'string' ? req.body.whereLeftOff.trim() : '';
+    const nextSteps = typeof req.body?.nextSteps === 'string' ? req.body.nextSteps : null;
+    const blockers = typeof req.body?.blockers === 'string' ? req.body.blockers : null;
+    if (!taskId || !whereLeftOff || !Number.isSafeInteger(fromVaId) || fromVaId <= 0
+      || (toVaId !== null && (!Number.isSafeInteger(toVaId) || toVaId <= 0))) {
+      return res.status(400).json({ error: 'A task, handoff note, and valid worker profile are required' });
+    }
 
     const db = await getDb();
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
     }
+    const fromWorker = await getFounderWorker(db, user.id, fromVaId);
+    const toWorker = toVaId === null ? null : await getFounderWorker(db, user.id, toVaId);
+    if (!fromWorker || (toVaId !== null && !toWorker)) {
+      return res.status(404).json({ error: 'Worker profile not found' });
+    }
+
+    const assignments = await db.select({ vaId: taskAssignments.vaId }).from(taskAssignments)
+      .where(and(
+        eq(taskAssignments.taskId, taskId),
+        eq(taskAssignments.founderId, user.id),
+        inArray(taskAssignments.status, ['assigned', 'in_progress', 'blocked']),
+      ));
+    if (assignments.length === 0) {
+      return res.status(404).json({ error: 'Task assignment not found' });
+    }
+    if (assignments.some(assignment => assignment.vaId !== fromVaId)) {
+      return res.status(409).json({ error: 'The handoff sender is no longer assigned to this task' });
+    }
+
     await db.insert(handoffNotes).values({
       taskId,
       fromVaId,
@@ -898,84 +1170,6 @@ router.get('/handoff/:taskId', async (req: any, res) => {
 // ASSIGNMENTS LIST (for Founder Dashboard)
 // ============================================
 
-// Get all assignments with task details
-async function fetchUserWorkspaceBoardIds(apiKey: string, token: string): Promise<string[]> {
-  const boardIds = new Set<string>();
-
-  // 1. Fetch ALL boards the token owner can access (personal + workspace)
-  try {
-    const allBoardsResponse = await fetchWithRetry(
-      `https://api.trello.com/1/members/me/boards?filter=open&fields=id&key=${apiKey}&token=${token}`,
-      undefined,
-      { maxRetries: 3, initialDelayMs: 1000, maxDelayMs: 10000 }
-    );
-    if (allBoardsResponse.ok) {
-      const allBoards = await allBoardsResponse.json();
-      if (Array.isArray(allBoards)) {
-        for (const board of allBoards) {
-          if (board?.id) boardIds.add(board.id);
-        }
-      }
-    }
-  } catch {
-    // non-fatal
-  }
-
-  // 2. Also fetch organization-scoped boards
-  try {
-    const workspacesResponse = await fetchWithRetry(
-      `https://api.trello.com/1/members/me/organizations?key=${apiKey}&token=${token}`,
-      undefined,
-      { maxRetries: 3, initialDelayMs: 1000, maxDelayMs: 10000 }
-    );
-    if (workspacesResponse.ok) {
-      const workspaces = await workspacesResponse.json();
-      if (Array.isArray(workspaces)) {
-        for (const workspace of workspaces) {
-          try {
-            const boardsResponse = await fetchWithRetry(
-              `https://api.trello.com/1/organizations/${workspace.id}/boards?filter=open&key=${apiKey}&token=${token}`,
-              undefined,
-              { maxRetries: 2, initialDelayMs: 1000, maxDelayMs: 10000 }
-            );
-            if (boardsResponse.ok) {
-              const boards = await boardsResponse.json();
-              if (Array.isArray(boards)) {
-                for (const board of boards) {
-                  if (board?.id && board.prefs?.isTemplate !== true) {
-                    boardIds.add(board.id);
-                  }
-                }
-              }
-            }
-          } catch {
-            // non-fatal
-          }
-        }
-      }
-    }
-  } catch {
-    // non-fatal
-  }
-
-  // 3. Fallback to all boards in the database
-  if (boardIds.size === 0) {
-    try {
-      const db = await getDb();
-      if (db) {
-        const dbBoards = await db.select({ trelloId: atisBoards.trelloId }).from(atisBoards);
-        for (const b of dbBoards) {
-          if (b.trelloId) boardIds.add(b.trelloId);
-        }
-      }
-    } catch {
-      // non-fatal
-    }
-  }
-
-  return Array.from(boardIds);
-}
-
 router.get('/assignments', async (req: any, res) => {
   try {
     const user = req.user;
@@ -988,14 +1182,13 @@ router.get('/assignments', async (req: any, res) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    const apiKey = process.env.TRELLO_API_KEY;
-    const token = process.env.TRELLO_TOKEN;
+    const apiKey = process.env.TRELLO_API_KEY?.trim();
+    const token = process.env.TRELLO_TOKEN?.trim();
     if (!apiKey || !token) {
-      return res.status(500).json({ error: 'Trello credentials not configured' });
+      throw new TrelloBoardInventoryUnavailableError();
     }
 
-    // Get allowed boards for this user
-    const allowedTrelloBoardIds = await fetchUserWorkspaceBoardIds(apiKey, token);
+    const allowedTrelloBoardIds = await fetchVerifiedTrelloBoardIds(apiKey, token);
     if (allowedTrelloBoardIds.length === 0) {
       return res.json([]);
     }
@@ -1151,6 +1344,14 @@ router.get('/assignments', async (req: any, res) => {
 
     res.json(result);
   } catch (error) {
+    if (error instanceof TrelloBoardInventoryUnavailableError) {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Retry-After', '5');
+      return res.status(503).json({
+        error: 'Trello assignments are unavailable. Retry after checking the Trello connection.',
+        code: 'TRELLO_ASSIGNMENTS_UNAVAILABLE',
+      });
+    }
     console.error('Error fetching assignments:', error);
     res.status(500).json({ error: 'Failed to fetch assignments' });
   }
@@ -1164,12 +1365,19 @@ router.post('/assignments/:id/assign', async (req: any, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const assignmentId = parseInt(req.params.id);
-    const { vaId } = req.body;
+    const assignmentId = Number(req.params.id);
+    const vaId = Number(req.body?.vaId);
+    if (!Number.isSafeInteger(assignmentId) || assignmentId <= 0 || !Number.isSafeInteger(vaId) || vaId <= 0) {
+      return res.status(400).json({ error: 'A valid assignment and worker profile are required' });
+    }
 
     const db = await getDb();
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
+    }
+    const worker = await getFounderWorker(db, user.id, vaId);
+    if (!worker) {
+      return res.status(404).json({ error: 'Worker profile not found' });
     }
     
     await db.update(taskAssignments)
@@ -1285,9 +1493,6 @@ router.get('/communications', async (req: any, res) => {
 // BRIEFING SETTINGS
 // ============================================
 
-// Note: Briefing settings are stored in a simple key-value approach
-// For now, return static defaults - can be extended with a settings table later
-
 // Get briefing settings
 router.get('/briefing-settings', async (req: any, res) => {
   try {
@@ -1296,16 +1501,10 @@ router.get('/briefing-settings', async (req: any, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    // Return defaults - briefing settings can be stored in userWorkingHours or a separate settings table
-    res.json({
-      morningBriefingEnabled: true,
-      morningBriefingTime: '08:00',
-      eodReportEnabled: true,
-      eodReportTime: '18:00',
-    });
+    return res.json(await getBriefingSettings(user.id));
   } catch (error) {
     console.error('Error fetching briefing settings:', error);
-    res.status(500).json({ error: 'Failed to fetch settings' });
+    return res.status(503).json({ error: 'Briefing settings are temporarily unavailable' });
   }
 });
 
@@ -1317,22 +1516,22 @@ router.post('/briefing-settings', async (req: any, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    // For now, just acknowledge the save - can be persisted to a settings table later
-    const { morningBriefingEnabled, morningBriefingTime, eodReportEnabled, eodReportTime } = req.body;
-    
-    // Log the settings for debugging
-    console.log('Briefing settings saved:', { morningBriefingEnabled, morningBriefingTime, eodReportEnabled, eodReportTime });
-
-    res.json({ success: true });
+    const settings = await saveBriefingSettings(user.id, req.body);
+    return res.json({ success: true, settings });
   } catch (error) {
+    if (error instanceof BriefingSettingsValidationError) {
+      return res.status(400).json({ error: error.message });
+    }
     console.error('Error saving briefing settings:', error);
-    res.status(500).json({ error: 'Failed to save settings' });
+    return res.status(503).json({ error: 'Briefing settings could not be saved' });
   }
 });
 
 // ============================================
 // EMAIL NOTIFICATIONS
 // ============================================
+
+const BRIEFING_TRELLO_CONCURRENCY = 5;
 
 // Send test email
 router.post('/email/test', async (req: any, res) => {
@@ -1342,12 +1541,12 @@ router.post('/email/test', async (req: any, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const isValid = await validateSendGridApiKey();
+    const isValid = await validateEmailProvider();
     if (!isValid) {
-      return res.status(400).json({ error: 'SendGrid API key not configured or invalid' });
+      return res.status(400).json({ error: 'Email delivery is disabled or the configured provider is invalid' });
     }
 
-    res.json({ success: true, message: 'SendGrid API key is valid' });
+    res.json({ success: true, message: 'Email provider is valid' });
   } catch (error) {
     console.error('Error testing email:', error);
     res.status(500).json({ error: 'Failed to test email' });
@@ -1386,7 +1585,7 @@ router.post('/email/morning-briefing/:workerId', async (req: any, res) => {
       and(eq(taskAssignments.vaId, workerId), eq(taskAssignments.founderId, user.id))
     );
 
-    const tasks = await Promise.all(assignments.map(async (a: typeof assignments[0]) => {
+    const tasks = await mapWithConcurrency(assignments, BRIEFING_TRELLO_CONCURRENCY, async (a) => {
       const summary = await fetchTrelloCardSummary(a.taskId);
       return {
         title: summary?.title || `Task ${a.taskId.split(':').pop()}`,
@@ -1396,7 +1595,7 @@ router.post('/email/morning-briefing/:workerId', async (req: any, res) => {
         durationHours: 1,
         priority: summary?.priority ? summary.priority.toLowerCase() : 'normal',
       };
-    }));
+    });
 
     const today = new Date().toLocaleDateString('en-US', { 
       weekday: 'long', 
@@ -1452,7 +1651,7 @@ router.post('/email/eod-report/:workerId', async (req: any, res) => {
       and(eq(taskAssignments.vaId, workerId), eq(taskAssignments.founderId, user.id))
     );
 
-    const completedTasks = await Promise.all(assignments.filter((a: typeof assignments[0]) => a.status === 'completed').map(async (a: typeof assignments[0]) => {
+    const completedTasks = await mapWithConcurrency(assignments.filter((a: typeof assignments[0]) => a.status === 'completed'), BRIEFING_TRELLO_CONCURRENCY, async (a) => {
       const summary = await fetchTrelloCardSummary(a.taskId);
       return {
         title: summary?.title || `Task ${a.taskId.split(':').pop()}`,
@@ -1460,9 +1659,9 @@ router.post('/email/eod-report/:workerId', async (req: any, res) => {
         durationHours: 1,
         priority: summary?.priority ? summary.priority.toLowerCase() : 'normal',
       };
-    }));
+    });
 
-    const incompleteTasks = await Promise.all(assignments.filter((a: typeof assignments[0]) => a.status === 'in_progress').map(async (a: typeof assignments[0]) => {
+    const incompleteTasks = await mapWithConcurrency(assignments.filter((a: typeof assignments[0]) => a.status === 'in_progress'), BRIEFING_TRELLO_CONCURRENCY, async (a) => {
       const summary = await fetchTrelloCardSummary(a.taskId);
       return {
         title: summary?.title || `Task ${a.taskId.split(':').pop()}`,
@@ -1470,9 +1669,9 @@ router.post('/email/eod-report/:workerId', async (req: any, res) => {
         durationHours: 1,
         priority: summary?.priority ? summary.priority.toLowerCase() : 'normal',
       };
-    }));
+    });
 
-    const blockedTasks = await Promise.all(assignments.filter((a: typeof assignments[0]) => a.status === 'blocked').map(async (a: typeof assignments[0]) => {
+    const blockedTasks = await mapWithConcurrency(assignments.filter((a: typeof assignments[0]) => a.status === 'blocked'), BRIEFING_TRELLO_CONCURRENCY, async (a) => {
       const summary = await fetchTrelloCardSummary(a.taskId);
       return {
         title: summary?.title || `Task ${a.taskId.split(':').pop()}`,
@@ -1480,7 +1679,7 @@ router.post('/email/eod-report/:workerId', async (req: any, res) => {
         durationHours: 1,
         priority: summary?.priority ? summary.priority.toLowerCase() : 'normal',
       };
-    }));
+    });
 
     const today = new Date().toLocaleDateString('en-US', { 
       weekday: 'long', 
@@ -1659,14 +1858,14 @@ router.get('/worker/profile', async (req: any, res) => {
       return res.status(503).json({ error: 'Database not available' });
     }
     
-    // Find the VA profile linked to this user
-    const profile = await db.select().from(vaProfiles).where(eq(vaProfiles.userId, user.id)).limit(1);
-    
-    if (profile.length === 0) {
+    const { profiles, profile } = await getWorkerProfileForAccount(db, user.id);
+    if (!profile) {
+      const ambiguous = ambiguousWorkerProfileResponse(profiles);
+      if (ambiguous) return res.status(ambiguous.status).json(ambiguous.body);
       return res.status(404).json({ error: 'Worker profile not found' });
     }
 
-    res.json(profile[0]);
+    res.json(profile);
   } catch (error) {
     console.error('Error fetching worker profile:', error);
     res.status(500).json({ error: 'Failed to fetch profile' });
@@ -1686,16 +1885,16 @@ router.get('/worker/tasks', async (req: any, res) => {
       return res.status(503).json({ error: 'Database not available' });
     }
     
-    // Find the VA profile linked to this user
-    const profile = await db.select().from(vaProfiles).where(eq(vaProfiles.userId, user.id)).limit(1);
-    
-    if (profile.length === 0) {
+    const { profiles, profile } = await getWorkerProfileForAccount(db, user.id);
+    if (!profile) {
+      const ambiguous = ambiguousWorkerProfileResponse(profiles);
+      if (ambiguous) return res.status(ambiguous.status).json(ambiguous.body);
       // User is not a worker, return empty tasks
       return res.json({ tasks: [] });
     }
     
-    const vaId = profile[0].id;
-    const trelloMemberId = profile[0].trelloMemberId;
+    const vaId = profile.id;
+    const trelloMemberId = profile.trelloMemberId;
 
     let tasks: any[] = [];
 
@@ -1713,14 +1912,17 @@ router.get('/worker/tasks', async (req: any, res) => {
       // Trello-native Flow: Fetch non-archived cards assigned to this Trello ID
       const cardRows = await db.select({
         card: atisCards,
+        board: atisBoards,
         understanding: atisCardUnderstanding,
         assignment: taskAssignments
       })
       .from(atisCards)
+      .leftJoin(atisBoards, eq(atisCards.boardId, atisBoards.id))
       .leftJoin(atisCardUnderstanding, eq(atisCards.id, atisCardUnderstanding.cardId))
       .leftJoin(taskAssignments, and(
         eq(atisCards.trelloId, taskAssignments.taskId),
-        eq(taskAssignments.vaId, vaId)
+        eq(taskAssignments.vaId, vaId),
+        eq(taskAssignments.founderId, profile.founderId)
       ))
       .where(
         and(
@@ -1729,17 +1931,12 @@ router.get('/worker/tasks', async (req: any, res) => {
         )
       );
 
-      tasks = await Promise.all(cardRows.map(async (row: any) => {
+      tasks = cardRows.map((row: any) => {
         const card = row.card;
+        const board = row.board;
         const understanding = row.understanding;
         const assignment = row.assignment;
         const cardTrelloId = card.trelloId;
-
-        let boardName = '';
-        if (card.boardId) {
-          const board = await db.select().from(atisBoards).where(eq(atisBoards.id, card.boardId)).limit(1);
-          if (board.length > 0) boardName = board[0].name;
-        }
 
         // Parse labels and priority
         const labels = card.labels ? JSON.parse(card.labels) : [];
@@ -1769,7 +1966,7 @@ router.get('/worker/tasks', async (req: any, res) => {
           id: cardTrelloId,
           cardId: cardTrelloId,
           cardName: card.name,
-          boardName,
+          boardName: board?.name || '',
           listName: card.listName || '',
           url: card.url || '',
           durationHours: understanding?.estimatedMinutes ? understanding.estimatedMinutes / 60 : 1,
@@ -1792,10 +1989,13 @@ router.get('/worker/tasks', async (req: any, res) => {
           synced: true,
           handoffNotes: assignment?.handoffNotes || ''
         };
-      }));
+      });
     } else {
       // Fallback: Legacy Table-driven Flow
-      const assignments = await db.select().from(taskAssignments).where(eq(taskAssignments.vaId, vaId));
+      const assignments = await db.select().from(taskAssignments).where(and(
+        eq(taskAssignments.vaId, vaId),
+        eq(taskAssignments.founderId, profile.founderId),
+      ));
 
       tasks = await Promise.all(assignments.map(async (a: typeof assignments[0]) => {
         const cardTrelloId = a.taskId.split(':')[0] || a.taskId.split('_')[0];
@@ -1884,19 +2084,29 @@ router.post('/worker/tasks/:taskId/complete', async (req: any, res) => {
       return res.status(503).json({ error: 'Database not available' });
     }
     
-    // Find the VA profile linked to this user
-    const profile = await db.select().from(vaProfiles).where(eq(vaProfiles.userId, user.id)).limit(1);
-    
-    if (profile.length === 0) {
+    const { profiles, profile } = await getWorkerProfileForAccount(db, user.id);
+    if (!profile) {
+      const ambiguous = ambiguousWorkerProfileResponse(profiles);
+      if (ambiguous) return res.status(ambiguous.status).json(ambiguous.body);
       return res.status(403).json({ error: 'Not a worker' });
     }
+
+    if (pilotCompletionResponse(user.id, res)) return;
     
-    const vaId = profile[0].id;
+    const vaId = profile.id;
     
     // Update the assignment status
-    await db.update(taskAssignments)
+    const updateResult = await db.update(taskAssignments)
       .set({ status: completed ? 'completed' : 'in_progress' })
-      .where(and(eq(taskAssignments.taskId, decodeURIComponent(taskId)), eq(taskAssignments.vaId, vaId)));
+      .where(and(
+        eq(taskAssignments.taskId, decodeURIComponent(taskId)),
+        eq(taskAssignments.vaId, vaId),
+        eq(taskAssignments.founderId, profile.founderId),
+      ));
+
+    if (!didUpdateSingleTaskAssignment(updateResult)) {
+      return res.status(404).json({ error: 'Assigned task not found' });
+    }
 
     await invalidateCache(user.id, user.openId, 'tasks');
     websocketService.emitToUser(user.openId, 'task:completed', {
@@ -1928,20 +2138,29 @@ router.post('/worker/tasks/:taskId/review', async (req: any, res) => {
       return res.status(503).json({ error: 'Database not available' });
     }
     
-    // Find the VA profile linked to this user
-    const profile = await db.select().from(vaProfiles).where(eq(vaProfiles.userId, user.id)).limit(1);
-    
-    if (profile.length === 0) {
+    const { profiles, profile } = await getWorkerProfileForAccount(db, user.id);
+    if (!profile) {
+      const ambiguous = ambiguousWorkerProfileResponse(profiles);
+      if (ambiguous) return res.status(ambiguous.status).json(ambiguous.body);
       return res.status(403).json({ error: 'Not a worker' });
     }
+
+    if (pilotCompletionResponse(user.id, res)) return;
     
-    const vaId = profile[0].id;
+    const vaId = profile.id;
     
     // Update the assignment status to completed
-    await db.update(taskAssignments)
+    const updateResult = await db.update(taskAssignments)
       .set({ status: 'completed' })
-      .where(and(eq(taskAssignments.taskId, decodeURIComponent(taskId)), eq(taskAssignments.vaId, vaId)));
-    
+      .where(and(
+        eq(taskAssignments.taskId, decodeURIComponent(taskId)),
+        eq(taskAssignments.vaId, vaId),
+        eq(taskAssignments.founderId, profile.founderId),
+      ));
+
+    if (!didUpdateSingleTaskAssignment(updateResult)) {
+      return res.status(404).json({ error: 'Assigned task not found' });
+    }
 
 
     await invalidateCache(user.id, user.openId, 'tasks');

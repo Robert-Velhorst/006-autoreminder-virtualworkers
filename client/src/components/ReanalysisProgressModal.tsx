@@ -82,14 +82,14 @@ export function ReanalysisProgressModal({
         const boardsWithCounts = await Promise.all(
           data.map(async (board: any) => {
             try {
-              const countRes = await fetch(`/api/atis/boards/${board.id}/cards/count`, {
+              const countRes = await fetch(`/api/atis/cards?boardId=${encodeURIComponent(board.id)}&limit=500`, {
                 credentials: 'include',
               });
-              const countData = countRes.ok ? await countRes.json() : { count: 0 };
+              const countData = countRes.ok ? await countRes.json() : [];
               return {
                 id: board.id,
                 name: board.name,
-                cardCount: countData.count || 0,
+                cardCount: Array.isArray(countData) ? countData.length : 0,
               };
             } catch {
               return {

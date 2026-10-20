@@ -16,6 +16,28 @@ export const DEFAULT_BROWSER_TAB_POLICY: BrowserTabPolicy = {
   includePinnedTabs: false,
 };
 
+export function normalizeBrowserTabOrigin(rawUrl: string): string | null {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      return `${url.origin}/`;
+    }
+    if (url.protocol === "file:") return "file:///";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function browserTabLabelFromOrigin(origin: string): string {
+  try {
+    const url = new URL(origin);
+    return url.protocol === "file:" ? "Local file" : url.hostname;
+  } catch {
+    return "Website";
+  }
+}
+
 export type BrowserTabHygieneStatus =
   | "disabled"
   | "protected_day"

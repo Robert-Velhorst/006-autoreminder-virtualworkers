@@ -9,6 +9,7 @@ const router = express.Router();
 router.use(requireAuthenticated);
 
 const TRELLO_API_BASE = 'https://api.trello.com/1';
+const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
 
 interface BulkRegistrationRequest {
   boardIds: string[];
@@ -30,6 +31,20 @@ interface BulkRegistrationResponse {
     successful: number;
     failed: number;
   };
+}
+
+export function trelloWebhookRegistrationError(status: number, responseText: string) {
+  const normalized = responseText.toLowerCase();
+  if (status === 401 || normalized.includes('invalid token')) {
+    return 'Authentication failed — check your Trello credentials';
+  }
+  if (status === 404 || normalized.includes('model not found')) {
+    return 'Board not found or you do not have permission';
+  }
+  if (normalized.includes('invalid value for idmodel')) {
+    return 'Board ID is invalid';
+  }
+  return `Trello rejected the webhook registration (${status})`;
 }
 
 /**
@@ -155,7 +170,6 @@ router.post('/', requireAdmin, async (req: any, res: Response) => {
     console.error('[TrelloWebhookBulk] Error:', error);
     res.status(500).json({
       error: 'Failed to process bulk registration',
-      details: error instanceof Error ? error.message : 'Unknown error',
     });
   }
 });
@@ -182,6 +196,7 @@ async function registerWebhookForBoard(
     const response = await fetch(`${TRELLO_API_BASE}/webhooks?key=${apiKey}&token=${token}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS),
       body: JSON.stringify({
         callbackURL: callbackUrl,
         idModel: boardId,
@@ -193,17 +208,11 @@ async function registerWebhookForBoard(
       const errorText = await response.text();
       let errorMessage = `HTTP ${response.status}`;
 
-      if (response.status === 401 || errorText.includes('invalid token')) {
-        errorMessage = 'Authentication failed — check your Trello credentials';
-      } else if (response.status === 404 || errorText.includes('model not found')) {
-        errorMessage = 'Board not found or you do not have permission';
-      } else if (errorText.includes('already exists')) {
+      if (errorText.includes('already exists')) {
         // Treat "already exists" as a success — webhook is in place
         return { boardId, success: true, webhookId: 'pre-existing' };
-      } else if (errorText.includes('invalid value for idModel')) {
-        errorMessage = `Board ID "${boardId}" is invalid`;
       } else {
-        errorMessage = errorText || errorMessage;
+        errorMessage = trelloWebhookRegistrationError(response.status, errorText);
       }
 
       return { boardId, success: false, error: errorMessage };
@@ -216,10 +225,11 @@ async function registerWebhookForBoard(
 
     return { boardId, success: true, webhookId: data.id };
   } catch (error) {
+    console.error('[TrelloWebhookBulk] Registration failed for %s:', boardId, error);
     return {
       boardId,
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: 'Trello webhook registration failed',
     };
   }
 }

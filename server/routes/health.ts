@@ -39,11 +39,12 @@ router.get("/", async (req: Request, res: Response) => {
 
     const statusCode = healthy ? 200 : 503;
     res.status(statusCode).json(health);
-  } catch (error) {
-    logger.error("Health check failed", error instanceof Error ? error : undefined);
+  } catch {
+    // Driver errors can include connection credentials and query data.
+    console.error('[Health] Health check failed');
     res.status(503).json({
-      status: "unhealthy",
-      error: "Health check failed",
+      status: 'unhealthy',
+      error: 'Health check failed',
       timestamp: new Date().toISOString(),
     });
   }
@@ -62,15 +63,22 @@ router.get("/ready", async (req: Request, res: Response) => {
       });
     }
 
+    if (process.env.REDIS_URL?.trim() && !isRedisAvailable()) {
+      return res.status(503).json({
+        ready: false,
+        reason: 'Redis is configured but not connected',
+      });
+    }
+
     res.json({
       ready: true,
       timestamp: new Date().toISOString(),
     });
-  } catch (error) {
-    logger.error("Readiness check failed", error instanceof Error ? error : undefined);
+  } catch {
+    console.error('[Health] Readiness check failed');
     res.status(503).json({
       ready: false,
-      reason: "Readiness check failed",
+      reason: 'Readiness check failed',
     });
   }
 });

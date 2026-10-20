@@ -1,0 +1,1 @@
+ALTER TABLE "browser_tab_states" ALTER COLUMN "captureSequence" SET DATA TYPE bigint;

@@ -18,6 +18,35 @@ import { websocketService } from './websocket.js';
 import { invokeLLM } from '../_core/llm.js';
 import { resolveBatchSchedule } from '../schedulingApi.js';
 
+export function calculateBatchProgress(completedTasks: number, failedTasks: number, totalTasks: number): number {
+  if (totalTasks <= 0) return 0;
+  const processed = Math.max(0, completedTasks) + Math.max(0, failedTasks);
+  return Math.min(100, Math.round((processed / totalTasks) * 100));
+}
+
+export function calculateBatchTerminalStatus(
+  completedTasks: number,
+  failedTasks: number,
+  totalTasks: number,
+): 'completed' | 'failed' {
+  return totalTasks > 0 && completedTasks === 0 && failedTasks >= totalTasks
+    ? 'failed'
+    : 'completed';
+}
+
+export function estimateBatchDuration(
+  elapsedSeconds: number,
+  completedTasks: number,
+  failedTasks: number,
+  totalTasks: number,
+): number | undefined {
+  const processed = Math.max(0, completedTasks) + Math.max(0, failedTasks);
+  if (processed <= 0 || totalTasks <= 0) return undefined;
+
+  const averageTaskSeconds = Math.max(1, elapsedSeconds) / processed;
+  return Math.max(1, Math.round(averageTaskSeconds * totalTasks));
+}
+
 interface QueuedJob {
   jobId: string;
   userId: string;
@@ -255,13 +284,23 @@ class BatchQueueProcessor extends EventEmitter {
         }
 
         // Update progress percentage
-        progress.progress = Math.round((progress.completedTasks / progress.totalTasks) * 100);
+        progress.progress = calculateBatchProgress(
+          progress.completedTasks,
+          progress.failedTasks,
+          progress.totalTasks,
+        );
 
         // Update elapsed time
         const startTime = this.jobStartTimes.get(job.jobId);
         if (startTime) {
           progress.elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
         }
+        progress.estimatedTimeSeconds = estimateBatchDuration(
+          progress.elapsedSeconds,
+          progress.completedTasks,
+          progress.failedTasks,
+          progress.totalTasks,
+        );
 
         // Emit progress update
         this.emit('progress', progress);
@@ -273,7 +312,11 @@ class BatchQueueProcessor extends EventEmitter {
       }
 
       if (progress.status !== 'cancelled') {
-        progress.status = 'completed';
+        progress.status = calculateBatchTerminalStatus(
+          progress.completedTasks,
+          progress.failedTasks,
+          progress.totalTasks,
+        );
       }
     } catch (error) {
       progress.status = 'failed';
@@ -416,9 +459,10 @@ class BatchQueueProcessor extends EventEmitter {
           ? new Date()
           : undefined,
         elapsedTimeSeconds: currentProgress.elapsedSeconds,
+        estimatedTimeSeconds: currentProgress.estimatedTimeSeconds,
       });
     } catch (error) {
-      console.error(`[Batch] Failed to persist progress for job ${jobId}:`, error);
+      console.error('[Batch] Failed to persist progress for job %s:', jobId, error);
     }
   }
 }

@@ -271,13 +271,6 @@ or silently change the meaning of prior worker statements.
 - External action proposals require explicit approval and do not create a comment,
   message, card move, or payment during assessment/replanning tests.
 
-## Migration Lineage
-
-The canonical `main` branch currently ends at migration
-`0031_worker_operator_scope`. This design introduces only additive schema changes
-through a new `0032_aptlss_evidence_graph` migration. It does not depend on
-uncommitted local migrations that may exist in other working directories.
-
 ## Delivery Phases
 
 1. Establish a current-state test baseline and document the existing APTLSS data

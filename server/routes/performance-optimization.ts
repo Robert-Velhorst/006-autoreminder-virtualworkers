@@ -5,14 +5,16 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { warmUpCache, getCacheWarmingStats, scheduleCacheRefresh } from '../services/cache-warming';
+import { warmUpCache, getCacheWarmingStats } from '../services/cache-warming';
 import { getCacheStats } from '../services/trello-cache';
 import { requestQueue } from '../services/request-queue';
 import { websocketService } from '../services/websocket';
-import { requireAuthenticated } from '../middleware/auth';
+import { requireAdmin } from '../middleware/auth';
+import { normalizeCacheRefreshInterval } from '../operational-control-validation';
+import { updateMaintenanceSetting } from '../maintenanceCenter';
 
 const router = Router();
-router.use(requireAuthenticated);
+router.use(requireAdmin);
 
 /**
  * POST /api/performance/cache-warm
@@ -94,14 +96,13 @@ router.get('/metrics', async (req: Request, res: Response) => {
       ? (cacheStats.hits / cacheStats.totalRequests) * 100
       : 0;
 
-    const queueDeduplicationRate = queueMetrics.totalRequests > 0
-      ? ((queueMetrics.totalRequests - queueMetrics.deduplicatedRequests) / queueMetrics.totalRequests) * 100
-      : 0;
+    const queueDeduplicationRate = queueMetrics.deduplicationRate;
 
     // Estimate API calls saved
-    const apiCallsSaved = cacheStats.hits + (queueMetrics.totalRequests - queueMetrics.deduplicatedRequests);
-    const apiCallReduction = cacheStats.totalRequests > 0
-      ? (apiCallsSaved / cacheStats.totalRequests) * 100
+    const apiCallsSaved = cacheStats.hits + queueMetrics.deduplicatedRequests;
+    const observedRequests = cacheStats.totalRequests + queueMetrics.totalRequests;
+    const apiCallReduction = observedRequests > 0
+      ? (apiCallsSaved / observedRequests) * 100
       : 0;
 
     // Response time improvements (estimated)
@@ -120,7 +121,7 @@ router.get('/metrics', async (req: Request, res: Response) => {
       queue: {
         totalRequests: queueMetrics.totalRequests,
         uniqueRequests: queueMetrics.totalRequests - queueMetrics.deduplicatedRequests,
-        deduplicatedRequests: queueMetrics.totalRequests - queueMetrics.deduplicatedRequests,
+        deduplicatedRequests: queueMetrics.deduplicatedRequests,
         deduplicationRate: Math.round(queueDeduplicationRate * 10) / 10,
         activeRequests: queueMetrics.activeRequests,
       },
@@ -157,18 +158,16 @@ router.post('/cache-refresh-schedule', async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
-    const { intervalMinutes = 60 } = req.body;
+    const interval = normalizeCacheRefreshInterval(req.body?.intervalMinutes);
+    if (!interval.ok) return res.status(400).json({ error: interval.error });
+    const intervalMinutes = interval.value;
 
-    if (intervalMinutes < 5) {
-      return res.status(400).json({ error: 'Minimum interval is 5 minutes' });
-    }
-
-    console.log('[Performance] Scheduling cache refresh every', intervalMinutes, 'minutes');
-    scheduleCacheRefresh(intervalMinutes);
+    console.log('[Performance] Saving cache refresh every', intervalMinutes, 'minutes');
+    await updateMaintenanceSetting("database_preload", true, intervalMinutes);
 
     return res.json({
       success: true,
-      message: `Cache refresh scheduled every ${intervalMinutes} minutes`,
+      message: `Cache refresh saved every ${intervalMinutes} minutes`,
     });
   } catch (error) {
     console.error('[Performance] Error scheduling cache refresh:', error);

@@ -1,6 +1,18 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+html:not(.dark) .aptlss-toast-title {
+  color: #27272a !important;
+}
+
+html.dark .aptlss-toast-title {
+  color: #f4f4f5 !important;
+}
+
+.toaster [data-sonner-toast][data-expanded="false"][data-front="false"] > * {
+  transition: none;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
@@ -44,7 +56,7 @@
 
 :root {
   /* Soft Minimalist Flow Palette */
-  --primary: oklch(0.65 0.15 250); /* Soft Blue */
+  --primary: oklch(0.488 0.243 264.376);
   --primary-foreground: oklch(0.98 0 0);
   --sidebar-primary: oklch(0.95 0.02 250);
   --sidebar-primary-foreground: oklch(0.3 0.05 250);
@@ -80,7 +92,7 @@
   --accent-foreground: oklch(0.3 0.05 250);
   
   /* Soft Destructive */
-  --destructive: oklch(0.7 0.15 20);
+  --destructive: #b91c1c;
   --destructive-foreground: oklch(0.98 0 0);
   
   --border: oklch(0.92 0.01 250);

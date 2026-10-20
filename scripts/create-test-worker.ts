@@ -7,6 +7,14 @@ import { eq, and } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 
 async function main() {
+  const confirmationFlag = '--confirm-create-test-worker';
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Refusing to create known-password test accounts in production.');
+  }
+  if (!process.argv.includes(confirmationFlag)) {
+    throw new Error(`Refusing to create test accounts. Re-run with ${confirmationFlag} in a non-production database.`);
+  }
+
   const db = await getDb();
   if (!db) {
     console.error('Failed to connect to database');

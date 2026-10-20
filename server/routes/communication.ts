@@ -1,19 +1,44 @@
 import { Router } from "express";
+import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { taskAssignments, vaProfiles } from "../../drizzle/schema.postgres";
+import { chatbotConversations, taskAssignments, vaProfiles } from "../../drizzle/schema.postgres";
 import { getDb } from "../db";
 import { requireAuthenticated, requestUser, resolveWorkerProfileId } from "../middleware/auth";
-import { storeConversation } from "../services/chatbot-history";
-import { postTrelloComment } from "../services/trello-chatbot";
+import {
+  isTrelloCommentAutomationEnabled,
+  postTrelloComment,
+  TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE,
+} from "../services/trello-chatbot";
+import { fetchAuthorizedTrelloCard, TrelloAccessError } from "../trelloCardAccess";
 
 const router = Router();
 router.use(requireAuthenticated);
 
+const WORKER_QUESTION_IDEMPOTENCY_VERSION = "worker-question-v1";
+
+function workerQuestionKey(userId: number, workerId: number, taskId: string, question: string) {
+  return createHash("sha256")
+    .update(JSON.stringify([WORKER_QUESTION_IDEMPOTENCY_VERSION, userId, workerId, taskId, question]))
+    .digest("hex");
+}
+
+function affectedRows(result: unknown) {
+  return Number((result as { rowCount?: number | null } | undefined)?.rowCount ?? 0);
+}
+
 router.post("/ask-founder", async (req, res) => {
+  const user = requestUser(req)!;
+  if (user.role !== "worker") {
+    return res.status(403).json({ error: "Only the assigned worker can send a question to the founder." });
+  }
+
   const { taskId, question } = req.body;
-  const workerId = await resolveWorkerProfileId(req, req.body.workerId);
-  if (!taskId || !workerId || typeof question !== "string" || !question.trim()) {
+  if (typeof taskId !== "string" || !taskId.trim() || typeof question !== "string" || !question.trim()) {
     return res.status(400).json({ error: "Missing required fields" });
+  }
+  const workerId = await resolveWorkerProfileId(req);
+  if (!workerId) {
+    return res.status(403).json({ error: "Worker profile is missing or ambiguous; ask an administrator to resolve it." });
   }
 
   const db = await getDb();
@@ -23,26 +48,129 @@ router.post("/ask-founder", async (req, res) => {
     const [worker] = await db.select().from(vaProfiles).where(eq(vaProfiles.id, workerId)).limit(1);
     if (!worker) return res.status(404).json({ error: "Worker profile not found" });
 
+    const [assignment] = await db.select({ id: taskAssignments.id })
+      .from(taskAssignments)
+      .where(and(
+        eq(taskAssignments.taskId, taskId),
+        eq(taskAssignments.vaId, workerId),
+      ))
+      .limit(1);
+    if (!assignment) {
+      return res.status(404).json({ error: "Task is not assigned to this worker" });
+    }
+
+    await fetchAuthorizedTrelloCard(user, taskId, { fields: 'idMembers' });
+
     const normalizedQuestion = question.trim();
     const commentText = `**[Worker Question]**\n${worker.name} asked:\n"${normalizedQuestion}"`;
-    const posted = await postTrelloComment(taskId, commentText);
 
-    await storeConversation({
-      cardTrelloId: taskId,
-      command: "ask_founder",
-      responseText: normalizedQuestion,
-      authorName: worker.name,
-      responseStatus: posted ? "success" : "failed",
-      receivedAt: new Date(),
-      respondedAt: new Date(),
+    if (!isTrelloCommentAutomationEnabled()) {
+      return res.status(409).json({ success: false, error: TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE });
+    }
+    const requestKey = workerQuestionKey(user.id, workerId, taskId, normalizedQuestion);
+    const requestArgs = JSON.stringify([WORKER_QUESTION_IDEMPOTENCY_VERSION, requestKey]);
+    const receivedAt = new Date();
+    const reservation = await db.transaction(async (tx) => {
+      const currentAssignments = await tx.select({ id: taskAssignments.id })
+        .from(taskAssignments)
+        .where(and(
+          eq(taskAssignments.taskId, taskId),
+          eq(taskAssignments.vaId, workerId),
+        ))
+        .orderBy(taskAssignments.id)
+        .for("update");
+      if (currentAssignments.length === 0) return { kind: "unassigned" as const };
+
+      const [existing] = await tx.select({
+        id: chatbotConversations.id,
+        responseStatus: chatbotConversations.responseStatus,
+        responseText: chatbotConversations.responseText,
+      })
+        .from(chatbotConversations)
+        .where(and(
+          eq(chatbotConversations.cardTrelloId, taskId),
+          eq(chatbotConversations.command, "ask_founder"),
+          eq(chatbotConversations.commandArgs, requestArgs),
+        ))
+        .limit(1)
+        .for("update");
+
+      if (existing) {
+        if (existing.responseText !== normalizedQuestion) return { kind: "key-conflict" as const };
+        if (existing.responseStatus === "success") return { kind: "already-sent" as const };
+        return { kind: "uncertain" as const };
+      }
+
+      const [created] = await tx.insert(chatbotConversations).values({
+        cardTrelloId: taskId,
+        command: "ask_founder",
+        commandArgs: requestArgs,
+        authorName: worker.name,
+        responseText: normalizedQuestion,
+        responseStatus: "pending",
+        receivedAt,
+      }).returning({ id: chatbotConversations.id });
+
+      if (!created?.id) throw new Error("Could not reserve the outbound question");
+      return { kind: "reserved" as const, conversationId: created.id };
     });
 
-    if (!posted) {
-      return res.status(502).json({ success: false, error: "Trello did not accept the question" });
+    if (reservation.kind === "unassigned") {
+      return res.status(404).json({ error: "Task is not assigned to this worker" });
     }
+    if (reservation.kind === "key-conflict") {
+      return res.status(409).json({ success: false, error: "This question request conflicts with an existing send record." });
+    }
+    if (reservation.kind === "already-sent") {
+      return res.json({ success: true });
+    }
+    if (reservation.kind === "uncertain") {
+      return res.status(409).json({
+        success: false,
+        deliveryStatus: "unknown",
+        error: "This question may already have been sent. Check the Trello card before taking further action.",
+      });
+    }
+
+    let posted = false;
+    try {
+      posted = await postTrelloComment(taskId, commentText);
+    } catch (error) {
+      console.error("[Communication] Trello question delivery could not be confirmed:", error);
+    }
+    if (!posted) {
+      return res.status(502).json({
+        success: false,
+        deliveryStatus: "unknown",
+        error: "Trello did not confirm whether the question was delivered. Check the card before trying again.",
+      });
+    }
+
+    const respondedAt = new Date();
+    try {
+      const result = await db.update(chatbotConversations)
+        .set({
+          responseStatus: "success",
+          respondedAt,
+          responseTimeMs: Math.max(0, respondedAt.getTime() - receivedAt.getTime()),
+        })
+        .where(eq(chatbotConversations.id, reservation.conversationId));
+      if (affectedRows(result) !== 1) throw new Error("Delivery result was not recorded");
+    } catch (error) {
+      console.error("[Communication] Trello accepted the worker question but its delivery result could not be saved:", error);
+      return res.status(502).json({
+        success: false,
+        deliveryStatus: "unknown",
+        error: "Trello accepted the question, but the dashboard could not record the result. Check the card before trying again.",
+      });
+    }
+
     return res.json({ success: true });
   } catch (error) {
     console.error("[Communication] Error processing ask-founder:", error);
+    if (error instanceof TrelloAccessError) {
+      return res.status(error.status).json({ error: error.message });
+    }
     return res.status(500).json({ error: "Failed to process question" });
   }
 });
@@ -63,29 +191,33 @@ router.post("/decision-log", async (req, res) => {
       return res.status(403).json({ error: "Worker profile not found" });
     }
 
-    const [task] = await db.select().from(taskAssignments).where(workerId
-      ? and(eq(taskAssignments.taskId, taskId), eq(taskAssignments.vaId, workerId))
-      : eq(taskAssignments.taskId, taskId)).limit(1);
-    if (!task) return res.status(404).json({ error: "Task not found" });
+    const logs = await db.transaction(async (tx) => {
+      const [task] = await tx.select().from(taskAssignments).where(workerId
+        ? and(eq(taskAssignments.taskId, taskId), eq(taskAssignments.vaId, workerId))
+        : eq(taskAssignments.taskId, taskId)).limit(1).for("update");
+      if (!task) return null;
 
-    let logs: Array<Record<string, unknown>> = [];
-    try {
-      logs = task.decisionLog ? JSON.parse(task.decisionLog) : [];
-      if (!Array.isArray(logs)) logs = [];
-    } catch {
-      logs = [];
-    }
+      let currentLogs: Array<Record<string, unknown>> = [];
+      try {
+        currentLogs = task.decisionLog ? JSON.parse(task.decisionLog) : [];
+        if (!Array.isArray(currentLogs)) currentLogs = [];
+      } catch {
+        currentLogs = [];
+      }
 
-    logs.push({
-      decision: decision.trim(),
-      reasoning: typeof reasoning === "string" ? reasoning.trim() : "",
-      author: user.name || user.openId,
-      timestamp: new Date().toISOString(),
+      currentLogs.push({
+        decision: decision.trim(),
+        reasoning: typeof reasoning === "string" ? reasoning.trim() : "",
+        author: user.name || user.openId,
+        timestamp: new Date().toISOString(),
+      });
+
+      await tx.update(taskAssignments)
+        .set({ decisionLog: JSON.stringify(currentLogs) })
+        .where(eq(taskAssignments.id, task.id));
+      return currentLogs;
     });
-
-    await db.update(taskAssignments)
-      .set({ decisionLog: JSON.stringify(logs) })
-      .where(eq(taskAssignments.id, task.id));
+    if (!logs) return res.status(404).json({ error: "Task not found" });
 
     return res.json({ success: true, logs });
   } catch (error) {

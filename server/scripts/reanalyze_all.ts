@@ -7,6 +7,11 @@ import dotenv from "dotenv";
 dotenv.config();
 
 async function run() {
+  const confirmationFlag = "--confirm-ai-reanalysis";
+  if (!process.argv.includes(confirmationFlag)) {
+    throw new Error(`Refusing bulk AI reanalysis. Re-run with ${confirmationFlag} after reviewing the expected model usage.`);
+  }
+
   const db = await getDb();
   if (!db) throw new Error("No db");
 

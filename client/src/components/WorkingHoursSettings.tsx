@@ -114,13 +114,16 @@ export function WorkingHoursSettings({ workerId, workerName, workerTimezone }: W
         body: JSON.stringify(settings),
       });
 
-      if (!response.ok) throw new Error('Failed to save settings');
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || 'Failed to save settings');
+      }
 
       const label = workerName ? `${workerName}'s settings` : 'Default settings';
       toast.success(`${label} saved successfully.`);
     } catch (error) {
       console.error('Error saving settings:', error);
-      toast.error('Failed to save settings. Please try again.');
+      toast.error(error instanceof Error ? error.message : 'Failed to save settings. Please try again.');
     } finally {
       setSaving(false);
     }
@@ -164,6 +167,7 @@ export function WorkingHoursSettings({ workerId, workerName, workerTimezone }: W
               <Label>Work Start Time</Label>
               <Input
                 type="time"
+                step={workerId ? 3600 : 60}
                 value={formatTime(settings.workStartHour, settings.workStartMinute)}
                 onChange={(e) => {
                   const [h, m] = e.target.value.split(':').map(Number);
@@ -176,6 +180,7 @@ export function WorkingHoursSettings({ workerId, workerName, workerTimezone }: W
               <Label>Work End Time</Label>
               <Input
                 type="time"
+                step={workerId ? 3600 : 60}
                 value={formatTime(settings.workEndHour, settings.workEndMinute)}
                 onChange={(e) => {
                   const [h, m] = e.target.value.split(':').map(Number);
@@ -389,6 +394,7 @@ export function WorkingHoursSettings({ workerId, workerName, workerTimezone }: W
                 <Label>{label}</Label>
                 <Input
                   type="time"
+                  step={workerId ? 3600 : 60}
                   value={(settings as any)[key]}
                   onChange={(e) => setSettings({ ...settings, [key]: e.target.value })}
                 />

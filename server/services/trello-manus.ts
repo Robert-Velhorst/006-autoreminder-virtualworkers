@@ -1,8 +1,11 @@
 import axios from "axios";
 import { areNotificationsEnabled } from "./notificationPolicy";
 import { dateKeyInTimeZone } from "../../shared/workerTime";
+import { mapWithConcurrency } from "../utils/concurrency";
 
 const TRELLO_API_BASE = "https://api.trello.com/1";
+const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
+const TRELLO_FANOUT_CONCURRENCY = 5;
 const WORKER_CARDS_CACHE_TTL_MS = 10_000;
 const WORKER_ACTIONS_CACHE_TTL_MS = 15_000;
 
@@ -70,6 +73,12 @@ export interface TrelloAction {
   };
 }
 
+export interface TrelloMemberIdentity {
+  id: string;
+  username: string;
+  fullName: string;
+}
+
 export function getTrelloMemberCardsPath(trelloMemberId: string) {
   return `/members/${encodeURIComponent(trelloMemberId.trim() || "me")}/cards`;
 }
@@ -119,10 +128,12 @@ async function getBoardListsCached(
   }
   try {
     const [listsRes, boardRes] = await Promise.all([
-      axios.get<TrelloList[]>(`${TRELLO_API_BASE}/boards/${boardId}/lists`, {
+      axios.get<TrelloList[]>(`${TRELLO_API_BASE}/boards/${encodeURIComponent(boardId)}/lists`, {
+        timeout: TRELLO_REQUEST_TIMEOUT_MS,
         params: { key: apiKey, token: apiToken, filter: "open", fields: "id,name" },
       }),
-      axios.get<{ id: string; name: string }>(`${TRELLO_API_BASE}/boards/${boardId}`, {
+      axios.get<{ id: string; name: string }>(`${TRELLO_API_BASE}/boards/${encodeURIComponent(boardId)}`, {
+        timeout: TRELLO_REQUEST_TIMEOUT_MS,
         params: { key: apiKey, token: apiToken, fields: "id,name" },
       }),
     ]);
@@ -153,6 +164,7 @@ export async function getWorkerCards(apiKey: string, apiToken: string, trelloMem
     const response = await axios.get(
       `${TRELLO_API_BASE}${getTrelloMemberCardsPath(trelloMemberId)}`,
       {
+        timeout: TRELLO_REQUEST_TIMEOUT_MS,
         params: {
           key: apiKey,
           token: apiToken,
@@ -164,8 +176,10 @@ export async function getWorkerCards(apiKey: string, apiToken: string, trelloMem
 
     const rawCards: (TrelloCard & { idBoard?: string })[] = response.data;
     const boardIds = Array.from(new Set(rawCards.map(c => c.idBoard).filter(Boolean))) as string[];
-    const boardData = await Promise.all(
-      boardIds.map(boardId => getBoardListsCached(boardId, apiKey, apiToken))
+    const boardData = await mapWithConcurrency(
+      boardIds,
+      TRELLO_FANOUT_CONCURRENCY,
+      (boardId) => getBoardListsCached(boardId, apiKey, apiToken),
     );
 
     const listMap = new Map<string, { list: TrelloList; boardName: string }>();
@@ -251,18 +265,19 @@ export async function getWorkerRecentActions(
       .sort((a, b) => new Date(b.dateLastActivity).getTime() - new Date(a.dateLastActivity).getTime())
       .slice(0, 15);
 
-    const actionRequests = sortedCards.map(card =>
-      axios.get(`${TRELLO_API_BASE}/cards/${card.id}/actions`, {
+    const allActionArrays = await mapWithConcurrency(
+      sortedCards,
+      TRELLO_FANOUT_CONCURRENCY,
+      (card) => axios.get(`${TRELLO_API_BASE}/cards/${encodeURIComponent(card.id)}/actions`, {
+        timeout: TRELLO_REQUEST_TIMEOUT_MS,
         params: {
           key: apiKey,
           token: apiToken,
           filter: "commentCard,updateCard,createCard,addMemberToCard,removeMemberFromCard,updateCheckItemStateOnCard",
           limit: 5,
         },
-      }).then(res => res.data as TrelloAction[]).catch(() => [] as TrelloAction[])
+      }).then(res => res.data as TrelloAction[]).catch(() => [] as TrelloAction[]),
     );
-
-    const allActionArrays = await Promise.all(actionRequests);
     const allActions = allActionArrays
       .flat()
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
@@ -301,14 +316,16 @@ export async function getWorkerCommentedCardIdsToday(
     const isToday = (dateStr: string) => dateKeyInTimeZone(new Date(dateStr), timeZone) === today;
 
     const requests: Promise<any>[] = [
-      axios.get(`${TRELLO_API_BASE}/members/${trelloMemberId}/actions`, {
+      axios.get(`${TRELLO_API_BASE}/members/${encodeURIComponent(trelloMemberId)}/actions`, {
+        timeout: TRELLO_REQUEST_TIMEOUT_MS,
         params: { key: apiKey, token: apiToken, filter: "commentCard", limit: 100 },
       }),
     ];
 
     if (boardOwnerMemberId) {
       requests.push(
-        axios.get(`${TRELLO_API_BASE}/members/${boardOwnerMemberId}/actions`, {
+        axios.get(`${TRELLO_API_BASE}/members/${encodeURIComponent(boardOwnerMemberId)}/actions`, {
+          timeout: TRELLO_REQUEST_TIMEOUT_MS,
           params: { key: apiKey, token: apiToken, filter: "commentCard", limit: 100 },
         })
       );
@@ -317,6 +334,7 @@ export async function getWorkerCommentedCardIdsToday(
     if (personalToken) {
       requests.push(
         axios.get(`${TRELLO_API_BASE}/members/me/actions`, {
+          timeout: TRELLO_REQUEST_TIMEOUT_MS,
           params: { key: apiKey, token: personalToken, filter: "commentCard", limit: 100 },
         })
       );
@@ -366,6 +384,86 @@ export async function getWorkerCommentedCardIdsToday(
   }
 }
 
+export async function getTrelloMemberIdentity(
+  apiKey: string,
+  apiToken: string,
+  trelloMemberId: string,
+): Promise<TrelloMemberIdentity> {
+  try {
+    const response = await axios.get<TrelloMemberIdentity>(
+      `${TRELLO_API_BASE}/members/${encodeURIComponent(trelloMemberId.trim() || "me")}`,
+      {
+        timeout: TRELLO_REQUEST_TIMEOUT_MS,
+        params: { key: apiKey, token: apiToken, fields: "id,username,fullName" },
+      },
+    );
+    return response.data;
+  } catch (error) {
+    logTrelloFailure("Failed to resolve worker identity", error);
+    throw new Error("Failed to resolve the configured Trello worker identity");
+  }
+}
+
+export async function getCardCommentActions(
+  apiKey: string,
+  apiToken: string,
+  cardId: string,
+  limit = 100,
+): Promise<TrelloAction[]> {
+  try {
+    const response = await axios.get<TrelloAction[]>(
+      `${TRELLO_API_BASE}/cards/${encodeURIComponent(cardId)}/actions`,
+      {
+        timeout: TRELLO_REQUEST_TIMEOUT_MS,
+        params: {
+          key: apiKey,
+          token: apiToken,
+          filter: "commentCard",
+          memberCreator: true,
+          memberCreator_fields: "id,username,fullName",
+          limit: Math.min(100, Math.max(1, Math.round(limit))),
+        },
+      },
+    );
+    return response.data;
+  } catch (error) {
+    logTrelloFailure(`Failed to fetch comments for card ${cardId}`, error);
+    throw new Error("Failed to fetch Trello card comments");
+  }
+}
+
+export async function moveCardToDoing(
+  cardId: string,
+  apiKey: string,
+  apiToken: string,
+): Promise<{ moved: boolean; listId: string; listName: string }> {
+  try {
+    const cardResponse = await axios.get(`${TRELLO_API_BASE}/cards/${encodeURIComponent(cardId)}`, {
+      timeout: TRELLO_REQUEST_TIMEOUT_MS,
+      params: { key: apiKey, token: apiToken, fields: "idBoard,idList" },
+    });
+    const card = cardResponse.data as { idBoard?: string; idList?: string };
+    if (!card.idBoard) throw new Error("Trello card has no board");
+
+    const { lists } = await getBoardListsCached(card.idBoard, apiKey, apiToken);
+    const doingList = lists.find((list) => isDoingList(list.name));
+    if (!doingList) throw new Error("This board has no Doing or In Progress list");
+    if (card.idList === doingList.id) {
+      return { moved: false, listId: doingList.id, listName: doingList.name };
+    }
+
+    await axios.put(`${TRELLO_API_BASE}/cards/${encodeURIComponent(cardId)}`, undefined, {
+      timeout: TRELLO_REQUEST_TIMEOUT_MS,
+      params: { key: apiKey, token: apiToken, idList: doingList.id },
+    });
+    workerCardsCache.clear();
+    return { moved: true, listId: doingList.id, listName: doingList.name };
+  } catch (error) {
+    logTrelloFailure("Failed to move card to Doing", error);
+    throw error instanceof Error ? error : new Error("Failed to move Trello card to Doing");
+  }
+}
+
 export async function getCardsDueToday(
   apiKey: string,
   apiToken: string,
@@ -409,6 +507,7 @@ export async function getWorkerBoards(apiKey: string, apiToken: string): Promise
     const res = await axios.get<TrelloBoard[]>(
       `${TRELLO_API_BASE}/members/me/boards`,
       {
+        timeout: TRELLO_REQUEST_TIMEOUT_MS,
         params: { key: apiKey, token: apiToken, filter: "open", fields: "id,name" },
       }
     );
@@ -434,9 +533,9 @@ export async function getWeeklyHours(apiKey: string, apiToken: string, trelloMem
   weekEnd.setDate(weekStart.getDate() + 6); // End of week (Saturday)
 
   return {
-    totalHours: 0, // Placeholder
-    targetMin: 50,
-    targetMax: 55,
+    totalHours: 0,
+    targetMin: 55,
+    targetMax: 60,
     weekStart: weekStart.toISOString(),
     weekEnd: weekEnd.toISOString(),
   };
@@ -454,15 +553,44 @@ export interface TrelloWebhook {
   firstConsecutiveFailDate: string | null;
 }
 
+export type TrelloWebhookStatus =
+  | { state: "active" | "inactive"; active: boolean; count: number }
+  | { state: "unconfigured" | "unavailable"; active: null; count: null };
+
+async function fetchRegisteredWebhooks(apiKey: string, apiToken: string): Promise<unknown> {
+  const response = await axios.get(
+    `${TRELLO_API_BASE}/tokens/${encodeURIComponent(apiToken)}/webhooks`,
+    {
+      timeout: TRELLO_REQUEST_TIMEOUT_MS,
+      params: { key: apiKey, token: apiToken },
+    }
+  );
+  return response.data;
+}
+
+// Health reads must distinguish an empty provider result from a failed lookup.
+export async function getRegisteredWebhookStatus(apiKey?: string, apiToken?: string): Promise<TrelloWebhookStatus> {
+  if (!apiKey?.trim() || !apiToken?.trim()) {
+    return { state: "unconfigured", active: null, count: null };
+  }
+  try {
+    const webhooks = await fetchRegisteredWebhooks(apiKey, apiToken);
+    if (!Array.isArray(webhooks) || webhooks.some(webhook =>
+      !webhook || typeof webhook !== "object" || typeof webhook.active !== "boolean"
+    )) {
+      throw new Error("Invalid Trello webhook response");
+    }
+    const active = webhooks.some(webhook => webhook.active === true);
+    return { state: active ? "active" : "inactive", active, count: webhooks.length };
+  } catch (error) {
+    logTrelloFailure("Registered webhook status unavailable", error);
+    return { state: "unavailable", active: null, count: null };
+  }
+}
+
 export async function getRegisteredWebhooks(apiKey: string, apiToken: string): Promise<TrelloWebhook[]> {
   try {
-    const response = await axios.get(
-      `${TRELLO_API_BASE}/tokens/${apiToken}/webhooks`,
-      {
-        params: { key: apiKey, token: apiToken },
-      }
-    );
-    return response.data as TrelloWebhook[];
+    return await fetchRegisteredWebhooks(apiKey, apiToken) as TrelloWebhook[];
   } catch (error) {
     logTrelloFailure("Failed to fetch registered webhooks", error);
     return [];
@@ -481,9 +609,10 @@ export async function postCardComment(
   }
 
   const response = await axios.post(
-    `${TRELLO_API_BASE}/cards/${cardId}/actions/comments`,
+    `${TRELLO_API_BASE}/cards/${encodeURIComponent(cardId)}/actions/comments`,
     null,
     {
+      timeout: TRELLO_REQUEST_TIMEOUT_MS,
       params: { key: apiKey, token: apiToken, text },
     }
   );

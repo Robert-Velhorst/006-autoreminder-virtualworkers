@@ -7,6 +7,7 @@
 import { getDb } from "./db";
 import {
   aptlssSteps,
+  decisionOutcomes,
   cardStates,
   priorityScores,
   AptlssStep,
@@ -16,11 +17,11 @@ import {
   PriorityScore,
   InsertPriorityScore,
 } from "../drizzle/schema.postgres";
-import { eq, and, inArray, desc, sql } from "drizzle-orm";
+import { eq, and, inArray, notInArray, desc, sql } from "drizzle-orm";
 
 // ─── aptlss_steps ─────────────────────────────────────────────────────────────
 
-/** Upsert a batch of steps for a card (replaces all non-manual, non-completed steps). */
+/** Upsert a batch of steps for a card without replacing pending founder decisions. */
 export async function upsertAptlssSteps(
   vaId: number,
   cardId: string,
@@ -29,22 +30,25 @@ export async function upsertAptlssSteps(
   const db = await getDb();
   if (!db) return;
 
-  // Load existing steps to preserve manual and completed ones
+  // Pending founder decisions remain actionable across plan regeneration.
   const existing: AptlssStep[] = await db
     .select()
     .from(aptlssSteps)
     .where(and(eq(aptlssSteps.cardId, cardId), eq(aptlssSteps.vaId, vaId)));
 
-  const manualOrDone = existing.filter(
-    (s) => s.isManual || s.status === "complete"
+  const protectedSteps = existing.filter(
+    (s) => s.isManual || s.status === "complete" || (s.requiresRobert && s.status === "open")
   );
-  const manualOrDoneCheckItemIds = new Set(
-    manualOrDone.map((s) => s.trelloCheckItemId).filter(Boolean)
+  const protectedCheckItemIds = new Set(
+    protectedSteps.map((s) => s.trelloCheckItemId).filter(Boolean)
+  );
+  const pendingFounderTitles = new Set(
+    protectedSteps.filter((s) => s.requiresRobert && s.status === "open").map((s) => s.title.trim().toLocaleLowerCase())
   );
 
   // Mark existing AI-generated open steps as obsolete
   const aiOpenIds = existing
-    .filter((s) => !s.isManual && s.status === "open")
+    .filter((s) => !s.isManual && s.status === "open" && !s.requiresRobert)
     .map((s) => s.id);
   if (aiOpenIds.length > 0) {
     await db
@@ -59,11 +63,11 @@ export async function upsertAptlssSteps(
       );
   }
 
-  // Insert new steps (skip if trelloCheckItemId already exists as manual/done)
+  // A regenerated plan must not duplicate or overwrite an unresolved decision.
   const toInsert = newSteps.filter(
     (s) =>
-      !s.trelloCheckItemId ||
-      !manualOrDoneCheckItemIds.has(s.trelloCheckItemId)
+      (!s.trelloCheckItemId || !protectedCheckItemIds.has(s.trelloCheckItemId)) &&
+      (!s.requiresRobert || !pendingFounderTitles.has(s.title.trim().toLocaleLowerCase()))
   );
   if (toInsert.length > 0) {
     await db.insert(aptlssSteps).values(toInsert);
@@ -85,6 +89,21 @@ export async function getOpenStepsForCard(vaId: number, cardId: string): Promise
       )
     )
     .orderBy(aptlssSteps.stepNumber);
+}
+
+/** Get open steps for a group of cards in one worker-scoped query. */
+export async function getOpenStepsForCards(vaId: number, cardIds: string[]): Promise<AptlssStep[]> {
+  const db = await getDb();
+  if (!db || cardIds.length === 0) return [];
+  return db
+    .select()
+    .from(aptlssSteps)
+    .where(and(
+      eq(aptlssSteps.vaId, vaId),
+      inArray(aptlssSteps.cardId, cardIds),
+      sql`${aptlssSteps.status} != 'obsolete'`,
+    ))
+    .orderBy(aptlssSteps.cardId, aptlssSteps.stepNumber);
 }
 
 /** Get all manual (human-added) steps for a card — used to preserve them during checklist sync. */
@@ -121,44 +140,31 @@ export async function getAllFounderDecisionSteps(vaId?: number): Promise<AptlssS
     .orderBy(desc(aptlssSteps.createdAt));
 }
 
-/** Mark a step as complete by its Trello check-item ID. */
-export async function completeStepByCheckItemId(
-  trelloCheckItemId: string,
-  vaId?: number
-): Promise<void> {
-  const db = await getDb();
-  if (!db) return;
-  const filters = [eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId)];
-  if (vaId !== undefined) filters.push(eq(aptlssSteps.vaId, vaId));
-  await db
-    .update(aptlssSteps)
-    .set({ status: "complete", completedAt: new Date() })
-    .where(and(...filters));
+function affectedRows(result: { rowCount: number | null }): number {
+  return result.rowCount ?? 0;
 }
 
-/** Mark a step as open (unchecked) by its Trello check-item ID. */
-export async function uncompleteStepByCheckItemId(
+/** Update a Trello-backed step only when it belongs to the active worker. */
+export async function setStepCompletionForWorker(
+  vaId: number,
   trelloCheckItemId: string,
-  vaId?: number
-): Promise<void> {
+  complete: boolean,
+): Promise<boolean> {
   const db = await getDb();
-  if (!db) return;
-  const filters = [eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId)];
-  if (vaId !== undefined) filters.push(eq(aptlssSteps.vaId, vaId));
-  await db
+  if (!db) throw new Error("Database not available");
+  const result = await db
     .update(aptlssSteps)
-    .set({ status: "open", completedAt: null })
-    .where(and(...filters));
-}
-
-/** Mark a Founder-required step as resolved (removes from Decision Queue). */
-export async function resolveFounderStep(stepId: number): Promise<void> {
-  const db = await getDb();
-  if (!db) return;
-  await db
-    .update(aptlssSteps)
-    .set({ requiresRobert: false, status: "complete", completedAt: new Date() })
-    .where(eq(aptlssSteps.id, stepId));
+    .set({
+      status: complete ? "complete" : "open",
+      completedAt: complete ? new Date() : null,
+    })
+    .where(and(
+      eq(aptlssSteps.vaId, vaId),
+      eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId),
+      eq(aptlssSteps.requiresRobert, false),
+      notInArray(aptlssSteps.id, db.select({ stepId: decisionOutcomes.stepId }).from(decisionOutcomes)),
+    ));
+  return affectedRows(result) === 1;
 }
 
 /** Get progress summary for a card: { total, completed, openFounder, openBlocked, estimatedRemainingMinutes } */
@@ -182,8 +188,22 @@ export async function getCardStepProgress(vaId: number, cardId: string) {
 export async function upsertCardState(state: InsertCardState): Promise<void> {
   const db = await getDb();
   if (!db) return;
-  await db.delete(cardStates).where(and(eq(cardStates.cardId, state.cardId), eq(cardStates.vaId, state.vaId)));
-  await db.insert(cardStates).values(state);
+  await db.insert(cardStates).values(state).onConflictDoUpdate({ target: [cardStates.vaId, cardStates.cardId],
+    set: {
+      cardName: state.cardName ?? "",
+      boardName: state.boardName ?? "",
+      listName: state.listName ?? "",
+      state: state.state ?? "NEW_UNTRIAGED",
+      stateReason: state.stateReason ?? null,
+      daysSinceProgress: state.daysSinceProgress ?? 0,
+      hasUnansweredQuestion: state.hasUnansweredQuestion ?? false,
+      isOverdue: state.isOverdue ?? false,
+      checklistComplete: state.checklistComplete ?? false,
+      hasFinalSummary: state.hasFinalSummary ?? false,
+      calculatedAt: state.calculatedAt ?? new Date(),
+      updatedAt: new Date(),
+    },
+  });
 }
 
 /** Get the current state for a card (null if never computed). */
@@ -213,10 +233,19 @@ export async function upsertPriorityScore(
 ): Promise<void> {
   const db = await getDb();
   if (!db) return;
-  await db
-    .delete(priorityScores)
-    .where(and(eq(priorityScores.cardId, score.cardId), eq(priorityScores.vaId, score.vaId)));
-  await db.insert(priorityScores).values(score);
+  await db.insert(priorityScores).values(score).onConflictDoUpdate({ target: [priorityScores.vaId, priorityScores.cardId],
+    set: {
+      cardName: score.cardName ?? "",
+      score: score.score ?? 0,
+      breakdown: score.breakdown ?? null,
+      tier: score.tier ?? "MEDIUM",
+      estimatedRemainingMinutes: score.estimatedRemainingMinutes ?? 0,
+      openSteps: score.openSteps ?? 0,
+      completedSteps: score.completedSteps ?? 0,
+      calculatedAt: score.calculatedAt ?? new Date(),
+      updatedAt: new Date(),
+    },
+  });
 }
 
 /** Get the priority score for a card (null if never computed). */

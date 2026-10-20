@@ -10,6 +10,7 @@ const validProductionEnvironment = {
   JWT_SECRET: "a".repeat(32),
   TRELLO_API_KEY: "trello-key",
   TRELLO_TOKEN: "trello-token",
+  OPENAI_API_KEY: "openai-key",
   PUBLIC_URL: "https://dashboard.example.com",
   APP_URL: "https://dashboard.example.com",
   VITE_FRONTEND_URL: "https://dashboard.example.com",
@@ -54,6 +55,18 @@ describe("production configuration", () => {
     })).toContain("DATABASE_URL must enable verified TLS with one sslmode=verify-full option and no ssl override");
   });
 
+  it.each([
+    "postgresql://postgres/va_dashboard?sslmode=verify-full",
+    "postgresql://worker@postgres/va_dashboard?sslmode=verify-full",
+    "postgresql://:secret@postgres/va_dashboard?sslmode=verify-full",
+    "postgresql://worker:secret@postgres/?sslmode=verify-full",
+    "postgresql://worker:secret@postgres?sslmode=verify-full",
+    "postgresql://worker:secret@postgres/va_dashboard?sslmode=verify-full#ignored",
+  ])("rejects incomplete or ambiguous database configuration without printing values", databaseUrl => {
+    expect(getProductionConfigurationErrors({ ...validProductionEnvironment, DATABASE_URL: databaseUrl }))
+      .toEqual(["DATABASE_URL must include a host, database, username and password without a fragment"]);
+  });
+
   it("reports missing or unsafe production configuration without values", () => {
     const errors = getProductionConfigurationErrors({
       NODE_ENV: "production",
@@ -72,6 +85,7 @@ describe("production configuration", () => {
       "APP_URL must be set to the public HTTPS origin in production",
       "VITE_FRONTEND_URL must be set to the public HTTPS origin in production",
       "HOST must bind to a non-loopback interface in production",
+      "PUBLIC_URL, WEBHOOK_BASE_URL, or APP_URL must provide an HTTPS public origin in production",
       "LOCAL_AUTH_BYPASS cannot be enabled in production",
     ]);
   });
@@ -106,4 +120,49 @@ describe("production configuration", () => {
     })).toContain("TRELLO_WEBHOOK_CALLBACK_URL and TRELLO_WEBHOOK_SECRET must be configured together");
   });
 
+});
+
+describe("provider and operator production guards", () => {
+it.each([undefined, "", "  ", "codex-subscription", " codex-subscription "])(
+    "does not require a paid API key for subscription mode (%s)", provider => {
+      const env = { ...validProductionEnvironment, OPENAI_API_KEY: "", APTLSS_MANAGER_PROVIDER: provider };
+      expect(getProductionConfigurationErrors(env)).toEqual([]);
+      expect(() => assertProductionConfiguration(env)).not.toThrow();
+    },
+  );
+it.each([undefined, "", "  "])("requires a nonempty key when the paid provider is explicitly selected (%s)", key => {
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment, APTLSS_MANAGER_PROVIDER: " openai-api ", OPENAI_API_KEY: key,
+    })).toEqual(["OPENAI_API_KEY is required"]);
+  });
+it("accepts an explicitly configured API provider and rejects unknown providers without leaking their values", () => {
+    expect(getProductionConfigurationErrors({ ...validProductionEnvironment, APTLSS_MANAGER_PROVIDER: "openai-api" })).toEqual([]);
+    const env = { ...validProductionEnvironment, APTLSS_MANAGER_PROVIDER: "invalid-private-value" };
+    expect(getProductionConfigurationErrors(env)).toEqual(["APTLSS_MANAGER_PROVIDER must be codex-subscription or openai-api"]);
+    expect(() => assertProductionConfiguration(env)).toThrow("APTLSS_MANAGER_PROVIDER must be codex-subscription or openai-api");
+    expect(() => assertProductionConfiguration(env)).not.toThrow("invalid-private-value");
+  });
+it("rejects a Vercel request-only production runtime", () => {
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      VERCEL: "1",
+    })).toEqual([
+      "Vercel request-only runtime is unsupported; deploy the unified Docker container",
+    ]);
+  });
+it("rejects a weak owner bootstrap token when recovery is configured", () => {
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      OWNER_BOOTSTRAP_TOKEN: "too-short",
+    })).toContain("OWNER_BOOTSTRAP_TOKEN must contain at least 24 characters when configured");
+  });
+it("does not allow scheduled email briefings while delivery is disabled", () => {
+    expect(getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      BRIEFING_SCHEDULER_ENABLED: "true",
+      NOTIFICATIONS_ENABLED: "false",
+    })).toEqual([
+      "BRIEFING_SCHEDULER_ENABLED requires NOTIFICATIONS_ENABLED=true",
+    ]);
+  });
 });

@@ -1,15 +1,23 @@
+import { encodeTrelloPathSegment } from '../utils/trello-path';
 import { Router, Response } from 'express';
-import { rateLimit } from 'express-rate-limit';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { getDb } from '../db';
-import { chatbotWebhooks, chatbotConversations, appSettings } from '../../drizzle/schema.postgres';
-import { eq, inArray } from 'drizzle-orm';
+import { chatbotWebhooks, chatbotConversations, chatbotCheckinResponses } from '../../drizzle/schema.postgres';
+import { desc, eq, gte, sql } from 'drizzle-orm';
 import { getCardConversations, storeConversation } from '../services/chatbot-history';
-import { postTrelloComment, sendScheduledCheckin } from '../services/trello-chatbot';
-import { requireAdmin, requireAuthenticated } from '../middleware/auth';
 import {
-  getConfiguredTrelloWebhookCallbackUrl,
-  isValidTrelloWebhookSignature,
-} from './trelloWebhookSignature';
+  isTrelloCommentAutomationEnabled,
+  postTrelloComment,
+  sendScheduledCheckin,
+  TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE,
+} from '../services/trello-chatbot';
+import { requireAdmin, requireAuthenticated } from '../middleware/auth';
+import { getWebhookCallbackUrl } from '../services/webhook-auto-register';
+import { getOpenAIModelStatus } from '../_core/llm';
+import { testAIConnection } from '../services/ai-service';
+import { parseLimitOffset } from '../utils/pagination';
+import { rateLimit } from 'express-rate-limit';
+import { getConfiguredTrelloWebhookCallbackUrl } from './trelloWebhookSignature';
 
 const router = Router();
 
@@ -30,6 +38,70 @@ router.use(rateLimit({
 }));
 
 const TRELLO_API_BASE = 'https://api.trello.com/1';
+const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
+const MAX_CONVERSATION_COUNT_CARD_IDS = 200;
+
+export function normalizeConversationCountCardIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  if (value.length > MAX_CONVERSATION_COUNT_CARD_IDS) {
+    throw new Error(`cardIds may contain at most ${MAX_CONVERSATION_COUNT_CARD_IDS} values`);
+  }
+  return [...new Set(value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0 && item.length <= 128))];
+}
+
+function callbackUrl() {
+  return getConfiguredTrelloWebhookCallbackUrl();
+}
+
+export function verifyTrelloWebhook(input: {
+  rawBody: Buffer;
+  signature: string;
+  callbackUrl: string;
+  secret: string;
+}) {
+  const expected = createHmac('sha1', input.secret)
+    .update(Buffer.concat([input.rawBody, Buffer.from(input.callbackUrl)]))
+    .digest('base64');
+  const actualBytes = Buffer.from(input.signature);
+  const expectedBytes = Buffer.from(expected);
+  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
+}
+
+function unconfirmedTrelloSend(res: Response, item: 'comment' | 'check-in') {
+  return res.status(409).json({
+    success: false,
+    deliveryStatus: 'unknown',
+    retryAllowed: false,
+    error: `Trello did not confirm whether the ${item} was posted; it may already be on the card.`,
+    nextStep: 'Open the Trello card and verify whether the comment is already there. Do not send it again until you have checked.',
+  });
+}
+
+async function persistSendHistory(record: Parameters<typeof storeConversation>[0], item: 'comment' | 'check-in') {
+  try {
+    return (await storeConversation(record)) != null;
+  } catch (error) {
+    console.error(`[TrelloWebhook] ${item} was posted but its history could not be saved:`, error);
+    return false;
+  }
+}
+
+function sendConfirmedResponse(res: Response, historySaved: boolean, item: 'comment' | 'check-in') {
+  if (!historySaved) {
+    return res.status(200).json({
+      success: true,
+      posted: true,
+      historySaved: false,
+      retryAllowed: false,
+      warning: `The ${item} was posted to Trello, but the dashboard could not save its history. Do not retry the send; check the Trello card. Dashboard history may be incomplete.`,
+    });
+  }
+
+  return res.json({ success: true, posted: true, historySaved: true });
+}
 
 router.use((req: any, res: Response, next) => {
   if ((req.method === 'GET' || req.method === 'HEAD') && req.path === '/') {
@@ -112,8 +184,10 @@ router.post('/register', requireAdmin, registerWebhookRateLimit, async (req: any
       return res.status(500).json({ error: 'Trello credentials not configured' });
     }
 
-    const callbackUrl = getConfiguredTrelloWebhookCallbackUrl();
-    if (!callbackUrl || !process.env.TRELLO_WEBHOOK_SECRET) {
+    // Registration must use deployment configuration, never a client-supplied
+    // host header. Trello signs future callbacks against this exact URL.
+    const configuredCallbackUrl = callbackUrl();
+    if (!configuredCallbackUrl) {
       return res.status(500).json({
         error: 'Set TRELLO_WEBHOOK_CALLBACK_URL to the exact public HTTPS callback and configure TRELLO_WEBHOOK_SECRET before registering Trello webhooks.',
       });
@@ -139,9 +213,10 @@ router.post('/register', requireAdmin, registerWebhookRateLimit, async (req: any
     const response = await fetch(`${TRELLO_API_BASE}/webhooks?key=${apiKey}&token=${token}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS),
       body: JSON.stringify({
         idModel: cleanModelId,
-        callbackURL: callbackUrl,
+        callbackURL: configuredCallbackUrl,
         description,
       }),
     });
@@ -173,7 +248,7 @@ router.post('/register', requireAdmin, registerWebhookRateLimit, async (req: any
           trelloWebhookId: webhookData.id,
           modelId: cleanModelId,
           description,
-          callbackUrl,
+          callbackUrl: configuredCallbackUrl,
           isActive: 1,
         })
         .catch((err: any) => console.error('[TrelloWebhook] DB insert error:', err));
@@ -181,9 +256,9 @@ router.post('/register', requireAdmin, registerWebhookRateLimit, async (req: any
 
     console.log('[TrelloWebhook] Webhook registered successfully:', webhookData.id);
     res.json({ success: true, webhookId: webhookData.id });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[TrelloWebhook] Error registering webhook:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Failed to register webhook with Trello' });
   }
 });
 
@@ -196,7 +271,7 @@ router.post('/register', requireAdmin, registerWebhookRateLimit, async (req: any
  * (idModel vs modelId, active vs isActive) which broke the frontend.
  * Now both paths are normalised through normaliseTrelloWebhook().
  */
-router.get('/list', async (req: any, res: Response) => {
+router.get('/list', requireAdmin, async (req: any, res: Response) => {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -208,15 +283,15 @@ router.get('/list', async (req: any, res: Response) => {
     if (apiKey && token) {
       try {
         const response = await fetch(
-          `${TRELLO_API_BASE}/tokens/${token}/webhooks?key=${apiKey}`
+          `${TRELLO_API_BASE}/tokens/${encodeURIComponent(token)}/webhooks?key=${encodeURIComponent(apiKey)}`,
+          { redirect: 'error', signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS) },
         );
         if (response.ok) {
           const raw = await response.json();
-          // Filter to only webhooks pointing at our callback URL so we don't
-          // show unrelated webhooks registered under the same token.
-          const ourBase = getConfiguredTrelloWebhookCallbackUrl();
-          const filtered = ourBase
-            ? raw.filter((w: any) => w.callbackURL === ourBase)
+          // Filter to webhooks explicitly owned by this configured deployment.
+          const configuredCallbackUrl = callbackUrl();
+          const filtered = configuredCallbackUrl
+            ? raw.filter((w: any) => (w.callbackURL ?? '') === configuredCallbackUrl)
             : [];
           const webhooks = filtered.map(normaliseTrelloWebhook);
           console.log('[TrelloWebhook] Fetched webhooks from Trello API');
@@ -237,9 +312,9 @@ router.get('/list', async (req: any, res: Response) => {
     }
 
     res.json({ webhooks: [] });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[TrelloWebhook] Error listing webhooks:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Failed to list Trello webhooks' });
   }
 });
 
@@ -253,14 +328,18 @@ router.delete('/:webhookId', requireAdmin, async (req: any, res: Response) => {
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
     const { webhookId } = req.params;
+    const encodedWebhookId = encodeTrelloPathSegment(webhookId);
+    if (!encodedWebhookId) {
+      return res.status(400).json({ error: 'Invalid Trello webhook ID' });
+    }
     const apiKey = process.env.TRELLO_API_KEY;
     const token = process.env.TRELLO_TOKEN;
 
     if (apiKey && token) {
       try {
         const response = await fetch(
-          `${TRELLO_API_BASE}/webhooks/${webhookId}?key=${apiKey}&token=${token}`,
-          { method: 'DELETE' }
+          `${TRELLO_API_BASE}/webhooks/${encodedWebhookId}?key=${apiKey}&token=${token}`,
+          { method: 'DELETE', redirect: 'error', signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS) }
         );
         if (response.ok) {
           console.log('[TrelloWebhook] Deleted webhook from Trello API');
@@ -278,9 +357,9 @@ router.delete('/:webhookId', requireAdmin, async (req: any, res: Response) => {
     }
 
     res.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[TrelloWebhook] Error deleting webhook:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Failed to delete Trello webhook' });
   }
 });
 
@@ -294,46 +373,106 @@ router.delete('/:webhookId', requireAdmin, async (req: any, res: Response) => {
  */
 router.post('/', async (req: any, res: Response) => {
   try {
-    const callbackUrl = getConfiguredTrelloWebhookCallbackUrl();
-    if (!callbackUrl || !process.env.TRELLO_WEBHOOK_SECRET) {
+    const secret = process.env.TRELLO_WEBHOOK_SECRET?.trim() || process.env.TRELLO_POWERUP_SECRET?.trim();
+    const registeredCallback = callbackUrl();
+    const signature = typeof req.get('x-trello-webhook') === 'string' ? req.get('x-trello-webhook') : '';
+    const rawBody = Buffer.isBuffer(req.rawBody) ? req.rawBody : null;
+    if (!secret || !registeredCallback) {
       return res.status(503).json({ error: 'Trello webhook verification is not configured' });
     }
-    if (!isValidTrelloWebhookSignature({
-      body: req.body,
-      callbackUrl,
-      requestPath: req.originalUrl,
-      secret: process.env.TRELLO_WEBHOOK_SECRET,
-      signature: req.get('x-trello-webhook'),
-    })) {
+    if (req.originalUrl !== new URL(registeredCallback).pathname || !rawBody || !signature || !verifyTrelloWebhook({ rawBody, signature, callbackUrl: registeredCallback, secret })) {
       return res.status(401).json({ error: 'Invalid Trello webhook signature' });
     }
-
-    const action = req.body;
-    const actionType: string = action?.type ?? 'unknown';
+    const payload = req.body;
+    const action = payload?.action ?? payload;
+    const actionData = action?.data && typeof action.data === 'object' ? action.data : {};
+    const actionType: string = typeof action?.type === 'string' ? action.type : 'unknown';
+    const actionId = typeof action?.id === 'string' && action.id.trim().length > 0
+      ? action.id.trim()
+      : null;
+    if (!actionId) {
+      return res.status(400).json({ error: 'Trello action ID is required' });
+    }
+    const boardTrelloId = actionData?.board?.id ?? payload?.model?.id ?? null;
+    const registeredModelId = payload?.model?.id ?? actionData?.board?.id ?? null;
+    const sourceDate = typeof action?.date === 'string' ? action.date : null;
 
     console.log('[TrelloWebhook] Received callback:', actionType);
 
     const db = await getDb();
     if (!db) {
-      return res.status(503).json({ error: 'Webhook storage is unavailable' });
+      return res.status(503).json({ error: 'Trello webhook storage is unavailable' });
     }
-    await db
-      .insert(chatbotConversations)
-      .values({
-        cardTrelloId: action?.data?.card?.id ?? 'unknown',
-        cardName: action?.data?.card?.name ?? null,
-        boardTrelloId: action?.data?.board?.id ?? null,
-        command: actionType,
-        commandArgs: JSON.stringify(action?.data ?? {}),
-        authorTrelloId: action?.memberCreator?.id ?? null,
-        authorName: action?.memberCreator?.fullName ?? null,
-        responseStatus: 'pending',
-      });
+    const conversation = {
+      cardTrelloId: actionData?.card?.id ?? 'unknown',
+      cardName: actionData?.card?.name ?? null,
+      boardTrelloId,
+      command: actionType,
+      commandArgs: JSON.stringify({
+        ...actionData,
+        _trelloWebhook: { actionId, sourceDate },
+      }),
+      authorTrelloId: action?.memberCreator?.id ?? null,
+      authorName: action?.memberCreator?.fullName ?? null,
+      responseStatus: 'pending' as const,
+    };
 
-    res.json({ success: true });
-  } catch (error: any) {
+    if (!registeredModelId) {
+      return res.status(503).json({ error: 'Trello webhook replay protection is unavailable' });
+    }
+
+    const archiveResult = await db.transaction(async (tx: any): Promise<'inserted' | 'duplicate' | 'unregistered'> => {
+        // All model registrations share this short-lived lock. A single Trello
+        // action may be delivered through both board and workspace webhooks,
+        // so locking only the incoming model row leaves a cross-model replay race.
+        const replayLockResult = await tx.execute(sql`
+          SELECT id FROM chatbot_webhooks
+          ORDER BY id
+          LIMIT 1
+          FOR UPDATE
+        `);
+        const replayLockRows = replayLockResult.rows;
+        if (!replayLockRows.length) {
+          return 'unregistered';
+        }
+
+        // Keep the matching registration locked until commit as well, so a
+        // concurrent removal cannot invalidate registration during archiving.
+        const registeredWebhookResult = await tx.execute(sql`
+          SELECT id FROM chatbot_webhooks
+          WHERE "modelId" = ${registeredModelId}
+          ORDER BY id
+          LIMIT 1
+          FOR UPDATE
+        `);
+        const registeredWebhookRows = registeredWebhookResult.rows;
+        if (!registeredWebhookRows.length) {
+          return 'unregistered';
+        }
+
+        const existingResult = await tx.execute(sql`
+          SELECT id FROM chatbot_conversations
+          WHERE CASE
+            WHEN pg_input_is_valid("commandArgs", 'jsonb')
+              THEN "commandArgs"::jsonb #>> '{_trelloWebhook,actionId}'
+            ELSE NULL
+          END = ${actionId}
+          LIMIT 1
+        `);
+        const existingRows = existingResult.rows;
+        if (existingRows.length) return 'duplicate';
+
+        await tx.insert(chatbotConversations).values(conversation);
+        return 'inserted';
+    });
+
+    if (archiveResult === 'unregistered') {
+      return res.status(503).json({ error: 'Trello webhook replay protection is unavailable' });
+    }
+    return res.json(archiveResult === 'duplicate' ? { success: true, duplicate: true } : { success: true });
+  } catch (error: unknown) {
     console.error('[TrelloWebhook] Error processing callback:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Trello webhook processing failed' });
   }
 });
 
@@ -344,7 +483,7 @@ router.post('/', async (req: any, res: Response) => {
  * Reachability is not probed server-side: the callback URL is configurable,
  * and making an outbound request here would create an SSRF primitive.
  */
-router.get('/status', async (req: any, res: Response) => {
+router.get('/status', requireAdmin, async (req: any, res: Response) => {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -356,11 +495,13 @@ router.get('/status', async (req: any, res: Response) => {
     const recommendation = isConfigured
       ? 'Webhook settings are present. Live delivery has not been tested; verify by sending a test event from Trello.'
       : 'Configure the Trello credentials, HTTPS callback URL, and webhook secret before enabling push updates.';
+    const configuredCallbackUrl = callbackUrl;
+    const isReachable = false; // A settings read does not establish live delivery acceptance.
 
     res.json({
       status: {
-        callbackUrl,
-        publicUrl: callbackUrl,
+        callbackUrl: configuredCallbackUrl,
+        publicUrl: configuredCallbackUrl,
         isConfigured,
         isReachable: null,
         recommendation,
@@ -368,7 +509,7 @@ router.get('/status', async (req: any, res: Response) => {
     });
   } catch (error: any) {
     console.error('[TrelloWebhook] Error getting webhook status:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Could not load Trello webhook status' });
   }
 });
 
@@ -377,13 +518,18 @@ router.get('/status', async (req: any, res: Response) => {
  * Get conversation counts for a batch of card IDs.
  * Returns { counts: { [cardId]: number } }
  */
-router.post('/conversation-counts', async (req: any, res: Response) => {
+router.post('/conversation-counts', requireAdmin, async (req: any, res: Response) => {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
-    const { cardIds } = req.body;
-    if (!Array.isArray(cardIds) || cardIds.length === 0) {
+    let cardIds: string[];
+    try {
+      cardIds = normalizeConversationCountCardIds(req.body?.cardIds);
+    } catch (error) {
+      return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid cardIds' });
+    }
+    if (cardIds.length === 0) {
       return res.json({ counts: {} });
     }
 
@@ -415,7 +561,7 @@ router.post('/conversation-counts', async (req: any, res: Response) => {
     res.json({ counts });
   } catch (error: any) {
     console.error('[TrelloWebhook] Error getting conversation counts:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Could not load conversation counts' });
   }
 });
 
@@ -423,26 +569,61 @@ router.post('/conversation-counts', async (req: any, res: Response) => {
  * GET /api/chatbot/analytics
  * Get chatbot analytics.
  */
-router.get('/analytics', async (req: any, res: Response) => {
+router.get('/analytics', requireAdmin, async (req: any, res: Response) => {
   try {
-    const user = req.user;
-    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const days = Number(req.query.days ?? 30);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      return res.status(400).json({ error: 'days must be an integer between 1 and 365' });
+    }
+    const db = await getDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+    const since = new Date(Date.now() - days * 24 * 60 * 60_000);
+    const [summaryRows, commandRows, checkinRows] = await Promise.all([
+      db.select({
+        totalConversations: sql<number>`COUNT(${chatbotConversations.id})`,
+        avgResponseTimeMs: sql<number>`COALESCE(AVG(${chatbotConversations.responseTimeMs}), 0)`,
+        totalCheckins: sql<number>`SUM(CASE WHEN ${chatbotConversations.command} = 'checkin' THEN 1 ELSE 0 END)`,
+        activeWorkers: sql<number>`COUNT(DISTINCT ${chatbotConversations.authorTrelloId})`,
+        activeCards: sql<number>`COUNT(DISTINCT ${chatbotConversations.cardTrelloId})`,
+      }).from(chatbotConversations).where(gte(chatbotConversations.createdAt, since)),
+      db.select({
+        command: chatbotConversations.command,
+        count: sql<number>`COUNT(*)`,
+      }).from(chatbotConversations)
+        .where(gte(chatbotConversations.createdAt, since))
+        .groupBy(chatbotConversations.command),
+      db.select({
+        totalResponses: sql<number>`COUNT(${chatbotCheckinResponses.id})`,
+        avgCheckinResponseMinutes: sql<number>`COALESCE(AVG(${chatbotCheckinResponses.responseTimeMinutes}), 0)`,
+      }).from(chatbotCheckinResponses).where(gte(chatbotCheckinResponses.createdAt, since)),
+    ]);
+    const summary = summaryRows[0];
+    const checkins = checkinRows[0];
+    const totalCheckins = Number(summary?.totalCheckins ?? 0);
+    const totalResponses = Number(checkins?.totalResponses ?? 0);
+    const totalCommands = Object.fromEntries(commandRows.map((row) => [row.command, Number(row.count)]));
+    const topCommands = commandRows
+      .map((row) => ({ command: row.command, count: Number(row.count) }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
 
-    res.json({
-      totalConversations: 0,
-      totalCommands: {},
-      avgResponseTimeMs: 0,
-      totalCheckins: 0,
-      totalResponses: 0,
-      overallResponseRate: 0,
-      avgCheckinResponseMinutes: 0,
-      activeWorkers: 0,
-      activeCards: 0,
-      topCommands: [],
+    return res.json({
+      totalConversations: Number(summary?.totalConversations ?? 0),
+      totalCommands,
+      avgResponseTimeMs: Math.round(Number(summary?.avgResponseTimeMs ?? 0)),
+      totalCheckins,
+      totalResponses,
+      overallResponseRate: totalCheckins === 0 ? 0 : totalResponses / totalCheckins,
+      avgCheckinResponseMinutes: Math.round(Number(checkins?.avgCheckinResponseMinutes ?? 0)),
+      activeWorkers: Number(summary?.activeWorkers ?? 0),
+      activeCards: Number(summary?.activeCards ?? 0),
+      topCommands,
+      periodDays: days,
+      source: 'chatbot_conversations+chatbot_checkin_responses',
     });
   } catch (error: any) {
     console.error('[TrelloWebhook] Error getting chatbot analytics:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Could not load chatbot analytics' });
   }
 });
 /**
@@ -451,27 +632,14 @@ router.get('/analytics', async (req: any, res: Response) => {
  */
 router.get('/ai-settings', requireAdmin, async (req: any, res: Response) => {
   try {
-    const db = await getDb();
-    if (!db) return res.status(500).json({ error: 'Database not available' });
-
-    const keys = ['ai_provider', 'ai_model', 'ai_groq_key', 'ai_together_key', 'ai_openrouter_key', 'ai_ollama_url'];
-    const settings = await db.select().from(appSettings).where(inArray(appSettings.key, keys));
-    
-    const settingsMap = new Map(settings.map((s: any) => [s.key, s.value]));
-    
+    const status = await getOpenAIModelStatus();
     res.json({
       success: true,
-      config: {
-        provider: settingsMap.get('ai_provider') || 'groq',
-        model: settingsMap.get('ai_model') || 'llama-3.3-70b-versatile',
-        groqApiKey: settingsMap.has('ai_groq_key') ? '********' : null,
-        togetherApiKey: settingsMap.has('ai_together_key') ? '********' : null,
-        openrouterApiKey: settingsMap.has('ai_openrouter_key') ? '********' : null,
-        ollamaUrl: settingsMap.get('ai_ollama_url') || 'http://localhost:11434',
-      }
+      config: status,
     });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error('[TrelloWebhook] Error loading AI settings:', error);
+    res.status(500).json({ error: 'Could not load OpenAI settings' });
   }
 });
 
@@ -480,37 +648,52 @@ router.get('/ai-settings', requireAdmin, async (req: any, res: Response) => {
  * Save the global AI provider settings
  */
 router.post('/ai-settings', requireAdmin, async (req: any, res: Response) => {
+  return res.status(410).json({
+    error: 'AI credentials are managed through OPENAI_API_KEY and cannot be stored in the dashboard database',
+  });
+});
+
+router.post('/test-ai', requireAdmin, async (_req: any, res: Response) => {
   try {
+    const result = await testAIConnection();
+    return res.status(result.success ? 200 : 503).json(result);
+  } catch (error) {
+    return res.status(502).json({
+      success: false,
+      error: 'Could not test the OpenAI connection',
+    });
+  }
+});
+
+/**
+ * GET /api/trello-webhook/recent
+ * Return recent stored bot conversations for the settings history panel.
+ */
+router.get('/recent', requireAdmin, async (req: any, res: Response) => {
+  try {
+    const days = Number(req.query.days ?? 7);
+    const limit = Number(req.query.limit ?? 250);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      return res.status(400).json({ error: 'days must be an integer between 1 and 365' });
+    }
+    if (!Number.isInteger(limit) || limit < 1 || limit > 250) {
+      return res.status(400).json({ error: 'limit must be an integer between 1 and 250' });
+    }
+
     const db = await getDb();
-    if (!db) return res.status(500).json({ error: 'Database not available' });
+    if (!db) return res.status(503).json({ error: 'Database not available' });
 
-    const { provider, model, groqApiKey, togetherApiKey, openrouterApiKey, ollamaUrl } = req.body;
-    
-    const upsertSetting = async (key: string, value: string | undefined | null) => {
-      if (value === undefined || value === '********') return; // skip unchanged masked keys
-      if (value === null || value === '') {
-        await db.delete(appSettings).where(eq(appSettings.key, key));
-        return;
-      }
-      
-      const existing = await db.select().from(appSettings).where(eq(appSettings.key, key)).limit(1);
-      if (existing.length > 0) {
-        await db.update(appSettings).set({ value }).where(eq(appSettings.key, key));
-      } else {
-        await db.insert(appSettings).values({ key, value });
-      }
-    };
+    const since = new Date(Date.now() - days * 24 * 60 * 60_000);
+    const conversations = await db.select()
+      .from(chatbotConversations)
+      .where(gte(chatbotConversations.receivedAt, since))
+      .orderBy(desc(chatbotConversations.receivedAt))
+      .limit(limit);
 
-    await upsertSetting('ai_provider', provider);
-    await upsertSetting('ai_model', model);
-    await upsertSetting('ai_groq_key', groqApiKey);
-    await upsertSetting('ai_together_key', togetherApiKey);
-    await upsertSetting('ai_openrouter_key', openrouterApiKey);
-    await upsertSetting('ai_ollama_url', ollamaUrl);
-
-    res.json({ success: true });
+    return res.json({ conversations });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error('[TrelloWebhook] Error loading recent conversations:', error);
+    return res.status(500).json({ error: 'Could not load recent conversations' });
   }
 });
 
@@ -518,13 +701,13 @@ router.post('/ai-settings', requireAdmin, async (req: any, res: Response) => {
  * GET /api/trello-webhook/history/:cardId
  * Get conversation history for a specific card.
  */
-router.get('/history/:cardId', async (req: any, res: Response) => {
+router.get('/history/:cardId', requireAdmin, async (req: any, res: Response) => {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
     const { cardId } = req.params;
-    const limit = req.query.limit ? Number(req.query.limit) : 50;
+    const { limit } = parseLimitOffset(req.query, { defaultLimit: 50, maxLimit: 100 });
 
     const rows = await getCardConversations(cardId, limit);
     const conversations = rows.map((r: any) => {
@@ -567,7 +750,7 @@ router.get('/history/:cardId', async (req: any, res: Response) => {
     res.json({ conversations });
   } catch (error: any) {
     console.error('[TrelloWebhook] Error fetching history:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Could not load conversation history' });
   }
 });
 
@@ -585,13 +768,23 @@ router.post('/send', requireAdmin, async (req: any, res: Response) => {
       return res.status(400).json({ error: 'Missing cardId or message' });
     }
 
-    const posted = await postTrelloComment(cardId, message);
+    if (!isTrelloCommentAutomationEnabled()) {
+      return res.status(409).json({ error: TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE });
+    }
+
+    let posted: boolean;
+    try {
+      posted = await postTrelloComment(cardId, message);
+    } catch (error) {
+      console.error('[TrelloWebhook] Manual comment outcome is unconfirmed:', error);
+      return unconfirmedTrelloSend(res, 'comment');
+    }
     if (!posted) {
-      return res.status(500).json({ error: 'Failed to post comment to Trello' });
+      return unconfirmedTrelloSend(res, 'comment');
     }
 
     // Save to chatbot_conversations history
-    await storeConversation({
+    const historySaved = await persistSendHistory({
       cardTrelloId: cardId,
       command: 'manual_message',
       responseText: message,
@@ -599,12 +792,12 @@ router.post('/send', requireAdmin, async (req: any, res: Response) => {
       responseStatus: 'success',
       receivedAt: new Date(),
       respondedAt: new Date(),
-    });
+    }, 'comment');
 
-    res.json({ success: true });
+    return sendConfirmedResponse(res, historySaved, 'comment');
   } catch (error: any) {
     console.error('[TrelloWebhook] Error sending message:', error);
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: 'Could not post the Trello message' });
   }
 });
 
@@ -622,13 +815,23 @@ router.post('/checkin', requireAdmin, async (req: any, res: Response) => {
       return res.status(400).json({ error: 'Missing cardId' });
     }
 
-    const success = await sendScheduledCheckin(cardId);
+    if (!isTrelloCommentAutomationEnabled()) {
+      return res.status(409).json({ error: TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE });
+    }
+
+    let success: boolean;
+    try {
+      success = await sendScheduledCheckin(cardId);
+    } catch (error) {
+      console.error('[TrelloWebhook] Check-in outcome is unconfirmed:', error);
+      return unconfirmedTrelloSend(res, 'check-in');
+    }
     if (!success) {
-      return res.status(500).json({ error: 'Failed to send checkin comment to Trello' });
+      return unconfirmedTrelloSend(res, 'check-in');
     }
 
     // Save to chatbot_conversations history
-    await storeConversation({
+    const historySaved = await persistSendHistory({
       cardTrelloId: cardId,
       command: 'checkin',
       responseText: 'Check-in request sent',
@@ -636,12 +839,12 @@ router.post('/checkin', requireAdmin, async (req: any, res: Response) => {
       responseStatus: 'success',
       receivedAt: new Date(),
       respondedAt: new Date(),
-    });
+    }, 'check-in');
 
-    res.json({ success: true });
+    return sendConfirmedResponse(res, historySaved, 'check-in');
   } catch (error: any) {
     console.error('[TrelloWebhook] Error triggering checkin:', error);
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: 'Could not send the Trello check-in' });
   }
 });
 

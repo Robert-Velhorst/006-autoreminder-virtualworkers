@@ -5,13 +5,15 @@ import {
   invalidateCache, 
   invalidateAllCache,
   getCacheStats,
-  cleanupExpiredCache
+  cleanupExpiredCache,
+  MAX_TASK_CACHE_BYTES,
+  isTaskCachePayloadWithinLimit,
 } from './services/trello-cache';
 import { getDb } from './db';
 import { 
   trelloCacheMetadata, 
   trelloCachedTasks 
-} from '../drizzle/schema';
+} from '../drizzle/schema.postgres';
 import { eq, and } from 'drizzle-orm';
 
 describe('Trello Cache Service', () => {
@@ -295,6 +297,19 @@ describe('Trello Cache Service', () => {
       expect(duration).toBeLessThan(1000);
       expect(cachedData).not.toBeNull();
       expect(cachedData.tasks).toHaveLength(1000);
+    });
+
+    it('does not persist an oversized task response that cannot fit in the durable cache', async () => {
+      const oversizedTasks = {
+        tasks: [{ id: 'oversized', description: 'x'.repeat(MAX_TASK_CACHE_BYTES) }],
+        timezone: 'UTC',
+      };
+
+      expect(isTaskCachePayloadWithinLimit(oversizedTasks)).toBe(false);
+
+      await setCachedTasks(testUserId, testUserOpenId, oversizedTasks, 300);
+
+      expect(await getCachedTasks(testUserId, testUserOpenId)).toBeNull();
     });
   });
 });

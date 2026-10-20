@@ -24,12 +24,28 @@ interface CacheWarmingStats {
   startTime: number;
   endTime: number;
   duration: number;
+  mode: 'database_buffer_preload';
 }
+
+let refreshInterval: NodeJS.Timeout | null = null;
+let warmUpInFlight: Promise<CacheWarmingStats> | null = null;
 
 /**
  * Warm up cache with frequently accessed data
  */
-export async function warmUpCache(): Promise<CacheWarmingStats> {
+export function warmUpCache(): Promise<CacheWarmingStats> {
+  if (warmUpInFlight) return warmUpInFlight;
+
+  const operation = runCacheWarmUp();
+  warmUpInFlight = operation;
+  const clearInFlight = () => {
+    if (warmUpInFlight === operation) warmUpInFlight = null;
+  };
+  void operation.then(clearInFlight, clearInFlight);
+  return operation;
+}
+
+async function runCacheWarmUp(): Promise<CacheWarmingStats> {
   const startTime = Date.now();
   console.log('[CacheWarming] Starting cache warm-up...');
 
@@ -113,6 +129,7 @@ export async function warmUpCache(): Promise<CacheWarmingStats> {
       startTime,
       endTime,
       duration,
+      mode: 'database_buffer_preload',
     };
 
     console.log('[CacheWarming] Cache warm-up completed in', duration, 'ms');
@@ -176,15 +193,25 @@ export async function getCacheWarmingStats(): Promise<Partial<CacheWarmingStats>
 /**
  * Schedule periodic cache refresh
  */
-export function scheduleCacheRefresh(intervalMinutes: number = 60): NodeJS.Timer {
-  console.log(`[CacheWarming] Scheduling cache refresh every ${intervalMinutes} minutes`);
+export function scheduleCacheRefresh(intervalMinutes: number = 60): NodeJS.Timeout {
+  const normalizedInterval = Math.min(24 * 60, Math.max(5, Math.floor(intervalMinutes)));
+  if (refreshInterval) clearInterval(refreshInterval);
+  console.log(`[CacheWarming] Scheduling database buffer preload every ${normalizedInterval} minutes`);
   
-  return setInterval(async () => {
+  refreshInterval = setInterval(async () => {
     try {
       console.log('[CacheWarming] Running scheduled cache refresh...');
       await warmUpCache();
     } catch (error) {
       console.error('[CacheWarming] Error during scheduled refresh:', error);
     }
-  }, intervalMinutes * 60 * 1000);
+  }, normalizedInterval * 60 * 1000);
+  refreshInterval.unref();
+  return refreshInterval;
+}
+
+export function stopCacheRefresh(): void {
+  if (!refreshInterval) return;
+  clearInterval(refreshInterval);
+  refreshInterval = null;
 }

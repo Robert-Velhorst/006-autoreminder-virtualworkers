@@ -182,17 +182,16 @@ Before the first production traffic is enabled:
    data is identified and its import is approved. If the source is confirmed as
    MySQL, follow the conditional rehearsal below; otherwise design and review a
    source-specific transfer before touching data.
-4. Before starting the application, verify that the target has its initial
-   founder account and the authentication records required by the application.
-   For a fresh/no-import target, execute a documented, one-time,
-   operator-only bootstrap after migrations to create the founder account and
-   its required `users` and `va_profiles` rows. Do not rely on public
-   registration: production rejects `/api/auth/register`. If no supported
-   bootstrap path exists, implement and validate one before deployment. For an
-   approved import, verify that the imported account and profile records are
-   present and usable. Verify founder/admin/worker role boundaries without
-   local auth bypass, and retain only redacted evidence. Do not start the
-   production application until this bootstrap/import check succeeds.
+4. For a fresh/no-import target, follow [Owner Provisioning](OWNER_PROVISIONING.md)
+   after migrations. `pnpm owner:provision` defaults to dry run and prepares a
+   pending owner; it does not create a worker profile. Start the application
+   behind restricted access, finish the one-time owner setup, and verify the
+   resulting founder account before inviting workers or enabling traffic.
+   Do not rely on public registration: production rejects `/api/auth/register`.
+   For an approved import, verify that imported accounts and required worker
+   profiles are present and usable. Verify founder/admin/worker role boundaries
+   without local auth bypass, retaining only redacted evidence. Keep general
+   production traffic disabled until this bootstrap/import check succeeds.
 5. Test the PostgreSQL backup and restore, verify sequences and app read/write
    behavior, and document the exact rollback point before any traffic move.
 6. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and

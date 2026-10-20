@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { TRPCError } from '@trpc/server';
 import { protectedProcedure, router } from '../_core/trpc';
 import { analyzeCardBeforeInterview } from '../services/pre-interview-analysis';
 import { startInterview, processResponse } from '../services/conversational-interview';
@@ -10,35 +11,23 @@ import {
   recordInterviewResponse,
   completeInterview,
 } from '../services/interview-persistence';
-const TRELLO_API_KEY = process.env.TRELLO_API_KEY;
-const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
+import { fetchAuthorizedTrelloCardWithComments, TrelloAccessError } from '../trelloCardAccess';
+import type { User } from '../../drizzle/schema.postgres';
 
 // In-memory cache is kept only as a short-lived convenience layer.
 const interviewStates = new Map<string, { sessionId: string; userId: number; state: any; preAnalysis: any }>();
 
 // Helper to get Trello card with all details
-async function getTrelloCard(cardId: string) {
-  const cardResponse = await fetch(
-    `https://api.trello.com/1/cards/${cardId}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&attachments=true&checklists=all`
-  );
-  
-  if (!cardResponse.ok) {
-    throw new Error(`Failed to fetch card: ${cardResponse.statusText}`);
+async function getTrelloCard(cardId: string, user: User) {
+  try {
+    return await fetchAuthorizedTrelloCardWithComments<any>(user, cardId);
+  } catch (error) {
+    if (error instanceof TrelloAccessError) {
+      const code = error.status === 403 ? 'FORBIDDEN' : error.status === 404 ? 'NOT_FOUND' : 'BAD_GATEWAY';
+      throw new TRPCError({ code, message: error.message });
+    }
+    throw error;
   }
-  
-  const card = await cardResponse.json();
-  
-  // Get comments
-  const actionsResponse = await fetch(
-    `https://api.trello.com/1/cards/${cardId}/actions?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&filter=commentCard`
-  );
-  
-  const comments = actionsResponse.ok ? await actionsResponse.json() : [];
-  
-  return {
-    ...card,
-    comments,
-  };
 }
 
 export const interviewRouter = router({
@@ -54,7 +43,7 @@ export const interviewRouter = router({
       const user = ctx.user;
 
       // Get card data from Trello
-      const card = await getTrelloCard(cardId);
+      const card = await getTrelloCard(cardId, user);
       if (!card) {
         throw new Error('Card not found');
       }
@@ -138,10 +127,13 @@ export const interviewRouter = router({
       if (!session) {
         throw new Error('Interview session not found.');
       }
+      if (session.userOpenId !== user.openId) {
+        throw new Error('Interview session does not belong to this account.');
+      }
 
       const { state } = stored;
 
-      const card = await getTrelloCard(cardId);
+      const card = await getTrelloCard(cardId, user);
       const preAnalysis = await analyzeCardBeforeInterview(card);
 
       // Process response
@@ -216,6 +208,7 @@ export const interviewRouter = router({
     }))
     .query(async ({ input, ctx }) => {
       const { cardId } = input;
+      const user = ctx.user;
 
       const stored = interviewStates.get(cardId);
       if (!stored || stored.userId !== ctx.user.id) {

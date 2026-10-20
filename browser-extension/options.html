@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Worker Browser Hygiene settings</title>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+      body { margin: 0; background: #0b0f17; color: #e7eaf0; }
+      main { width: min(640px, calc(100% - 32px)); margin: 48px auto; }
+      h1 { font-size: 22px; margin: 0 0 8px; }
+      p { color: #9ca6b7; line-height: 1.5; }
+      form { margin-top: 24px; display: grid; gap: 16px; padding: 20px; border: 1px solid #293142; border-radius: 8px; background: #111722; }
+      label { display: grid; gap: 7px; font-size: 13px; font-weight: 650; }
+      input { height: 38px; border: 1px solid #394357; border-radius: 6px; padding: 0 11px; background: #090d14; color: inherit; font: inherit; }
+      .actions { display: flex; gap: 10px; }
+      button { height: 38px; border: 1px solid #3b82f6; border-radius: 6px; padding: 0 14px; background: #2563eb; color: white; font-weight: 650; cursor: pointer; }
+      button.secondary { background: transparent; color: #bfdbfe; }
+      #status { min-height: 20px; font-size: 13px; }
+      .ok { color: #34d399; } .error { color: #fb7185; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Worker Browser Hygiene</h1>
+      <p>Connect this browser to your worker dashboard. After you grant access to the dashboard address, the collector sends open-tab IDs, website domains, pinned state and window IDs every minute. It does not send page contents, tab titles, URL paths, query strings or browsing history. Tabs close only when you select and confirm them.</p>
+      <form id="settings-form">
+        <label>Dashboard URL<input id="dashboard-url" type="url" required></label>
+        <label>Collector label<input id="collector-label" type="text" maxlength="128" required></label>
+        <label>Collector token<input id="collector-token" type="password" autocomplete="off" required placeholder="Create a collector token in worker Settings"></label>
+        <label><span><input id="enabled" type="checkbox"> Enable minute-by-minute reporting to this dashboard</span></label><div class="actions"><button type="submit">Save</button><button type="button" class="secondary" id="test">Save and test</button></div>
+        <div id="status" aria-live="polite"></div>
+      </form>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

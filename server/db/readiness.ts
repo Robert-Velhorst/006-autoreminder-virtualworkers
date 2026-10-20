@@ -1,7 +1,7 @@
 export const REQUIRED_POSTGRES_MIGRATION = {
-  tag: "0001_add_atis_postgres_tables",
-  createdAt: 1791977937806n,
-  hash: "6954a9bd3c4c7c955b00210f2afd2c3c71157b5ec3083d91ceb7003f348f780d",
+  tag: "0004_browser_capture_sequence_range",
+  createdAt: 1792485905541n,
+  hash: "5c43c09b32218fd6cfd3bb0611fcf02d7b47921427743eb84ce8358e2d10b370",
 } as const;
 
 export const READINESS_QUERY_TIMEOUT_MS = 2_000;

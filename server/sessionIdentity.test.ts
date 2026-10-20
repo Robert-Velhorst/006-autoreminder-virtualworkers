@@ -14,12 +14,10 @@ describe("session identity", () => {
   });
 
   it("prefers an explicit session audience", () => {
-    expect(
-      getSessionAudience({
-        SESSION_APP_ID: "joyce-production",
-        VITE_APP_ID: "legacy-manus-app",
-      })
-    ).toBe("joyce-production");
+    expect(getSessionAudience({
+      SESSION_APP_ID: "worker-production",
+      VITE_APP_ID: "legacy-manus-app",
+    })).toBe("worker-production");
   });
 
   it("keeps the legacy Manus app id as a compatibility fallback", () => {
@@ -35,15 +33,17 @@ describe("session identity", () => {
     vi.resetModules();
 
     const { sdk } = await import("./_core/sdk");
-    const token = await sdk.createSessionToken("joyce-local", {
-      name: "Joyce",
+    const token = await sdk.createSessionToken("worker-local", {
+      name: "Worker",
       expiresInMs: 60_000,
     });
 
     await expect(sdk.verifySession(token)).resolves.toEqual({
-      openId: "joyce-local",
+      openId: "worker-local",
       appId: "va-dashboard",
-      name: "Joyce",
+      name: "Worker",
+      sessionId: expect.any(String),
+      expiresAt: expect.any(Date),
     });
   }, 20_000);
 });

@@ -38,7 +38,7 @@ interface Conversation {
   commandArgs: string[];
   authorTrelloId: string;
   authorName: string;
-  responseStatus: 'pending' | 'success' | 'error';
+  responseStatus: 'pending' | 'success' | 'failed';
   responseTimeMs: number | null;
   receivedAt: string;
   respondedAt: string | null;
@@ -61,22 +61,29 @@ export function ConversationBrowser() {
   const loadRecentConversations = async () => {
     setLoading(true);
     try {
-      // Load analytics which includes recent conversations
-      const response = await fetch('/api/trello-webhook/analytics?days=7');
-      if (response.ok) {
-        const data = await response.json();
-        // For now, we'll show grouped by card
-        // In a real implementation, we'd have a dedicated endpoint
-      }
-      
-      // Load stored webhooks to get active cards
-      const webhooksResponse = await fetch('/api/trello-webhook/stored-webhooks');
-      if (webhooksResponse.ok) {
-        const webhooksData = await webhooksResponse.json();
-        // Use webhook data to identify active boards
-      }
+      const response = await fetch('/api/trello-webhook/recent?days=7', {
+        credentials: 'include',
+      });
+      if (!response.ok) throw new Error('Failed to load conversation history');
+      const data = await response.json();
+      const recent = Array.isArray(data.conversations) ? data.conversations : [];
+      setConversations(recent.map((conversation: any): Conversation => ({
+        ...conversation,
+        cardName: conversation.cardName || conversation.cardTrelloId,
+        boardTrelloId: conversation.boardTrelloId || '',
+        commandArgs: Array.isArray(conversation.commandArgs)
+          ? conversation.commandArgs
+          : (() => {
+              try { return JSON.parse(conversation.commandArgs || '[]'); }
+              catch { return []; }
+            })(),
+        authorTrelloId: conversation.authorTrelloId || '',
+        authorName: conversation.authorName || 'Unknown user',
+        responseStatus: conversation.responseStatus === 'failed' ? 'failed' : conversation.responseStatus,
+      })));
     } catch (error) {
       console.error('Error loading conversations:', error);
+      setConversations([]);
     } finally {
       setLoading(false);
     }
@@ -142,7 +149,7 @@ export function ConversationBrowser() {
     switch (status) {
       case 'success':
         return <CheckCircle className="h-3 w-3 text-green-500" />;
-      case 'error':
+      case 'failed':
         return <XCircle className="h-3 w-3 text-red-500" />;
       case 'pending':
         return <AlertCircle className="h-3 w-3 text-yellow-500" />;
@@ -202,7 +209,7 @@ export function ConversationBrowser() {
               <SelectItem value="all">All Status</SelectItem>
               <SelectItem value="success">Success</SelectItem>
               <SelectItem value="pending">Pending</SelectItem>
-              <SelectItem value="error">Error</SelectItem>
+              <SelectItem value="failed">Failed</SelectItem>
             </SelectContent>
           </Select>
         </div>

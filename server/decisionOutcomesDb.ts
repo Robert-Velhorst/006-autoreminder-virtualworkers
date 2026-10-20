@@ -1,17 +1,20 @@
-import { and, desc, eq } from "drizzle-orm";
-import { aptlssPlans, aptlssSteps, decisionOutcomes } from "../drizzle/schema.postgres";
+import { and, desc, eq, like } from "drizzle-orm";
+import { aptlssPlans, aptlssSteps, decisionOutcomes, notificationHistory } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
+import { enqueueManagerTask } from "./aptlssManagerQueue";
 
 export class DecisionOutcomeError extends Error {}
 
 export async function recordDecisionOutcome({
   vaId,
   stepId,
+  disposition,
   outcome,
   resolvedBy,
 }: {
   vaId: number;
   stepId: number;
+  disposition: "approved" | "rejected";
   outcome: string;
   resolvedBy: string;
 }) {
@@ -30,7 +33,8 @@ export async function recordDecisionOutcome({
           eq(aptlssSteps.status, "open"),
         ),
       )
-      .limit(1);
+      .limit(1)
+      .for("update");
 
     if (!step) {
       throw new DecisionOutcomeError("This decision is no longer open.");
@@ -56,6 +60,7 @@ export async function recordDecisionOutcome({
         listName: plan?.listName ?? "",
         decisionPrompt: step.title,
         recommendedDecision: step.recommendedDecision,
+        disposition,
         outcome,
         resolvedBy,
         resolvedAt,
@@ -65,13 +70,22 @@ export async function recordDecisionOutcome({
     await tx
       .update(aptlssSteps)
       .set({
-        requiresRobert: false,
         status: "complete",
         completedAt: resolvedAt,
       })
       .where(eq(aptlssSteps.id, step.id));
 
-    return { id: created.id, cardId: step.cardId, resolvedAt };
+    await tx.update(notificationHistory).set({ isRead: 1, readAt: resolvedAt })
+      .where(and(like(notificationHistory.taskId, `founder-decision:${step.id}:%`), eq(notificationHistory.isRead, 0)));
+
+    const reassessment = await enqueueManagerTask(tx, {
+      vaId,
+      eventKey: `founder-decision:${created.id}`,
+      trigger: "decision_outcome",
+      urgent: true,
+    });
+
+    return { id: created.id, cardId: step.cardId, resolvedAt, reassessmentQueued: reassessment.accepted };
   });
 }
 
@@ -80,7 +94,12 @@ export async function getDecisionHistory(vaId: number, limit = 30) {
   if (!db) return [];
 
   return db
-    .select()
+    .select({
+      id: decisionOutcomes.id,
+      cardName: decisionOutcomes.cardName,
+      outcome: decisionOutcomes.outcome,
+      resolvedAt: decisionOutcomes.resolvedAt,
+    })
     .from(decisionOutcomes)
     .where(eq(decisionOutcomes.vaId, vaId))
     .orderBy(desc(decisionOutcomes.resolvedAt))

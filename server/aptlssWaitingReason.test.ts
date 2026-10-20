@@ -73,6 +73,20 @@ describe("APTLSS free-form waiting reason interpretation", () => {
     expect(result.nextAction).toContain("Mark");
   });
 
+  it("uses a role-based worker actor for internal blockers", () => {
+    const result = interpretWaitingReason("The virtual worker still needs to upload the signed brief.", { nowMs });
+
+    expect(result).toMatchObject({
+      category: "asset",
+      waitingOn: "worker",
+      waitingOnName: "Worker",
+      nextStepType: "complete_internal_action",
+      isActionableNow: true,
+    });
+    expect(result.nextAction).toContain("assigned worker");
+    expect(result.nextAction).not.toContain("Joyce");
+  });
+
   it("understands a Dutch Robert approval with an explicit weekday and time", () => {
     const result = interpretWaitingReason(
       "Wacht op Robert om de betalingsregeling goed te keuren voor maandag om 10:00. Gisteren gevraagd.",

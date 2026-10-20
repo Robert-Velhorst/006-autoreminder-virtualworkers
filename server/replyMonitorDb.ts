@@ -3,7 +3,7 @@
  * Covers: reply_threads, vague_reply_flags, unsigned_message_flags
  */
 
-import { and, asc, desc, eq, inArray, isNull, lte } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, notInArray } from "drizzle-orm";
 import { replyThreads, unsignedMessageFlags, vagueReplyFlags } from "../drizzle/schema.postgres";
 import { getDb, incrementPayLogD1 } from "./db";
 
@@ -15,6 +15,12 @@ function todayEAT(): string {
 // ─── Shared types ─────────────────────────────────────────────────────────────
 
 export type ReplySource = "trello" | "upwork";
+
+export const MAX_REPLY_MONITOR_PAGE_SIZE = 200;
+export function normalizeReplyMonitorLimit(limit: number | undefined, fallback: number): number {
+  if (!Number.isFinite(limit)) return fallback;
+  return Math.min(Math.max(Math.floor(limit as number), 1), MAX_REPLY_MONITOR_PAGE_SIZE);
+}
 
 // ─── Reply Threads ────────────────────────────────────────────────────────────
 
@@ -31,7 +37,7 @@ export interface ReplyThreadRow {
   lastNonWorkerAuthor: string;
   lastNonWorkerText: string;
   lastWorkerReplyAt: Date | null;
-  status: string;
+  status: "pending" | "replied" | "overdue" | "inactive";
   demerited: boolean;
   updatedAt: Date;
 }
@@ -54,7 +60,7 @@ export async function upsertReplyThread(vaId: number, data: {
   demerited: boolean;
 }): Promise<void> {
   const db = await getDb();
-  if (!db) return;
+  if (!db) throw new Error("Database not available");
   if (!data.lastNonWorkerMsgAt) {
     console.warn("[DB] upsertReplyThread skipped without a received-message timestamp");
     return;
@@ -83,7 +89,19 @@ export async function upsertReplyThread(vaId: number, data: {
     });
   } catch (e) {
     console.error("[DB] upsertReplyThread failed:", e);
+    throw e;
   }
+}
+
+export async function deactivateMissingTrelloReplyThreads(vaId: number, activeCardIds: string[]): Promise<number> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const ids = [...new Set(activeCardIds.filter(Boolean))];
+  const result = await db.update(replyThreads).set({ status: "inactive", updatedAt: new Date() })
+    .where(and(eq(replyThreads.vaId, vaId), eq(replyThreads.source, "trello"),
+      inArray(replyThreads.status, ["pending", "overdue"]),
+      ...(ids.length ? [notInArray(replyThreads.cardId, ids)] : [])));
+  return result.rowCount ?? 0;
 }
 
 // Alias for Upwork
@@ -109,7 +127,7 @@ export async function getAllReplyThreads(vaId: number, limit = 100): Promise<Rep
   try {
     return await db.select().from(replyThreads).where(eq(replyThreads.vaId, vaId))
       .orderBy(desc(replyThreads.lastNonWorkerMsgAt))
-      .limit(Math.min(500, Math.max(1, Math.trunc(limit)))) as ReplyThreadRow[];
+      .limit(normalizeReplyMonitorLimit(limit, 100)) as ReplyThreadRow[];
   } catch {
     return [];
   }
@@ -197,15 +215,17 @@ export async function getActiveVagueReplyFlags(vaId: number): Promise<VagueFlagR
   }
 }
 
-export async function resolveVagueReplyFlag(id: number): Promise<void> {
+export async function resolveVagueReplyFlag(vaId: number, id: number): Promise<boolean> {
   const db = await getDb();
-  if (!db) return;
-  try {
-    await db.update(vagueReplyFlags).set({ resolvedAt: new Date(), resolvedBy: "manual", updatedAt: new Date() })
-      .where(eq(vagueReplyFlags.id, id));
-  } catch (e) {
-    console.error("[DB] resolveVagueReplyFlag failed:", e);
-  }
+  if (!db) throw new Error("Database not available");
+  const result = await db.update(vagueReplyFlags).set({
+    resolvedAt: new Date(), resolvedBy: "manual", updatedAt: new Date(),
+
+  }).where(and(eq(vagueReplyFlags.id, id), eq(vagueReplyFlags.vaId, vaId), isNull(vagueReplyFlags.resolvedAt)));
+  if (result.rowCount === 1) return true;
+  const [owned] = await db.select({ id: vagueReplyFlags.id }).from(vagueReplyFlags)
+    .where(and(eq(vagueReplyFlags.id, id), eq(vagueReplyFlags.vaId, vaId))).limit(1);
+  return Boolean(owned);
 }
 
 export async function autoDemeritVagueReplyFlag(id: number): Promise<void> {
@@ -228,7 +248,7 @@ export async function getAllVagueReplyFlags(vaId: number, limit = 50): Promise<V
   try {
     return await db.select().from(vagueReplyFlags).where(eq(vagueReplyFlags.vaId, vaId))
       .orderBy(desc(vagueReplyFlags.flaggedAt))
-      .limit(Math.min(500, Math.max(1, Math.trunc(limit)))) as VagueFlagRow[];
+      .limit(normalizeReplyMonitorLimit(limit, 50)) as VagueFlagRow[];
   } catch {
     return [];
   }
@@ -321,16 +341,17 @@ export async function getActiveUnsignedFlags(vaId: number): Promise<UnsignedFlag
   }
 }
 
-export async function resolveUnsignedFlag(id: number, note?: string): Promise<void> {
+export async function resolveUnsignedFlag(vaId: number, id: number, note?: string): Promise<boolean> {
   const db = await getDb();
-  if (!db) return;
-  try {
-    await db.update(unsignedMessageFlags).set({
-      resolvedAt: new Date(), resolvedBy: "manual", resolutionNote: note ?? null, updatedAt: new Date(),
-    }).where(eq(unsignedMessageFlags.id, id));
-  } catch (e) {
-    console.error("[DB] resolveUnsignedFlag failed:", e);
-  }
+  if (!db) throw new Error("Database not available");
+  const result = await db.update(unsignedMessageFlags).set({
+    resolvedAt: new Date(), resolvedBy: "manual", updatedAt: new Date(),
+    resolutionNote: note ?? null,
+  }).where(and(eq(unsignedMessageFlags.id, id), eq(unsignedMessageFlags.vaId, vaId), isNull(unsignedMessageFlags.resolvedAt)));
+  if (result.rowCount === 1) return true;
+  const [owned] = await db.select({ id: unsignedMessageFlags.id }).from(unsignedMessageFlags)
+    .where(and(eq(unsignedMessageFlags.id, id), eq(unsignedMessageFlags.vaId, vaId))).limit(1);
+  return Boolean(owned);
 }
 
 export async function autoDemeritUnsignedFlag(id: number): Promise<void> {
@@ -353,7 +374,7 @@ export async function getAllUnsignedFlags(vaId: number, limit = 50): Promise<Uns
   try {
     return await db.select().from(unsignedMessageFlags).where(eq(unsignedMessageFlags.vaId, vaId))
       .orderBy(desc(unsignedMessageFlags.flaggedAt))
-      .limit(Math.min(500, Math.max(1, Math.trunc(limit)))) as UnsignedFlagRow[];
+      .limit(normalizeReplyMonitorLimit(limit, 50)) as UnsignedFlagRow[];
   } catch {
     return [];
   }

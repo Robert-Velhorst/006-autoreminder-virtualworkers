@@ -17,6 +17,7 @@
 import axios from "axios";
 
 const TRELLO_API_BASE = "https://api.trello.com/1";
+const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
 
 // ─── Sub-types (kept for backward compat with formatContextForLLM) ───────────
 export interface TrelloChecklist {
@@ -84,8 +85,10 @@ export async function fetchCardContext(
   apiKey: string,
   apiToken: string
 ): Promise<TrelloCardContext> {
+  const encodedCardId = encodeURIComponent(cardId);
   const [cardRes, checklistsRes, actionsRes] = await Promise.all([
-    axios.get(`${TRELLO_API_BASE}/cards/${cardId}`, {
+    axios.get(`${TRELLO_API_BASE}/cards/${encodedCardId}`, {
+      timeout: TRELLO_REQUEST_TIMEOUT_MS,
       params: {
         key: apiKey,
         token: apiToken,
@@ -96,10 +99,12 @@ export async function fetchCardContext(
         attachment_fields: "name,url",
       },
     }),
-    axios.get(`${TRELLO_API_BASE}/cards/${cardId}/checklists`, {
+    axios.get(`${TRELLO_API_BASE}/cards/${encodedCardId}/checklists`, {
+      timeout: TRELLO_REQUEST_TIMEOUT_MS,
       params: { key: apiKey, token: apiToken },
     }),
-    axios.get(`${TRELLO_API_BASE}/cards/${cardId}/actions`, {
+    axios.get(`${TRELLO_API_BASE}/cards/${encodedCardId}/actions`, {
+      timeout: TRELLO_REQUEST_TIMEOUT_MS,
       params: {
         key: apiKey,
         token: apiToken,
@@ -118,10 +123,12 @@ export async function fetchCardContext(
   let listName = "Unknown List";
   try {
     const [boardRes, listRes] = await Promise.all([
-      axios.get(`${TRELLO_API_BASE}/boards/${card.idBoard}`, {
+      axios.get(`${TRELLO_API_BASE}/boards/${encodeURIComponent(card.idBoard)}`, {
+        timeout: TRELLO_REQUEST_TIMEOUT_MS,
         params: { key: apiKey, token: apiToken, fields: "name" },
       }),
-      axios.get(`${TRELLO_API_BASE}/lists/${card.idList}`, {
+      axios.get(`${TRELLO_API_BASE}/lists/${encodeURIComponent(card.idList)}`, {
+        timeout: TRELLO_REQUEST_TIMEOUT_MS,
         params: { key: apiKey, token: apiToken, fields: "name" },
       }),
     ]);

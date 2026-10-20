@@ -7,9 +7,7 @@
 
 import type { PreAnalysisResult } from './pre-interview-analysis';
 import { validateAnswer, calculateInterviewConfidence, generateFollowUpQuestion, detectLowConfidenceAndGenerateFollowUps, generateSmartFollowUpMessage, type ValidationResult } from './answer-validator';
-
-const FORGE_API_URL = process.env.BUILT_IN_FORGE_API_URL || process.env.VITE_FRONTEND_FORGE_API_URL;
-const FORGE_API_KEY = process.env.BUILT_IN_FORGE_API_KEY || process.env.VITE_FRONTEND_FORGE_API_KEY;
+import { getLLMText, invokeLLM } from '../_core/llm';
 
 export interface InterviewMessage {
   role: 'assistant' | 'user';
@@ -241,29 +239,14 @@ If interview is complete AND confidence >= 70%, start with: INTERVIEW_COMPLETE
 Otherwise, ask your next question naturally (be conversational, not robotic).`;
 
   try {
-    const response = await fetch(`${FORGE_API_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${FORGE_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: 'anthropic/claude-sonnet-4-20250514',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `User response: "${userResponse}"\n\nWhat should I ask next?` },
-        ],
-        max_tokens: 500,
-        temperature: 0.7,
-      }),
+    const response = await invokeLLM({
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `User response: "${userResponse}"\n\nWhat should I ask next?` },
+      ],
+      maxTokens: 500,
     });
-
-    if (!response.ok) {
-      throw new Error(`AI API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const aiMessage = data.choices?.[0]?.message?.content || 'Could you tell me more about that?';
+    const aiMessage = getLLMText(response) || 'Could you tell me more about that?';
 
     const isComplete = aiMessage.startsWith('INTERVIEW_COMPLETE');
     const cleanMessage = isComplete ? aiMessage.replace('INTERVIEW_COMPLETE', '').trim() : aiMessage;
@@ -312,29 +295,15 @@ Return JSON:
 }`;
 
   try {
-    const response = await fetch(`${FORGE_API_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${FORGE_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: 'anthropic/claude-sonnet-4-20250514',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: 'Extract the final goal from this conversation.' },
-        ],
-        max_tokens: 800,
-        temperature: 0.3,
-      }),
+    const response = await invokeLLM({
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: 'Extract the final goal from this conversation as JSON.' },
+      ],
+      maxTokens: 800,
+      responseFormat: { type: 'json_object' },
     });
-
-    if (!response.ok) {
-      throw new Error(`AI API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    let content = data.choices?.[0]?.message?.content || '{}';
+    let content = getLLMText(response) || '{}';
 
     // Remove markdown code blocks if present
     content = content.trim();

@@ -3,6 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { send } = vi.hoisted(() => ({ send: vi.fn() }));
 const { axiosPost } = vi.hoisted(() => ({ axiosPost: vi.fn() }));
 
+vi.mock("../googleEvidence", () => ({
+  getGoogleMailDeliveryStatus: vi.fn(async () => ({ connected: false })),
+  sendGoogleMail: vi.fn(async () => { throw new Error("Unexpected Gmail delivery in SendGrid policy test"); }),
+  validateGoogleMailDeliveryConnection: vi.fn(),
+}));
+
 vi.mock("@sendgrid/mail", () => ({
   default: {
     setApiKey: vi.fn(),
@@ -21,6 +27,8 @@ describe("outbound notification gate", () => {
     vi.stubEnv("TRELLO_API_KEY", "test-key");
     vi.stubEnv("TRELLO_TOKEN", "test-token");
     vi.stubEnv("SENDGRID_API_KEY", "test-sendgrid-key");
+    vi.stubEnv("SENDGRID_FROM_EMAIL", "verified-synthetic@example.test");
+    vi.stubEnv("EMAIL_PROVIDER", "sendgrid");
     send.mockReset().mockResolvedValue([{}]);
     axiosPost.mockReset().mockResolvedValue({ data: { id: "action-id", date: "2026-10-13T12:00:00.000Z" } });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
@@ -42,7 +50,7 @@ describe("outbound notification gate", () => {
       const { postCardComment } = await import("./trello-manus");
 
       await expect(sendEmail({ to: "worker@example.test", subject: "Test", html: "Test" })).resolves.toBe(false);
-      await expect(postTrelloComment("card-id", "Test comment")).resolves.toBe(false);
+      await expect(postTrelloComment("0123456789abcdef01234567", "Test comment")).resolves.toBe(false);
       await expect(postCardComment("card-id", "Test comment", "test-key", "test-token")).rejects.toThrow(
         "Outbound Trello comments are disabled",
       );
@@ -59,7 +67,7 @@ describe("outbound notification gate", () => {
     const { postCardComment } = await import("./trello-manus");
 
     await expect(sendEmail({ to: "worker@example.test", subject: "Test", html: "Test" })).resolves.toBe(true);
-    await expect(postTrelloComment("card-id", "Test comment")).resolves.toBe(true);
+    await expect(postTrelloComment("0123456789abcdef01234567", "Test comment")).resolves.toBe(true);
     await expect(postCardComment("card-id", "Test comment", "test-key", "test-token")).resolves.toEqual({
       id: "action-id",
       date: "2026-10-13T12:00:00.000Z",

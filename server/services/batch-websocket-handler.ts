@@ -15,6 +15,7 @@ class BatchWebSocketHandler {
   private clients: Map<string, ClientConnection[]> = new Map();
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private updateCheckInterval: NodeJS.Timeout | null = null;
+  private updateCheckInFlight = false;
 
   constructor() {
     this.startHeartbeat();
@@ -93,7 +94,7 @@ class BatchWebSocketHandler {
     let broadcastCount = 0;
 
     this.clients.forEach((clients: ClientConnection[], key: string) => {
-      if (key.startsWith(jobId)) {
+      if (key.startsWith(`${jobId}:`)) {
         for (const client of clients) {
           try {
             if (client.ws.readyState === WebSocket.OPEN) {
@@ -237,6 +238,8 @@ class BatchWebSocketHandler {
    */
   private startUpdateCheck() {
     this.updateCheckInterval = setInterval(async () => {
+      if (this.clients.size === 0 || this.updateCheckInFlight) return;
+      this.updateCheckInFlight = true;
       try {
         const db = await getDb();
         if (!db) return;
@@ -266,6 +269,8 @@ class BatchWebSocketHandler {
         }
       } catch (err) {
         console.error('[BatchWebSocket] Failed to check updates:', err);
+      } finally {
+        this.updateCheckInFlight = false;
       }
     }, 1000); // Check every second
   }

@@ -1,19 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useLocation } from "wouter";
 import {
   Activity,
   AlertTriangle,
   Archive,
   BrainCircuit,
+  BellRing,
   CalendarDays,
-  Check,
   ChevronDown,
   ChevronRight,
   Clock3,
   Copy,
   ExternalLink,
   FileCheck2,
-  Gauge,
   GripVertical,
   History,
   Inbox,
@@ -32,14 +31,14 @@ import {
   ShieldCheck,
   Sun,
   Timer,
+  X,
 } from "lucide-react";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { trpc } from "@/lib/trpc";
+import { trpc, type RouterOutputs } from "@/lib/trpc";
 import { useTheme } from "@/contexts/ThemeContext";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -49,26 +48,33 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { getWorkLaneRank } from "@shared/workLanePriority";
-import { formatWorkerDate } from "@shared/workerTime";
+import type { WorkerManagerAction, WorkerManagerPlanImpact } from "@shared/workerManagerView";
+import { orderWorkerCards, selectManagerActionForCard, selectManagerPrimary, selectTodayQueue, workerCardIsWaiting } from "@shared/workerTodayGuidance";
+import { managerExecutionCoverageReady, managerStatusQueryOptions } from "@/lib/managerPilotAvailability";
+import { dateKeyInTimeZone, formatWorkerDate } from "@shared/workerTime";
+import { assessWorkerSourceChecks } from "@shared/workerSourceChecks";
+import { describeWorkerIntegrationSync } from "@shared/workerIntegrationStatus";
 import { toast } from "sonner";
+import WorkerReminders from "./WorkerReminders";
+import ManagerCoach from "@/components/ManagerCoach";
+import ManagerShadowSettings from "@/components/ManagerShadowSettings";
+import ManagerVerificationFollowups from "@/components/ManagerVerificationFollowups";
+import WorkerPlanSuggestion, { workerPlanSuggestionIsCurrent } from "@/components/WorkerPlanSuggestion";
 
 type OperatorCard = {
   cardId: string;
   cardName: string;
   cardUrl: string;
+  trelloCache?: { cachedAt: string; expiresAt: string } | null;
   boardName: string;
   listName: string;
+  dueAt?: string | null;
+  overdue?: boolean;
   nextBestAction: string | null;
-  planSummary: string | null;
   primaryState: string | null;
-  stateReason: string | null;
   actionability: string | null;
   priorityScore: number;
   priorityTier: string;
-  confidenceScore: number | null;
-  confidenceReason: string | null;
-  recommendations: string[];
-  uncertainties: string[];
   evidenceSummary: {
     sources: Array<{
       key: "trello" | "communication" | "gmail" | "google_drive" | "time";
@@ -77,31 +83,14 @@ type OperatorCard = {
       status: "linked" | "live" | "missing";
       detail: string;
     }>;
-    issues: Array<{
-      id: string;
-      title: string;
-      detail: string;
-      resolution: string;
-      severity: "high" | "medium" | "low";
-    }>;
     forecast: {
       p50Minutes: number | null;
       p90Minutes: number | null;
-      sampleSize: number;
-      uncertainty: string | null;
-    } | null;
-    confidenceProfile: {
-      targetScore: number | null;
-      ceiling: number | null;
-      gapToTarget: number | null;
-      dimensions: Partial<Record<"evidence" | "forecast" | "humanValidation" | "consistency", number>>;
-      blockers: string[];
     } | null;
   };
   waitingReason: {
     waitingOn: string;
     nextAction: string;
-    confidenceScore: number;
     followUpAt: Date | string | null;
   } | null;
   steps: Array<{
@@ -111,16 +100,63 @@ type OperatorCard = {
     status: string;
     category: string;
     requiresRobert: boolean;
+    decisionDueAt: string | null;
+    decisionDeferred: boolean;
     completionCriteria: string | null;
     riskIfSkipped: string | null;
   }>;
 };
+
+export function WorkerTaskStepRow({ step, action }: {
+  step: OperatorCard["steps"][number];
+  action?: Pick<WorkerManagerAction, "kind" | "blocked"> & Partial<Pick<WorkerManagerAction, "reason">>;
+}) {
+  const complete = step.status === "complete";
+  const needsDecision = !complete && step.requiresRobert;
+  return (
+    <div role="group" aria-label={`Step ${step.stepNumber}: ${step.title}`} className="flex gap-2 rounded-md border p-3 text-sm">
+      <span className="text-muted-foreground">{step.stepNumber}.</span>
+      <span className="min-w-0 flex-1">
+        {step.title}
+        {needsDecision && <span className="mt-1 block text-xs text-muted-foreground">Waiting for founder decision{step.decisionDeferred && step.decisionDueAt ? ` · review ${new Date(step.decisionDueAt).toLocaleString()}` : ""}</span>}
+        {!complete && action?.blocked && <span className="mt-1 block text-xs text-amber-700 dark:text-amber-300">{workerFacingActionInstruction(action)}</span>}
+      </span>
+      {complete ? <Badge variant="outline">Done</Badge> : action
+        ? <Badge variant="outline">{action.blocked ? "Waiting" : "Ready"}</Badge>
+        : needsDecision && <Badge variant="outline">{step.decisionDeferred ? "Deferred" : "Decision"}</Badge>}
+    </div>
+  );
+}
+
+function nextInstruction(card: OperatorCard, managerAction?: WorkerManagerAction | null) {
+  if (managerAction) {
+    if (managerAction.blocked) return workerFacingActionInstruction(managerAction);
+    const managerStep = card.steps.find(item => managerAction.stepIds.includes(item.id) && item.status !== "complete");
+    if (managerAction.kind === "work" && managerStep) {
+      return `Next step: ${workerFacingOperationalText(managerStep.title, "Review the recorded step in task details.")}`;
+    }
+    return workerFacingActionInstruction(managerAction);
+  }
+  const step = card.steps.find(item => item.status !== "complete");
+  if (/require.*approval|execute the highest.priority open step/i.test(card.nextBestAction ?? "")) {
+    return step
+      ? `${step.requiresRobert ? "Decision needed: " : "Next step: "}${workerFacingOperationalText(step.title, "Review the recorded step in task details.")}`
+      : "The next action is not specified. Open the task and record the missing question before starting.";
+  }
+  return workerFacingOperationalText(card.nextBestAction, "Open task details and confirm the next action before starting.");
+}
+
+function currentCompletionCriterion(card: OperatorCard, managerAction?: WorkerManagerAction | null) {
+  if (managerAction) return managerAction.blocked ? null : workerFacingOperationalText(managerAction.completionCriteria, "");
+  return workerFacingOperationalText(card.steps.find(item => item.status !== "complete")?.completionCriteria, "") || null;
+}
 
 const NAVIGATION = [
   { path: "/worker", label: "Today", description: "Now and next", icon: LayoutDashboard },
   { path: "/worker/plan", label: "Plan My Day", description: "Time blocks", icon: CalendarDays },
   { path: "/worker/decisions", label: "Decisions", description: "Required outcomes", icon: BrainCircuit },
   { path: "/worker/evidence", label: "Evidence", description: "Connected facts", icon: FileCheck2 },
+  { path: "/worker/reminders", label: "Reminders", description: "Commitments and follow-up", icon: BellRing },
 ] as const;
 
 function priorityTone(tier: string) {
@@ -135,16 +171,51 @@ function initials(value: string) {
   return (parts.length > 1 ? `${parts[0][0]}${parts.at(-1)?.[0]}` : parts[0]?.slice(0, 2) || "W").toUpperCase();
 }
 
-function evidenceTone(status: "linked" | "live" | "missing") {
-  if (status === "linked") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
-  if (status === "live") return "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300";
-  return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+type BrowserConnectionSnapshot = {
+  connected?: boolean;
+  collectorConfigured?: boolean;
+  status?: string | null;
+  capturedAt?: Date | string | null;
+  actionableTabs?: number;
+};
+
+function describeBrowserConnection(status?: BrowserConnectionSnapshot) {
+  if (status?.connected) {
+    return {
+      label: "Connected",
+      detail: `${status.actionableTabs ?? 0} actionable tabs are currently visible.`,
+      healthy: true,
+    };
+  }
+
+  if (status?.status === "stale") {
+    const lastInventory = status.capturedAt
+      ? `The last inventory was ${new Date(status.capturedAt).toLocaleString()}.`
+      : "The last inventory is outside the configured freshness window.";
+    return {
+      label: "Stale",
+      detail: `${lastInventory} Reopen the browser collector to refresh tab compliance.`,
+      healthy: false,
+    };
+  }
+
+  if (status?.collectorConfigured) {
+    return {
+      label: "Waiting for data",
+      detail: "The browser is paired, but no tab report has arrived yet.",
+      healthy: false,
+    };
+  }
+
+  return {
+    label: "Setup required",
+    detail: "Install and authorize the local collector before tab compliance can be trusted.",
+    healthy: false,
+  };
 }
 
-function uncertaintyTone(severity: "high" | "medium" | "low") {
-  if (severity === "high") return "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300";
-  if (severity === "medium") return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
-  return "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300";
+function MetricCell({ label, value }: { label: string; value: string }) {
+  return <div className="min-w-0 p-3 text-center"><div className="text-[11px] font-semibold uppercase text-muted-foreground">{label}</div><div className="mt-1 truncate text-sm font-semibold">{value}</div></div>;
 }
 
 function formatDuration(minutes: number | null) {
@@ -155,12 +226,161 @@ function formatDuration(minutes: number | null) {
   return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
 }
 
-export default function WorkerOperator({ view = "today" }: { view?: "today" | "plan" | "decisions" | "evidence" | "settings" }) {
+const INTERNAL_OR_TECHNICAL_WORKER_TEXT = [
+  /\b(?:chain[-\s]?of[-\s]?thought|internal\s+(?:reasoning|thoughts?)|reasoning\s+trace|system\s+prompt|developer\s+prompt)\b/i,
+  /\bmodel\s+(?:selection|name|version|id)\b/i,
+  /\b(?:gpt|claude|gemini)[-\w.]*/i,
+  /\btokens?\b/i,
+  /\b(?:debug(?:ger|ging)?|stack\s+trace|traceback)\b/i,
+  /\bhttp\s*[45]\d{2}\b/i,
+  /\b(?:t?rpc|sql|database)\s+(?:error|failure|exception)\b/i,
+  /\b(?:server|backend)\s+(?:configuration|error|failure)\b/i,
+  /\bapi\b|\bservice\s+endpoint\b/i,
+  /\b(?:econn(?:refused|reset)|etimedout|internal\s+server\s+error)\b/i,
+  /\b(?:let\s+me\s+think|my\s+thought\s+process|i\s+think)\b/i,
+];
+
+export function workerFacingOperationalText(value: unknown, fallback: string) {
+  const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  return !text || text.length > 180 || INTERNAL_OR_TECHNICAL_WORKER_TEXT.some(pattern => pattern.test(text)) ? fallback : text;
+}
+
+export function workerFacingActionInstruction(action: Pick<WorkerManagerAction, "kind" | "blocked"> & Partial<Pick<WorkerManagerAction, "reason">>) {
+  if (action.blocked) {
+    const fallback = action.kind === "decision"
+      ? "Waiting for a founder decision."
+      : action.kind === "verify"
+        ? "Waiting for source verification."
+        : "Waiting for a required step.";
+    return workerFacingOperationalText(action.reason, fallback);
+  }
+  if (action.kind === "verify") return "Check the linked source.";
+  if (action.kind === "draft") return "Prepare a draft for review.";
+  if (action.kind === "decision") return "Prepare the decision for review.";
+  if (action.kind === "follow_up") return "Complete the scheduled follow-up.";
+  return "Continue the recorded work step.";
+}
+
+export function workerFacingPlanChangeReason(kind: NonNullable<WorkerManagerPlanImpact["planChanges"]>[number]["kind"]) {
+  if (kind === "added") return "A new time block is suggested.";
+  if (kind === "moved") return "This task is suggested at a different time.";
+  if (kind === "updated") return "The saved work block would change.";
+  return "This task is not included in the suggestion.";
+}
+
+export function workerFacingPlanImpact(impact: WorkerManagerPlanImpact | null | undefined) {
+  if (!impact) return impact;
+  return {
+    ...impact,
+    planChanges: impact.planChanges?.map(change => ({
+      ...change,
+      reason: workerFacingOperationalText(change.reason, workerFacingPlanChangeReason(change.kind)),
+    })),
+  };
+}
+
+function workerPlanBlockStatus(status: string) {
+  if (status === "planned") return "Planned";
+  if (status === "active") return "In progress";
+  if (status === "done") return "Done";
+  if (status === "skipped") return "Skipped";
+  return "Needs review";
+}
+
+export function workerFacingGoogleSyncFailure(value: unknown) {
+  const rawDetail = typeof value === "string" ? value : "";
+  const detail = rawDetail.toLowerCase();
+  if (/timed out|timeout|took too long/.test(detail)) {
+    return "Google did not finish checking this source in time. Try again; ask your supervisor to review the connection if it keeps happening.";
+  }
+  if (/expired|reconnect|access was rejected|unauthori[sz]ed|forbidden|invalid_grant/.test(detail)) {
+    return "Google access needs to be reconnected. Open Google settings, reconnect Google, then sync again.";
+  }
+  if (/quota|rate limit|too many requests/.test(detail)) {
+    return "Google has temporarily limited requests. Wait before trying again; contact your supervisor if it continues.";
+  }
+
+  const safeDetail = workerFacingOperationalText(rawDetail, "");
+  return safeDetail
+    ? `${safeDetail} Review Google settings and try again; contact your supervisor if it continues.`
+    : "Google could not check this source. Review Google settings and try again; contact your supervisor if the issue continues.";
+}
+
+export function workerSyncStatusDetail(sync: ReturnType<typeof describeWorkerIntegrationSync>) {
+  return sync.label === "Needs attention"
+    ? workerFacingGoogleSyncFailure(sync.detail)
+    : sync.detail;
+}
+
+export function workerPlanPendingStatus(startedAt: number, now = Date.now()) {
+  const elapsedSeconds = Math.max(0, Math.floor((now - startedAt) / 1_000));
+  return {
+    progress: "Plan generation is still running",
+    estimate: "completion estimate unavailable",
+    elapsed: `${elapsedSeconds}s elapsed`,
+  };
+}
+
+function PendingPlanGenerationStatus({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, []);
+  const status = workerPlanPendingStatus(startedAt, now);
+
+  return (
+    <div role="status" aria-live="polite" className="flex flex-wrap items-center gap-3 border-b p-4">
+      <Loader2 className="size-4 animate-spin" />
+      <span>{status.progress}; {status.estimate}.</span>
+      <span aria-live="off">{status.elapsed}</span>
+    </div>
+  );
+}
+
+export default function WorkerOperator({ view = "today" }: { view?: "today" | "plan" | "decisions" | "evidence" | "reminders" | "settings" }) {
   const [, navigate] = useLocation();
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const mobileNavRef = useRef<HTMLElement>(null);
+  const mobileTriggerRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (mobileOpen) {
+      mobileNavRef.current?.querySelector<HTMLElement>("[data-worker-nav-item]")?.focus();
+    }
+  }, [mobileOpen]);
+
+  function closeMobileNavigation() {
+    setMobileOpen(false);
+    mobileTriggerRef.current?.focus();
+  }
+
+  function handleMobileNavigationKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMobileNavigation();
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const focusable = Array.from(
+      mobileNavRef.current?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      ) ?? []
+    ).filter(element => element.getClientRects().length > 0);
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
   const context = trpc.operator.getContext.useQuery(undefined, { staleTime: 5 * 60_000 });
   const apiHealth = trpc.system.health.useQuery(
     { timestamp: 0 },
@@ -172,11 +392,20 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <aside className={`fixed inset-y-0 left-0 z-50 flex border-r bg-background transition-[width,transform] duration-200 ${collapsed ? "w-16" : "w-60"} ${mobileOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}>
+      <aside
+        id="worker-navigation"
+        ref={mobileNavRef}
+        role={mobileOpen ? "dialog" : undefined}
+        aria-label={mobileOpen ? "Worker navigation" : undefined}
+        aria-modal={mobileOpen ? true : undefined}
+        onKeyDown={mobileOpen ? handleMobileNavigationKeyDown : undefined}
+        className={`fixed inset-y-0 left-0 z-50 flex border-r bg-background transition-[width,transform] duration-200 ${collapsed ? "w-16" : "w-60"} ${mobileOpen ? "visible translate-x-0" : "invisible -translate-x-full md:visible md:translate-x-0"}`}
+      >
         <div className="flex w-full flex-col">
           <div className="flex h-16 items-center gap-3 border-b px-3">
             <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-blue-600 font-semibold text-white">{initials(workerName)}</div>
             {!collapsed && <div className="min-w-0"><div className="truncate font-semibold">{workerName}</div><div className="truncate text-xs text-muted-foreground">Worker operator</div></div>}
+            <Button variant="ghost" size="icon" className="ml-auto md:hidden" onClick={closeMobileNavigation} aria-label="Close navigation"><X className="size-4" /></Button>
           </div>
           <nav className="flex-1 space-y-1 p-2">
             {NAVIGATION.map((item) => {
@@ -185,7 +414,8 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
                 <button
                   key={item.path}
                   type="button"
-                  onClick={() => { navigate(item.path); setMobileOpen(false); }}
+                  data-worker-nav-item
+                  onClick={() => { navigate(item.path); if (mobileOpen) closeMobileNavigation(); }}
                   title={collapsed ? item.label : undefined}
                   className={`flex h-12 w-full items-center gap-3 rounded-md px-3 text-left transition-colors ${active ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"}`}
                 >
@@ -203,7 +433,7 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
             >
               <Settings className="size-4" />{!collapsed && "Settings"}
             </button>
-            <button type="button" onClick={logout} className="flex h-10 w-full items-center gap-3 rounded-md px-3 text-sm text-muted-foreground hover:bg-accent hover:text-foreground">
+            <button type="button" onClick={() => { setMobileOpen(false); void logout(); }} className="flex h-10 w-full items-center gap-3 rounded-md px-3 text-sm text-muted-foreground hover:bg-accent hover:text-foreground">
               <LogOut className="size-4" />{!collapsed && "Sign out"}
             </button>
           </div>
@@ -217,30 +447,31 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
           </button>
         </div>
       </aside>
-      {mobileOpen && <button type="button" aria-label="Close navigation" className="fixed inset-0 z-40 bg-black/50 md:hidden" onClick={() => setMobileOpen(false)} />}
+      {mobileOpen && <button type="button" aria-label="Close navigation" className="fixed inset-0 z-40 bg-black/50 md:hidden" onClick={closeMobileNavigation} />}
 
       <div className={`transition-[padding] duration-200 ${collapsed ? "md:pl-16" : "md:pl-60"}`}>
         <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b bg-background/95 px-4 backdrop-blur md:px-6">
           <div className="flex items-center gap-3">
-            <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setMobileOpen(true)} aria-label="Open navigation"><Menu className="size-4" /></Button>
+            <Button ref={mobileTriggerRef} variant="ghost" size="icon" className="md:hidden" onClick={() => setMobileOpen(true)} aria-label="Open navigation" aria-expanded={mobileOpen} aria-controls="worker-navigation"><Menu className="size-4" /></Button>
             <div><div className="text-sm font-semibold">Worker Operator</div><div className="text-xs text-muted-foreground">{workerName} · {formatWorkerDate(new Date(), timeZone)}</div></div>
           </div>
           <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">{theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}</Button>
         </header>
-        <main className="mx-auto w-full max-w-[1280px] p-4 md:p-6">
+        <main className={`mx-auto w-full min-w-0 p-4 md:p-6 ${view === "today" || view === "settings" ? "max-w-none" : "max-w-[1280px]"}`}>
           {(apiHealth.error || (apiHealth.data && apiHealth.data.runtime !== "unified-node")) && (
             <Alert variant="destructive" className="mb-5">
               <AlertTriangle className="size-4" />
-              <AlertTitle>Backend connection unavailable</AlertTitle>
+              <AlertTitle>Portal connection needs attention</AlertTitle>
               <AlertDescription>
-                This portal must be served by the unified Node application. Requests are not reaching the expected backend; check the container deployment and API domain before using operational actions.
+                This portal could not confirm its services are ready. Refresh before relying on saved updates, and contact your supervisor if the issue continues.
               </AlertDescription>
             </Alert>
           )}
-          {view === "today" && <TodayView onOpenPlan={() => navigate("/worker/plan")} onOpenDecisions={() => navigate("/worker/decisions")} />}
+          {view === "today" && <TodayView timeZone={timeZone} onOpenPlan={() => navigate("/worker/plan")} onOpenDecisions={() => navigate("/worker/decisions")} />}
           {view === "plan" && <PlanView founderName={founderName} timeZone={timeZone} />}
           {view === "decisions" && <DecisionsView founderName={founderName} />}
           {view === "evidence" && <EvidenceView />}
+          {view === "reminders" && <WorkerReminders />}
           {view === "settings" && <WorkerSettingsView />}
         </main>
       </div>
@@ -248,18 +479,30 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
   );
 }
 
-function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; onOpenDecisions: () => void }) {
+function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string; onOpenPlan: () => void; onOpenDecisions: () => void }) {
   const utils = trpc.useUtils();
-  const [selected, setSelected] = useState<OperatorCard | null>(null);
+  const [orderingTime, setOrderingTime] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setOrderingTime(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const managerQuery = trpc.operator.getManagerStatus.useQuery(undefined, managerStatusQueryOptions);
   const actionQuery = trpc.trello.actionAlerts.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const intelligenceQuery = trpc.operator.getWorkQueueContext.useQuery(undefined, { retry: false, staleTime: 60_000 });
+  const googleQuery = trpc.operator.getGoogleEvidenceStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const timerQuery = trpc.timer.getActive.useQuery(undefined, { staleTime: 15_000 });
   const planQuery = trpc.operator.getDailyPlan.useQuery(undefined, { staleTime: 60_000 });
   const browserQuery = trpc.operator.getBrowserTabStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const startTimer = trpc.timer.start.useMutation({
     onSuccess: () => { void utils.timer.getActive.invalidate(); toast.success("Timer started"); },
-    onError: (error) => toast.error(error.message),
+    onError: () => toast.error("Timer could not be started. Refresh task status and try again."),
   });
+
+  const managerCoverageReady = managerExecutionCoverageReady(managerQuery.error, managerQuery.data?.snapshot?.executionReady);
+  const managerActions = managerCoverageReady ? managerQuery.data?.snapshot?.actions ?? [] : [];
+  const primary = selectManagerPrimary(managerQuery.data?.snapshot);
+  const managerInputCardId = primary?.kind === "verification" ? primary.cardId : null;
 
   const cards = useMemo(() => {
     const alertCards = [
@@ -268,52 +511,91 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
       ...(actionQuery.data?.overdueCards ?? []),
     ];
     const alerts = new Map(alertCards.map((card) => [card.id, card]));
-    return [...(intelligenceQuery.data?.cards ?? [])]
+    return orderWorkerCards([...(intelligenceQuery.data?.cards ?? [])]
       .map((card) => {
         const alert = alerts.get(card.cardId);
         return {
           ...card,
           boardName: card.boardName || alert?.boardName || "Unknown board",
           listName: card.listName || alert?.listName || "Unknown list",
+          actionability: card.cardId === managerInputCardId
+            || managerCoverageReady && selectManagerActionForCard(managerActions, card.cardId)?.blocked
+            ? "blocked"
+            : card.actionability,
         } as OperatorCard;
-      })
-      .sort((left, right) => {
-        const lane = getWorkLaneRank(left.listName) - getWorkLaneRank(right.listName);
-        return lane || right.priorityScore - left.priorityScore;
-      });
-  }, [actionQuery.data, intelligenceQuery.data]);
-  useEffect(() => {
-    if (!selected) return;
-    const refreshed = cards.find((card) => card.cardId === selected.cardId);
-    if (refreshed && refreshed !== selected) setSelected(refreshed);
-  }, [cards, selected]);
-  const now = cards[0] ?? null;
-  const next = cards.slice(1, 4);
+      }), orderingTime);
+  }, [actionQuery.data, intelligenceQuery.data, managerActions, managerCoverageReady, managerInputCardId, orderingTime]);
+  const selected = cards.find((card) => card.cardId === selectedCardId) ?? null;
+  const { related, first: now, next } = selectTodayQueue(cards, primary?.cardId ?? null);
+  const visibleNextCards = managerCoverageReady ? next : cards.slice(0, 3);
   const openDecisions = cards.reduce((total, card) => total + card.steps.filter((step) => step.requiresRobert && step.status !== "complete").length, 0);
   const plan = planQuery.data?.schedule;
+  const planImpact = managerQuery.data?.snapshot?.proposal?.planningImpact;
+  const hasCurrentSuggestion = !planQuery.isLoading && !planQuery.error && !managerQuery.error && !managerQuery.data?.error && workerPlanSuggestionIsCurrent({
+    impact: planImpact,
+    expectedPlanVersion: managerQuery.data?.snapshot?.planVersion,
+    currentPlanVersion: planQuery.data?.planVersion,
+    currentDateKey: dateKeyInTimeZone(orderingTime, timeZone),
+    hasSavedPlan: !!plan,
+    applied: managerQuery.data?.snapshot?.applied,
+  });
+  const isWaiting = workerCardIsWaiting;
+  const sourceChecksFor = (card: OperatorCard) => assessWorkerSourceChecks({
+    sources: card.evidenceSummary.sources,
+    trelloCache: card.trelloCache ?? null,
+    gmail: googleQuery.data?.gmail ?? null,
+    drive: googleQuery.data?.drive ?? null,
+    googleConnectionReady: googleQuery.data?.credentialsReady ?? null,
+    now: orderingTime,
+  });
+  const canStart = (card: OperatorCard) => managerCoverageReady
+    && !(primary?.kind === "verification" && primary.cardId === card.cardId)
+    && !isWaiting(card)
+    && !sourceChecksFor(card).checks.some(check => check.linkedCount > 0 && check.status !== "current")
+    && !timerQuery.isLoading && !timerQuery.error && !startTimer.isPending && !timerQuery.data;
+  const nowSources = now ? sourceChecksFor(now) : null;
+  const nowManagerAction = now ? selectManagerActionForCard(managerActions, now.cardId) : null;
+  const selectedManagerActions = selected
+    ? managerActions.filter(action => action.cardId === selected.cardId)
+    : [];
 
-  const begin = (card: OperatorCard) => startTimer.mutate({
+  const begin = (card: OperatorCard) => { if (!canStart(card)) return; startTimer.mutate({
     cardId: card.cardId,
     cardName: card.cardName,
     cardUrl: card.cardUrl,
     boardName: card.boardName,
     listName: card.listName,
-  });
+  }); };
   const refreshEvidence = async () => {
-    const [intelligenceResult, actionResult] = await Promise.all([
+    const [intelligenceResult, actionResult, googleResult] = await Promise.all([
       intelligenceQuery.refetch(),
       actionQuery.refetch(),
+      googleQuery.refetch(),
     ]);
-    if (intelligenceResult.error || actionResult.error) {
-      toast.error(intelligenceResult.error?.message ?? actionResult.error?.message ?? "Evidence refresh failed");
+    if (intelligenceResult.error || actionResult.error || googleResult.error) {
+      toast.error("Source status could not be reloaded. Try again; no external accounts were synced.");
       return;
     }
-    toast.success("Card evidence refreshed");
+    toast.success("Saved source status reloaded. This does not sync external accounts.");
   };
 
   return (
     <div className="space-y-5">
-      <PageHeading title="Today" description="Work from one trusted sequence. Context and deeper actions stay out of the execution path." />
+      <PageHeading title="Today" description="" />
+      <ManagerCoach />
+      {(actionQuery.error || actionQuery.data?.available === false) && <Alert variant="destructive">
+        <AlertTriangle className="size-4" />
+        <AlertTitle>Trello task updates are unavailable</AlertTitle>
+        <AlertDescription>
+          The saved task list may not include recent Trello changes. Check with your supervisor that Trello is connected before relying on it. {" "}
+          <Button variant="outline" size="sm" onClick={() => void actionQuery.refetch()}>Retry</Button>
+        </AlertDescription>
+      </Alert>}
+      {googleQuery.data?.gmail.sourceConflictPending && <Alert variant="destructive">
+        <AlertTriangle className="size-4" />
+        <AlertTitle>Gmail source needs review</AlertTitle>
+        <AlertDescription>A saved email could not be safely refreshed. Review the original before relying on it. Email-linked work remains paused until the source is reconciled.</AlertDescription>
+      </Alert>}
       {browserQuery.data?.shouldWarn && (
         <Alert className="border-amber-500/40 bg-amber-500/5">
           <Archive className="size-4 text-amber-500" />
@@ -325,66 +607,89 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
         <div className="space-y-4">
           <Card className="gap-0 rounded-lg border-blue-500/30 py-0">
             <CardHeader className="border-b py-4">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase text-emerald-500"><span className="size-2 rounded-full bg-emerald-500" />Now</div>
+              <div className="text-xs font-semibold uppercase text-muted-foreground">{!managerCoverageReady ? "Work list needs a full check" : primary ? "Other work you can continue" : now && isWaiting(now) ? "Waiting for a prerequisite" : "Next task"}</div>
             </CardHeader>
             <CardContent className="p-5">
-              {intelligenceQuery.isLoading ? <QueueSkeleton /> : now ? (
-                <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_180px]">
-                  <button type="button" className="min-w-0 text-left" onClick={() => setSelected(now)}>
-                    <div className="mb-2 flex flex-wrap items-center gap-2"><h2 className="text-lg font-semibold">{now.cardName}</h2><Badge variant="outline" className={priorityTone(now.priorityTier)}>{now.priorityTier}</Badge></div>
-                    <p className="text-sm text-muted-foreground">{now.boardName} · {now.listName}</p>
-                    <div className="mt-4 border-l-2 border-blue-500 pl-3"><div className="text-[11px] font-semibold uppercase text-muted-foreground">Exactly next</div><p className="mt-1 text-sm font-medium">{now.nextBestAction || "Review the card and define the next concrete action."}</p></div>
-                    {now.waitingReason && <p className="mt-3 text-xs text-amber-600 dark:text-amber-300">Waiting evidence: {now.waitingReason.nextAction}</p>}
-                  </button>
-                  <div className="flex flex-col justify-end gap-2">
-                    <Button onClick={() => begin(now)} disabled={startTimer.isPending || timerQuery.data?.cardId === now.cardId}>
-                      {startTimer.isPending ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-                      {timerQuery.data?.cardId === now.cardId ? "Timer running" : "Start timer"}
-                    </Button>
-                    <Button variant="outline" onClick={() => setSelected(now)}>Open details</Button>
+              {intelligenceQuery.isLoading ? <QueueSkeleton /> : !managerCoverageReady ? (
+                <div role="status" className="space-y-2 text-sm"><h2 className="font-semibold">No task is recommended yet</h2><p className="text-muted-foreground">The visible tasks are for reference, not a confirmed order. Do not start a timer until the full work list has been checked.</p></div>
+              ) : now ? (
+                <>
+                  {timerQuery.data && timerQuery.data.cardId !== now.cardId && <div role="status" className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
+                    <p><span className="font-semibold">Timer already running for {timerQuery.data.cardName}.</span> Continue on that task; its time is already being recorded. This selected task has not been started.</p>
+                    {/^https?:\/\//i.test(timerQuery.data.cardUrl) && <a href={timerQuery.data.cardUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block font-medium text-blue-700 underline dark:text-blue-300">Open running task</a>}
+                  </div>}
+                  <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_180px]">
+                    <button type="button" className="min-w-0 text-left" onClick={() => setSelectedCardId(now.cardId)}>
+                      <div className="mb-2 flex flex-wrap items-center gap-2"><h2 className="text-lg font-semibold">{now.cardName}</h2><Badge variant="outline" className={priorityTone(now.priorityTier)}>{now.priorityTier}</Badge></div>
+                      <p className="text-sm text-muted-foreground">{now.boardName} · {now.listName}</p>
+                      <div className="mt-4 border-l-2 border-blue-500 pl-3"><div className="text-[11px] font-semibold uppercase text-muted-foreground">{isWaiting(now) || nowManagerAction?.blocked ? "Waiting for" : "Next action"}</div><p className="mt-1 text-sm font-medium">{nextInstruction(now, nowManagerAction)}</p></div>
+                      {now.waitingReason && <p className="mt-3 text-xs text-amber-600 dark:text-amber-300">Waiting evidence: {workerFacingOperationalText(now.waitingReason.nextAction, "Review the recorded blocker before continuing.")}</p>}
+                      {(currentCompletionCriterion(now, nowManagerAction) || now.evidenceSummary.forecast?.p50Minutes !== null && now.evidenceSummary.forecast?.p50Minutes !== undefined) && <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 border-t pt-3 text-xs text-muted-foreground">
+                        {currentCompletionCriterion(now, nowManagerAction) && <span><span className="font-semibold text-foreground">Done when:</span> {currentCompletionCriterion(now, nowManagerAction)}</span>}
+                        {now.evidenceSummary.forecast?.p50Minutes !== null && now.evidenceSummary.forecast?.p50Minutes !== undefined && <span><span className="font-semibold text-foreground">Working estimate:</span> {formatDuration(now.evidenceSummary.forecast.p50Minutes)}{now.evidenceSummary.forecast.p90Minutes !== null ? ` to ${formatDuration(now.evidenceSummary.forecast.p90Minutes)}` : ""}</span>}
+                      </div>}
+                      {nowSources?.checks.some(check => check.status !== "current") && <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">Source check needed. Open details to see what to verify before acting.</p>}
+                    </button>
+                    <div className="flex flex-col justify-end gap-2">
+                      <Button onClick={() => begin(now)} disabled={!canStart(now)}>
+                        {startTimer.isPending ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+                        {timerQuery.data?.cardId === now.cardId ? "Timer running" : timerQuery.data ? "Timer running on another task" : !managerCoverageReady ? "Waiting for full work check" : isWaiting(now) ? "Waiting - review first" : "Start timer"}
+                      </Button>
+                      <Button variant="outline" onClick={() => setSelectedCardId(now.cardId)}>Open details</Button>
+                      {/^https?:\/\//i.test(now.cardUrl) && <a href={now.cardUrl} target="_blank" rel="noopener noreferrer" className="text-center text-xs font-medium text-blue-700 underline dark:text-blue-300">Open source card</a>}
+                    </div>
                   </div>
-                </div>
+                </>
+              ) : primary ? (
+                <div className="space-y-3 text-sm"><p>No other task is ready to execute. Follow the work guidance above or review the waiting tasks below.</p>{related && <Button variant="outline" onClick={() => setSelectedCardId(related.cardId)}>Open related task</Button>}</div>
               ) : (
-                <EmptyState title="No trusted work item yet" detail={intelligenceQuery.error?.message ?? "Generate APTLSS plans or connect Trello to build the queue."} />
+                <EmptyState title="No trusted work item yet" detail={intelligenceQuery.error ? "Task information could not be loaded. Refresh before relying on the work list." : "Generate APTLSS plans or connect Trello to build the queue."} />
               )}
             </CardContent>
           </Card>
 
           <Card className="gap-0 rounded-lg py-0">
-            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Next up</CardTitle><CardDescription>Only the next three cards are shown.</CardDescription></CardHeader>
+            <CardHeader className="border-b py-4"><CardTitle className="text-sm">{managerCoverageReady ? "Next up" : "Tasks to inspect"}</CardTitle><CardDescription>{managerCoverageReady ? "Only the next three cards are shown." : "These tasks are not ranked until the full work list is checked."}</CardDescription></CardHeader>
             <CardContent className="p-0">
-              {next.length ? next.map((card, index) => (
-                <button key={card.cardId} type="button" onClick={() => setSelected(card)} className="grid w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-3 border-b px-4 py-3 text-left last:border-b-0 hover:bg-accent/40">
+              {intelligenceQuery.isLoading ? <QueueSkeleton /> : intelligenceQuery.error ? <p role="alert" className="p-4">Tasks could not be loaded. Refresh to try again.</p> : visibleNextCards.length ? visibleNextCards.map((card, index) => (
+                <button key={card.cardId} type="button" onClick={() => setSelectedCardId(card.cardId)} className="grid w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-3 border-b px-4 py-3 text-left last:border-b-0 hover:bg-accent/40">
                   <span className="flex size-6 items-center justify-center rounded border text-xs text-muted-foreground">{index + 1}</span>
-                  <span className="min-w-0"><span className="block truncate text-sm font-medium">{card.cardName}</span><span className="block truncate text-xs text-muted-foreground">{card.listName} · {card.nextBestAction ?? "Review next action"}</span></span>
+                  <span className="min-w-0"><span className="block truncate text-sm font-medium">{card.cardName}</span><span className="block truncate text-xs text-muted-foreground">{card.listName} · {workerFacingOperationalText(card.nextBestAction, "Open task details for the next action.")}</span></span>
                   <Badge variant="outline" className={priorityTone(card.priorityTier)}>{card.priorityTier}</Badge>
                 </button>
               )) : <div className="p-5 text-sm text-muted-foreground">No additional cards queued.</div>}
             </CardContent>
           </Card>
 
-          <QueueLanes cards={cards} onSelect={setSelected} />
+          {!intelligenceQuery.isLoading && !intelligenceQuery.error && <QueueLanes cards={cards} complete={managerCoverageReady} onSelect={(card) => setSelectedCardId(card.cardId)} />}
         </div>
 
         <aside className="space-y-3">
-          <ContextMetric icon={CalendarDays} label="Plan health" value={plan ? `${plan.planHealth.confidence}%` : "Not generated"} detail={plan ? `${plan.planHealth.scheduledMinutes} min scheduled` : "Create today's time blocks"} onClick={onOpenPlan} />
+          {planQuery.isLoading || timerQuery.isLoading || intelligenceQuery.isLoading || browserQuery.isLoading ? <p role="status" className="p-4 text-sm text-muted-foreground">Loading your work summary...</p> : planQuery.error || timerQuery.error || intelligenceQuery.error || browserQuery.error ? <p role="alert" className="p-4 text-sm">Some work information is unavailable. Refresh before relying on these totals.</p> : <>
+          <ContextMetric icon={CalendarDays} label="Day plan" value={plan ? (plan.planHealth.availableMinutes === 0 && !plan.blocks.length ? "Protected day" : "Available") : "Not generated"} detail={hasCurrentSuggestion ? planImpact?.planChanges?.length ? `${planImpact.planChanges.length} suggested changes to review` : "Plan suggestion to review" : plan ? `${plan.planHealth.scheduledMinutes} min scheduled` : "Create today's time blocks"} onClick={onOpenPlan} />
           <ContextMetric icon={Timer} label="Time now" value={timerQuery.data ? "Tracking" : "Stopped"} detail={timerQuery.data?.cardName ?? "No active timer"} />
           <ContextMetric icon={BrainCircuit} label="Decisions" value={`${openDecisions} open`} detail="Outcome required to close" onClick={onOpenDecisions} />
           <ContextMetric icon={Archive} label="Browser hygiene" value={browserQuery.data?.connected ? `${browserQuery.data.actionableTabs} tabs` : "Disconnected"} detail={browserQuery.data?.connected ? `Limit ${browserQuery.data.allowedTabs}` : "Collector has not reported"} />
+          </>}
         </aside>
       </div>
       <CardInspector
         card={selected}
-        onClose={() => setSelected(null)}
+        activeTimer={timerQuery.data ?? null}
+        managerActions={selectedManagerActions}
+        sourceChecks={selected ? sourceChecksFor(selected) : null}
+        timeZone={timeZone}
+        onClose={() => setSelectedCardId(null)}
         onStart={begin}
+        canStart={canStart}
         onRefresh={refreshEvidence}
-        refreshing={intelligenceQuery.isFetching || actionQuery.isFetching}
+        refreshing={intelligenceQuery.isFetching || actionQuery.isFetching || googleQuery.isFetching}
       />
     </div>
   );
 }
 
-function QueueLanes({ cards, onSelect }: { cards: OperatorCard[]; onSelect: (card: OperatorCard) => void }) {
+function QueueLanes({ cards, complete, onSelect }: { cards: OperatorCard[]; complete: boolean; onSelect: (card: OperatorCard) => void }) {
   const lanes = [
     { key: "on-hold", label: "On-hold first", cards: cards.filter((card) => getWorkLaneRank(card.listName) === 0) },
     { key: "doing", label: "Doing second", cards: cards.filter((card) => getWorkLaneRank(card.listName) === 1) },
@@ -392,7 +697,7 @@ function QueueLanes({ cards, onSelect }: { cards: OperatorCard[]; onSelect: (car
   ];
   return (
     <Card className="gap-0 rounded-lg py-0">
-      <CardHeader className="border-b py-4"><CardTitle className="text-sm">Queue lanes</CardTitle><CardDescription>Collapsed by default to keep the sequence readable.</CardDescription></CardHeader>
+      <CardHeader className="border-b py-4"><CardTitle className="text-sm">{complete ? "All tasks" : "Visible tasks"}</CardTitle></CardHeader>
       <CardContent className="p-0">
         {lanes.map((lane) => <Lane key={lane.key} label={lane.label} cards={lane.cards} onSelect={onSelect} />)}
       </CardContent>
@@ -410,7 +715,7 @@ function Lane({ label, cards, onSelect }: { label: string; cards: OperatorCard[]
       <CollapsibleContent>
         {cards.length ? cards.map((card) => (
           <button key={card.cardId} type="button" onClick={() => onSelect(card)} className="flex w-full items-center justify-between gap-3 border-b bg-muted/20 px-6 py-2.5 text-left text-sm hover:bg-accent/50">
-            <span className="truncate">{card.cardName}</span><span className="shrink-0 text-xs text-muted-foreground">{card.priorityScore}</span>
+            <span className="truncate">{card.cardName}</span>
           </button>
         )) : <div className="border-b bg-muted/20 px-6 py-3 text-xs text-muted-foreground">No cards in this lane.</div>}
       </CollapsibleContent>
@@ -425,14 +730,24 @@ const INSPECTOR_MAX_WIDTH = 1_040;
 
 function CardInspector({
   card,
+  activeTimer,
+  managerActions,
+  sourceChecks,
+  timeZone,
   onClose,
   onStart,
+  canStart,
   onRefresh,
   refreshing,
 }: {
   card: OperatorCard | null;
+  activeTimer: { cardId: string; cardName: string; cardUrl: string } | null;
+  managerActions: WorkerManagerAction[];
+  sourceChecks: ReturnType<typeof assessWorkerSourceChecks> | null;
+  timeZone: string;
   onClose: () => void;
   onStart: (card: OperatorCard) => void;
+  canStart: (card: OperatorCard) => boolean;
   onRefresh: () => Promise<void>;
   refreshing: boolean;
 }) {
@@ -476,6 +791,7 @@ function CardInspector({
     ? Math.max(0, viewportWidth - 8)
     : Math.max(INSPECTOR_MIN_WIDTH, Math.min(preferredWidth, desktopMax));
   const wide = panelWidth >= 720;
+  const managerAction = card ? selectManagerActionForCard(managerActions, card.cardId) : null;
   const evidenceSummary = card?.evidenceSummary ?? {
     sources: [
       { key: "trello" as const, label: "Trello", count: 0, status: "missing" as const, detail: "Refresh to check current evidence" },
@@ -484,15 +800,7 @@ function CardInspector({
       { key: "google_drive" as const, label: "Drive", count: 0, status: "missing" as const, detail: "Refresh to check current evidence" },
       { key: "time" as const, label: "Time", count: 0, status: "missing" as const, detail: "Refresh to check current evidence" },
     ],
-    issues: (card?.uncertainties ?? []).map((detail, index) => ({
-      id: `legacy-uncertainty-${index}`,
-      title: "Assessment gap",
-      detail,
-      resolution: "Refresh the evidence check before relying on this assessment.",
-      severity: "medium" as const,
-    })),
     forecast: null,
-    confidenceProfile: null,
   };
 
   const saveWidth = (value: number) => {
@@ -592,100 +900,44 @@ function CardInspector({
             <div className="space-y-6 px-5 py-5">
               <section className="border-l-2 border-blue-500 pl-4">
                 <InspectorLabel>Exactly next</InspectorLabel>
-                <p className="text-sm font-medium">{card.nextBestAction ?? "No next action recorded."}</p>
+                <p className="text-sm font-medium">{nextInstruction(card, managerAction)}</p>
               </section>
 
-              <div className={wide ? "grid grid-cols-2 gap-6" : "space-y-6"}>
-                <section>
-                  <InspectorLabel>Assessment</InspectorLabel>
-                  <p className="text-sm leading-relaxed">{card.stateReason ?? card.planSummary ?? "No assessment context available."}</p>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Badge variant="outline" className={priorityTone(card.priorityTier)}>{card.priorityTier} / {card.priorityScore}</Badge>
-                    {card.confidenceScore !== null && <Badge variant="outline">{card.confidenceScore}% confidence</Badge>}
-                  </div>
-                </section>
-
-                <section>
-                  <div className="flex items-center justify-between gap-3">
-                    <InspectorLabel>Confidence</InspectorLabel>
-                    {evidenceSummary.confidenceProfile?.targetScore && (
-                      <span className="text-xs text-muted-foreground">Target {evidenceSummary.confidenceProfile.targetScore}%</span>
-                    )}
-                  </div>
-                  <Progress value={card.confidenceScore ?? 0} className="mt-2 h-2" />
-                  <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-                    {card.confidenceReason ?? "No confidence explanation recorded."}
-                  </p>
-                  {evidenceSummary.confidenceProfile?.blockers.length ? (
-                    <ul className="mt-3 space-y-1 text-xs text-muted-foreground">
-                      {evidenceSummary.confidenceProfile.blockers.slice(0, 3).map((blocker) => <li key={blocker}>- {blocker}</li>)}
-                    </ul>
-                  ) : null}
-                </section>
-              </div>
+              {activeTimer && <section role="status" className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
+                {activeTimer.cardId === card.cardId
+                  ? <p>Timer running for this task. Continue working; time is being recorded.</p>
+                  : <p>Timer already running for {activeTimer.cardName}. Continue on that task; this selected task has not been started.</p>}
+                {activeTimer.cardId !== card.cardId && /^https?:\/\//i.test(activeTimer.cardUrl) && <a href={activeTimer.cardUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block font-medium text-blue-700 underline dark:text-blue-300">Open running task</a>}
+              </section>}
 
               <section>
                 <div className="flex items-center justify-between gap-3">
-                  <InspectorLabel>Evidence coverage</InspectorLabel>
+                  <InspectorLabel>Source checks</InspectorLabel>
                   <Button variant="ghost" size="sm" onClick={() => void onRefresh()} disabled={refreshing}>
                     <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />
-                    Refresh
+                    Reload status
                   </Button>
                 </div>
-                <div className={`mt-2 grid gap-2 ${wide ? "grid-cols-5" : "grid-cols-2"}`}>
-                  {evidenceSummary.sources.map((source) => (
-                    <div key={source.key} className="min-w-0 rounded-md border bg-muted/20 p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-xs font-semibold">{source.label}</span>
-                        <Badge variant="outline" className={`px-1.5 py-0 text-[10px] ${evidenceTone(source.status)}`}>
-                          {source.status}
-                        </Badge>
+                <div className="mt-2 divide-y border-y">
+                  {sourceChecks?.checks.map((check) => (
+                    <div key={check.key} className="py-3 text-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-medium">{check.label}{check.key !== "trello" && <span className="ml-1 font-normal text-muted-foreground">({check.linkedCount} linked)</span>}</span>
+                        <span className={check.status === "current" ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}>
+                          {check.status === "current" ? "Checked" : check.status === "overdue" ? "Check overdue" : check.status === "disabled" ? "Sync off" : check.status === "disconnected" ? "Connection unavailable" : "Check time unknown"}
+                        </span>
                       </div>
-                      <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{source.detail}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">{check.checkedLabel}: {check.checkedAt ? new Date(check.checkedAt).toLocaleString(undefined, { timeZone }) : "not recorded"}</p>
+                      {check.nextAction && <p className="mt-1 text-xs">Next: {check.nextAction}</p>}
                     </div>
                   ))}
                 </div>
+                {sourceChecks?.coverageGap && <p className="mt-2 text-xs text-muted-foreground">{sourceChecks.coverageGap}</p>}
+                <p className="mt-2 text-xs text-muted-foreground">Reloading status does not sync external accounts.</p>
               </section>
 
-              <section>
-                <div className="flex items-center justify-between gap-3">
-                  <InspectorLabel>Uncertainty controls</InspectorLabel>
-                  <Badge variant="outline">{evidenceSummary.issues.length} open</Badge>
-                </div>
-                {evidenceSummary.issues.length ? (
-                  <div className={`mt-2 grid gap-3 ${wide ? "grid-cols-2" : "grid-cols-1"}`}>
-                    {evidenceSummary.issues.map((issue) => (
-                      <div key={issue.id} className="rounded-md border p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex min-w-0 items-start gap-2">
-                            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" />
-                            <h3 className="text-sm font-semibold">{issue.title}</h3>
-                          </div>
-                          <Badge variant="outline" className={uncertaintyTone(issue.severity)}>{issue.severity}</Badge>
-                        </div>
-                        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{issue.detail}</p>
-                        <div className="mt-3 border-t pt-3">
-                          <div className="text-[11px] font-semibold uppercase text-muted-foreground">How to resolve</div>
-                          <p className="mt-1 text-sm leading-relaxed">{issue.resolution}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="mt-2 flex items-center gap-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-4 text-sm">
-                    <ShieldCheck className="size-4 text-emerald-500" />
-                    No material uncertainty remains in the currently connected evidence.
-                  </div>
-                )}
-              </section>
+                            <ManagerVerificationFollowups key={card.cardId} cardId={card.cardId} />
 
-              <section>
-                <div className="flex items-center justify-between gap-3">
-                  <InspectorLabel>Verification follow-ups</InspectorLabel>
-                  <Badge variant="outline">{verification.data?.length ?? 0} open</Badge>
-                </div>
-                {verification.data?.length ? <div className="mt-2 space-y-2">{verification.data.map((followup) => <div key={followup.id} className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3"><p className="text-sm font-medium">{followup.title}</p><p className="mt-1 text-sm text-muted-foreground">{followup.question}</p></div>)}</div> : <p className="mt-2 text-sm text-muted-foreground">No conflicting evidence needs a worker response.</p>}
-              </section>
 
               <section>
                 <Collapsible open={rawEvidenceOpen} onOpenChange={setRawEvidenceOpen}>
@@ -693,7 +945,14 @@ function CardInspector({
                     <span><span className="block text-sm font-semibold">Raw linked evidence</span><span className="block text-xs text-muted-foreground">Exact retained detail, shown only when needed.</span></span>{rawEvidenceOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
                   </CollapsibleTrigger>
                   <CollapsibleContent className="space-y-3 border-x border-b p-3">
-                    {cardEvidence.isLoading ? <QueueSkeleton /> : cardEvidence.data?.length ? cardEvidence.data.map((item) => <div key={item.id} className="rounded-md border p-3"><div className="flex items-start justify-between gap-3"><span className="text-sm font-medium">{item.title}</span><Badge variant="outline">{item.source}</Badge></div>{item.summary && <p className="mt-2 text-sm text-muted-foreground">{item.summary}</p>}{item.content && <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-muted/40 p-3 text-xs leading-relaxed">{item.content}</pre>}{item.sourceUrl && <a className="mt-2 inline-flex items-center gap-1 text-xs text-blue-600 hover:underline dark:text-blue-300" href={item.sourceUrl} target="_blank" rel="noreferrer">Open source <ExternalLink className="size-3" /></a>}</div>) : <p className="text-sm text-muted-foreground">No graph-linked evidence has been retained for this card yet.</p>}
+                    {cardEvidence.isLoading ? <QueueSkeleton /> : cardEvidence.isError ? (
+                      <div role="alert" className="space-y-2">
+                        <p className="text-sm text-muted-foreground">Source details could not be loaded. This does not mean the task has no evidence.</p>
+                        <Button variant="outline" size="sm" disabled={cardEvidence.isFetching} onClick={() => void cardEvidence.refetch()}>
+                          <RefreshCw className="size-4" /> Retry loading sources
+                        </Button>
+                      </div>
+                    ) : cardEvidence.data?.length ? cardEvidence.data.map((item) => <div key={item.id} className="rounded-md border p-3"><div className="flex items-start justify-between gap-3"><span className="text-sm font-medium">{item.title}</span><Badge variant="outline">{item.source}</Badge></div>{item.content && <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-muted/40 p-3 text-xs leading-relaxed">{item.content}</pre>}{item.sourceUrl && <a className="mt-2 inline-flex items-center gap-1 text-xs text-blue-600 hover:underline dark:text-blue-300" href={item.sourceUrl} target="_blank" rel="noreferrer">Open source <ExternalLink className="size-3" /></a>}</div>) : <p className="text-sm text-muted-foreground">No graph-linked evidence has been retained for this card yet.</p>}
                     <div className="border-t pt-3"><Label htmlFor="evidence-assertion">Add a worker evidence note</Label><Textarea id="evidence-assertion" className="mt-2 min-h-24" value={assertion} onChange={(event) => setAssertion(event.target.value)} placeholder="Record what happened, including the exact source or reason. This does not change Trello." /><Button className="mt-2" size="sm" variant="outline" disabled={assertion.trim().length < 3 || recordAssertion.isPending} onClick={() => card && recordAssertion.mutate({ cardId: card.cardId, title: `Worker update: ${card.cardName}`, detail: assertion })}>{recordAssertion.isPending ? <Loader2 className="size-4 animate-spin" /> : <FileCheck2 className="size-4" />}Record evidence note</Button></div>
                   </CollapsibleContent>
                 </Collapsible>
@@ -702,31 +961,29 @@ function CardInspector({
               {evidenceSummary.forecast && (
                 <section>
                   <InspectorLabel>Remaining-time range</InspectorLabel>
-                  <div className="mt-2 grid grid-cols-3 divide-x rounded-md border">
+                  <div className="mt-2 grid grid-cols-2 divide-x rounded-md border">
                     <MetricCell label="P50" value={formatDuration(evidenceSummary.forecast.p50Minutes)} />
                     <MetricCell label="P90" value={formatDuration(evidenceSummary.forecast.p90Minutes)} />
-                    <MetricCell label="Samples" value={String(evidenceSummary.forecast.sampleSize)} />
                   </div>
                   <p className="mt-2 text-xs text-muted-foreground">Use P90 for commitments while uncertainty is medium or high.</p>
                 </section>
               )}
 
               <section>
-                <InspectorLabel>APTLSS steps</InspectorLabel>
+                <InspectorLabel>Task steps</InspectorLabel>
                 <div className={`mt-2 grid gap-2 ${wide ? "grid-cols-2" : "grid-cols-1"}`}>
-                  {card.steps.length ? card.steps.map((step) => (
-                    <div key={step.id} className="flex gap-2 rounded-md border p-3 text-sm">
-                      <span className="text-muted-foreground">{step.stepNumber}.</span>
-                      <span className="min-w-0 flex-1">{step.title}</span>
-                      {step.requiresRobert && <Badge variant="outline">Decision</Badge>}
-                    </div>
-                  )) : <p className="text-sm text-muted-foreground">No structured steps recorded.</p>}
+                  {card.steps.length ? card.steps.map((step) => {
+                    const action = managerActions.find(item => item.stepIds.includes(step.id));
+                    return (
+                      <WorkerTaskStepRow key={step.id} step={step} action={action} />
+                    );
+                  }) : <p className="text-sm text-muted-foreground">No structured steps recorded.</p>}
                 </div>
               </section>
             </div>
           </div>
           <div className="grid shrink-0 gap-2 border-t bg-background p-4 sm:grid-cols-2">
-            <Button onClick={() => onStart(card)}><Play className="size-4" />Start timer</Button>
+            <Button disabled={!canStart(card)} onClick={() => onStart(card)}><Play className="size-4" />{activeTimer?.cardId === card.cardId ? "Timer running" : activeTimer ? "Timer running on another task" : "Start timer"}</Button>
             <Button variant="outline" asChild><a href={card.cardUrl} target="_blank" rel="noreferrer">Open Trello <ExternalLink className="size-4" /></a></Button>
           </div>
         </>}
@@ -737,117 +994,110 @@ function CardInspector({
 
 function PlanView({ founderName, timeZone }: { founderName: string; timeZone: string }) {
   const utils = trpc.useUtils();
+  const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null);
   const query = trpc.operator.getDailyPlan.useQuery(undefined, { staleTime: 60_000 });
+  const editingPolicy = trpc.operator.getDailyPlanEditingPolicy.useQuery(undefined, { staleTime: 60_000 });
+  const manager = trpc.operator.getManagerStatus.useQuery(undefined, managerStatusQueryOptions);
   const mutation = trpc.operator.generateDailyPlan.useMutation({
     onSuccess: () => { void utils.operator.getDailyPlan.invalidate(); toast.success("Day plan generated"); },
-    onError: (error) => toast.error(error.message),
+    onError: () => toast.error("Your day plan could not be updated. Reload the saved plan before trying again."),
   });
-  const replan = trpc.operator.replanRemainingDay.useMutation({
-    onSuccess: () => {
-      void utils.operator.getDailyPlan.invalidate();
-      toast.success("Remaining day replanned");
-    },
-    onError: (error) => toast.error(error.message),
-  });
-  const updatePlan = trpc.operator.updateDailyPlan.useMutation({
-    onSuccess: () => {
-      void utils.operator.getDailyPlan.invalidate();
-      toast.success("Plan block updated");
-    },
-    onError: (error) => toast.error(error.message),
-  });
-  const [elapsed, setElapsed] = useState(0);
   const run = (force: boolean) => {
-    setElapsed(0);
-    const timer = window.setInterval(() => setElapsed((value) => value + 1), 1_000);
-    mutation.mutate({ force }, { onSettled: () => window.clearInterval(timer) });
+    setGenerationStartedAt(Date.now());
+    mutation.mutate({ force });
   };
   const plan = query.data?.schedule;
-  const progress = mutation.isPending ? Math.min(92, 15 + elapsed * 8) : 0;
-  const stage = elapsed < 2 ? "Loading APTLSS state" : elapsed < 5 ? "Protecting breaks and ranking lanes" : "Validating and saving blocks";
-  const updateBlockStatus = (blockId: string, status: "done" | "skipped") => {
-    if (!plan) return;
-    const at = new Date().toISOString();
-    updatePlan.mutate({
-      ...plan,
-      generatedAt: at,
-      blocks: plan.blocks.map((block) => block.id === blockId ? { ...block, status } : block),
-      auditTrail: [...plan.auditTrail, { at, action: `block_${status}`, detail: `Worker marked ${blockId} as ${status}.` }],
-    });
-  };
+  const workerPlanImpact = workerFacingPlanImpact(manager.data?.snapshot?.proposal?.planningImpact);
+  const canEditPlan = editingPolicy.data?.editable === true;
   return (
     <div className="space-y-5">
-      <PageHeading title="Plan My Day" description="One agenda. Detail remains available inside each block instead of separate duplicate views." actions={<div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => replan.mutate()} disabled={!plan || replan.isPending || mutation.isPending}>{replan.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}Replan remaining</Button><Button onClick={() => run(Boolean(plan))} disabled={mutation.isPending || replan.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{plan ? "Regenerate plan" : "Generate plan"}</Button></div>} />
-      {mutation.isPending && <Card className="gap-3 rounded-lg p-5"><div className="flex justify-between text-sm"><span className="font-medium">{stage}</span><span className="text-muted-foreground">about {Math.max(1, 12 - elapsed)}s left</span></div><Progress value={progress} /><p className="text-xs text-muted-foreground">{progress}% complete · live estimate adjusts as validation runs</p></Card>}
-      {query.isLoading ? <QueueSkeleton /> : !plan ? <Alert><Inbox className="size-4" /><AlertTitle>No saved plan</AlertTitle><AlertDescription>Generate from the current APTLSS plans, states, priorities, and configured schedule.</AlertDescription></Alert> : (
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
-          <Card className="gap-0 rounded-lg py-0">
-            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Today’s agenda</CardTitle><CardDescription>{plan.constraints.startTime}–{plan.constraints.endTime} · {timeZone} · configured breaks protected</CardDescription></CardHeader>
-            <CardContent className="p-0">
-              {plan.blocks.length ? plan.blocks.map((block) => (
-                <div key={block.id} className="grid gap-3 border-b p-4 last:border-b-0 sm:grid-cols-[72px_minmax(0,1fr)_auto]">
-                  <div className="text-sm font-medium">{block.startTime}<div className="text-xs font-normal text-muted-foreground">{block.endTime}</div></div>
-                  <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-medium">{block.cardName}</span><Badge variant="outline" className={priorityTone(block.priority)}>{block.priority}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{block.action}</p></div>
-                  <div className="flex items-center gap-2"><Badge variant="outline">{block.status}</Badge>{block.status === "planned" && <><Button variant="ghost" size="icon" title="Mark block done" aria-label="Mark block done" disabled={updatePlan.isPending} onClick={() => updateBlockStatus(block.id, "done")}><Check className="size-4" /></Button><Button variant="ghost" size="icon" title="Skip block" aria-label="Skip block" disabled={updatePlan.isPending} onClick={() => updateBlockStatus(block.id, "skipped")}><ChevronRight className="size-4" /></Button></>}</div>
-                </div>
-              )) : <div className="p-6 text-sm text-muted-foreground">No work blocks are scheduled for this protected day.</div>}
-            </CardContent>
-          </Card>
-          <div className="space-y-3">
-            <ContextMetric icon={Gauge} label="Confidence" value={`${plan.planHealth.confidence}%`} detail="Evidence-backed, capped below certainty" />
-            <ContextMetric icon={Clock3} label="Scheduled" value={`${Math.round(plan.planHealth.scheduledMinutes / 60 * 10) / 10}h`} detail={`${plan.planHealth.gaps} min remains available`} />
-            <ContextMetric icon={BrainCircuit} label={`${founderName} items`} value={`${plan.robertItems.length}`} detail="Visible even when unscheduled" />
-            <ContextMetric icon={ListTodo} label="Unscheduled" value={`${plan.unscheduledCards.length}`} detail="Retained for replanning" />
-          </div>
-        </div>
-      )}
+      <PageHeading title="Plan My Day" description="" actions={canEditPlan ? <Button onClick={() => run(Boolean(plan))} disabled={mutation.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{plan ? "Regenerate plan" : "Generate plan"}</Button> : undefined} />
+      {editingPolicy.isError && <Alert variant="destructive"><AlertTitle>Plan access could not be checked</AlertTitle><AlertDescription>Reload this page before making schedule changes.</AlertDescription></Alert>}
+      {editingPolicy.data?.editable === false && <Alert><CalendarDays className="size-4" /><AlertTitle>Agenda changes are paused</AlertTitle><AlertDescription>{plan ? `Your saved agenda remains the schedule to follow. Suggested changes above are not applied. Contact ${founderName} if it needs to change.` : `No agenda is saved yet. Contact ${founderName} to set today's schedule.`}</AlertDescription></Alert>}
+      {mutation.isPending && generationStartedAt !== null && <PendingPlanGenerationStatus startedAt={generationStartedAt} />}
+      {query.error && <Alert variant="destructive"><AlertTitle>Plan could not be loaded</AlertTitle><AlertDescription>The saved agenda is unavailable. Refresh the page before relying on it. <Button variant="outline" size="sm" onClick={() => void query.refetch()}>Retry</Button></AlertDescription></Alert>}
+      {mutation.error && <Alert variant="destructive"><AlertTitle>Plan update needs confirmation</AlertTitle><AlertDescription>Reload the saved plan before trying again to check whether the update completed.</AlertDescription></Alert>}
+      {!query.isLoading && !query.error && !manager.isLoading && !manager.error && !manager.data?.error && <WorkerPlanSuggestion
+        impact={workerPlanImpact}
+        expectedPlanVersion={manager.data?.snapshot?.planVersion}
+        currentPlanVersion={query.data?.planVersion}
+        currentDateKey={dateKeyInTimeZone(Date.now(), timeZone)}
+        hasSavedPlan={!!plan}
+        applied={manager.data?.snapshot?.applied}
+      />}
+      {query.isLoading ? <QueueSkeleton /> : !plan && !query.error && canEditPlan ? <Alert><Inbox className="size-4" /><AlertTitle>No saved plan</AlertTitle><AlertDescription>Create a plan using your tasks and working hours.</AlertDescription></Alert> : plan ? <WorkerDailyPlanContent plan={plan} timeZone={timeZone} /> : null}
+    </div>
+  );
+}
+
+type WorkerDailyPlanSchedule = NonNullable<RouterOutputs["operator"]["getDailyPlan"]>["schedule"];
+
+export function WorkerDailyPlanContent({ plan, timeZone }: { plan: WorkerDailyPlanSchedule; timeZone: string }) {
+  const scheduledHours = Math.round(plan.planHealth.scheduledMinutes / 60 * 10) / 10;
+  const availableMinutes = Math.max(0, plan.planHealth.availableMinutes - plan.planHealth.scheduledMinutes);
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
+      <Card className="gap-0 rounded-lg py-0">
+        <CardHeader className="border-b py-4"><CardTitle className="text-sm">Today’s agenda</CardTitle><CardDescription>{plan.constraints.startTime}–{plan.constraints.endTime} · {timeZone} · breaks protected</CardDescription></CardHeader>
+        <CardContent className="p-0">
+          {plan.blocks.length ? plan.blocks.map((block) => (
+            <div key={block.id} className="grid gap-3 border-b p-4 last:border-b-0 sm:grid-cols-[72px_minmax(0,1fr)_auto]">
+              <div className="text-sm font-medium">{block.startTime}<div className="text-xs font-normal text-muted-foreground">{block.endTime}</div></div>
+              <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-medium">{block.cardName}</span><Badge variant="outline" className={priorityTone(block.priority)}>{block.priority}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{workerFacingOperationalText(block.action, "Continue the next recorded task step.")}</p></div>
+              <Badge variant="outline">{workerPlanBlockStatus(block.status)}</Badge>
+            </div>
+          )) : <div className="p-6 text-sm text-muted-foreground">No work blocks are scheduled for this protected day.</div>}
+        </CardContent>
+      </Card>
+      <div className="space-y-3">
+        <ContextMetric icon={Clock3} label="Scheduled" value={`${scheduledHours}h`} detail={`${availableMinutes} min available`} />
+        <ContextMetric icon={ListTodo} label="Unscheduled tasks" value={`${plan.unscheduledCards.length}`} detail="Not placed in today's agenda" />
+        {!!plan.unscheduledCards.length && <details className="border-t py-3"><summary className="cursor-pointer text-sm font-medium">Unscheduled tasks ({plan.unscheduledCards.length})</summary><ul className="mt-3 space-y-3 text-sm">{plan.unscheduledCards.map(item => <li key={item.cardId}><p className="font-medium">{item.cardName}</p><p className="text-muted-foreground">{workerFacingOperationalText(item.reason, "No suitable time block is available; review the task details.")}</p></li>)}</ul></details>}
+      </div>
     </div>
   );
 }
 
 function DecisionsView({ founderName }: { founderName: string }) {
-  const utils = trpc.useUtils();
   const queue = trpc.aptlss.getDecisionQueue.useQuery(undefined, { staleTime: 30_000 });
   const history = trpc.operator.getDecisionHistory.useQuery({ limit: 20 }, { staleTime: 30_000 });
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [outcome, setOutcome] = useState("");
+  const [showAllDecisions, setShowAllDecisions] = useState(false);
   const selected = queue.data?.items.find((item) => item.stepId === selectedId) ?? queue.data?.items[0] ?? null;
-  const mutation = trpc.operator.recordDecisionOutcome.useMutation({
-    onSuccess: () => {
-      setOutcome("");
-      setSelectedId(null);
-      void utils.aptlss.getDecisionQueue.invalidate();
-      void utils.operator.getDecisionHistory.invalidate();
-      toast.success("Outcome recorded");
-    },
-    onError: (error) => toast.error(error.message),
-  });
+  const decisionItems = queue.data?.items ?? [];
+  const visibleDecisionItems = showAllDecisions ? decisionItems : decisionItems.slice(0, 8);
   return (
     <div className="space-y-5">
-      <PageHeading title="Decisions" description="Close a decision only by recording what was decided. Nothing is posted or moved in Trello." />
+      <PageHeading title="Decisions" description={`These items await a decision from ${founderName}. Continue with other work until the outcome is recorded.`} />
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-4">
           <Card className="gap-0 rounded-lg py-0">
-            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Decision inbox</CardTitle><CardDescription>Highest-priority unresolved decision first.</CardDescription></CardHeader>
+            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Awaiting founder</CardTitle><CardDescription>Highest-priority unresolved decision first.</CardDescription></CardHeader>
             <CardContent className="p-0">
-              {queue.isLoading ? <div className="p-4"><QueueSkeleton /></div> : queue.data?.items.length ? queue.data.items.map((item, index) => (
-                <button key={item.stepId} type="button" onClick={() => setSelectedId(item.stepId)} className={`grid w-full grid-cols-[28px_minmax(0,1fr)_auto] gap-3 border-b px-4 py-3 text-left last:border-b-0 hover:bg-accent/40 ${selected?.stepId === item.stepId ? "bg-accent/50" : ""}`}>
-                  <span className="flex size-6 items-center justify-center rounded border text-xs">{index + 1}</span>
-                  <span className="min-w-0"><span className="block truncate text-sm font-medium">{item.cardName}</span><span className="block truncate text-xs text-muted-foreground">{item.stepTitle}</span></span>
-                  <Badge variant="outline" className={priorityTone(item.tier)}>{item.tier}</Badge>
-                </button>
-              )) : <EmptyState title="Decision inbox is clear" detail={`New ${founderName}-required APTLSS steps will appear here.`} />}
+              {queue.isLoading ? <div className="p-4"><QueueSkeleton /></div> : queue.error ? <p role="alert" className="p-4 text-sm">Decision items could not be loaded. Refresh before relying on this list.</p> : decisionItems.length ? <>
+                {visibleDecisionItems.map((item, index) => (
+                  <button key={item.stepId} type="button" onClick={() => setSelectedId(item.stepId)} className={`grid w-full grid-cols-[28px_minmax(0,1fr)_auto] gap-3 border-b px-4 py-3 text-left hover:bg-accent/40 ${selected?.stepId === item.stepId ? "bg-accent/50" : ""}`}>
+                    <span className="flex size-6 items-center justify-center rounded border text-xs">{index + 1}</span>
+                    <span className="min-w-0"><span className="block truncate text-sm font-medium">{item.cardName}</span><span className="block truncate text-xs text-muted-foreground">{item.stepTitle}</span></span>
+                    <Badge variant="outline" className={priorityTone(item.tier)}>{item.tier}</Badge>
+                  </button>
+                ))}
+                {decisionItems.length > 8 && <div className="p-3">
+                  <Button className="w-full" variant="ghost" onClick={() => setShowAllDecisions((value) => !value)}>
+                    {showAllDecisions ? "Show fewer decisions" : `Show ${decisionItems.length - 8} more decisions`}
+                  </Button>
+                </div>}
+              </> : <EmptyState title="Decision inbox is clear" detail={`New ${founderName}-required APTLSS steps will appear here.`} />}
             </CardContent>
           </Card>
-          <RecentOutcomes rows={history.data ?? []} />
+          <RecentOutcomes rows={history.data ?? []} unavailable={!!history.error} />
         </div>
         <Card className="h-fit gap-4 rounded-lg p-5 lg:sticky lg:top-20">
           {selected ? <>
-            <div><div className="text-xs font-semibold uppercase text-muted-foreground">Selected decision</div><h2 className="mt-1 font-semibold">{selected.cardName}</h2><p className="mt-1 text-sm text-muted-foreground">{selected.stepTitle}</p></div>
-            <div className="rounded-md border bg-muted/30 p-3"><div className="text-[11px] font-semibold uppercase text-muted-foreground">Recommendation</div><p className="mt-1 text-sm">{selected.recommendedDecision || "No recommendation recorded; use the linked Trello context."}</p></div>
-            <div><label htmlFor="decision-outcome" className="text-sm font-medium">Outcome <span className="text-destructive">*</span></label><Textarea id="decision-outcome" className="mt-2 min-h-28" value={outcome} onChange={(event) => setOutcome(event.target.value)} placeholder="Record the exact decision and any condition that affects the next step." /></div>
-            <Button onClick={() => mutation.mutate({ stepId: selected.stepId, outcome })} disabled={outcome.trim().length < 3 || mutation.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}Record outcome</Button>
-            <Button variant="outline" asChild><a href={selected.cardUrl} target="_blank" rel="noreferrer">Open Trello context <ExternalLink className="size-4" /></a></Button>
+            <div><div className="text-xs font-semibold uppercase text-muted-foreground">Decision owner: {founderName}</div><h2 className="mt-1 font-semibold">{selected.cardName}</h2><p className="mt-1 text-sm text-muted-foreground">{selected.stepTitle}</p></div>
+            <p className="text-sm">This step remains on hold. The founder records the decision; APTLSS then reassesses the card before you continue.</p>
+            {/^https:\/\//i.test(selected.cardUrl) && <Button variant="outline" asChild><a href={selected.cardUrl} target="_blank" rel="noopener noreferrer">Open Trello context <ExternalLink className="size-4" /></a></Button>}
           </> : <EmptyState title="Select a decision" detail="The outcome inspector stays separate from the ordered inbox." />}
         </Card>
       </div>
@@ -855,9 +1105,9 @@ function DecisionsView({ founderName }: { founderName: string }) {
   );
 }
 
-function RecentOutcomes({ rows }: { rows: Array<{ id: number; cardName: string; outcome: string; resolvedAt: Date; recommendedDecision: string | null }> }) {
+function RecentOutcomes({ rows, unavailable }: { rows: Array<{ id: number; cardName: string; outcome: string; resolvedAt: Date }>; unavailable: boolean }) {
   const [open, setOpen] = useState(false);
-  return <Card className="gap-0 rounded-lg py-0"><Collapsible open={open} onOpenChange={setOpen}><CollapsibleTrigger className="flex w-full items-center justify-between p-4 text-left"><span><span className="block text-sm font-semibold">Recent outcomes</span><span className="block text-xs text-muted-foreground">Durable resolution history</span></span>{open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</CollapsibleTrigger><CollapsibleContent className="border-t">{rows.length ? rows.map((row) => <div key={row.id} className="border-b p-4 last:border-b-0"><div className="flex justify-between gap-3"><span className="text-sm font-medium">{row.cardName}</span><span className="shrink-0 text-xs text-muted-foreground">{new Date(row.resolvedAt).toLocaleDateString()}</span></div><p className="mt-1 text-sm">{row.outcome}</p>{row.recommendedDecision && <p className="mt-1 text-xs text-muted-foreground">Recommended: {row.recommendedDecision}</p>}</div>) : <div className="p-4 text-sm text-muted-foreground">No recorded outcomes yet.</div>}</CollapsibleContent></Collapsible></Card>;
+  return <Card className="gap-0 rounded-lg py-0"><Collapsible open={open} onOpenChange={setOpen}><CollapsibleTrigger className="flex w-full items-center justify-between p-4 text-left"><span><span className="block text-sm font-semibold">Recent outcomes</span><span className="block text-xs text-muted-foreground">Durable resolution history</span></span>{open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</CollapsibleTrigger><CollapsibleContent className="border-t">{unavailable ? <p role="alert" className="p-4 text-sm">Outcome history could not be loaded. Refresh before relying on this list.</p> : rows.length ? rows.map((row) => <div key={row.id} className="border-b p-4 last:border-b-0"><div className="flex justify-between gap-3"><span className="text-sm font-medium">{row.cardName}</span><span className="shrink-0 text-xs text-muted-foreground">{new Date(row.resolvedAt).toLocaleDateString()}</span></div><p className="mt-1 text-sm">{row.outcome}</p></div>) : <div className="p-4 text-sm text-muted-foreground">No recorded outcomes yet.</div>}</CollapsibleContent></Collapsible></Card>;
 }
 
 function EvidenceView() {
@@ -867,26 +1117,64 @@ function EvidenceView() {
   const intelligence = trpc.operator.getWorkQueueContext.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const compliance = trpc.compliance.getHistory.useQuery({ limit: 7 }, { retry: false, staleTime: 60_000 });
   const email = trpc.emailInbox.getPendingCount.useQuery(undefined, { retry: false, staleTime: 60_000 });
+  const google = trpc.operator.getGoogleEvidenceStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const latest = compliance.data?.[0] ?? null;
+  const browserConnection = describeBrowserConnection(status.data);
+  const gmailSync = google.data?.credentialsReady ? describeWorkerIntegrationSync({
+    enabled: google.data.gmail.enabled,
+    intervalMinutes: google.data.gmail.intervalMinutes,
+    lastSyncedAt: google.data.gmail.lastSyncedAt,
+    lastError: google.data.gmail.lastError,
+  }) : null;
+  const driveSync = google.data?.credentialsReady ? describeWorkerIntegrationSync({
+    enabled: google.data.drive.enabled,
+    intervalMinutes: google.data.drive.intervalMinutes,
+    lastSyncedAt: google.data.drive.lastSyncedAt,
+    lastError: google.data.drive.lastError,
+  }) : null;
+  const integrationStatus = (provider: "gmail" | "drive", sync: typeof gmailSync) => !google.data
+    ? google.isLoading ? "Checking" : "Unavailable"
+    : !google.data.credentialsReady ? "Setup required"
+      : provider === "gmail" && google.data.gmail.sourceConflictPending ? "Review required"
+      : sync?.label ?? "Status unknown";
+  const integrationDetail = (provider: "gmail" | "drive", sync: typeof gmailSync) => {
+    if (!google.data) return google.isLoading
+      ? "Checking the Google connection and last successful sync."
+      : "Google sync status could not be checked. Open Settings to retry.";
+    if (!google.data.credentialsReady) return "Connect Google in Settings before these sources can be checked.";
+    const source = google.data[provider];
+    const when = source.lastSyncedAt && Number.isFinite(Date.parse(source.lastSyncedAt))
+      ? ` Last successful sync: ${new Date(source.lastSyncedAt).toLocaleString()}.`
+      : " No valid successful sync time is recorded.";
+    const statusDetail = sync ? workerSyncStatusDetail(sync) : "Sync status is unavailable.";
+    const providerDetail = provider === "gmail"
+      ? `${email.error ? "Pending email count is unavailable." : `${email.data?.count ?? 0} email${email.data?.count === 1 ? "" : "s"} awaiting review.`} Gmail is not changed automatically.`
+      : "This check collects accessible file metadata; open a matched Drive file to review its contents.";
+    if (provider === "gmail" && google.data.gmail.sourceConflictPending) {
+      return `A saved email could not be safely refreshed. Review the original before relying on it.${when} ${providerDetail}`;
+    }
+    return `${statusDetail}${when} ${providerDetail}`;
+  };
   return (
     <div className="space-y-5">
-      <PageHeading title="Evidence" description="Connected facts are visible here; execution actions remain in Today and Decisions." />
+      <PageHeading title="Evidence" description="" />
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <ContextMetric icon={ShieldCheck} label="APTLSS cards" value={`${intelligence.data?.cards.length ?? 0}`} detail="Plans joined to states and scores" />
-        <ContextMetric icon={Clock3} label="Waiting reasons" value={`${waiting.data?.length ?? 0}`} detail="Free-flow reasons interpreted" />
-        <ContextMetric icon={Archive} label="Browser collector" value={status.data?.connected ? "Connected" : "Disconnected"} detail={status.data?.capturedAt ? `Last seen ${new Date(status.data.capturedAt).toLocaleTimeString()}` : "No inventory received"} />
+        <ContextMetric icon={ShieldCheck} label="Tasks" value={`${intelligence.data?.cards.length ?? 0}`} detail="Tasks with recorded steps" />
+        <ContextMetric icon={Clock3} label="Waiting reasons" value={`${waiting.data?.length ?? 0}`} detail="Recorded blockers and follow-ups" />
+        <ContextMetric icon={Archive} label="Browser connection" value={browserConnection.label} detail={browserConnection.detail} />
         <ContextMetric icon={History} label="Daily compliance" value={latest ? `${latest.compliancePct}%` : "No snapshot"} detail={latest ? `${latest.evidenceCount} source facts checked` : "Record a verified snapshot"} />
       </div>
       <Card className="gap-0 rounded-lg py-0">
-        <CardHeader className="border-b py-4"><CardTitle className="text-sm">Evidence boundaries</CardTitle><CardDescription>What the consolidated layer knows and what it still needs.</CardDescription></CardHeader>
+        <CardHeader className="border-b py-4"><CardTitle className="text-sm">Connected sources</CardTitle></CardHeader>
         <CardContent className="divide-y p-0">
-          <EvidenceRow label="Trello and APTLSS" status={intelligence.error ? "Needs attention" : "Connected"} detail={intelligence.error?.message ?? "Plans, card state, priority and open steps are joined by card ID."} />
-          <EvidenceRow label="Waiting reasons" status="Operational" detail="Free-text is classified into actor, missing item, follow-up and next action with confidence and missing-information flags." />
-          <EvidenceRow label="Browser tabs" status={status.data?.connected ? "Connected" : "Setup required"} detail={status.data?.connected ? `${status.data.actionableTabs} actionable tabs are currently visible.` : "Install and authorize the local collector before tab compliance can be trusted."} />
-          <EvidenceRow label="Communication" status={latest?.verificationStatus ?? "No snapshot"} detail={latest ? `${latest.messageReplied}/${latest.messageTotal} messages answered; ${latest.messageNeedsClarification} need clarification.` : "No verified communication snapshot is available yet."} />
-          <EvidenceRow label="Gmail processing" status={email.error ? "Needs attention" : `${email.data?.count ?? 0} pending`} detail={latest ? `${latest.emailCompleted}/${latest.emailTotal} retained emails were processed or archived for the latest snapshot.` : "Inbox tasks are retained without changing Gmail automatically."} />
-          <EvidenceRow label="Time accountability" status={latest ? `${Math.round(latest.trackedSeconds / 360) / 10}h tracked` : "No snapshot"} detail={latest ? `${Math.round(latest.overtimeSeconds / 360) / 10}h overtime against the configured worker schedule.` : "Completed timer entries are included in the next snapshot."} />
-          <EvidenceRow label="Browser history" status={`${history.data?.length ?? 0} days`} detail="End-of-day browser snapshots are retained separately from task and communication evidence." />
+          <EvidenceRow label="Trello tasks" status={intelligence.isLoading ? "Checking" : intelligence.error ? "Unavailable" : "Available"} detail={intelligence.error ? "Task information could not be loaded. Refresh before relying on it." : "Task status, priority and remaining steps. Cached-source freshness is shown in each task's details."} />
+          <EvidenceRow label="Waiting reasons" status={waiting.isLoading ? "Checking" : waiting.error ? "Unavailable" : `${waiting.data?.length ?? 0} recorded`} detail={waiting.error ? "Waiting reasons could not be loaded. Refresh before relying on them." : "Recorded reasons tasks are waiting and who needs to respond."} />
+          <EvidenceRow label="Browser tabs" status={browserConnection.label} detail={browserConnection.detail} />
+          <EvidenceRow label="Communication" status={compliance.isLoading ? "Checking" : compliance.error ? "Unavailable" : latest?.verificationStatus ?? "No snapshot"} detail={compliance.error ? "Communication review status could not be loaded." : latest ? `${latest.messageReplied}/${latest.messageTotal} messages answered; ${latest.messageNeedsClarification} need clarification.` : "No verified communication snapshot is available yet."} />
+          <EvidenceRow label="Gmail sync" status={integrationStatus("gmail", gmailSync)} detail={integrationDetail("gmail", gmailSync)} />
+          <EvidenceRow label="Google Drive metadata" status={integrationStatus("drive", driveSync)} detail={integrationDetail("drive", driveSync)} />
+          <EvidenceRow label="Time accountability" status={compliance.isLoading ? "Checking" : compliance.error ? "Unavailable" : latest ? `${Math.round(latest.trackedSeconds / 360) / 10}h tracked` : "No snapshot"} detail={compliance.error ? "Time accountability could not be loaded." : latest ? `${Math.round(latest.overtimeSeconds / 360) / 10}h overtime against the configured worker schedule.` : "Completed timer entries are included in the next snapshot."} />
+          <EvidenceRow label="Browser history" status={history.isLoading ? "Checking" : history.error ? "Unavailable" : `${history.data?.length ?? 0} days`} detail={history.error ? "Browser history could not be loaded." : "Your recorded end-of-day tab checks."} />
         </CardContent>
       </Card>
     </div>
@@ -899,6 +1187,7 @@ function WorkerSettingsView() {
   const policy = trpc.operator.getBrowserTabPolicy.useQuery(undefined, { staleTime: 60_000 });
   const browser = trpc.operator.getBrowserTabStatus.useQuery(undefined, { retry: false, staleTime: 30_000 });
   const email = trpc.emailInbox.getPendingCount.useQuery(undefined, { retry: false, staleTime: 60_000 });
+  const google = trpc.operator.getGoogleEvidenceStatus.useQuery(undefined, { retry: false, staleTime: 60_000, refetchInterval: 60_000 });
   const apiHealth = trpc.system.health.useQuery(
     { timestamp: 0 },
     { retry: 1, staleTime: 30_000, refetchInterval: 60_000 },
@@ -908,6 +1197,13 @@ function WorkerSettingsView() {
   const [warningMinutes, setWarningMinutes] = useState(30);
   const [staleMinutes, setStaleMinutes] = useState(10);
   const [includePinnedTabs, setIncludePinnedTabs] = useState(false);
+  const [gmailEnabled, setGmailEnabled] = useState(true);
+  const [gmailInterval, setGmailInterval] = useState(60);
+  const [gmailLookback, setGmailLookback] = useState(30);
+  const [driveEnabled, setDriveEnabled] = useState(true);
+  const [driveInterval, setDriveInterval] = useState(180);
+  const [driveLookback, setDriveLookback] = useState(30);
+  const [driveFolderId, setDriveFolderId] = useState("");
 
   useEffect(() => {
     if (!policy.data) return;
@@ -918,13 +1214,24 @@ function WorkerSettingsView() {
     setIncludePinnedTabs(policy.data.includePinnedTabs);
   }, [policy.data]);
 
+  useEffect(() => {
+    if (!google.data) return;
+    setGmailEnabled(google.data.settings.gmail.enabled);
+    setGmailInterval(google.data.settings.gmail.intervalMinutes);
+    setGmailLookback(google.data.settings.gmail.lookbackDays);
+    setDriveEnabled(google.data.settings.drive.enabled);
+    setDriveInterval(google.data.settings.drive.intervalMinutes);
+    setDriveLookback(google.data.settings.drive.lookbackDays);
+    setDriveFolderId(google.data.settings.drive.folderId ?? "");
+  }, [google.data]);
+
   const savePolicy = trpc.operator.setBrowserTabPolicy.useMutation({
     onSuccess: () => {
       void utils.operator.getBrowserTabPolicy.invalidate();
       void utils.operator.getBrowserTabStatus.invalidate();
       toast.success("Browser policy saved");
     },
-    onError: (error) => toast.error(error.message),
+    onError: () => toast.error("Browser settings could not be saved. Try again."),
   });
   const collectorToken = trpc.operator.getBrowserCollectorToken.useMutation({
     onSuccess: async ({ token }) => {
@@ -932,24 +1239,80 @@ function WorkerSettingsView() {
         await navigator.clipboard.writeText(token);
         toast.success("Collector token copied");
       } catch {
-        toast.error("Clipboard access was blocked");
+        toast.error("The pairing details could not be copied. Try again.");
       }
     },
-    onError: (error) => toast.error(error.message),
+    onError: () => toast.error("Browser pairing could not be created. Try again."),
+  });
+  const saveGoogle = trpc.operator.updateGoogleEvidenceSettings.useMutation({
+    onSuccess: () => {
+      void utils.operator.getGoogleEvidenceStatus.invalidate();
+      toast.success("Google evidence settings saved");
+    },
+    onError: () => toast.error("Google settings could not be saved. Try again."),
+  });
+  const syncGoogle = trpc.operator.syncGoogleEvidence.useMutation({
+    onSuccess: (result) => {
+      void utils.operator.getGoogleEvidenceStatus.invalidate();
+      void utils.emailInbox.getPendingCount.invalidate();
+      void utils.operator.getWorkQueueContext.invalidate();
+      if (!result.configured) {
+        toast.error("Google evidence is not configured. Review the connection settings.");
+      } else if (result.message) {
+        toast.error(workerFacingGoogleSyncFailure(result.message));
+      } else if (result.gmail.sourceConflictWarning) {
+        toast.info("Sync finished, but a Gmail source needs review. The previously saved evidence was left unchanged.");
+      } else {
+        toast.success(`Evidence refreshed: ${result.gmail.imported} emails and ${result.drive.imported} Drive files checked`);
+      }
+    },
+    onError: (error) => toast.error(workerFacingGoogleSyncFailure(error.message)),
+  });
+  const disconnectGoogle = trpc.operator.disconnectGoogleEvidence.useMutation({
+    onSuccess: () => {
+      void utils.operator.getGoogleEvidenceStatus.invalidate();
+      toast.success("Google worker connection removed");
+    },
+    onError: () => toast.error("Google connection could not be removed. Try again."),
   });
   const worker = context.data;
+  const browserConnection = describeBrowserConnection(browser.data);
+  const googleReady = google.data?.credentialsReady === true;
+  const gmailSync = googleReady ? describeWorkerIntegrationSync({
+    enabled: google.data!.gmail.enabled,
+    intervalMinutes: google.data!.gmail.intervalMinutes,
+    lastSyncedAt: google.data!.gmail.lastSyncedAt,
+    lastError: google.data!.gmail.lastError,
+  }) : null;
+  const driveSync = googleReady ? describeWorkerIntegrationSync({
+    enabled: google.data!.drive.enabled,
+    intervalMinutes: google.data!.drive.intervalMinutes,
+    lastSyncedAt: google.data!.drive.lastSyncedAt,
+    lastError: google.data!.drive.lastError,
+  }) : null;
+  const connectionTime = (value: string | null | undefined) => formatIntegrationTime(value, worker?.timezone ?? "UTC");
   const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
   return (
     <div className="space-y-5">
-      <PageHeading title="Settings" description="Personal operating controls for this worker profile. Founder and system administration remain separate." />
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <PageHeading title="Settings" description="" />
+      <ManagerShadowSettings />
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">
         <Card className="gap-0 rounded-lg py-0">
           <CardHeader className="border-b py-4">
             <CardTitle className="text-sm">Browser organization</CardTitle>
             <CardDescription>Warn near the end of the working day when the connected browser exceeds the agreed limit.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-5 p-5">
+            <details className="border-b pb-4" open={!browser.data?.collectorConfigured}>
+              <summary className="cursor-pointer text-sm font-medium">Connect this work browser</summary>
+              <div className="mt-3 space-y-3 text-sm text-muted-foreground">
+                <Button variant="outline" asChild><a href="/downloads/worker-browser-collector.zip" download>Download browser collector</a></Button>
+                <p>If you already installed an earlier version, replace the files in the same unpacked extension folder and click Reload on the browser's Extensions page. Keeping the same installation preserves its saved pairing.</p>
+                <ol className="list-decimal space-y-2 pl-5"><li>Extract the download. In Chrome or Edge Extensions, enable developer mode and choose Load unpacked. Select the extracted folder.</li><li>Create a pairing token below. This replaces any previous token for this worker.</li><li>In the extension settings, enter this dashboard address: <span className="break-all font-mono">{window.location.origin}</span>. Paste the token, enable reporting and choose Save and test.</li></ol>
+                <p>The collector reports tab counts, website domains and pinned state. It does not send page contents, URL paths or tab titles. Closing tabs always requires your selection and confirmation.</p>
+              </div>
+            </details>
             <div className="flex items-center justify-between gap-4">
               <div><Label htmlFor="browser-policy-enabled">End-of-day checks</Label><p className="mt-1 text-xs text-muted-foreground">Keep tab hygiene evidence active for this profile.</p></div>
               <Switch id="browser-policy-enabled" checked={enabled} onCheckedChange={setEnabled} />
@@ -957,7 +1320,7 @@ function WorkerSettingsView() {
             <div className="grid gap-4 sm:grid-cols-3">
               <NumberSetting id="max-open-tabs" label="Allowed tabs" value={maxOpenTabs} min={0} max={50} onChange={setMaxOpenTabs} />
               <NumberSetting id="warning-minutes" label="Warn before end" value={warningMinutes} min={0} max={240} suffix="min" onChange={setWarningMinutes} />
-              <NumberSetting id="stale-minutes" label="Collector stale after" value={staleMinutes} min={2} max={120} suffix="min" onChange={setStaleMinutes} />
+              <NumberSetting id="stale-minutes" label="Warn if disconnected for" value={staleMinutes} min={2} max={120} suffix="min" onChange={setStaleMinutes} />
             </div>
             <div className="flex items-center justify-between gap-4 rounded-md border p-3">
               <div><Label htmlFor="include-pinned">Count pinned tabs</Label><p className="mt-1 text-xs text-muted-foreground">Pinned reference tabs are excluded by default.</p></div>
@@ -965,7 +1328,7 @@ function WorkerSettingsView() {
             </div>
             <div className="flex flex-wrap justify-end gap-2">
               <Button variant="outline" onClick={() => collectorToken.mutate()} disabled={collectorToken.isPending}>
-                {collectorToken.isPending ? <Loader2 className="size-4 animate-spin" /> : <Copy className="size-4" />}Copy collector token
+                {collectorToken.isPending ? <Loader2 className="size-4 animate-spin" /> : <Copy className="size-4" />}Create and copy pairing token
               </Button>
               <Button
                 onClick={() => savePolicy.mutate({
@@ -994,20 +1357,78 @@ function WorkerSettingsView() {
             </CardContent>
           </Card>
           <Card className="gap-0 rounded-lg py-0">
-            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Evidence connections</CardTitle></CardHeader>
+            <CardHeader className="border-b py-4"><CardTitle className="text-sm">Connection health</CardTitle><CardDescription>These checks show saved access and sync freshness, not proof that every source contains all task information.</CardDescription></CardHeader>
             <CardContent className="divide-y p-0">
               <ConnectionRow
-                label="Backend API"
-                value={apiHealth.data?.runtime === "unified-node" ? "Connected" : apiHealth.isLoading ? "Checking" : "Unavailable"}
-                healthy={apiHealth.data?.runtime === "unified-node"}
+                label="Dashboard connection"
+                status={apiHealth.data?.runtime === "unified-node" ? "Connected" : apiHealth.isLoading ? "Checking" : "Unavailable"}
+                detail={apiHealth.data?.runtime === "unified-node" ? "The dashboard is responding." : "The dashboard connection could not be confirmed. Refresh before relying on saved status."}
+                tone={apiHealth.data?.runtime === "unified-node" ? "healthy" : apiHealth.isLoading ? "muted" : "critical"}
               />
-              <ConnectionRow label="Trello identity" value={worker?.trelloMemberId ? "Configured" : "Uses token owner"} healthy={Boolean(worker?.trelloMemberId)} />
-              <ConnectionRow label="Gmail queue" value={`${email.data?.count ?? 0} pending`} healthy={!email.error} />
-              <ConnectionRow label="Browser collector" value={browser.data?.connected ? "Connected" : browser.data?.collectorConfigured ? "Waiting for data" : "Setup required"} healthy={Boolean(browser.data?.connected)} />
+              <ConnectionRow
+                label="Trello"
+                status={worker?.trelloMemberId ? "Member configured" : "Shared account"}
+                detail="This is the saved account mapping; the task's source status shows whether cached Trello data is still usable."
+                tone="muted"
+              />
+              <ConnectionRow
+                label="Gmail"
+                status={!google.data ? google.error ? "Unavailable" : "Checking" : !googleReady ? "Setup required" : google.data.gmail.sourceConflictPending ? "Review required" : email.error ? "Needs attention" : gmailSync!.label}
+                detail={!google.data ? "Gmail status could not be loaded." : !googleReady ? "Connect Google to check this source." : google.data.gmail.sourceConflictPending ? `A saved email could not be safely refreshed. Review the original before relying on it.${google.data.gmail.lastSyncedAt ? ` Last successful sync: ${connectionTime(google.data.gmail.lastSyncedAt)}.` : ""}` : `${workerSyncStatusDetail(gmailSync!)}${google.data.gmail.lastSyncedAt ? ` Last successful sync: ${connectionTime(google.data.gmail.lastSyncedAt)}.` : ""} ${email.data?.count ?? 0} pending message${email.data?.count === 1 ? "" : "s"}.`}
+                tone={!google.data ? "critical" : !googleReady || email.error ? "critical" : google.data.gmail.sourceConflictPending ? "warning" : gmailSync!.tone}
+                href="#google-connection"
+                linkLabel="Review Gmail settings"
+              />
+              <ConnectionRow
+                label="Google Drive"
+                status={!google.data ? google.error ? "Unavailable" : "Checking" : !googleReady ? "Setup required" : driveSync!.label}
+                detail={!google.data ? "Drive status could not be loaded." : !googleReady ? "Connect Google to check this source." : `${workerSyncStatusDetail(driveSync!)}${google.data.drive.lastSyncedAt ? ` Last successful sync: ${connectionTime(google.data.drive.lastSyncedAt)}.` : ""} ${google.data.drive.folderScoped ? "Limited to the selected folder." : "Checks accessible file metadata."}`}
+                tone={!google.data ? "critical" : !googleReady ? "critical" : driveSync!.tone}
+                href="#google-connection"
+                linkLabel="Review Drive settings"
+              />
+              <ConnectionRow
+                label="Browser collector"
+                status={browserConnection.label}
+                detail={browserConnection.detail}
+                tone={browserConnection.healthy ? "healthy" : "warning"}
+              />
             </CardContent>
           </Card>
         </div>
       </div>
+      <Card id="google-connection" className="gap-0 rounded-lg py-0 scroll-mt-20">
+        <CardHeader className="border-b py-4">
+          <CardTitle className="text-sm">Google connection</CardTitle>
+          <CardDescription>Read-only access. Nothing is sent, archived, labelled, or moved in Google.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5 p-5">
+          {!google.data?.credentialsReady && <Alert>
+            <AlertTriangle className="size-4" />
+            <AlertTitle>Google connection needs setup</AlertTitle>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{google.isLoading ? "Checking the Google connection." : "Connect Google to check these sources."}</span>{google.data?.clientConfigured && <Button size="sm" asChild><a href="/api/google-evidence/connect">Connect Google</a></Button>}</AlertDescription>
+          </Alert>}
+          <details><summary className="cursor-pointer text-sm font-medium">Google sync preferences</summary>
+          <div className="mt-4 grid gap-5 lg:grid-cols-2">
+            <section className="space-y-4 rounded-md border p-4">
+              <div className="flex items-center justify-between gap-4"><div><Label htmlFor="gmail-evidence-enabled">Gmail intake</Label><p className="mt-1 text-xs text-muted-foreground">Keeps only the newest message in each inbox thread.</p></div><Switch id="gmail-evidence-enabled" checked={gmailEnabled} onCheckedChange={setGmailEnabled} /></div>
+              <div className="grid gap-4 sm:grid-cols-2"><NumberSetting id="gmail-interval" label="Check every" value={gmailInterval} min={15} max={1440} suffix="min" onChange={setGmailInterval} /><NumberSetting id="gmail-lookback" label="Look back" value={gmailLookback} min={1} max={90} suffix="days" onChange={setGmailLookback} /></div>
+              <p className="text-xs text-muted-foreground">{google.data?.gmail.lastSyncedAt ? `Last checked ${new Date(google.data.gmail.lastSyncedAt).toLocaleString()}.` : "No Gmail data collected yet."}</p>
+            </section>
+            <section className="space-y-4 rounded-md border p-4">
+              <div className="flex items-center justify-between gap-4"><div><Label htmlFor="drive-evidence-enabled">Drive metadata</Label><p className="mt-1 text-xs text-muted-foreground">Links files only when the card ID or full card title matches exactly.</p></div><Switch id="drive-evidence-enabled" checked={driveEnabled} onCheckedChange={setDriveEnabled} /></div>
+              <div className="grid gap-4 sm:grid-cols-2"><NumberSetting id="drive-interval" label="Check every" value={driveInterval} min={15} max={1440} suffix="min" onChange={setDriveInterval} /><NumberSetting id="drive-lookback" label="Look back" value={driveLookback} min={1} max={90} suffix="days" onChange={setDriveLookback} /></div>
+              <div className="space-y-2"><Label htmlFor="drive-folder-id">Optional folder ID</Label><Input id="drive-folder-id" value={driveFolderId} onChange={(event) => setDriveFolderId(event.target.value)} placeholder="All accessible files when empty" /><p className="text-xs text-muted-foreground">{google.data?.drive.lastSyncedAt ? `Last checked ${new Date(google.data.drive.lastSyncedAt).toLocaleString()}.` : "No Drive metadata collected yet."}</p></div>
+            </section>
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            {google.data?.connectionMode === "worker" && <Button variant="outline" onClick={() => disconnectGoogle.mutate()} disabled={disconnectGoogle.isPending}>{disconnectGoogle.isPending && <Loader2 className="size-4 animate-spin" />}Disconnect Google</Button>}
+            <Button variant="outline" onClick={() => syncGoogle.mutate({ gmail: gmailEnabled, drive: driveEnabled })} disabled={syncGoogle.isPending}>{syncGoogle.isPending && <Loader2 className="size-4 animate-spin" />}Sync now</Button>
+            <Button onClick={() => saveGoogle.mutate({ gmail: { enabled: gmailEnabled, intervalMinutes: gmailInterval, lookbackDays: gmailLookback }, drive: { enabled: driveEnabled, intervalMinutes: driveInterval, lookbackDays: driveLookback, folderId: driveFolderId.trim() || null } })} disabled={saveGoogle.isPending}>{saveGoogle.isPending && <Loader2 className="size-4 animate-spin" />}Save sync preferences</Button>
+          </div>
+          </details>
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -1028,8 +1449,43 @@ function SettingSummary({ label, value }: { label: string; value: string }) {
   return <div className="flex items-center justify-between gap-4"><span className="text-muted-foreground">{label}</span><span className="text-right font-medium">{value}</span></div>;
 }
 
-function ConnectionRow({ label, value, healthy }: { label: string; value: string; healthy: boolean }) {
-  return <div className="flex items-center justify-between gap-4 p-4"><span className="flex items-center gap-2 text-sm"><Monitor className="size-4 text-muted-foreground" />{label}</span><Badge variant="outline" className={healthy ? "border-emerald-500/30 text-emerald-600 dark:text-emerald-300" : "border-amber-500/30 text-amber-600 dark:text-amber-300"}>{value}</Badge></div>;
+function formatIntegrationTime(value: string | null | undefined, timeZone: string) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "time unknown";
+  try {
+    return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", timeZone }).format(date);
+  } catch {
+    return "time unknown";
+  }
+}
+
+function ConnectionRow({ label, status, detail, tone, href, linkLabel }: {
+  label: string;
+  status: string;
+  detail: string;
+  tone: "healthy" | "warning" | "critical" | "muted";
+  href?: string;
+  linkLabel?: string;
+}) {
+  const toneClass = {
+    healthy: "border-emerald-500/30 text-emerald-700 dark:text-emerald-300",
+    warning: "border-amber-500/30 text-amber-700 dark:text-amber-300",
+    critical: "border-red-500/30 text-red-700 dark:text-red-300",
+    muted: "border-border text-muted-foreground",
+  }[tone];
+  return (
+    <div className="grid gap-2 p-4 sm:grid-cols-[minmax(0,180px)_minmax(0,1fr)] sm:items-start">
+      <div className="flex min-w-0 items-center justify-between gap-3 sm:flex-col sm:items-start">
+        <span className="flex items-center gap-2 text-sm font-medium"><Monitor className="size-4 shrink-0 text-muted-foreground" />{label}</span>
+        <Badge variant="outline" className={toneClass}>{status}</Badge>
+      </div>
+      <div className="min-w-0 text-sm text-muted-foreground">
+        <p>{detail}</p>
+        {href && linkLabel && <a href={href} className="mt-1 inline-block font-medium text-blue-700 underline underline-offset-2 dark:text-blue-300">{linkLabel}</a>}
+      </div>
+    </div>
+  );
 }
 
 function EvidenceRow({ label, status, detail }: { label: string; status: string; detail: string }) {
@@ -1037,16 +1493,12 @@ function EvidenceRow({ label, status, detail }: { label: string; status: string;
 }
 
 function PageHeading({ title, description, actions }: { title: string; description: string; actions?: React.ReactNode }) {
-  return <div className="flex flex-col justify-between gap-3 border-b pb-4 sm:flex-row sm:items-end"><div><h1 className="text-2xl font-semibold">{title}</h1><p className="mt-1 text-sm text-muted-foreground">{description}</p></div>{actions}</div>;
+  return <div className="flex flex-col justify-between gap-3 border-b pb-4 sm:flex-row sm:items-end"><div><h1 className="text-2xl font-semibold">{title}</h1>{description && <p className="mt-1 text-sm text-muted-foreground">{description}</p>}</div>{actions}</div>;
 }
 
 function ContextMetric({ icon: Icon, label, value, detail, onClick }: { icon: typeof Activity; label: string; value: string; detail: string; onClick?: () => void }) {
   const content = <><div className="flex items-center justify-between text-xs font-semibold uppercase text-muted-foreground"><span>{label}</span><Icon className="size-4" /></div><div className="mt-2 text-lg font-semibold">{value}</div><div className="mt-1 text-xs text-muted-foreground">{detail}</div></>;
   return onClick ? <button type="button" onClick={onClick} className="w-full rounded-lg border bg-card p-4 text-left hover:border-blue-500/40 hover:bg-accent/20">{content}</button> : <div className="rounded-lg border bg-card p-4">{content}</div>;
-}
-
-function MetricCell({ label, value }: { label: string; value: string }) {
-  return <div className="min-w-0 p-3 text-center"><div className="text-[11px] font-semibold uppercase text-muted-foreground">{label}</div><div className="mt-1 truncate text-sm font-semibold">{value}</div></div>;
 }
 
 function InspectorLabel({ children }: { children: React.ReactNode }) {

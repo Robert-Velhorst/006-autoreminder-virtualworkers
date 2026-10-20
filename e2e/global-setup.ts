@@ -40,6 +40,14 @@ export default async function globalSetup() {
          "passwordHash" = EXCLUDED."passwordHash"`,
       [E2E_USERNAME, passwordHash]
     );
+    await pool.query(`INSERT INTO users ("openId", name, role)
+      VALUES ('va-dashboard-ci-founder', 'CI Founder', 'admin')
+      ON CONFLICT ("openId") DO NOTHING`);
+    await pool.query(`DELETE FROM va_profiles WHERE "userId" = (SELECT id FROM users WHERE "openId" = $1)`, [E2E_USERNAME]);
+    await pool.query(`INSERT INTO va_profiles ("userId", "founderId", name, timezone, status)
+      SELECT worker.id, founder.id, 'CI Worker', 'UTC', 'active'
+      FROM users worker CROSS JOIN users founder
+      WHERE worker."openId" = $1 AND founder."openId" = 'va-dashboard-ci-founder'`, [E2E_USERNAME]);
   } finally {
     await pool.end();
   }
@@ -49,6 +57,8 @@ export default async function globalSetup() {
       connectionString: requireIsolatedCiDatabase(),
     });
     try {
+      await teardownPool.query('DELETE FROM va_profiles WHERE "userId" = (SELECT id FROM users WHERE "openId" = $1)', [E2E_USERNAME]);
+      await teardownPool.query("DELETE FROM users WHERE \"openId\" = 'va-dashboard-ci-founder'");
       await teardownPool.query('DELETE FROM users WHERE "openId" = $1', [
         E2E_USERNAME,
       ]);

@@ -25,12 +25,17 @@ interface ConnectedClient {
 }
 
 function configuredOrigins() {
-  return [
+  const directOrigins = [
     process.env.PUBLIC_URL,
     process.env.TRELLO_WEBHOOK_CALLBACK_URL,
     process.env.APP_URL,
     process.env.VITE_FRONTEND_URL,
   ].filter((value): value is string => Boolean(value?.trim()));
+  const localOrigins = (process.env.LOCAL_ACCESS_ORIGINS || "")
+    .split(",")
+    .map(value => value.trim())
+    .filter(Boolean);
+  return [...directOrigins, ...localOrigins];
 }
 
 export function isAllowedWebSocketOrigin(origin: string | undefined, allowedOrigins = configuredOrigins()) {
@@ -38,10 +43,6 @@ export function isAllowedWebSocketOrigin(origin: string | undefined, allowedOrig
 
   try {
     const url = new URL(origin);
-    if (process.env.NODE_ENV !== "production" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname)) {
-      return true;
-    }
-
     return allowedOrigins.some(candidate => {
       try {
         return new URL(candidate).origin === url.origin;
@@ -118,13 +119,31 @@ export class WebSocketService {
       }
     });
 
-    if (isRedisAvailable()) {
-      const pubClient = getRedisPubClient()!;
-      const subClient = getRedisSubClient()!;
-      this.io.adapter(createAdapter(pubClient, subClient));
-      console.log("[WebSocket] Redis adapter attached - multi-instance mode enabled");
-    } else {
-      console.log("[WebSocket] Redis not available - running in single-instance mode");
+    const pubClient = getRedisPubClient();
+    const subClient = getRedisSubClient();
+    if (pubClient && subClient) {
+      // The adapter does not await publish(). Keep application events local
+      // during an outage and handle disconnect races without an unhandled rejection.
+      const adapterPublisher = new Proxy(pubClient, {
+        get(target, property) {
+          if (property === "publish") return (channel: string, message: string | Buffer) => {
+            if (target.status !== "ready") return Promise.resolve(0);
+            return target.publish(channel, message).catch(() => {
+              console.warn("[WebSocket] Redis publication unavailable; local delivery retained");
+              return 0;
+            });
+          };
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      // Install once before sockets join. The dedicated subscriber retains
+      // channel subscriptions across delayed startup and reconnects.
+      this.io.adapter(createAdapter(adapterPublisher, subClient));
+      console.log("[WebSocket] Redis adapter configured");
+    }
+    if (!isRedisAvailable()) {
+      console.log("[WebSocket] Redis not ready - cross-instance delivery unavailable");
     }
 
     this.io.on("connection", socket => {

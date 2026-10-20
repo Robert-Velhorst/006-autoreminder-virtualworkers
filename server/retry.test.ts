@@ -22,6 +22,19 @@ describe('Retry Mechanism', () => {
       expect(global.fetch).toHaveBeenCalledTimes(1);
     });
 
+    it('adds a bounded timeout unless the caller supplies a cancellation signal', async () => {
+      global.fetch = vi.fn().mockResolvedValue(new Response('success', { status: 200 }));
+
+      await fetchWithRetry('https://api.trello.com/default-timeout');
+      const defaultInit = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+      expect(defaultInit.signal).toBeInstanceOf(AbortSignal);
+
+      const controller = new AbortController();
+      await fetchWithRetry('https://api.trello.com/custom-signal', { signal: controller.signal });
+      const suppliedInit = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[1][1] as RequestInit;
+      expect(suppliedInit.signal).toBe(controller.signal);
+    });
+
     it('should retry on 429 rate limit error', async () => {
       const failResponse = new Response('rate limited', { status: 429 });
       const successResponse = new Response('success', { status: 200 });

@@ -1,9 +1,11 @@
 import { and, desc, eq } from "drizzle-orm";
-import { aptlssWaitingReasons, type AptlssWaitingReason } from "../drizzle/schema.postgres";
+import { aptlssPlans, aptlssWaitingReasons, type AptlssWaitingReason } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 import type { AptlssWaitingSignal, WaitingReasonInterpretation } from "./aptlssWaitingReason";
 
 export class WaitingReasonError extends Error {}
+export class WaitingReasonNotInQueueError extends WaitingReasonError {}
+export class WaitingReasonCardChangedError extends WaitingReasonError {}
 
 export type HydratedWaitingReason = AptlssWaitingReason & {
   interpretationValue: WaitingReasonInterpretation;
@@ -56,6 +58,19 @@ export async function recordAptlssWaitingReason({
 
   return db.transaction(async (tx) => {
     const createdAt = new Date();
+    const [plannedCard] = await tx.select({
+      cardName: aptlssPlans.cardName,
+      cardUrl: aptlssPlans.cardUrl,
+      boardName: aptlssPlans.boardName,
+      listName: aptlssPlans.listName,
+    }).from(aptlssPlans).where(and(
+      eq(aptlssPlans.vaId, vaId),
+      eq(aptlssPlans.cardId, cardId),
+    )).limit(1).for("update");
+    if (!plannedCard) throw new WaitingReasonNotInQueueError("This card is no longer in your work queue");
+    if (plannedCard.cardName !== cardName || plannedCard.cardUrl !== cardUrl || plannedCard.boardName !== boardName || plannedCard.listName !== listName) {
+      throw new WaitingReasonCardChangedError("This card changed while you were recording the waiting reason");
+    }
     await tx
       .update(aptlssWaitingReasons)
       .set({ status: "superseded", resolvedAt: createdAt })

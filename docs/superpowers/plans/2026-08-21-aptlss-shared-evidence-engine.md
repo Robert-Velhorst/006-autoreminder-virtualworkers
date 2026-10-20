@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Keep the developer migration lineage additive after migration 0031; do not modify an existing migration.
+- Keep the developer migration lineage additive after migration 0044; do not modify an existing migration.
 - Existing source systems remain canonical. APTLSS stores references and normalized, bounded snapshots.
 - APTLSS may update internal assessments and future schedule blocks only. It must not post, move, archive, send, pay, or externally complete anything.
 - Keep completed blocks and the active timer/active block unchanged during replanning.
@@ -30,7 +30,7 @@
 
 | Path | Responsibility |
 | --- | --- |
-| drizzle/0032_aptlss_evidence_graph.sql | Additive graph, assessment provenance, exception verification, plan-change audit and indexes. |
+| drizzle/0045_aptlss_evidence_graph.sql | Additive graph, assessment provenance, exception verification, plan-change audit and indexes. |
 | drizzle/schema.ts | Drizzle definitions and inferred types for new additive tables. |
 | server/aptlssEvidenceGraph.ts | Normalize, deduplicate, link and audit typed evidence. |
 | server/aptlssAssessmentEngine.ts | Compute factorized confidence, conflicts, gaps and recommendations. |
@@ -89,7 +89,7 @@ git commit -m "docs: define APTLSS shared evidence engine"
 
 ## Task 2: Add Additive Evidence Graph Persistence
 
-**Files:** Create drizzle/0032_aptlss_evidence_graph.sql, server/aptlssEvidenceGraph.ts and server/aptlssEvidenceGraph.test.ts. Modify drizzle/schema.ts and drizzle/meta/_journal.json.
+**Files:** Create drizzle/0045_aptlss_evidence_graph.sql, server/aptlssEvidenceGraph.ts and server/aptlssEvidenceGraph.test.ts. Modify drizzle/schema.ts and drizzle/meta/_journal.json.
 
 **Interfaces:** Consumes workspaceEvidenceItems, workspaceEvidenceLinks and authenticated worker context. Produces upsertAptlssEvidence, linkAptlssEvidence, getAptlssEvidenceForCard and appendAptlssEvidenceAudit.
 
@@ -156,7 +156,7 @@ npx.cmd pnpm@11.19.0 run db:migrate
 - [ ] **Step 6: Commit the graph.**
 
 ~~~powershell
-git add -- drizzle/0032_aptlss_evidence_graph.sql drizzle/meta/_journal.json drizzle/schema.ts server/aptlssEvidenceGraph.ts server/aptlssEvidenceGraph.test.ts
+git add -- drizzle/0045_aptlss_evidence_graph.sql drizzle/meta/_journal.json drizzle/schema.ts server/aptlssEvidenceGraph.ts server/aptlssEvidenceGraph.test.ts
 git commit -m "feat: add APTLSS evidence graph"
 ~~~
 
@@ -303,7 +303,7 @@ Store assessment version, evidence set, prediction, worker response, verified re
 
 ~~~powershell
 npx.cmd pnpm@11.19.0 vitest run server/aptlssOutcomeLearning.test.ts server/aptlssAssessmentEngine.test.ts
-git add -- drizzle/0032_aptlss_evidence_graph.sql drizzle/schema.ts server/aptlssOutcomeLearning.ts server/aptlssOutcomeLearning.test.ts
+git add -- drizzle/0045_aptlss_evidence_graph.sql drizzle/schema.ts server/aptlssOutcomeLearning.ts server/aptlssOutcomeLearning.test.ts
 git commit -m "feat: calibrate APTLSS from verified outcomes"
 ~~~
 

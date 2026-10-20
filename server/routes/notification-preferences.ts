@@ -12,6 +12,10 @@ import { getDb } from '../db';
 import { userNotificationPreferences } from '../../drizzle/schema.postgres';
 import { eq } from 'drizzle-orm';
 import { requireAuthenticated, requestUser } from '../middleware/auth';
+import {
+  normalizeNotificationPreferences,
+  type NotificationPreferenceValues,
+} from '../operational-control-validation';
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -71,9 +75,9 @@ router.get('/', async (req: Request, res: Response) => {
       inAppEnabled: prefs.inAppEnabled === 1,
       lastDigestSent: prefs.lastDigestSent,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[NotificationPrefs] Get error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Unable to load notification preferences' });
   }
 });
 
@@ -93,17 +97,7 @@ router.put('/', async (req: Request, res: Response) => {
       return res.status(500).json({ error: 'Database not available' });
     }
 
-    const input: NotificationPreferencesInput = req.body;
-
-    // Validate notification mode
-    if (input.notificationMode && !['disabled', 'daily_digest', 'priority_only'].includes(input.notificationMode)) {
-      return res.status(400).json({ error: 'Invalid notification mode' });
-    }
-
-    // Validate digest time format (HH:MM)
-    if (input.digestTime && !/^([01]\d|2[0-3]):([0-5]\d)$/.test(input.digestTime)) {
-      return res.status(400).json({ error: 'Invalid digest time format. Use HH:MM' });
-    }
+    const input: NotificationPreferencesInput = req.body ?? {};
 
     // Check if preferences exist
     const [existing] = await db.select()
@@ -111,15 +105,18 @@ router.put('/', async (req: Request, res: Response) => {
       .where(eq(userNotificationPreferences.userOpenId, user.openId))
       .limit(1);
 
-    const data = {
-      notificationMode: input.notificationMode || 'priority_only',
-      digestTime: input.digestTime || '08:00',
-      digestTimezone: input.digestTimezone || 'Europe/Amsterdam',
-      urgentThresholdHours: input.urgentThresholdHours ?? 24,
-      emailEnabled: input.emailEnabled !== false ? 1 : 0,
-      emailAddress: input.emailAddress || user.email || null,
-      inAppEnabled: input.inAppEnabled !== false ? 1 : 0,
-    };
+    const current: NotificationPreferenceValues | undefined = existing ? {
+      notificationMode: existing.notificationMode as NotificationPreferenceValues['notificationMode'],
+      digestTime: existing.digestTime,
+      digestTimezone: existing.digestTimezone,
+      urgentThresholdHours: existing.urgentThresholdHours,
+      emailEnabled: existing.emailEnabled,
+      emailAddress: existing.emailAddress,
+      inAppEnabled: existing.inAppEnabled,
+    } : undefined;
+    const normalized = normalizeNotificationPreferences(input as unknown as Record<string, unknown>, current, user.email);
+    if (!normalized.ok) return res.status(400).json({ error: normalized.error });
+    const data = normalized.value;
 
     if (existing) {
       await db.update(userNotificationPreferences)
@@ -141,9 +138,9 @@ router.put('/', async (req: Request, res: Response) => {
       emailEnabled: data.emailEnabled === 1,
       inAppEnabled: data.inAppEnabled === 1,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[NotificationPrefs] Update error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Unable to update notification preferences' });
   }
 });
 
@@ -220,9 +217,9 @@ router.get('/should-notify', async (req: Request, res: Response) => {
       mode,
       urgentThreshold,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[NotificationPrefs] Should-notify error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Unable to evaluate notification preferences' });
   }
 });
 

@@ -2,6 +2,7 @@ import express from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import atisRouter from './routes/atis';
+import atisPhasesRouter from './routes/atis-phases';
 
 type TestUser = {
   id: number;
@@ -19,6 +20,7 @@ function appWithUser(user?: TestUser) {
     });
   }
   app.use('/api/atis', atisRouter);
+  app.use('/api/atis/phases', atisPhasesRouter);
   return app;
 }
 
@@ -30,6 +32,18 @@ describe('ATIS route authorization', () => {
   it('rejects worker access to the retained administrator ATIS portal', async () => {
     await request(appWithUser({ id: 2, openId: 'worker-2', role: 'worker' }))
       .get('/api/atis/stats')
+      .expect(403, { error: 'Forbidden - admin only' });
+  });
+
+  it('rejects an unauthenticated compatibility analysis read before loading session data', async () => {
+    await request(appWithUser())
+      .get('/api/atis/phases/analyze/card-1')
+      .expect(401, { error: 'Unauthorized' });
+  });
+
+  it('rejects worker access to the retained administrator phase-analysis portal', async () => {
+    await request(appWithUser({ id: 2, openId: 'worker-2', role: 'worker' }))
+      .get('/api/atis/phases/analyze/card-1')
       .expect(403, { error: 'Forbidden - admin only' });
   });
 

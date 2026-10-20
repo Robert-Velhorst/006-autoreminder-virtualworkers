@@ -1,48 +1,42 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, lte } from "drizzle-orm";
+import { createHash } from "crypto";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { InsertUser, users } from "../drizzle/schema.postgres";
 import * as schema from "../drizzle/schema.postgres";
 import { ENV } from "./_core/env";
 import { parseDateKey } from "./utils/date-only";
+import { DatabaseUnavailableError } from "./databaseAvailability";
 import { requirePostgresDatabaseUrl } from "./db/databaseUrl";
 import { hasRequiredPostgresSchema } from "./db/readiness";
 
 let _db: NodePgDatabase<typeof schema> | null = null;
 let _pool: Pool | null = null;
+let _closing: Promise<void> | null = null;
 
-// Lazily create the drizzle instance so local tooling can run without a DB.
 export async function getDb() {
+  if (_closing) await _closing;
   if (!_db && process.env.DATABASE_URL) {
     try {
       const databaseUrl = requirePostgresDatabaseUrl(process.env.DATABASE_URL, {
         requireVerifiedTls: process.env.NODE_ENV === "production",
       });
-
       _pool = new Pool({
         connectionString: databaseUrl,
         max: Number(process.env.DATABASE_POOL_MAX ?? 10),
-        connectionTimeoutMillis: Number(
-          process.env.DATABASE_CONNECT_TIMEOUT_MS ?? 10_000
-        ),
-        idleTimeoutMillis: Number(
-          process.env.DATABASE_IDLE_TIMEOUT_MS ?? 30_000
-        ),
+        connectionTimeoutMillis: Number(process.env.DATABASE_CONNECT_TIMEOUT_MS ?? 10_000),
+        idleTimeoutMillis: Number(process.env.DATABASE_IDLE_TIMEOUT_MS ?? 30_000),
         allowExitOnIdle: process.env.NODE_ENV !== "production",
       });
-      _pool.on("error", error => {
-        console.error(
-          "[Database] Unexpected idle PostgreSQL client error:",
-          error
-        );
-      });
+      // Driver diagnostics may include connection details or personal query data.
+      _pool.on("error", () => console.warn("[Database] Unexpected idle PostgreSQL client error"));
       _db = drizzle(_pool, { schema });
-      console.log("[Database] PostgreSQL pool initialized");
-    } catch (error) {
-      console.warn("[Database] Failed to connect:", error);
-      await _pool?.end().catch(() => {});
+    } catch {
+      const pool = _pool;
       _pool = null;
       _db = null;
+      if (pool) await pool.end().catch(() => undefined);
+      console.warn("[Database] Failed to initialize PostgreSQL connection pool");
     }
   }
   return _db;
@@ -54,11 +48,38 @@ export async function isDatabaseReachable(): Promise<boolean> {
   return hasRequiredPostgresSchema(_pool);
 }
 
-export async function closeDatabase(): Promise<void> {
+export async function closeDb(): Promise<void> {
+  if (_closing) return _closing;
   const pool = _pool;
   _pool = null;
   _db = null;
-  await pool?.end();
+  if (!pool) return;
+  _closing = pool.end();
+  try { await _closing; } finally { _closing = null; }
+}
+export const closeDatabase = closeDb;
+
+function sessionHash(sessionId: string) {
+  return createHash("sha256").update(sessionId).digest("hex");
+}
+
+export async function isSessionRevoked(sessionId: string): Promise<boolean> {
+  const database = await getDb();
+  if (!database) {
+    if (process.env.DATABASE_URL || process.env.NODE_ENV === "production") throw new DatabaseUnavailableError();
+    return false;
+  }
+  const [row] = await database.select({ sessionHash: schema.revokedSessions.sessionHash })
+    .from(schema.revokedSessions).where(eq(schema.revokedSessions.sessionHash, sessionHash(sessionId))).limit(1);
+  return Boolean(row);
+}
+
+export async function revokeSession(sessionId: string, expiresAt: Date): Promise<void> {
+  const database = await getDb();
+  if (!database) throw new DatabaseUnavailableError();
+  await database.delete(schema.revokedSessions).where(lte(schema.revokedSessions.expiresAt, new Date()));
+  await database.insert(schema.revokedSessions).values({ sessionHash: sessionHash(sessionId), expiresAt })
+    .onConflictDoUpdate({ target: schema.revokedSessions.sessionHash, set: { expiresAt } });
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {
@@ -69,6 +90,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   const db = await getDb();
   if (!db) {
     console.warn("[Database] Cannot upsert user: database not available");
+    if (process.env.DATABASE_URL || process.env.NODE_ENV === "production") throw new DatabaseUnavailableError();
     return;
   }
 
@@ -116,7 +138,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
       set: updateSet,
     });
   } catch (error) {
-    console.error("[Database] Failed to upsert user:", error);
+    console.error("[Database] Failed to upsert user");
     throw error;
   }
 }
@@ -125,6 +147,7 @@ export async function getUserByOpenId(openId: string) {
   const db = await getDb();
   if (!db) {
     console.warn("[Database] Cannot get user: database not available");
+    if (process.env.DATABASE_URL || process.env.NODE_ENV === "production") throw new DatabaseUnavailableError();
     return undefined;
   }
 

@@ -7,13 +7,23 @@ import { eq, desc, and } from "drizzle-orm";
 
 // ─── APTLSS Card Plans ────────────────────────────────────────────────────────
 
-/** Upsert (insert or replace) an APTLSS plan for a card. */
+/** Atomically replace an APTLSS plan for a card without losing the prior row on failure. */
 export async function upsertAptlssPlan(plan: InsertAptlssPlan): Promise<void> {
   const db = await getDb();
   if (!db) return;
-  // Delete any existing plan for this card first, then insert fresh
-  await db.delete(aptlssPlans).where(and(eq(aptlssPlans.cardId, plan.cardId), eq(aptlssPlans.vaId, plan.vaId)));
-  await db.insert(aptlssPlans).values(plan);
+  await db.insert(aptlssPlans).values(plan).onConflictDoUpdate({
+    target: [aptlssPlans.vaId, aptlssPlans.cardId],
+    set: {
+      cardName: plan.cardName,
+      cardUrl: plan.cardUrl,
+      boardName: plan.boardName ?? "",
+      listName: plan.listName ?? "",
+      planJson: plan.planJson,
+      contextSnapshot: plan.contextSnapshot ?? null,
+      generatedAt: plan.generatedAt ?? new Date(),
+      updatedAt: new Date(),
+    },
+  });
 }
 
 /** Get the most recent APTLSS plan for a card (null if none). */

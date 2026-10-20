@@ -1,3 +1,4 @@
+import { encodeTrelloPathSegment } from '../utils/trello-path';
 /**
  * ATIS API Routes
  * 
@@ -21,7 +22,12 @@ import { createChecklistSyncService } from '../services/trello-checklist-sync';
 import { createAttachmentExtractor } from '../services/attachment-extractor';
 import { createChatbotExtractor } from '../services/chatbot-extractor';
 import { fetchWithRetry } from '../utils/retry';
+import { fetchVerifiedTrelloBoardIds, TrelloBoardInventoryUnavailableError } from '../trelloBoardInventory';
 import { atisRateLimiter } from '../middleware/rate-limiter';
+import { parseLimitOffset } from '../utils/pagination';
+import { normalizeChecklistSyncCardIds, toChecklistSyncCards } from '../atisChecklistSyncRows';
+import { startAtisOperation, getAtisOperation, getActiveAtisOperations, AtisOperationRecoveryRequired, AtisOperationRequestConflict } from '../atisOperations';
+import type { ScheduledJobContext, ScheduledJobTransaction } from '../scheduledJobRuntime';
 
 const router = Router();
 const INACTIVE_LIST_KEYWORDS = ['done', 'completed', 'complete', 'archive', 'archived', 'info'];
@@ -47,88 +53,46 @@ function requireAtisAdmin(req: AuthenticatedAtisRequest, res: Response, next: Ne
 
 router.use(requireAtisAdmin);
 
+function operationFailure(res: Response, error: unknown) {
+  if (error instanceof RangeError) return res.status(400).json({ error: 'acknowledgeInterruptedOperationId must be a positive integer' });
+  if (error instanceof AtisOperationRecoveryRequired) {
+    return res.status(409).json({ operation: error.operation, requestedNotStarted: true,
+      error: 'Review interrupted work, then POST acknowledgeInterruptedOperationId matching this operation to start a replacement.' });
+  }
+  if (error instanceof AtisOperationRequestConflict) {
+    return res.status(409).json({ operation: error.operation, requestedNotStarted: true, error: error.message });
+  }
+  return res.status(503).json({ error: 'ATIS status or start unavailable. Read active operations before retrying.' });
+}
+
+function recoveryAcknowledgement(body: any): number | undefined {
+  const value = body?.acknowledgeInterruptedOperationId;
+  if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) throw new RangeError('Invalid recovery acknowledgement');
+  return value;
+}
+
+router.get('/operations/active', async (_req: Request, res: Response) => {
+  try { return res.json({ operations: await getActiveAtisOperations() }); }
+  catch (error) { return operationFailure(res, error); }
+});
+
+router.get('/operations/:id', async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: 'Invalid operation ID' });
+  try {
+    const operation = await getAtisOperation(id);
+    return operation ? res.json({ operation }) : res.status(404).json({ error: 'Operation not found' });
+  } catch (error) { return operationFailure(res, error); }
+});
+
 function isInactiveListName(listName?: string | null) {
   if (!listName) return false;
   const normalized = listName.toLowerCase().trim();
   return INACTIVE_LIST_KEYWORDS.some((keyword) => normalized === keyword || normalized.includes(keyword));
 }
 
-async function fetchUserWorkspaceBoardIds(apiKey: string, token: string) {
-  const boardIds = new Set<string>();
-
-  // 1. Fetch ALL boards the token owner can access (personal + workspace)
-  try {
-    const allBoardsResponse = await fetchWithRetry(
-      `https://api.trello.com/1/members/me/boards?filter=open&fields=id&key=${apiKey}&token=${token}`,
-      undefined,
-      { maxRetries: 3, initialDelayMs: 1000, maxDelayMs: 10000 }
-    );
-    if (allBoardsResponse.ok) {
-      const allBoards = await allBoardsResponse.json();
-      if (Array.isArray(allBoards)) {
-        for (const board of allBoards) {
-          if (board?.id) boardIds.add(board.id);
-        }
-      }
-    }
-  } catch {
-    // non-fatal — fall through to workspace-based fetch
-  }
-
-  // 2. Also fetch organization-scoped boards (in case token is a workspace admin)
-  try {
-    const workspacesResponse = await fetchWithRetry(
-      `https://api.trello.com/1/members/me/organizations?key=${apiKey}&token=${token}`,
-      undefined,
-      { maxRetries: 3, initialDelayMs: 1000, maxDelayMs: 10000 }
-    );
-
-    if (workspacesResponse.ok) {
-      const workspaces = await workspacesResponse.json();
-      if (Array.isArray(workspaces)) {
-        for (const workspace of workspaces) {
-          try {
-            const boardsResponse = await fetchWithRetry(
-              `https://api.trello.com/1/organizations/${workspace.id}/boards?filter=open&key=${apiKey}&token=${token}`,
-              undefined,
-              { maxRetries: 2, initialDelayMs: 1000, maxDelayMs: 10000 }
-            );
-            if (boardsResponse.ok) {
-              const boards = await boardsResponse.json();
-              if (Array.isArray(boards)) {
-                for (const board of boards) {
-                  if (board?.id && board.prefs?.isTemplate !== true) {
-                    boardIds.add(board.id);
-                  }
-                }
-              }
-            }
-          } catch {
-            // non-fatal
-          }
-        }
-      }
-    }
-  } catch {
-    // non-fatal
-  }
-
-  // 3. If Trello API returned no boards at all, fall back to all boards in DB
-  if (boardIds.size === 0) {
-    try {
-      const db = await getDb();
-      if (db) {
-        const dbBoards = await db.select({ trelloId: atisBoards.trelloId }).from(atisBoards);
-        for (const b of dbBoards) {
-          if (b.trelloId) boardIds.add(b.trelloId);
-        }
-      }
-    } catch {
-      // non-fatal
-    }
-  }
-
-  return Array.from(boardIds);
+function sendAtisFailure(res: Response, operation: string) {
+  return res.status(500).json({ error: `Failed to ${operation}. Check the server logs or retry.` });
 }
 
 /**
@@ -177,7 +141,7 @@ router.get('/stats', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[ATIS] Stats error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load ATIS statistics');
   }
 });
 
@@ -200,7 +164,7 @@ router.get('/jobs', async (req: Request, res: Response) => {
     res.json(jobs);
   } catch (error: any) {
     console.error('[ATIS] Jobs error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load ingestion jobs');
   }
 });
 
@@ -222,7 +186,7 @@ router.get('/workspaces', async (req: Request, res: Response) => {
     res.json(workspaces);
   } catch (error: any) {
     console.error('[ATIS] Workspaces error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load workspaces');
   }
 });
 
@@ -249,7 +213,7 @@ router.get('/boards', async (req: Request, res: Response) => {
     res.json(boards);
   } catch (error: any) {
     console.error('[ATIS] Boards error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load boards');
   }
 });
 
@@ -265,8 +229,7 @@ router.get('/cards', async (req: Request, res: Response) => {
     }
 
     const boardId = req.query.boardId ? parseInt(req.query.boardId as string) : undefined;
-    const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
-    const offset = req.query.offset ? parseInt(req.query.offset as string) : 0;
+    const { limit, offset } = parseLimitOffset(req.query, { defaultLimit: 100, maxLimit: 200 });
 
     let query = db.select().from(atisCards);
     if (boardId) {
@@ -281,7 +244,7 @@ router.get('/cards', async (req: Request, res: Response) => {
     res.json(cards);
   } catch (error: any) {
     console.error('[ATIS] Cards error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load cards');
   }
 });
 
@@ -332,7 +295,7 @@ router.get('/cards/:id', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[ATIS] Card error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load the card');
   }
 });
 
@@ -381,7 +344,7 @@ router.get('/cards-without-due-date', async (req: Request, res: Response) => {
     res.json(cards);
   } catch (error: any) {
     console.error('[ATIS] Cards without due date error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load cards without due dates');
   }
 });
 
@@ -395,7 +358,7 @@ router.get('/understanding/stats', async (req: Request, res: Response) => {
     res.json(stats);
   } catch (error: any) {
     console.error('[ATIS] Understanding stats error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load understanding statistics');
   }
 });
 
@@ -405,37 +368,25 @@ router.get('/understanding/stats', async (req: Request, res: Response) => {
  */
 router.post('/understanding/process', atisRateLimiter, async (req: Request, res: Response) => {
   try {
-    const { cardId, limit } = req.body;
-
-    if (cardId) {
-      // Process single card
-      const understanding = await processCardUnderstanding(cardId);
-      if (!understanding) {
-        return res.status(404).json({ error: 'Card not found' });
-      }
-      return res.json({ success: true, understanding });
+    const cardId = req.body?.cardId;
+    if (cardId !== undefined && (!Number.isSafeInteger(cardId) || cardId <= 0)) {
+      return res.status(400).json({ error: 'cardId must be a positive integer' });
     }
-
-    // Process all cards without understanding
-    console.log('[ATIS] Starting batch AI understanding processing...');
-    
-    const result = await processAllCardsUnderstanding(
-      (progress) => {
-        if (progress.current % 5 === 0) {
-          console.log(`[ATIS Understanding] Progress: ${progress.current}/${progress.total} - ${progress.status}`);
-        }
-      },
-      limit || 100 // Default to 100 cards at a time
-    );
-
-    res.json({
-      success: true,
-      processed: result.processed,
-      failed: result.failed,
+    const { limit } = parseLimitOffset({ limit: req.body?.limit }, { defaultLimit: 100, maxLimit: 100 });
+    const operation = await startAtisOperation({ kind: 'understanding', ownerUserId: (req as AuthenticatedAtisRequest).user!.id,
+      request: cardId ? { cardId } : { limit }, acknowledgeInterruptedOperationId: recoveryAcknowledgement(req.body),
+    }, async context => {
+      if (cardId) {
+        const understanding = await processCardUnderstanding(cardId, context);
+        if (!understanding) throw new Error('Card not found');
+        return { success: true, cardId };
+      }
+      const result = await processAllCardsUnderstanding(undefined, limit, context);
+      return { success: true, processed: result.processed, failed: result.failed };
     });
+    return res.status(202).json({ operation });
   } catch (error: any) {
-    console.error('[ATIS] Understanding process error:', error);
-    res.status(500).json({ error: error.message });
+    return operationFailure(res, error);
   }
 });
 
@@ -472,7 +423,7 @@ router.get('/card/:id/understanding', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[ATIS] Card understanding error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load card understanding');
   }
 });
 
@@ -487,7 +438,7 @@ router.post('/understanding/reprocess-failed', atisRateLimiter, async (req: Requ
       return res.status(500).json({ error: 'Database not available' });
     }
 
-    const { limit = 50 } = req.body;
+    const { limit } = parseLimitOffset({ limit: req.body?.limit }, { defaultLimit: 50, maxLimit: 100 });
 
     // Get cards with low confidence (fallback results)
     const lowConfidenceCards = await db.select({
@@ -523,7 +474,7 @@ router.post('/understanding/reprocess-failed', atisRateLimiter, async (req: Requ
     });
   } catch (error: any) {
     console.error('[ATIS] Reprocess failed error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'reprocess cards');
   }
 });
 
@@ -562,7 +513,7 @@ router.post('/understanding/reprocess/:cardId', atisRateLimiter, async (req: Req
     });
   } catch (error: any) {
     console.error(`[ATIS] Failed to reprocess card:`, error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'reprocess the card');
   }
 });
 
@@ -573,6 +524,10 @@ router.post('/understanding/reprocess/:cardId', atisRateLimiter, async (req: Req
 router.post('/cards/:trelloId/reingest', async (req: Request, res: Response) => {
   try {
     const { trelloId } = req.params;
+    const encodedTrelloId = encodeTrelloPathSegment(trelloId);
+    if (!encodedTrelloId) {
+      return res.status(400).json({ error: 'Invalid Trello card ID' });
+    }
     const db = await getDb();
     
     if (!db) {
@@ -589,8 +544,11 @@ router.post('/cards/:trelloId/reingest', async (req: Request, res: Response) => 
     console.log(`[ATIS] Re-ingesting card ${trelloId} from Trello...`);
 
     // Fetch fresh card data from Trello
-    const cardResponse = await fetch(
-      `https://api.trello.com/1/cards/${trelloId}?key=${apiKey}&token=${token}&checklists=all&attachments=true`
+    const encodedCardId = encodeURIComponent(trelloId);
+    const cardResponse = await fetchWithRetry(
+      `https://api.trello.com/1/cards/${encodedCardId}?key=${apiKey}&token=${token}&checklists=all&attachments=true`,
+      undefined,
+      { maxRetries: 0, timeoutMs: 15_000 },
     );
 
     if (!cardResponse.ok) {
@@ -623,8 +581,10 @@ router.post('/cards/:trelloId/reingest', async (req: Request, res: Response) => 
       .where(eq(atisCards.id, existingCard.id));
 
     // Fetch and update comments
-    const commentsResponse = await fetch(
-      `https://api.trello.com/1/cards/${trelloId}/actions?filter=commentCard&key=${apiKey}&token=${token}`
+    const commentsResponse = await fetchWithRetry(
+      `https://api.trello.com/1/cards/${encodedCardId}/actions?filter=commentCard&key=${apiKey}&token=${token}`,
+      undefined,
+      { maxRetries: 0, timeoutMs: 15_000 },
     );
     
     if (commentsResponse.ok) {
@@ -657,7 +617,7 @@ router.post('/cards/:trelloId/reingest', async (req: Request, res: Response) => 
     });
   } catch (error: any) {
     console.error(`[ATIS] Failed to reingest card:`, error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'reingest the card');
   }
 });
 
@@ -686,7 +646,7 @@ router.get('/cards/by-trello/:trelloId', async (req: Request, res: Response) => 
     res.json(card);
   } catch (error: any) {
     console.error(`[ATIS] Failed to get card by Trello ID:`, error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load the Trello card');
   }
 });
 
@@ -705,14 +665,45 @@ router.post('/sync', async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Trello credentials not configured' });
   }
 
-  const db = await getDb();
-  if (!db) return res.status(500).json({ error: 'Database not available' });
-
   try {
+    const operation = await startAtisOperation({ kind: 'sync', ownerUserId: user.id,
+      acknowledgeInterruptedOperationId: recoveryAcknowledgement(req.body),
+    }, context => runAtisSync(apiKey, token, context));
+    return res.status(202).json({ operation });
+  } catch (error) { return operationFailure(res, error); }
+});
+
+async function runAtisSync(apiKey: string, token: string, context: ScheduledJobContext) {
+  const db = await getDb();
+  if (!db) throw new Error('Database not available');
+  const fenced = <T,>(write: (tx: ScheduledJobTransaction) => Promise<T>) => db.transaction(async tx => {
+    await context.assertOwnership(tx);
+    const result = await write(tx);
+    await context.assertOwnership(tx);
+    return result;
+  });
+  const fetchOwned: typeof fetchWithRetry = async (url, init, options) => {
+    const maxRetries = options?.maxRetries ?? 3;
+    for (let attempt = 0; ; attempt++) {
+      await context.assertOwnership();
+      const signal = AbortSignal.any([context.signal, AbortSignal.timeout(options?.timeoutMs ?? 15_000)]);
+      try {
+        // Retry here so each individual provider attempt gets an awaited lease check.
+        const response = await fetchWithRetry(url, { ...init, signal }, { ...options, maxRetries: 0 });
+        await context.assertOwnership();
+        if (attempt >= maxRetries || ![429, 500, 502, 503, 504].includes(response.status)) return response;
+        await response.body?.cancel();
+      } catch (error) {
+        await context.assertOwnership();
+        if (attempt >= maxRetries) throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, Math.min(10_000, 1000 * 2 ** attempt)));
+    }
+  };
     console.log('[ATIS Sync] Starting full Trello sync...');
 
     // ── 1. Fetch workspaces ──────────────────────────────────────────────────
-    const wsRes = await fetchWithRetry(
+    const wsRes = await fetchOwned(
       `https://api.trello.com/1/members/me/organizations?key=${apiKey}&token=${token}`,
       undefined, { maxRetries: 3, initialDelayMs: 1000, maxDelayMs: 10000 }
     );
@@ -720,11 +711,12 @@ router.post('/sync', async (req: Request, res: Response) => {
     const workspaces: any[] = await wsRes.json();
 
     // Also include personal boards (not in any workspace)
-    const personalBoardsRes = await fetchWithRetry(
+    const personalBoardsRes = await fetchOwned(
       `https://api.trello.com/1/members/me/boards?filter=open&key=${apiKey}&token=${token}`,
       undefined, { maxRetries: 3, initialDelayMs: 1000, maxDelayMs: 10000 }
     );
-    const personalBoards: any[] = personalBoardsRes.ok ? await personalBoardsRes.json() : [];
+    if (!personalBoardsRes.ok) throw new Error('Trello personal board inventory unavailable');
+    const personalBoards: any[] = await personalBoardsRes.json();
 
     let totalBoards = 0;
     let totalCards  = 0;
@@ -732,20 +724,20 @@ router.post('/sync', async (req: Request, res: Response) => {
     // ── 2. Upsert workspace boards ───────────────────────────────────────────
     const processedBoardIds = new Set<string>();
 
-    const upsertBoard = async (board: any, workspaceId: number | null) => {
+    const upsertBoard = async (board: any, workspaceId: number | null) => fenced(async tx => {
       if (processedBoardIds.has(board.id)) return null;
       processedBoardIds.add(board.id);
 
-      const existing = await db.select({ id: atisBoards.id })
+      const existing = await tx.select({ id: atisBoards.id })
         .from(atisBoards).where(eq(atisBoards.trelloId, board.id)).limit(1);
 
       if (existing.length > 0) {
-        await db.update(atisBoards)
+        await tx.update(atisBoards)
           .set({ name: board.name, updatedAt: new Date() })
           .where(eq(atisBoards.trelloId, board.id));
         return existing[0].id;
       } else {
-        const [inserted] = await db.insert(atisBoards).values({
+        const [inserted] = await tx.insert(atisBoards).values({
           trelloId: board.id,
           workspaceId,
           name: board.name,
@@ -755,19 +747,21 @@ router.post('/sync', async (req: Request, res: Response) => {
         totalBoards++;
         return inserted.id;
       }
-    };
+    });
 
     // Workspace boards
     for (const ws of workspaces) {
+      await context.assertOwnership();
+      const wsDbId = await fenced(async tx => {
       // Upsert workspace record
-      const existingWs = await db.select({ id: atisWorkspaces.id })
+      const existingWs = await tx.select({ id: atisWorkspaces.id })
         .from(atisWorkspaces).where(eq(atisWorkspaces.trelloId, ws.id)).limit(1);
 
       let wsDbId: number;
       if (existingWs.length > 0) {
         wsDbId = existingWs[0].id;
       } else {
-        const [insertedWs] = await db.insert(atisWorkspaces).values({
+        const [insertedWs] = await tx.insert(atisWorkspaces).values({
           trelloId: ws.id,
           name: ws.displayName || ws.name,
           displayName: ws.displayName || null,
@@ -775,12 +769,14 @@ router.post('/sync', async (req: Request, res: Response) => {
         }).returning({ id: atisWorkspaces.id });
         wsDbId = insertedWs.id;
       }
+      return wsDbId;
+      });
 
-      const boardsRes = await fetchWithRetry(
+      const boardsRes = await fetchOwned(
         `https://api.trello.com/1/organizations/${ws.id}/boards?filter=open&key=${apiKey}&token=${token}`,
         undefined, { maxRetries: 2, initialDelayMs: 1000, maxDelayMs: 10000 }
       );
-      if (!boardsRes.ok) continue;
+      if (!boardsRes.ok) throw new Error('Trello workspace board inventory unavailable');
       const boards: any[] = await boardsRes.json();
 
       for (const board of boards) {
@@ -797,35 +793,37 @@ router.post('/sync', async (req: Request, res: Response) => {
 
     // ── 3. Fetch and upsert cards for every board ────────────────────────────
     const allBoards = await db.select().from(atisBoards);
-    let autoAnalyzeCount = 0;
 
     for (const board of allBoards) {
-      const cardsRes = await fetchWithRetry(
+      const cardsRes = await fetchOwned(
         `https://api.trello.com/1/boards/${board.trelloId}/cards?filter=open&fields=id,name,desc,url,due,dueComplete,closed,idList,labels,idMembers,badges&key=${apiKey}&token=${token}`,
         undefined, { maxRetries: 2, initialDelayMs: 1000, maxDelayMs: 10000 }
       );
-      if (!cardsRes.ok) continue;
+      if (!cardsRes.ok) throw new Error('Trello board cards unavailable');
       const cards: any[] = await cardsRes.json();
 
       // Fetch list names for this board
-      const listsRes = await fetchWithRetry(
+      const listsRes = await fetchOwned(
         `https://api.trello.com/1/boards/${board.trelloId}/lists?filter=open&key=${apiKey}&token=${token}`,
         undefined, { maxRetries: 2, initialDelayMs: 1000, maxDelayMs: 10000 }
       );
       const listMap = new Map<string, string>();
+      if (!listsRes.ok) throw new Error('Trello board lists unavailable');
       if (listsRes.ok) {
         const lists: any[] = await listsRes.json();
         for (const l of lists) listMap.set(l.id, l.name);
       }
 
       for (const card of cards) {
+        await context.assertOwnership();
         if (card.closed) continue;
         const listName = listMap.get(card.idList) || null;
 
         // Skip cards in inactive lists (Done, Completed, Archive, Info) at ingestion time
         if (isInactiveListName(listName)) continue;
 
-        const existing = await db.select({ id: atisCards.id })
+        await fenced(async tx => {
+        const existing = await tx.select({ id: atisCards.id })
           .from(atisCards).where(eq(atisCards.trelloId, card.id)).limit(1);
 
         const cardData = {
@@ -849,39 +847,15 @@ router.post('/sync', async (req: Request, res: Response) => {
           lastSyncedAt: new Date(),
         };
 
-        let cardDbId: number;
         if (existing.length > 0) {
-          await db.update(atisCards).set({ ...cardData, updatedAt: new Date() })
+          await tx.update(atisCards).set({ ...cardData, updatedAt: new Date() })
             .where(eq(atisCards.trelloId, card.id));
-          cardDbId = existing[0].id;
         } else {
-          const [inserted] = await db.insert(atisCards).values({ trelloId: card.id, ...cardData })
-            .returning({ id: atisCards.id });
-          cardDbId = inserted.id;
+          await tx.insert(atisCards).values({ trelloId: card.id, ...cardData });
           totalCards++;
         }
 
-        // Trigger AI analysis automatically in the background if understanding doesn't exist
-        try {
-          const [existingUnderstanding] = await db.select({ id: atisCardUnderstanding.id })
-            .from(atisCardUnderstanding)
-            .where(eq(atisCardUnderstanding.cardId, cardDbId))
-            .limit(1);
-
-          if (!existingUnderstanding) {
-            const delay = autoAnalyzeCount * 3000;
-            autoAnalyzeCount++;
-            console.log(`[ATIS Sync] Auto-analyzing card: ${card.name} in ${delay}ms`);
-            
-            setTimeout(() => {
-              processCardUnderstanding(cardDbId).catch(err => {
-                console.error(`[ATIS Sync] Auto-analysis failed for card ${cardDbId}:`, err);
-              });
-            }, delay);
-          }
-        } catch (e) {
-          console.error(`[ATIS Sync] Auto-analysis trigger check failed:`, e);
-        }
+        });
       }
     }
 
@@ -890,18 +864,14 @@ router.post('/sync', async (req: Request, res: Response) => {
     const stats = await db.select({ count: sql<number>`count(*)` }).from(atisCards);
     const boardStats = await db.select({ count: sql<number>`count(*)` }).from(atisBoards);
 
-    res.json({
+    return {
       success: true,
       newBoards: totalBoards,
       newCards: totalCards,
       totalBoards: Number(boardStats[0]?.count) || 0,
       totalCards: Number(stats[0]?.count) || 0,
-    });
-  } catch (error: any) {
-    console.error('[ATIS Sync] Error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
+    };
+}
 
 /**
  * GET /api/atis/timeline-tasks
@@ -918,18 +888,20 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
         return res.status(401).json({ error: 'Unauthorized' });
       }
 
+      const { limit, offset } = parseLimitOffset(req.query, { defaultLimit: 50, maxLimit: 200 });
+
       const db = await getDb();
       if (!db) {
         return res.status(500).json({ error: 'Database not available' });
       }
 
-      const apiKey = process.env.TRELLO_API_KEY;
-      const token = process.env.TRELLO_TOKEN;
+      const apiKey = process.env.TRELLO_API_KEY?.trim();
+      const token = process.env.TRELLO_TOKEN?.trim();
       if (!apiKey || !token) {
-        return res.status(500).json({ error: 'Trello credentials not configured' });
+        throw new TrelloBoardInventoryUnavailableError();
       }
 
-      const allowedTrelloBoardIds = await fetchUserWorkspaceBoardIds(apiKey, token);
+      const allowedTrelloBoardIds = await fetchVerifiedTrelloBoardIds(apiKey, token);
       if (allowedTrelloBoardIds.length === 0) {
         return res.json({
           scheduled: [],
@@ -944,8 +916,8 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
           },
           pagination: {
             total: 0,
-            limit: Number(req.query.limit || 50),
-            offset: Number(req.query.offset || 0),
+            limit,
+            offset,
             hasMore: false,
           },
           filters: {
@@ -981,8 +953,8 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
           },
           pagination: {
             total: 0,
-            limit: Number(req.query.limit || 50),
-            offset: Number(req.query.offset || 0),
+            limit,
+            offset,
             hasMore: false,
           },
           filters: {
@@ -996,8 +968,6 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
       }
 
       const { 
-        limit = 50,
-        offset = 0,
         filter = 'upcoming', // upcoming, overdue, all, today
         taskType, // admin, creation, technical, etc.
         complexity, // simple, medium, complex
@@ -1047,8 +1017,8 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
           ? desc(atisCards.dueDate) 
           : atisCards.dueDate
       )
-      .limit(Number(limit))
-      .offset(Number(offset));
+      .limit(limit)
+      .offset(offset);
 
     const boardMap = new Map(allowedAtisBoards.map((b: any) => [b.id, b.name]));
 
@@ -1216,7 +1186,7 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
     // Get total count for pagination
     const [totalResult] = await db.select({ count: sql<number>`count(*)` })
       .from(atisCards)
-      .where(eq(atisCards.isArchived, 0));
+      .where(and(...conditions));
 
     // For now, all tasks are considered scheduled (no overflow logic in ATIS endpoint)
     // The overflow logic will be applied when scheduling is triggered
@@ -1242,9 +1212,9 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
       },
       pagination: {
         total: Number(totalResult?.count) || 0,
-        limit: Number(limit),
-        offset: Number(offset),
-        hasMore: tasks.length === Number(limit),
+        limit,
+        offset,
+        hasMore: tasks.length === limit,
       },
       filters: {
         filter,
@@ -1256,6 +1226,14 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
     });
       return; // Success - exit retry loop
     } catch (error: any) {
+      if (error instanceof TrelloBoardInventoryUnavailableError) {
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Retry-After', '5');
+        return res.status(503).json({
+          error: 'Trello work queue is unavailable. Retry after checking the Trello connection.',
+          code: 'TRELLO_BOARD_ACCESS_UNAVAILABLE',
+        });
+      }
       lastError = error;
       console.error(`[ATIS] Timeline tasks error (attempt ${attempt}/${maxRetries}):`, error);
       
@@ -1274,7 +1252,7 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
   
   // All retries exhausted
   console.error('[ATIS] All retry attempts failed:', lastError);
-  res.status(500).json({ error: lastError?.message || 'Failed to fetch timeline tasks after multiple attempts' });
+  res.status(500).json({ error: 'Failed to fetch timeline tasks after multiple attempts' });
 });
 
 /**
@@ -1317,7 +1295,7 @@ router.post('/checklist/toggle', async (req: AuthenticatedAtisRequest, res: Resp
     }
   } catch (error: any) {
     console.error('[ATIS] Checklist toggle error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'toggle the checklist item');
   }
 });
 
@@ -1354,7 +1332,7 @@ router.get('/checklist/status/:cardId', async (req: AuthenticatedAtisRequest, re
     res.json({ cardId, completedSteps });
   } catch (error: any) {
     console.error('[ATIS] Checklist status error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load checklist status');
   }
 });
 
@@ -1422,7 +1400,7 @@ router.post('/checklist/sync-completion/:cardId', async (req: AuthenticatedAtisR
     res.json({ synced: true, stepIndex, completed, trelloItemId: checkItem.id });
   } catch (error: any) {
     console.error('[ATIS] Checklist sync completion error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'sync checklist completion');
   }
 });
 
@@ -1477,7 +1455,7 @@ router.post('/sync-checklist/:cardId', async (req: Request, res: Response) => {
 
     // Guard: Trello credentials must be present before attempting sync
     if (!process.env.TRELLO_API_KEY || !process.env.TRELLO_TOKEN) {
-      return res.status(500).json({ error: 'Trello credentials (TRELLO_API_KEY / TRELLO_TOKEN) are not configured on the server.' });
+      return res.status(503).json({ error: 'Trello integration is not configured on the server.' });
     }
 
     // Sync to Trello
@@ -1491,7 +1469,7 @@ router.post('/sync-checklist/:cardId', async (req: Request, res: Response) => {
     res.json(syncResult);
   } catch (error: any) {
     console.error('[ATIS] Checklist sync error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'sync the checklist');
   }
 });
 
@@ -1501,7 +1479,15 @@ router.post('/sync-checklist/:cardId', async (req: Request, res: Response) => {
  */
 router.post('/sync-checklists/bulk', async (req: Request, res: Response) => {
   try {
-    const { cardIds, replaceExisting = false, preserveCompleted = true, limit = 50 } = req.body;
+    const { replaceExisting = false, preserveCompleted = true } = req.body;
+    if (req.body?.cardIds !== undefined && !Array.isArray(req.body.cardIds)) {
+      return res.status(400).json({ error: 'cardIds must be an array of positive integer card IDs' });
+    }
+    const cardIds = normalizeChecklistSyncCardIds(req.body?.cardIds);
+    if (Array.isArray(req.body?.cardIds) && (cardIds.length === 0 || cardIds.length !== req.body.cardIds.length)) {
+      return res.status(400).json({ error: 'cardIds must contain unique positive integer card IDs' });
+    }
+    const { limit } = parseLimitOffset({ limit: req.body?.limit }, { defaultLimit: 50, maxLimit: 100 });
 
     const db = await getDb();
     if (!db) {
@@ -1510,13 +1496,12 @@ router.post('/sync-checklists/bulk', async (req: Request, res: Response) => {
 
     // Get cards with understanding
     let result;
-    if (cardIds && cardIds.length > 0) {
-      const idList = cardIds.map((id: number) => id).join(',');
+    if (cardIds.length > 0) {
       result = await db.execute(sql`
         SELECT c.id, c."trelloId" AS trello_id, u."aptlssChecklist"
         FROM atis_cards c
         JOIN atis_card_understanding u ON c.id = u."cardId"
-        WHERE c.id IN (${sql.raw(idList)})
+        WHERE c.id IN (${sql.join(cardIds.map((id) => sql`${id}`), sql`, `)})
         AND u."aptlssChecklist" IS NOT NULL
         AND c."trelloId" IS NOT NULL
         LIMIT ${limit}
@@ -1544,19 +1529,10 @@ router.post('/sync-checklists/bulk', async (req: Request, res: Response) => {
     }
 
     // Parse checklists and prepare for sync
-    const cardsToSync = rows.map((row: any) => {
-      let checklist: any[] = [];
-      try {
-        checklist = row.aptlssChecklist ? JSON.parse(row.aptlssChecklist) : [];
-      } catch (e) {
-        checklist = [];
-      }
-      return {
-        cardId: row.id,
-        trelloId: row.trello_id,
-        checklist,
-      };
-    }).filter((c: any) => c.checklist.length > 0);
+    const cardsToSync = toChecklistSyncCards(rows).map((card) => ({
+      ...card,
+      cardId: String(card.cardId),
+    }));
 
     // Sync to Trello
     const syncService = createChecklistSyncService();
@@ -1565,7 +1541,7 @@ router.post('/sync-checklists/bulk', async (req: Request, res: Response) => {
     res.json(syncResult);
   } catch (error: any) {
     console.error('[ATIS] Bulk checklist sync error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'sync checklists in bulk');
   }
 });
 
@@ -1617,7 +1593,7 @@ router.get('/sync-status/:cardId', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[ATIS] Sync status error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load sync status');
   }
 });
 
@@ -1643,7 +1619,7 @@ router.get('/task-types', async (req: Request, res: Response) => {
     res.json(result.filter((r: any) => r.taskType));
   } catch (error: any) {
     console.error('[ATIS] Task types error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load task types');
   }
 });
 
@@ -1662,7 +1638,7 @@ router.get('/extraction/stats', async (req: Request, res: Response) => {
     res.json(stats);
   } catch (error: any) {
     console.error('[ATIS] Extraction stats error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load extraction statistics');
   }
 });
 
@@ -1672,13 +1648,13 @@ router.get('/extraction/stats', async (req: Request, res: Response) => {
  */
 router.post('/extraction/process', async (req: Request, res: Response) => {
   try {
-    const { limit = 50 } = req.body;
+    const { limit } = parseLimitOffset({ limit: req.body?.limit }, { defaultLimit: 50, maxLimit: 100 });
     const extractor = createAttachmentExtractor();
     const result = await extractor.processPendingAttachments(limit);
     res.json(result);
   } catch (error: any) {
     console.error('[ATIS] Extraction process error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'process extraction');
   }
 });
 
@@ -1694,7 +1670,7 @@ router.get('/extraction/card/:cardId', async (req: Request, res: Response) => {
     res.json({ cardId, attachmentCount: content.length, content });
   } catch (error: any) {
     console.error('[ATIS] Card extraction error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load card extraction');
   }
 });
 
@@ -1713,7 +1689,7 @@ router.get('/chatbot/stats', async (req: Request, res: Response) => {
     res.json(stats);
   } catch (error: any) {
     console.error('[ATIS] Chatbot stats error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load chatbot statistics');
   }
 });
 
@@ -1739,7 +1715,7 @@ router.post('/chatbot/scan', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[ATIS] Chatbot scan error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'scan chatbot messages');
   }
 });
 
@@ -1749,13 +1725,13 @@ router.post('/chatbot/scan', async (req: Request, res: Response) => {
  */
 router.post('/chatbot/process', async (req: Request, res: Response) => {
   try {
-    const { limit = 20 } = req.body;
+    const { limit } = parseLimitOffset({ limit: req.body?.limit }, { defaultLimit: 20, maxLimit: 100 });
     const extractor = createChatbotExtractor();
     const result = await extractor.processDetectedUrls(limit);
     res.json(result);
   } catch (error: any) {
     console.error('[ATIS] Chatbot process error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'process chatbot messages');
   }
 });
 
@@ -1771,7 +1747,7 @@ router.get('/chatbot/card/:cardId', async (req: Request, res: Response) => {
     res.json({ cardId, conversationCount: conversations.length, conversations });
   } catch (error: any) {
     console.error('[ATIS] Card chatbot error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'load card chatbot messages');
   }
 });
 
@@ -1804,7 +1780,7 @@ router.post('/chatbot/extract-url', async (req: Request, res: Response) => {
     res.json(result);
   } catch (error: any) {
     console.error('[ATIS] URL extraction error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'extract URLs');
   }
 });
 
@@ -1821,12 +1797,18 @@ router.post('/understanding/reanalyze-all', atisRateLimiter, async (req: Request
     }
 
     const { 
-      limit = 100, 
       minConfidence = 0, 
       forceAll = false,
       boardId,  // Filter by specific board
-      cardIds,  // Filter by specific card IDs
     } = req.body;
+    if (req.body?.cardIds !== undefined && !Array.isArray(req.body.cardIds)) {
+      return res.status(400).json({ error: 'cardIds must be an array of positive integer card IDs' });
+    }
+    const cardIds = normalizeChecklistSyncCardIds(req.body?.cardIds);
+    if (Array.isArray(req.body?.cardIds) && (cardIds.length === 0 || cardIds.length !== req.body.cardIds.length)) {
+      return res.status(400).json({ error: 'cardIds must contain unique positive integer card IDs' });
+    }
+    const { limit } = parseLimitOffset({ limit: req.body?.limit }, { defaultLimit: 100, maxLimit: 100 });
 
     // Get cards to reprocess based on filters
     let cardsToProcess: Array<{ id: number; cardName?: string }>;
@@ -1838,7 +1820,7 @@ router.post('/understanding/reanalyze-all', atisRateLimiter, async (req: Request
       AND LOWER(${atisCards.listName}) NOT LIKE '%archived%' 
       AND LOWER(${atisCards.listName}) NOT LIKE '%info%'`;
 
-    if (cardIds && Array.isArray(cardIds) && cardIds.length > 0) {
+    if (cardIds.length > 0) {
       // Specific cards requested
       cardsToProcess = await db.select({
         id: atisCards.id,
@@ -1888,7 +1870,7 @@ router.post('/understanding/reanalyze-all', atisRateLimiter, async (req: Request
         .limit(limit);
     }
 
-    const filterDesc = cardIds ? `${cardIds.length} specific cards` : boardId ? `board ${boardId}` : 'all cards';
+    const filterDesc = cardIds.length > 0 ? `${cardIds.length} specific cards` : boardId ? `board ${boardId}` : 'all cards';
     console.log(`[ATIS] Re-analyzing ${cardsToProcess.length} cards (${filterDesc}) with updated AI prompt...`);
 
     let processed = 0;
@@ -1909,7 +1891,7 @@ router.post('/understanding/reanalyze-all', atisRateLimiter, async (req: Request
         console.log(`[ATIS Reanalyze] [${processed}/${cardsToProcess.length}] Reanalyzed card ${card.id}: ${cardInfo?.name || 'Unknown'}`);
       } catch (error: any) {
         failed++;
-        results.push({ cardId: card.id, success: false, error: error.message });
+        results.push({ cardId: card.id, success: false, error: 'Reanalysis failed. Check the server logs or retry.' });
         console.error(`[ATIS Reanalyze] Failed to reanalyze card ${card.id}:`, error.message);
       }
       // Rate limiting - 500ms between requests
@@ -1925,7 +1907,7 @@ router.post('/understanding/reanalyze-all', atisRateLimiter, async (req: Request
     });
   } catch (error: any) {
     console.error('[ATIS] Reanalyze all error:', error);
-    res.status(500).json({ error: error.message });
+    sendAtisFailure(res, 'reanalyze cards');
   }
 });
 

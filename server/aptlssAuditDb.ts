@@ -2,7 +2,7 @@
  * DB helpers for the APTLSS Audit Log and Admin Sync Log.
  *
  * The audit log records every automated action the system takes on a Trello card
- * so that Robert and Joyce can trace "what did the system do and why?".
+ * so that the owner and assigned worker can trace "what did the system do and why?".
  *
  * The sync log records each maintenance job run / webhook delivery for the
  * admin monitoring tab.

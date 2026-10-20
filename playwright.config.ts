@@ -6,6 +6,8 @@ import { defineConfig, devices } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "./e2e",
+  // Manager fixtures run under their dedicated guarded database/server configuration.
+  testIgnore: /aptlss-manager(?:-live|-review)?\.spec\.ts/,
   globalSetup: "./e2e/global-setup.ts",
 
   /* Run tests in files in parallel */
@@ -30,7 +32,7 @@ export default defineConfig({
   /* Shared settings for all the projects below */
   use: {
     /* Base URL to use in actions like `await page.goto('/')` */
-    baseURL: process.env.BASE_URL || "http://localhost:3000",
+    baseURL: process.env.BASE_URL || process.env.E2E_BASE_URL || "http://localhost:3000",
 
     /* Collect trace when retrying the failed test */
     trace: "on-first-retry",

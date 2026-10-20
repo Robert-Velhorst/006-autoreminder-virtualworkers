@@ -218,67 +218,125 @@ interface ProviderConfig {
   model: string;
 }
 
-const getProviders = async (): Promise<ProviderConfig[]> => {
-  const providers: ProviderConfig[] = [];
-  let dbSettings = new Map<string, string>();
-  
+const OPENAI_MODEL_PREFERENCE = [
+  "gpt-5.2",
+  "gpt-5.1",
+  "gpt-5",
+  "gpt-4.1",
+  "gpt-5-mini",
+  "gpt-4.1-mini",
+  "gpt-4o-mini",
+] as const;
+const MODEL_CACHE_MS = 6 * 60 * 60_000;
+const DEFAULT_MAX_COMPLETION_TOKENS = 4_096;
+const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 120_000;
+const MAX_OPENAI_REQUEST_TIMEOUT_MS = 300_000;
+let modelCache: { keyFingerprint: string; model: string; expiresAt: number } | null = null;
+
+/**
+ * Most operator flows produce short, structured assessments. Keep the shared
+ * fallback bounded so a caller that forgets to specify a budget cannot turn a
+ * routine request into a 32K-token completion. Longer features can and do
+ * pass an explicit positive integer.
+ */
+export function resolveMaxCompletionTokens(value?: number) {
+  if (value == null) return DEFAULT_MAX_COMPLETION_TOKENS;
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error("maxTokens must be a positive integer");
+  }
+  return value;
+}
+
+/**
+ * Keep an unavailable provider from holding an operator action indefinitely.
+ * The ceiling preserves a deliberate long-running request without allowing an
+ * accidental environment value to consume a request slot for hours.
+ */
+export function resolveOpenAIRequestTimeoutMs(value = process.env.OPENAI_REQUEST_TIMEOUT_MS) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed < 1_000) return DEFAULT_OPENAI_REQUEST_TIMEOUT_MS;
+  return Math.min(parsed, MAX_OPENAI_REQUEST_TIMEOUT_MS);
+}
+
+export function selectPreferredOpenAIModel(modelIds: string[], explicit?: string | null) {
+  const available = new Set(modelIds);
+  const requested = explicit?.trim();
+  if (requested) {
+    if (modelIds.length > 0 && !available.has(requested)) {
+      throw new Error(`OPENAI_MODEL '${requested}' is not available to this API key`);
+    }
+    return requested;
+  }
+  return OPENAI_MODEL_PREFERENCE.find((model) => available.has(model))
+    ?? modelIds.find((model) => /^gpt-(?:5|4\.1)(?:$|-)/.test(model) && !/audio|realtime|search|transcribe|tts|image|codex/i.test(model))
+    ?? "gpt-4o-mini";
+}
+
+async function resolveOpenAIModel(key: string) {
+  const explicit = process.env.OPENAI_MODEL?.trim();
+  const keyFingerprint = key.slice(-8);
+  if (modelCache && modelCache.keyFingerprint === keyFingerprint && modelCache.expiresAt > Date.now()) {
+    return explicit || modelCache.model;
+  }
   try {
-    const db = await getDb();
-    if (db) {
-      const keys = ['ai_provider', 'ai_model', 'ai_groq_key', 'ai_together_key', 'ai_openrouter_key', 'ai_ollama_url'];
-      const settings = await db.select().from(appSettings).where(inArray(appSettings.key, keys));
-      dbSettings = new Map(settings.map(s => [s.key, s.value]));
-    }
-  } catch (e) {
-    console.error("[LLM] Failed to read settings from DB, falling back to ENV", e);
+    const response = await fetch("https://api.openai.com/v1/models", {
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`model catalog returned ${response.status}`);
+    const payload = await response.json() as { data?: Array<{ id?: unknown }> };
+    const modelIds = (payload.data ?? []).flatMap((entry) => typeof entry.id === "string" ? [entry.id] : []);
+    const model = selectPreferredOpenAIModel(modelIds, explicit);
+    modelCache = { keyFingerprint, model, expiresAt: Date.now() + MODEL_CACHE_MS };
+    return model;
+  } catch (error) {
+    if (explicit) return explicit;
+    console.warn("[LLM] OpenAI model discovery failed; using the compatibility fallback", {
+      reason: error instanceof Error ? error.message : "unknown",
+    });
+    return "gpt-4o-mini";
+  }
+}
+
+export async function getOpenAIModelStatus() {
+  const key = process.env.OPENAI_API_KEY?.trim();
+  if (!key) {
+    return {
+      configured: false,
+      provider: "openai" as const,
+      model: null,
+      managedBy: "environment" as const,
+    };
   }
 
-  const selectedProvider = dbSettings.get('ai_provider');
-  const selectedModel = dbSettings.get('ai_model');
-  
-  if (selectedProvider && selectedModel) {
-    let key = '';
-    let url = '';
-    if (selectedProvider === 'groq') {
-      key = dbSettings.get('ai_groq_key') || process.env.GROQ_API_KEY || '';
-      url = 'https://api.groq.com/openai/v1/chat/completions';
-    } else if (selectedProvider === 'together') {
-      key = dbSettings.get('ai_together_key') || process.env.TOGETHER_API_KEY || '';
-      url = 'https://api.together.xyz/v1/chat/completions';
-    } else if (selectedProvider === 'openrouter') {
-      key = dbSettings.get('ai_openrouter_key') || process.env.OPENROUTER_API_KEY || '';
-      url = 'https://openrouter.ai/api/v1/chat/completions';
-    } else if (selectedProvider === 'ollama') {
-      key = 'ollama'; // No auth needed
-      url = `${(dbSettings.get('ai_ollama_url') || 'http://localhost:11434').replace(/\/$/, '')}/v1/chat/completions`;
-    }
-    
-    if (key) {
-      providers.push({ id: selectedProvider, url, key, model: selectedModel });
-    }
-  }
+  return {
+    configured: true,
+    provider: "openai" as const,
+    model: await resolveOpenAIModel(key),
+    managedBy: "environment" as const,
+  };
+}
 
-  // Fallbacks
-  const groqEnv = process.env.GROQ_API_KEY;
-  if (groqEnv && !providers.find(p => p.id === 'groq')) {
-    providers.push({ id: 'groq', url: 'https://api.groq.com/openai/v1/chat/completions', key: groqEnv, model: 'llama-3.3-70b-versatile' });
-  }
+export function getLLMText(result: InvokeResult): string {
+  const content = result.choices[0]?.message?.content;
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part): part is TextContent => part.type === "text")
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+}
 
-  const forgeEnv = ENV.forgeApiKey;
-  if (forgeEnv && !providers.find(p => p.id === 'forge')) {
-    const forgeUrl = ENV.forgeApiUrl ? `${ENV.forgeApiUrl.replace(/\/$/, "")}/v1/chat/completions` : "https://forge.manus.im/v1/chat/completions";
-    providers.push({ id: 'forge', url: forgeUrl, key: forgeEnv, model: 'gemini-2.5-flash' });
-  }
-  
-  const openaiEnv = process.env.OPENAI_API_KEY;
-  if (openaiEnv && !providers.find(p => p.id === 'openai')) {
-    providers.push({ id: 'openai', url: 'https://api.openai.com/v1/chat/completions', key: openaiEnv, model: 'gpt-4o-mini' });
-  }
-
-  if (providers.length === 0) {
-    throw new Error("No LLM API keys configured. Set GROQ_API_KEY, OPENAI_API_KEY, or use the Settings UI.");
-  }
-  return providers;
+const getProviders = async (): Promise<ProviderConfig[]> => {
+  const key = process.env.OPENAI_API_KEY?.trim();
+  if (!key) throw new Error("OPENAI_API_KEY is required for AI operations");
+  return [{
+    id: "openai",
+    url: "https://api.openai.com/v1/chat/completions",
+    key,
+    model: await resolveOpenAIModel(key),
+  }];
 };
 
 const normalizeResponseFormat = ({
@@ -360,14 +418,11 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
         payload.tool_choice = normalizedToolChoice;
       }
 
-      const maxOut = params.maxTokens ?? params.max_tokens;
-      if (provider.id === 'groq') {
-        payload.max_tokens = Math.min(maxOut ?? 2048, 2048);
+      const maxOut = resolveMaxCompletionTokens(params.maxTokens ?? params.max_tokens);
+      if (/^(?:gpt-5|o\d)/.test(provider.model)) {
+        payload.max_completion_tokens = maxOut;
       } else {
-        payload.max_tokens = maxOut ?? 32768;
-        if (provider.id === 'forge') {
-          (payload as any).thinking = { budget_tokens: 128 };
-        }
+        payload.max_tokens = maxOut;
       }
 
       const normalizedResponseFormat = normalizeResponseFormat({
@@ -385,20 +440,13 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
         "content-type": "application/json",
       };
       
-      if (provider.key !== 'ollama') {
-        headers.authorization = `Bearer ${provider.key}`;
-      }
-
-      // OpenRouter specific headers
-      if (provider.id === 'openrouter') {
-        headers['HTTP-Referer'] = 'http://localhost:3000';
-        headers['X-Title'] = 'VA Dashboard';
-      }
+      headers.authorization = `Bearer ${provider.key}`;
 
       const response = await fetch(provider.url, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(resolveOpenAIRequestTimeoutMs()),
       });
 
       if (!response.ok) {
@@ -411,7 +459,8 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
     } catch (error: any) {
       console.warn(`[LLM] Provider '${provider.id}' failed: ${error.message}`);
       errors.push(`[${provider.id}] ${error.message}`);
-      // Continue loop to try fallback provider
+      // A single canonical provider avoids cross-provider data leakage and
+      // inconsistent assessments. The error is surfaced after this attempt.
     }
   }
 

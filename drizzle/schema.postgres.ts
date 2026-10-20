@@ -1,5 +1,7 @@
+import { sql } from "drizzle-orm";
 import {
   integer,
+  bigint,
   text,
   timestamp,
   varchar,
@@ -64,11 +66,7 @@ export const pgEnumType09 = pgEnum("enum_status_1xo8rhz", [
   "rejected",
 ]);
 export const pgEnumType10 = pgEnum("enum_source_1xgs10d", ["trello", "upwork"]);
-export const pgEnumType11 = pgEnum("enum_status_mga0dt", [
-  "pending",
-  "replied",
-  "overdue",
-]);
+export const pgEnumType11 = pgEnum("enum_status_mga0dt", ["pending","replied","overdue","inactive"]);
 export const pgEnumType12 = pgEnum("enum_resolvedby_2vjpz9", [
   "manual",
   "auto_demerit",
@@ -548,13 +546,13 @@ export const trelloCacheMetadata = pgTable("trello_cache_metadata", {
     .notNull(),
 });
 
-export const trelloCachedTasks = pgTable("trello_cached_tasks", {
-  id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
-  userId: integer("userId").notNull(),
-  userOpenId: varchar("userOpenId", { length: 64 }).notNull(),
-  taskData: text("taskData").notNull(), // JSON serialized task data
-  cachedAt: timestamp("cachedAt").defaultNow().notNull(),
-  expiresAt: timestamp("expiresAt").notNull(),
+export const trelloCachedTasks = pgTable('trello_cached_tasks', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  userId: integer('userId').notNull(),
+  userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
+  taskData: text('taskData').notNull(), // JSON serialized schedule response
+  cachedAt: timestamp('cachedAt').defaultNow().notNull(),
+  expiresAt: timestamp('expiresAt').notNull(),
 });
 
 export const trelloCachedBoards = pgTable("trello_cached_boards", {
@@ -567,16 +565,16 @@ export const trelloCachedBoards = pgTable("trello_cached_boards", {
   expiresAt: timestamp("expiresAt").notNull(),
 });
 
-export const trelloCachedCards = pgTable("trello_cached_cards", {
-  id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
-  userId: integer("userId").notNull(),
-  userOpenId: varchar("userOpenId", { length: 64 }).notNull(),
-  boardId: varchar("boardId", { length: 64 }).notNull(),
-  cardId: varchar("cardId", { length: 64 }).notNull(),
-  cardData: text("cardData").notNull(), // JSON serialized card data
-  cachedAt: timestamp("cachedAt").defaultNow().notNull(),
-  expiresAt: timestamp("expiresAt").notNull(),
-});
+export const trelloCachedCards = pgTable('trello_cached_cards', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  userId: integer('userId').notNull(),
+  userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
+  boardId: varchar('boardId', { length: 64 }).notNull(),
+  cardId: varchar('cardId', { length: 64 }).notNull(),
+  cardData: text('cardData').notNull(), // JSON serialized card data
+  cachedAt: timestamp('cachedAt').defaultNow().notNull(),
+  expiresAt: timestamp('expiresAt').notNull(),
+}, (table) => [index('trello_cached_cards_user_card_cached_idx').on(table.userId, table.cardId, table.cachedAt)]);
 
 export type TrelloCacheMetadata = typeof trelloCacheMetadata.$inferSelect;
 export type InsertTrelloCacheMetadata = typeof trelloCacheMetadata.$inferInsert;
@@ -790,48 +788,37 @@ export const reviewQueue = pgTable("review_queue", {
 });
 
 // Time tracking entries
-export const timeEntries = pgTable(
-  "time_entries",
-  {
-    id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
-    taskId: varchar("taskId", { length: 128 }).notNull(),
-    vaId: integer("vaId").notNull(),
-    founderId: integer("founderId").notNull(),
-    cardId: varchar("cardId", { length: 64 }),
-    cardName: varchar("cardName", { length: 512 }),
-    cardUrl: varchar("cardUrl", { length: 1024 }),
-    boardName: varchar("boardName", { length: 256 }).default("Unknown Board"),
-    listName: varchar("listName", { length: 256 }).default("Unknown"),
-    startTime: timestamp("startTime").notNull(),
-    endTime: timestamp("endTime"),
-    durationMinutes: integer("durationMinutes"),
-    durationSeconds: integer("durationSeconds"),
-    notes: text("notes"),
-    source: varchar("source", { length: 32 }).notNull().default("legacy"),
-    category: varchar("category", { length: 32 })
-      .notNull()
-      .default("client_work"),
-    planDateKey: varchar("planDateKey", { length: 16 }),
-    planBlockId: varchar("planBlockId", { length: 128 }),
-    aptlssStepId: integer("aptlssStepId"),
-    isVoided: boolean("isVoided").notNull().default(false),
-    voidedAt: timestamp("voidedAt"),
-    voidReason: text("voidReason"),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-    updatedAt: timestamp("updatedAt")
-      .defaultNow()
-      .$onUpdateFn(() => new Date())
-      .notNull(),
-  },
-  table => [
-    index("time_entries_period_idx").on(table.startTime, table.endTime),
-    index("time_entries_plan_block_idx").on(
-      table.planDateKey,
-      table.planBlockId
-    ),
-    index("time_entries_step_idx").on(table.aptlssStepId),
-  ]
-);
+export const timeEntries = pgTable('time_entries', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  taskId: varchar('taskId', { length: 128 }).notNull(),
+  vaId: integer('vaId').notNull(),
+  founderId: integer('founderId').notNull(),
+  cardId: varchar('cardId', { length: 64 }),
+  cardName: varchar('cardName', { length: 512 }),
+  cardUrl: varchar('cardUrl', { length: 1024 }),
+  boardName: varchar('boardName', { length: 256 }).default('Unknown Board'),
+  listName: varchar('listName', { length: 256 }).default('Unknown'),
+  startTime: timestamp('startTime').notNull(),
+  endTime: timestamp('endTime'),
+  durationMinutes: integer('durationMinutes'),
+  durationSeconds: integer('durationSeconds'),
+  notes: text('notes'),
+  source: varchar('source', { length: 32 }).notNull().default('legacy'),
+  category: varchar('category', { length: 32 }).notNull().default('client_work'),
+  planDateKey: varchar('planDateKey', { length: 16 }),
+  planBlockId: varchar('planBlockId', { length: 128 }),
+  aptlssStepId: integer('aptlssStepId'),
+  isVoided: boolean('isVoided').notNull().default(false),
+  voidedAt: timestamp('voidedAt'),
+  voidReason: text('voidReason'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  index('time_entries_period_idx').on(table.startTime, table.endTime),
+  index('va_time_entries_period_idx').on(table.vaId, table.startTime, table.endTime),
+  index('time_entries_plan_block_idx').on(table.planDateKey, table.planBlockId),
+  index('time_entries_step_idx').on(table.aptlssStepId),
+]);
 
 // Payment cycles — each 2-week pay period per founder
 export const paymentCycles = pgTable("payment_cycles", {
@@ -1136,43 +1123,26 @@ export const dailyComplianceSnapshots = pgTable(
 );
 
 // Tracks Trello comment threads per worker
-export const replyThreads = pgTable(
-  "reply_threads",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    vaId: integer("vaId").notNull(),
-    source: enumText("source", ["trello", "upwork"])
-      .notNull()
-      .default("trello"),
-    cardId: varchar("cardId", { length: 64 }).notNull(),
-    cardName: varchar("cardName", { length: 512 }).notNull(),
-    cardUrl: varchar("cardUrl", { length: 1024 }).notNull(),
-    boardName: varchar("boardName", { length: 256 }).notNull().default(""),
-    listName: varchar("listName", { length: 256 }).notNull().default(""),
-    lastNonWorkerMsgAt: timestamp("lastNonWorkerMsgAt").notNull(),
-    lastNonWorkerAuthor: varchar("lastNonWorkerAuthor", { length: 256 })
-      .notNull()
-      .default(""),
-    lastNonWorkerText: text("lastNonWorkerText"),
-    lastWorkerReplyAt: timestamp("lastWorkerReplyAt"),
-    status: enumText("status", ["pending", "replied", "overdue"])
-      .notNull()
-      .default("pending"),
-    demerited: boolean("demerited").notNull().default(false),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-    updatedAt: timestamp("updatedAt")
-      .defaultNow()
-      .$onUpdateFn(() => new Date())
-      .notNull(),
-  },
-  table => [
-    uniqueIndex("va_reply_thread_idx").on(
-      table.vaId,
-      table.cardId,
-      table.source
-    ),
-  ]
-);
+export const replyThreads = pgTable("reply_threads", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId").notNull(),
+  source: enumText("source", ["trello", "upwork"]).notNull().default("trello"),
+  cardId: varchar("cardId", { length: 64 }).notNull(),
+  cardName: varchar("cardName", { length: 512 }).notNull(),
+  cardUrl: varchar("cardUrl", { length: 1024 }).notNull(),
+  boardName: varchar("boardName", { length: 256 }).notNull().default(""),
+  listName: varchar("listName", { length: 256 }).notNull().default(""),
+  lastNonWorkerMsgAt: timestamp("lastNonWorkerMsgAt").notNull(),
+  lastNonWorkerAuthor: varchar("lastNonWorkerAuthor", { length: 256 }).notNull().default(""),
+  lastNonWorkerText: text("lastNonWorkerText"),
+  lastWorkerReplyAt: timestamp("lastWorkerReplyAt"),
+  status: pgEnumType11("status").notNull().default("pending"),
+  demerited: boolean("demerited").notNull().default(false),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  uniqueIndex('va_reply_thread_idx').on(table.vaId, table.cardId, table.source)
+]);
 
 // Tracks vague replies per worker
 export const vagueReplyFlags = pgTable("vague_reply_flags", {
@@ -1225,19 +1195,13 @@ export const emailTasks = pgTable("email_tasks", {
   vaId: integer("vaId").notNull(),
   gmailMessageId: varchar("gmailMessageId", { length: 128 }).notNull().unique(),
   gmailThreadId: varchar("gmailThreadId", { length: 128 }).notNull(),
-  subject: varchar("subject", { length: 1024 })
-    .notNull()
-    .default("(no subject)"),
+  subject: varchar("subject", { length: 1024 }).notNull().default("(no subject)"),
   fromAddress: varchar("fromAddress", { length: 320 }).notNull().default(""),
   fromName: varchar("fromName", { length: 256 }).notNull().default(""),
   snippet: text("snippet"),
   receivedAt: timestamp("receivedAt").notNull(),
-  category: enumText("category", ["financial", "non_financial"])
-    .notNull()
-    .default("non_financial"),
-  status: enumText("status", ["pending", "processed", "archived"])
-    .notNull()
-    .default("pending"),
+  category: enumText("category", ["financial", "non_financial"]).notNull().default("non_financial"),
+  status: enumText("status", ["pending", "processed", "archived"]).notNull().default("pending"),
   deadlineAt: timestamp("deadlineAt"),
   trelloCardId: varchar("trelloCardId", { length: 64 }),
   trelloCardName: varchar("trelloCardName", { length: 512 }),
@@ -1247,11 +1211,11 @@ export const emailTasks = pgTable("email_tasks", {
   processedAt: timestamp("processedAt"),
   archivedAt: timestamp("archivedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt")
-    .defaultNow()
-    .$onUpdateFn(() => new Date())
-    .notNull(),
-});
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  index("email_tasks_va_status_received_idx").on(table.vaId, table.status, table.receivedAt),
+  index("email_tasks_va_trello_card_idx").on(table.vaId, table.trelloCardId),
+]);
 
 // Card snoozes per worker
 export const cardSnoozes = pgTable("card_snoozes", {
@@ -1872,32 +1836,32 @@ export type InsertInterviewResult = typeof interviewResults.$inferInsert;
 // ============================================
 
 // Task schedule history - track all rescheduling events
-export const taskScheduleHistory = pgTable("task_schedule_history", {
-  id: varchar("id", { length: 64 }).primaryKey(),
-  taskId: varchar("taskId", { length: 128 }).notNull(),
-  cardTrelloId: varchar("cardTrelloId", { length: 64 }),
+export const taskScheduleHistory = pgTable('task_schedule_history', {
+  id: varchar('id', { length: 64 }).primaryKey(),
+  taskId: varchar('taskId', { length: 128 }).notNull(),
+  founderId: integer('founderId'),
+  assignmentId: integer('assignmentId'),
+  cardTrelloId: varchar('cardTrelloId', { length: 64 }),
 
   // Previous schedule
-  previousStartTime: timestamp("previousStartTime"),
-  previousEndTime: timestamp("previousEndTime"),
+  previousStartTime: timestamp('previousStartTime'),
+  previousEndTime: timestamp('previousEndTime'),
 
   // New schedule
-  newStartTime: timestamp("newStartTime"),
-  newEndTime: timestamp("newEndTime"),
+  newStartTime: timestamp('newStartTime'),
+  newEndTime: timestamp('newEndTime'),
 
   // Change details
-  changedBy: varchar("changedBy", { length: 64 }).notNull(), // User openId
-  reason: varchar("reason", { length: 255 }), // Why was it rescheduled?
-  source: enumText("source", ["manual", "auto", "batch", "conflict_resolution"])
-    .default("manual")
-    .notNull(),
+  changedBy: varchar('changedBy', { length: 64 }).notNull(), // User openId
+  reason: varchar('reason', { length: 255 }), // Why was it rescheduled?
+  source: enumText('source', ['manual', 'auto', 'batch', 'conflict_resolution']).default('manual').notNull(),
 
   // Conflict info
-  hadConflicts: integer("hadConflicts").default(0).notNull(), // 0=false, 1=true
-  conflictDetails: text("conflictDetails"), // JSON array of conflicts
+  hadConflicts: integer('hadConflicts').default(0).notNull(), // 0=false, 1=true
+  conflictDetails: text('conflictDetails'), // JSON array of conflicts
 
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+}, table => [index("task_schedule_history_assignment_created_idx").on(table.assignmentId, table.createdAt)]);
 
 // Batch operations tracking
 export const batchOperations = pgTable("batch_operations", {
@@ -2729,9 +2693,7 @@ export const aptlssSteps = pgTable("aptlss_steps", {
   title: varchar("title", { length: 1024 }).notNull(),
   estimatedMinutes: integer("estimatedMinutes").notNull().default(15),
   status: varchar("status", { length: 32 }).notNull().default("open"),
-  category: varchar("category", { length: 64 })
-    .notNull()
-    .default("internal_work"),
+  category: varchar("category", { length: 64 }).notNull().default("internal_work"),
   requiresRobert: boolean("requiresRobert").notNull().default(false),
   blockedBy: varchar("blockedBy", { length: 64 }),
   dependsOnCards: text("dependsOnCards"),
@@ -2742,11 +2704,10 @@ export const aptlssSteps = pgTable("aptlss_steps", {
   completedAt: timestamp("completedAt"),
   lastSyncedAt: timestamp("lastSyncedAt").defaultNow().notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt")
-    .defaultNow()
-    .$onUpdateFn(() => new Date())
-    .notNull(),
-});
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  index("va_aptlss_step_card_idx").on(table.vaId, table.cardId),
+]);
 
 export const cardStates = pgTable(
   "card_states",
@@ -3073,86 +3034,54 @@ export const aptlssWaitingReasons = pgTable(
   ]
 );
 
-export const decisionOutcomes = pgTable(
-  "decision_outcomes",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    vaId: integer("vaId").notNull(),
-    stepId: integer("stepId").notNull().unique(),
-    cardId: varchar("cardId", { length: 64 }).notNull(),
-    cardName: varchar("cardName", { length: 512 }).notNull().default(""),
-    cardUrl: varchar("cardUrl", { length: 1024 }).notNull().default(""),
-    boardName: varchar("boardName", { length: 256 }).notNull().default(""),
-    listName: varchar("listName", { length: 256 }).notNull().default(""),
-    decisionPrompt: text("decisionPrompt").notNull(),
-    recommendedDecision: text("recommendedDecision"),
-    outcome: text("outcome").notNull(),
-    resolvedBy: varchar("resolvedBy", { length: 64 }).notNull(),
-    resolvedAt: timestamp("resolvedAt").defaultNow().notNull(),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-  },
-  table => [
-    index("decision_outcomes_va_resolved_idx").on(table.vaId, table.resolvedAt),
-  ]
-);
+export const decisionOutcomes = pgTable("decision_outcomes", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId").notNull(),
+  stepId: integer("stepId").notNull().unique(),
+  cardId: varchar("cardId", { length: 64 }).notNull(),
+  cardName: varchar("cardName", { length: 512 }).notNull().default(""),
+  cardUrl: varchar("cardUrl", { length: 1024 }).notNull().default(""),
+  boardName: varchar("boardName", { length: 256 }).notNull().default(""),
+  listName: varchar("listName", { length: 256 }).notNull().default(""),
+  decisionPrompt: text("decisionPrompt").notNull(),
+  recommendedDecision: text("recommendedDecision"),
+  disposition: enumText("disposition", ["recorded", "approved", "rejected"]).notNull().default("recorded"),
+  outcome: text("outcome").notNull(),
+  resolvedBy: varchar("resolvedBy", { length: 64 }).notNull(),
+  resolvedAt: timestamp("resolvedAt").defaultNow().notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("decision_outcomes_va_resolved_idx").on(table.vaId, table.resolvedAt),
+]);
 
-export const workspaceEvidenceItems = pgTable(
-  "workspace_evidence_items",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    source: enumText("source", [
-      "gmail",
-      "google_drive",
-      "trello",
-      "communication",
-    ]).notNull(),
-    sourceId: varchar("sourceId", { length: 256 }).notNull(),
-    sourceContainerId: varchar("sourceContainerId", { length: 256 }),
-    kind: varchar("kind", { length: 128 }).notNull().default("record"),
-    title: varchar("title", { length: 1024 }).notNull(),
-    summary: text("summary"),
-    content: text("content"),
-    sourceUrl: varchar("sourceUrl", { length: 2048 }),
-    mimeType: varchar("mimeType", { length: 256 }),
-    modifiedAt: timestamp("modifiedAt"),
-    observedAt: timestamp("observedAt").notNull(),
-    contentHash: varchar("contentHash", { length: 64 }).notNull(),
-    metadataJson: text("metadataJson"),
-    reviewStatus: enumText("reviewStatus", [
-      "unreviewed",
-      "linked",
-      "not_work_related",
-    ])
-      .notNull()
-      .default("unreviewed"),
-    reviewedAt: timestamp("reviewedAt"),
-    reviewedBy: varchar("reviewedBy", { length: 128 }),
-    active: boolean("active").notNull().default(true),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-    updatedAt: timestamp("updatedAt")
-      .defaultNow()
-      .$onUpdateFn(() => new Date())
-      .notNull(),
-  },
-  table => [
-    uniqueIndex("workspace_evidence_source_id_unique").on(
-      table.source,
-      table.sourceId
-    ),
-    index("workspace_evidence_source_modified_idx").on(
-      table.source,
-      table.modifiedAt
-    ),
-    index("workspace_evidence_active_observed_idx").on(
-      table.active,
-      table.observedAt
-    ),
-    index("workspace_evidence_review_idx").on(
-      table.reviewStatus,
-      table.modifiedAt
-    ),
-  ]
-);
+export const workspaceEvidenceItems = pgTable("workspace_evidence_items", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId"),
+  source: enumText("source", ["gmail", "google_drive", "trello", "communication"]).notNull(),
+  sourceId: varchar("sourceId", { length: 256 }).notNull(),
+  sourceContainerId: varchar("sourceContainerId", { length: 256 }),
+  kind: varchar("kind", { length: 128 }).notNull().default("record"),
+  title: varchar("title", { length: 1024 }).notNull(),
+  summary: text("summary"),
+  content: text("content"),
+  sourceUrl: varchar("sourceUrl", { length: 2048 }),
+  mimeType: varchar("mimeType", { length: 256 }),
+  modifiedAt: timestamp("modifiedAt"),
+  observedAt: timestamp("observedAt").notNull(),
+  contentHash: varchar("contentHash", { length: 64 }).notNull(),
+  metadataJson: text("metadataJson"),
+  reviewStatus: enumText("reviewStatus", ["unreviewed", "linked", "not_work_related"]).notNull().default("unreviewed"),
+  reviewedAt: timestamp("reviewedAt"),
+  reviewedBy: varchar("reviewedBy", { length: 128 }),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  uniqueIndex("workspace_evidence_va_source_id_unique").on(table.vaId, table.source, table.sourceId),
+  index("workspace_evidence_va_source_modified_idx").on(table.vaId, table.source, table.modifiedAt),
+  index("workspace_evidence_va_active_observed_idx").on(table.vaId, table.active, table.observedAt),
+  index("workspace_evidence_va_review_idx").on(table.vaId, table.reviewStatus, table.modifiedAt),
+]);
 
 export const workspaceEvidenceLinks = pgTable(
   "workspace_evidence_links",
@@ -3191,356 +3120,197 @@ export const workspaceEvidenceLinks = pgTable(
 );
 
 // The graph is additive: workspaceEvidenceItems remains the canonical retained source record.
-export const aptlssEvidenceRevisions = pgTable(
-  "aptlss_evidence_revisions",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    evidenceId: integer("evidenceId").notNull(),
-    contentHash: varchar("contentHash", { length: 64 }).notNull(),
-    truthClass: enumText("truthClass", [
-      "source_record",
-      "worker_assertion",
-      "system_inference",
-    ]).notNull(),
-    summary: text("summary"),
-    content: text("content"),
-    metadataJson: text("metadataJson"),
-    observedAt: timestamp("observedAt").notNull(),
-    recordedBy: varchar("recordedBy", { length: 128 }),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-  },
-  table => [
-    foreignKey({
-      columns: [table.evidenceId],
-      foreignColumns: [workspaceEvidenceItems.id],
-      name: "aptlss_evidence_revision_item_fk",
-    })
-      .onDelete("cascade")
-      .onUpdate("cascade"),
-    uniqueIndex("aptlss_evidence_revision_hash_unique").on(
-      table.evidenceId,
-      table.contentHash
-    ),
-    index("aptlss_evidence_revision_observed_idx").on(
-      table.evidenceId,
-      table.observedAt
-    ),
-  ]
-);
+export const aptlssEvidenceRevisions = pgTable("aptlss_evidence_revisions", {
+id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+evidenceId: integer("evidenceId").notNull(),
+contentHash: varchar("contentHash", { length: 64 }).notNull(),
+truthClass: enumText("truthClass", ["source_record", "worker_assertion", "system_inference"]).notNull(),
+summary: text("summary"),
+content: text("content"),
+metadataJson: text("metadataJson"),
+observedAt: timestamp("observedAt").notNull(),
+recordedBy: varchar("recordedBy", { length: 128 }),
+createdAt: timestamp("createdAt").defaultNow().notNull()
+}, (table) => [
+  foreignKey({
+    columns: [table.evidenceId],
+    foreignColumns: [workspaceEvidenceItems.id],
+    name: "aptlss_evidence_revision_item_fk",
+  }).onDelete("cascade").onUpdate("cascade"),
+  uniqueIndex("aptlss_evidence_revision_hash_unique").on(table.evidenceId, table.contentHash),
+  index("aptlss_evidence_revision_observed_idx").on(table.evidenceId, table.observedAt),
+]);
 
-export const aptlssEvidenceSubjectLinks = pgTable(
-  "aptlss_evidence_subject_links",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    evidenceId: integer("evidenceId").notNull(),
-    vaId: integer("vaId").notNull(),
-    subjectType: enumText("subjectType", [
-      "card",
-      "worker",
-      "decision",
-      "plan_block",
-    ]).notNull(),
-    subjectId: varchar("subjectId", { length: 256 }).notNull(),
-    relevanceScore: integer("relevanceScore").notNull(),
-    linkMethod: enumText("linkMethod", ["automatic", "manual", "confirmed"])
-      .notNull()
-      .default("automatic"),
-    matchReason: varchar("matchReason", { length: 512 }).notNull(),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-    updatedAt: timestamp("updatedAt")
-      .defaultNow()
-      .$onUpdateFn(() => new Date())
-      .notNull(),
-  },
-  table => [
-    foreignKey({
-      columns: [table.evidenceId],
-      foreignColumns: [workspaceEvidenceItems.id],
-      name: "aptlss_evidence_subject_item_fk",
-    })
-      .onDelete("cascade")
-      .onUpdate("cascade"),
-    uniqueIndex("aptlss_evidence_subject_unique").on(
-      table.evidenceId,
-      table.vaId,
-      table.subjectType,
-      table.subjectId
-    ),
-    index("aptlss_evidence_subject_lookup_idx").on(
-      table.vaId,
-      table.subjectType,
-      table.subjectId,
-      table.relevanceScore
-    ),
-  ]
-);
+export const aptlssEvidenceSubjectLinks = pgTable("aptlss_evidence_subject_links", {
+id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+evidenceId: integer("evidenceId").notNull(),
+vaId: integer("vaId").notNull(),
+subjectType: enumText("subjectType", ["card", "worker", "decision", "plan_block"]).notNull(),
+subjectId: varchar("subjectId", { length: 256 }).notNull(),
+relevanceScore: integer("relevanceScore").notNull(),
+linkMethod: enumText("linkMethod", ["automatic", "manual", "confirmed"]).notNull().default("automatic"),
+matchReason: varchar("matchReason", { length: 512 }).notNull(),
+createdAt: timestamp("createdAt").defaultNow().notNull(),
+updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull()
+}, (table) => [
+  foreignKey({
+    columns: [table.evidenceId],
+    foreignColumns: [workspaceEvidenceItems.id],
+    name: "aptlss_evidence_subject_item_fk",
+  }).onDelete("cascade").onUpdate("cascade"),
+  uniqueIndex("aptlss_evidence_subject_unique").on(table.evidenceId, table.vaId, table.subjectType, table.subjectId),
+  index("aptlss_evidence_subject_lookup_idx").on(table.vaId, table.subjectType, table.subjectId, table.relevanceScore),
+]);
 
-export const aptlssEvidenceConflicts = pgTable(
-  "aptlss_evidence_conflicts",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    vaId: integer("vaId").notNull(),
-    sourceEvidenceId: integer("sourceEvidenceId").notNull(),
-    assertedEvidenceId: integer("assertedEvidenceId").notNull(),
-    status: enumText("status", [
-      "needs_verification",
-      "consistent",
-      "resolved",
-      "dismissed",
-    ])
-      .notNull()
-      .default("needs_verification"),
-    resolution: text("resolution"),
-    resolvedBy: varchar("resolvedBy", { length: 128 }),
-    resolvedAt: timestamp("resolvedAt"),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-    updatedAt: timestamp("updatedAt")
-      .defaultNow()
-      .$onUpdateFn(() => new Date())
-      .notNull(),
-  },
-  table => [
-    foreignKey({
-      columns: [table.sourceEvidenceId],
-      foreignColumns: [workspaceEvidenceItems.id],
-      name: "aptlss_evidence_conflict_source_fk",
-    })
-      .onDelete("cascade")
-      .onUpdate("cascade"),
-    foreignKey({
-      columns: [table.assertedEvidenceId],
-      foreignColumns: [workspaceEvidenceItems.id],
-      name: "aptlss_evidence_conflict_asserted_fk",
-    })
-      .onDelete("cascade")
-      .onUpdate("cascade"),
-    uniqueIndex("aptlss_evidence_conflict_pair_unique").on(
-      table.sourceEvidenceId,
-      table.assertedEvidenceId
-    ),
-    index("aptlss_evidence_conflict_va_status_idx").on(
-      table.vaId,
-      table.status,
-      table.createdAt
-    ),
-  ]
-);
+export const aptlssEvidenceConflicts = pgTable("aptlss_evidence_conflicts", {
+id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+vaId: integer("vaId").notNull(),
+sourceEvidenceId: integer("sourceEvidenceId").notNull(),
+assertedEvidenceId: integer("assertedEvidenceId").notNull(),
+status: enumText("status", ["needs_verification", "consistent", "resolved", "dismissed"]).notNull().default("needs_verification"),
+resolution: text("resolution"),
+resolvedBy: varchar("resolvedBy", { length: 128 }),
+resolvedAt: timestamp("resolvedAt"),
+createdAt: timestamp("createdAt").defaultNow().notNull(),
+updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull()
+}, (table) => [
+  foreignKey({
+    columns: [table.sourceEvidenceId],
+    foreignColumns: [workspaceEvidenceItems.id],
+    name: "aptlss_evidence_conflict_source_fk",
+  }).onDelete("cascade").onUpdate("cascade"),
+  foreignKey({
+    columns: [table.assertedEvidenceId],
+    foreignColumns: [workspaceEvidenceItems.id],
+    name: "aptlss_evidence_conflict_asserted_fk",
+  }).onDelete("cascade").onUpdate("cascade"),
+  uniqueIndex("aptlss_evidence_conflict_pair_unique").on(table.sourceEvidenceId, table.assertedEvidenceId),
+  index("aptlss_evidence_conflict_va_status_idx").on(table.vaId, table.status, table.createdAt),
+]);
 
-export const aptlssVerificationFollowups = pgTable(
-  "aptlss_verification_followups",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    vaId: integer("vaId").notNull(),
-    cardId: varchar("cardId", { length: 64 }),
-    conflictId: integer("conflictId"),
-    title: varchar("title", { length: 512 }).notNull(),
-    question: text("question").notNull(),
-    status: enumText("status", ["open", "resolved", "superseded"])
-      .notNull()
-      .default("open"),
-    dueAt: timestamp("dueAt"),
-    resolution: text("resolution"),
-    resolvedBy: varchar("resolvedBy", { length: 128 }),
-    resolvedAt: timestamp("resolvedAt"),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-    updatedAt: timestamp("updatedAt")
-      .defaultNow()
-      .$onUpdateFn(() => new Date())
-      .notNull(),
-  },
-  table => [
-    foreignKey({
-      columns: [table.conflictId],
-      foreignColumns: [aptlssEvidenceConflicts.id],
-      name: "aptlss_verification_followup_conflict_fk",
-    })
-      .onDelete("set null")
-      .onUpdate("cascade"),
-    index("aptlss_verification_followup_va_status_idx").on(
-      table.vaId,
-      table.status,
-      table.dueAt
-    ),
-    index("aptlss_verification_followup_card_idx").on(
-      table.cardId,
-      table.status
-    ),
-  ]
-);
+export const aptlssVerificationFollowups = pgTable("aptlss_verification_followups", {
+id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+vaId: integer("vaId").notNull(),
+cardId: varchar("cardId", { length: 64 }),
+conflictId: integer("conflictId"),
+title: varchar("title", { length: 512 }).notNull(),
+question: text("question").notNull(),
+status: enumText("status", ["open", "resolved", "superseded"]).notNull().default("open"),
+dueAt: timestamp("dueAt"),
+resolution: text("resolution"),
+resolvedBy: varchar("resolvedBy", { length: 128 }),
+resolvedAt: timestamp("resolvedAt"),
+createdAt: timestamp("createdAt").defaultNow().notNull(),
+updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull()
+}, (table) => [
+  foreignKey({
+    columns: [table.conflictId],
+    foreignColumns: [aptlssEvidenceConflicts.id],
+    name: "aptlss_verification_followup_conflict_fk",
+  }).onDelete("set null").onUpdate("cascade"),
+  index("aptlss_verification_followup_va_status_idx").on(table.vaId, table.status, table.dueAt),
+  index("aptlss_verification_followup_card_idx").on(table.cardId, table.status),
+]);
 
-export const communicationEvidence = pgTable(
-  "communication_evidence",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    channel: varchar("channel", { length: 64 }).notNull(),
-    externalId: varchar("externalId", { length: 256 }).notNull(),
-    threadId: varchar("threadId", { length: 256 }),
-    direction: enumText("direction", [
-      "inbound",
-      "outbound",
-      "system",
-      "unknown",
-    ])
-      .notNull()
-      .default("unknown"),
-    sender: varchar("sender", { length: 512 }),
-    recipientsJson: text("recipientsJson"),
-    subject: varchar("subject", { length: 1024 }),
-    summary: text("summary"),
-    occurredAt: timestamp("occurredAt").notNull(),
-    responseRequired: boolean("responseRequired").notNull().default(false),
-    respondedAt: timestamp("respondedAt"),
-    linkedCardId: varchar("linkedCardId", { length: 64 }),
-    evidenceItemId: integer("evidenceItemId"),
-    metadataJson: text("metadataJson"),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-    updatedAt: timestamp("updatedAt")
-      .defaultNow()
-      .$onUpdateFn(() => new Date())
-      .notNull(),
-  },
-  table => [
-    uniqueIndex("communication_evidence_channel_external_unique").on(
-      table.channel,
-      table.externalId
-    ),
-    index("communication_evidence_card_occurred_idx").on(
-      table.linkedCardId,
-      table.occurredAt
-    ),
-    index("communication_evidence_response_idx").on(
-      table.responseRequired,
-      table.respondedAt
-    ),
-  ]
-);
+export const communicationEvidence = pgTable("communication_evidence", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId"),
+  channel: varchar("channel", { length: 64 }).notNull(),
+  externalId: varchar("externalId", { length: 256 }).notNull(),
+  threadId: varchar("threadId", { length: 256 }),
+  direction: enumText("direction", ["inbound", "outbound", "system", "unknown"]).notNull().default("unknown"),
+  sender: varchar("sender", { length: 512 }),
+  recipientsJson: text("recipientsJson"),
+  subject: varchar("subject", { length: 1024 }),
+  summary: text("summary"),
+  occurredAt: timestamp("occurredAt").notNull(),
+  responseRequired: boolean("responseRequired").notNull().default(false),
+  respondedAt: timestamp("respondedAt"),
+  linkedCardId: varchar("linkedCardId", { length: 64 }),
+  evidenceItemId: integer("evidenceItemId"),
+  metadataJson: text("metadataJson"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  uniqueIndex("communication_evidence_va_channel_external_unique").on(table.vaId, table.channel, table.externalId),
+  index("communication_evidence_va_card_occurred_idx").on(table.vaId, table.linkedCardId, table.occurredAt),
+  index("communication_evidence_va_response_idx").on(table.vaId, table.responseRequired, table.respondedAt),
+]);
 
-export const complianceCardEvidence = pgTable(
-  "compliance_card_evidence",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    snapshotDate: date("snapshotDate", { mode: "date" }).notNull(),
-    cardId: varchar("cardId", { length: 64 }).notNull(),
-    cardName: varchar("cardName", { length: 512 }).notNull(),
-    cardUrl: varchar("cardUrl", { length: 1024 }).notNull(),
-    boardName: varchar("boardName", { length: 256 }).notNull().default(""),
-    listName: varchar("listName", { length: 256 }).notNull().default(""),
-    category: varchar("category", { length: 16 }).notNull(),
-    assignedToJoyce: boolean("assignedToJoyce").notNull().default(true),
-    compliant: boolean("compliant").notNull().default(false),
-    evidenceType: varchar("evidenceType", { length: 32 })
-      .notNull()
-      .default("none"),
-    evidenceActionId: varchar("evidenceActionId", { length: 64 }),
-    evidenceAt: timestamp("evidenceAt"),
-    evidenceJson: text("evidenceJson").notNull(),
-    verifiedAt: timestamp("verifiedAt").notNull(),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-    updatedAt: timestamp("updatedAt")
-      .defaultNow()
-      .$onUpdateFn(() => new Date())
-      .notNull(),
-  },
-  table => [
-    uniqueIndex("compliance_evidence_date_card_unique").on(
-      table.snapshotDate,
-      table.cardId
-    ),
-    index("compliance_evidence_card_date_idx").on(
-      table.cardId,
-      table.snapshotDate
-    ),
-    index("compliance_evidence_date_compliant_idx").on(
-      table.snapshotDate,
-      table.compliant
-    ),
-  ]
-);
+export const complianceCardEvidence = pgTable("compliance_card_evidence", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId"),
+  snapshotDate: date("snapshotDate").notNull(),
+  cardId: varchar("cardId", { length: 64 }).notNull(),
+  cardName: varchar("cardName", { length: 512 }).notNull(),
+  cardUrl: varchar("cardUrl", { length: 1024 }).notNull(),
+  boardName: varchar("boardName", { length: 256 }).notNull().default(""),
+  listName: varchar("listName", { length: 256 }).notNull().default(""),
+  category: varchar("category", { length: 16 }).notNull(),
+  assignedToJoyce: boolean("assignedToJoyce").notNull().default(true),
+  assignedToWorker: boolean("assignedToWorker").notNull().default(true),
+  compliant: boolean("compliant").notNull().default(false),
+  evidenceType: varchar("evidenceType", { length: 32 }).notNull().default("none"),
+  evidenceActionId: varchar("evidenceActionId", { length: 64 }),
+  evidenceAt: timestamp("evidenceAt"),
+  evidenceJson: text("evidenceJson").notNull(),
+  verifiedAt: timestamp("verifiedAt").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  uniqueIndex("compliance_evidence_va_date_card_unique").on(table.vaId, table.snapshotDate, table.cardId),
+  index("compliance_evidence_va_card_date_idx").on(table.vaId, table.cardId, table.snapshotDate),
+  index("compliance_evidence_va_date_compliant_idx").on(table.vaId, table.snapshotDate, table.compliant),
+]);
 
-export const complianceCommunicationEvidence = pgTable(
-  "compliance_communication_evidence",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    snapshotDate: date("snapshotDate", { mode: "date" }).notNull(),
-    evidenceKey: varchar("evidenceKey", { length: 256 }).notNull(),
-    kind: enumText("kind", ["message_response", "email_processing"]).notNull(),
-    channel: varchar("channel", { length: 64 }).notNull(),
-    externalId: varchar("externalId", { length: 256 }).notNull(),
-    title: varchar("title", { length: 1024 }).notNull(),
-    sourceUrl: varchar("sourceUrl", { length: 1024 }),
-    occurredAt: timestamp("occurredAt").notNull(),
-    dueAt: timestamp("dueAt"),
-    outcome: enumText("outcome", [
-      "verified",
-      "missed",
-      "needs_clarification",
-      "excluded",
-    ]).notNull(),
-    evidenceType: varchar("evidenceType", { length: 64 }).notNull(),
-    evidenceAt: timestamp("evidenceAt"),
-    evidenceJson: text("evidenceJson").notNull(),
-    verifiedAt: timestamp("verifiedAt").notNull(),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-    updatedAt: timestamp("updatedAt")
-      .defaultNow()
-      .$onUpdateFn(() => new Date())
-      .notNull(),
-  },
-  table => [
-    uniqueIndex("compliance_comm_date_key_unique").on(
-      table.snapshotDate,
-      table.evidenceKey
-    ),
-    index("compliance_comm_date_kind_outcome_idx").on(
-      table.snapshotDate,
-      table.kind,
-      table.outcome
-    ),
-    index("compliance_comm_external_idx").on(table.channel, table.externalId),
-  ]
-);
+export const complianceCommunicationEvidence = pgTable("compliance_communication_evidence", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId"),
+  snapshotDate: date("snapshotDate").notNull(),
+  evidenceKey: varchar("evidenceKey", { length: 256 }).notNull(),
+  kind: enumText("kind", ["message_response", "email_processing"]).notNull(),
+  channel: varchar("channel", { length: 64 }).notNull(),
+  externalId: varchar("externalId", { length: 256 }).notNull(),
+  title: varchar("title", { length: 1024 }).notNull(),
+  sourceUrl: varchar("sourceUrl", { length: 1024 }),
+  occurredAt: timestamp("occurredAt").notNull(),
+  dueAt: timestamp("dueAt"),
+  outcome: enumText("outcome", ["verified", "missed", "needs_clarification", "excluded"]).notNull(),
+  evidenceType: varchar("evidenceType", { length: 64 }).notNull(),
+  evidenceAt: timestamp("evidenceAt"),
+  evidenceJson: text("evidenceJson").notNull(),
+  verifiedAt: timestamp("verifiedAt").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  uniqueIndex("compliance_comm_va_date_key_unique").on(table.vaId, table.snapshotDate, table.evidenceKey),
+  index("compliance_comm_va_date_kind_outcome_idx").on(table.vaId, table.snapshotDate, table.kind, table.outcome),
+  index("compliance_comm_va_external_idx").on(table.vaId, table.channel, table.externalId),
+]);
 
-export const complianceClarificationRequests = pgTable(
-  "compliance_clarification_requests",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    snapshotDate: date("snapshotDate", { mode: "date" }).notNull(),
-    evidenceKey: varchar("evidenceKey", { length: 256 }).notNull(),
-    kind: enumText("kind", ["message_response", "email_processing"]).notNull(),
-    channel: varchar("channel", { length: 64 }).notNull(),
-    externalId: varchar("externalId", { length: 256 }).notNull(),
-    title: varchar("title", { length: 1024 }).notNull(),
-    question: text("question").notNull(),
-    status: enumText("status", ["open", "resolved", "superseded"])
-      .notNull()
-      .default("open"),
-    resolution: enumText("resolution", [
-      "completed",
-      "not_completed",
-      "not_required",
-    ]),
-    response: text("response"),
-    requestedAt: timestamp("requestedAt").defaultNow().notNull(),
-    respondedAt: timestamp("respondedAt"),
-    resolvedAt: timestamp("resolvedAt"),
-    sourceJson: text("sourceJson").notNull(),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-    updatedAt: timestamp("updatedAt")
-      .defaultNow()
-      .$onUpdateFn(() => new Date())
-      .notNull(),
-  },
-  table => [
-    uniqueIndex("compliance_clarification_date_key_unique").on(
-      table.snapshotDate,
-      table.evidenceKey
-    ),
-    index("compliance_clarification_status_requested_idx").on(
-      table.status,
-      table.requestedAt
-    ),
-  ]
-);
+export const complianceClarificationRequests = pgTable("compliance_clarification_requests", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId"),
+  snapshotDate: date("snapshotDate").notNull(),
+  evidenceKey: varchar("evidenceKey", { length: 256 }).notNull(),
+  kind: enumText("kind", ["message_response", "email_processing"]).notNull(),
+  channel: varchar("channel", { length: 64 }).notNull(),
+  externalId: varchar("externalId", { length: 256 }).notNull(),
+  title: varchar("title", { length: 1024 }).notNull(),
+  question: text("question").notNull(),
+  status: enumText("status", ["open", "resolved", "superseded"]).notNull().default("open"),
+  resolution: enumText("resolution", ["completed", "not_completed", "not_required"]),
+  response: text("response"),
+  requestedAt: timestamp("requestedAt").defaultNow().notNull(),
+  respondedAt: timestamp("respondedAt"),
+  resolvedAt: timestamp("resolvedAt"),
+  sourceJson: text("sourceJson").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  uniqueIndex("compliance_clarification_va_date_key_unique").on(table.vaId, table.snapshotDate, table.evidenceKey),
+  index("compliance_clarification_va_status_requested_idx").on(table.vaId, table.status, table.requestedAt),
+]);
 
 export const timeEntryEvents = pgTable(
   "time_entry_events",
@@ -3671,34 +3441,24 @@ export const scheduledJobLeases = pgTable(
   table => [index("scheduled_job_leases_expiry_idx").on(table.leaseExpiresAt)]
 );
 
-export const browserTabStates = pgTable(
-  "browser_tab_states",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    vaId: integer("vaId").notNull(),
-    collectorId: varchar("collectorId", { length: 128 }).notNull().unique(),
-    collectorLabel: varchar("collectorLabel", { length: 128 })
-      .notNull()
-      .default("Worker browser"),
-    totalTabs: integer("totalTabs").notNull().default(0),
-    pinnedTabs: integer("pinnedTabs").notNull().default(0),
-    windowCount: integer("windowCount").notNull().default(0),
-    tabsJson: text("tabsJson").notNull(),
-    capturedAt: timestamp("capturedAt").notNull(),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-    updatedAt: timestamp("updatedAt")
-      .defaultNow()
-      .$onUpdateFn(() => new Date())
-      .notNull(),
-  },
-  table => [
-    index("browser_tab_states_va_captured_idx").on(
-      table.vaId,
-      table.capturedAt
-    ),
-    index("browser_tab_states_captured_idx").on(table.capturedAt),
-  ]
-);
+export const browserTabStates = pgTable("browser_tab_states", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId").notNull(),
+  collectorId: varchar("collectorId", { length: 128 }).notNull().unique(),
+  captureSequence: bigint("captureSequence", { mode: "number" }).notNull().default(0),
+  sourceCapturedAt: timestamp("sourceCapturedAt"),
+  collectorLabel: varchar("collectorLabel", { length: 128 }).notNull().default("Worker browser"),
+  totalTabs: integer("totalTabs").notNull().default(0),
+  pinnedTabs: integer("pinnedTabs").notNull().default(0),
+  windowCount: integer("windowCount").notNull().default(0),
+  tabsJson: text("tabsJson").notNull(),
+  capturedAt: timestamp("capturedAt").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  index("browser_tab_states_va_captured_idx").on(table.vaId, table.capturedAt),
+  index("browser_tab_states_captured_idx").on(table.capturedAt),
+]);
 
 export const browserTabDailyEvidence = pgTable(
   "browser_tab_daily_evidence",
@@ -3733,23 +3493,16 @@ export const browserTabDailyEvidence = pgTable(
   ]
 );
 
-export const atisChecklistCompletion = pgTable(
-  "atis_checklist_completion",
-  {
-    id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
-    cardId: integer("card_id").notNull(),
-    stepIndex: integer("step_index").notNull(),
-    userId: integer("user_id").notNull(),
-    completedAt: timestamp("completed_at").defaultNow().notNull(),
-  },
-  table => [
-    uniqueIndex("card_step_user_unique").on(
-      table.cardId,
-      table.stepIndex,
-      table.userId
-    ),
-  ]
-);
+export const atisChecklistCompletion = pgTable('atis_checklist_completion', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  cardId: integer('card_id').notNull(),
+  stepIndex: integer('step_index').notNull(),
+  userId: integer('user_id').notNull(),
+  completedAt: timestamp('completed_at').defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex('card_step_user_unique').on(table.cardId, table.stepIndex, table.userId),
+  index('atis_checklist_user_completed_idx').on(table.userId, table.completedAt),
+]);
 
 export const atisChecklistSync = pgTable(
   "atis_checklist_sync",
@@ -3882,3 +3635,394 @@ export type InsertBrowserTabDailyEvidence =
 export type UnsignedMessageFlag = typeof unsignedMessageFlags.$inferSelect;
 export type InsertUnsignedMessageFlag =
   typeof unsignedMessageFlags.$inferInsert;
+
+
+export const revokedSessions = pgTable("revoked_sessions", {
+  sessionHash: varchar("sessionHash", { length: 64 }).primaryKey(),
+  revokedAt: timestamp("revokedAt").defaultNow().notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+}, (table) => ({
+  expiresAtIdx: index("revoked_sessions_expires_at_idx").on(table.expiresAt),
+}));
+
+export const workerInvitations = pgTable('worker_invitations', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  userId: integer('userId').notNull(),
+  vaId: integer('vaId').notNull(),
+  founderId: integer('founderId').notNull(),
+  email: varchar('email', { length: 320 }).notNull(),
+  tokenHash: varchar('tokenHash', { length: 64 }).notNull(),
+  expiresAt: timestamp('expiresAt').notNull(),
+  sentAt: timestamp('sentAt'),
+  acceptedAt: timestamp('acceptedAt'),
+  revokedAt: timestamp('revokedAt'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => ({
+  tokenHashUnique: uniqueIndex('worker_invitations_token_hash_unique').on(table.tokenHash),
+  userStatusIdx: index('worker_invitations_user_status_idx').on(table.userId, table.acceptedAt, table.revokedAt),
+  founderCreatedIdx: index('worker_invitations_founder_created_idx').on(table.founderId, table.createdAt),
+}));
+
+export const commitments = pgTable('commitments', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  workspaceOwnerId: integer('workspaceOwnerId').notNull(),
+  assignedUserId: integer('assignedUserId'),
+  createdByUserId: integer('createdByUserId').notNull(),
+  sourceType: enumText('sourceType', ['manual', 'trello', 'gmail', 'google_drive', 'system']).notNull(),
+  sourceId: varchar('sourceId', { length: 255 }),
+  sourceUrl: varchar('sourceUrl', { length: 1024 }),
+  title: varchar('title', { length: 500 }).notNull(),
+  context: text('context'),
+  dueAt: timestamp('dueAt').notNull(),
+  status: enumText('status', ['open', 'completed', 'cancelled']).default('open').notNull(),
+  completedAt: timestamp('completedAt'),
+  cancelledAt: timestamp('cancelledAt'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  uniqueIndex('commitments_workspace_source_unique').on(table.workspaceOwnerId, table.sourceType, table.sourceId),
+  index('commitments_workspace_status_due_idx').on(table.workspaceOwnerId, table.status, table.dueAt),
+  index('commitments_assignee_status_due_idx').on(table.assignedUserId, table.status, table.dueAt),
+]);
+
+export const reminderRules = pgTable('reminder_rules', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  workspaceOwnerId: integer('workspaceOwnerId').notNull(),
+  createdByUserId: integer('createdByUserId').notNull(),
+  name: varchar('name', { length: 255 }).notNull(),
+  triggerType: enumText('triggerType', ['before_due', 'at_due', 'after_due', 'no_update', 'manual']).default('before_due').notNull(),
+  offsetMinutes: integer('offsetMinutes').default(60).notNull(),
+  channel: enumText('channel', ['in_app', 'email']).default('in_app').notNull(),
+  requireApproval: boolean('requireApproval').default(true).notNull(),
+  maxAttempts: integer('maxAttempts').default(1).notNull(),
+  cooldownMinutes: integer('cooldownMinutes').default(60).notNull(),
+  active: boolean('active').default(true).notNull(),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  index('reminder_rules_workspace_active_idx').on(table.workspaceOwnerId, table.active),
+]);
+
+export const reminderPolicies = pgTable('reminder_policies', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  userId: integer('userId').notNull(),
+  enabled: boolean('enabled').default(true).notNull(),
+  inAppEnabled: boolean('inAppEnabled').default(true).notNull(),
+  emailEnabled: boolean('emailEnabled').default(false).notNull(),
+  maxPerDay: integer('maxPerDay').default(3).notNull(),
+  minIntervalMinutes: integer('minIntervalMinutes').default(60).notNull(),
+  quietHoursStart: varchar('quietHoursStart', { length: 5 }).default('22:00').notNull(),
+  quietHoursEnd: varchar('quietHoursEnd', { length: 5 }).default('08:00').notNull(),
+  timezone: varchar('timezone', { length: 64 }).default('UTC').notNull(),
+  allowWeekends: boolean('allowWeekends').default(false).notNull(),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  uniqueIndex('reminder_policies_user_unique').on(table.userId),
+]);
+
+export const reminderSchedules = pgTable('reminder_schedules', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  commitmentId: integer('commitmentId').notNull(),
+  ruleId: integer('ruleId').notNull(),
+  recipientUserId: integer('recipientUserId').notNull(),
+  scheduledFor: timestamp('scheduledFor').notNull(),
+  state: enumText('state', [
+    'scheduled',
+    'preparing',
+    'draft_ready',
+    'sending',
+    'sent',
+    'failed',
+    'needs_review',
+    'escalated',
+    'skipped',
+    'cancelled',
+  ]).default('scheduled').notNull(),
+  channel: enumText('channel', ['in_app', 'email']).notNull(),
+  idempotencyKey: varchar('idempotencyKey', { length: 64 }).notNull(),
+  draftTitle: varchar('draftTitle', { length: 500 }),
+  draftContent: text('draftContent'),
+  policyReason: text('policyReason'),
+  attemptCount: integer('attemptCount').default(0).notNull(),
+  lastAttemptAt: timestamp('lastAttemptAt'),
+  approvedAt: timestamp('approvedAt'),
+  approvedByUserId: integer('approvedByUserId'),
+  sentAt: timestamp('sentAt'),
+  escalatedAt: timestamp('escalatedAt'),
+  error: text('error'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  uniqueIndex('reminder_schedules_idempotency_unique').on(table.idempotencyKey),
+  index('reminder_schedules_due_state_idx').on(table.state, table.scheduledFor),
+  index('reminder_schedules_recipient_state_idx').on(table.recipientUserId, table.state, table.scheduledFor),
+  index('reminder_schedules_commitment_idx').on(table.commitmentId),
+]);
+
+export const reminderAuditEvents = pgTable('reminder_audit_events', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  workspaceOwnerId: integer('workspaceOwnerId').notNull(),
+  commitmentId: integer('commitmentId'),
+  scheduleId: integer('scheduleId'),
+  actorUserId: integer('actorUserId'),
+  eventType: varchar('eventType', { length: 64 }).notNull(),
+  detailsJson: text('detailsJson'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+}, (table) => [
+  index('reminder_audit_workspace_created_idx').on(table.workspaceOwnerId, table.createdAt),
+  index('reminder_audit_commitment_created_idx').on(table.commitmentId, table.createdAt),
+  index('reminder_audit_schedule_created_idx').on(table.scheduleId, table.createdAt),
+]);
+
+export const haiConnectorTokens = pgTable('hai_connector_tokens', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  workspaceOwnerId: integer('workspaceOwnerId').notNull(),
+  createdByUserId: integer('createdByUserId').notNull(),
+  label: varchar('label', { length: 128 }).default('HAI Worker Control').notNull(),
+  tokenPrefix: varchar('tokenPrefix', { length: 24 }).notNull(),
+  tokenHash: varchar('tokenHash', { length: 64 }).notNull(),
+  scopes: varchar('scopes', { length: 255 }).default('worker_control:read').notNull(),
+  lastUsedAt: timestamp('lastUsedAt'),
+  expiresAt: timestamp('expiresAt'),
+  revokedAt: timestamp('revokedAt'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().$onUpdateFn(() => new Date()).notNull(),
+}, (table) => [
+  uniqueIndex('hai_connector_tokens_hash_unique').on(table.tokenHash),
+  index('hai_connector_tokens_owner_active_idx').on(table.workspaceOwnerId, table.revokedAt, table.createdAt),
+]);
+
+export const founderDecisionDeadlines = pgTable("founder_decision_deadlines", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId").notNull(),
+  stepId: integer("stepId").notNull(),
+  dueAt: timestamp("dueAt"),
+  source: varchar("source", { length: 1024 }).notNull(),
+  recordedBy: varchar("recordedBy", { length: 64 }).notNull(),
+  recordedAt: timestamp("recordedAt").defaultNow().notNull(),
+}, (table) => [
+  index("founder_decision_deadlines_step_idx").on(table.stepId, table.id),
+]);
+
+export const maintenanceJobSettings = pgTable("maintenance_job_settings", {
+  jobKey: varchar("jobKey", { length: 96 }).primaryKey(),
+  enabled: boolean("enabled").notNull().default(true),
+  intervalMinutes: integer("intervalMinutes").notNull(),
+  lastScheduledAt: timestamp("lastScheduledAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull(),
+});
+
+export const aptlssManagerState = pgTable("aptlss_manager_state", {
+  vaId: integer("vaId").primaryKey(),
+  enabled: boolean("enabled").notNull().default(true),
+  intervalMinutes: integer("intervalMinutes").notNull().default(5),
+  mode: enumText("mode", ["shadow", "active"]).notNull().default("shadow"),
+  policyRevision: integer("policyRevision").notNull().default(0),
+  shadowStartedAt: timestamp("shadowStartedAt").defaultNow().notNull(),
+  lastSuccessfulAt: timestamp("lastSuccessfulAt"),
+  checkedAt: timestamp("checkedAt"),
+  inputHash: varchar("inputHash", { length: 64 }),
+  sourceHash: varchar("sourceHash", { length: 64 }),
+  currentCheckId: integer("currentCheckId"),
+  historyScopeHash: varchar("historyScopeHash", { length: 64 }),
+  lastError: varchar("lastError", { length: 512 }),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull(),
+});
+
+export const aptlssManagerUpdates = pgTable("aptlss_manager_updates", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId").notNull(),
+  cardId: varchar("cardId", { length: 64 }).notNull(),
+  detail: text("detail").notNull(),
+  interventionId: varchar("interventionId", { length: 256 }),
+  reportKind: varchar("reportKind", { length: 24 }).default("update").notNull(),
+  actionId: varchar("actionId", { length: 256 }),
+  assessmentRunId: integer("assessmentRunId"),
+  requestKey: varchar("requestKey", { length: 36 }),
+  outcome: varchar("outcome", { length: 32 }),
+  deadlineDate: varchar("deadlineDate", { length: 10 }),
+  sourceEvidenceId: varchar("sourceEvidenceId", { length: 256 }),
+  sourceDescription: varchar("sourceDescription", { length: 512 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("aptlss_manager_updates_worker_card_idx").on(table.vaId, table.cardId, table.createdAt),
+  uniqueIndex("aptlss_manager_updates_request_unique").on(table.vaId, table.requestKey),
+]);
+
+export const aptlssManagerRuns = pgTable("aptlss_manager_runs", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId").notNull(),
+  inputHash: varchar("inputHash", { length: 64 }).notNull(),
+  trigger: varchar("trigger", { length: 32 }).notNull(),
+  mode: enumText("mode", ["shadow", "active"]).notNull().default("shadow"),
+  proposalHash: varchar("proposalHash", { length: 64 }),
+  previousPlanJson: text("previousPlanJson"),
+  appliedPlanHash: varchar("appliedPlanHash", { length: 64 }),
+  snapshotJson: text("snapshotJson").notNull(),
+  reviewDigest: varchar("reviewDigest", { length: 64 }).generatedAlwaysAs(sql`("snapshotJson"::jsonb ->> 'implementationDigest')`),
+  reviewUrgent: boolean("reviewUrgent").generatedAlwaysAs(sql`("snapshotJson"::jsonb @> '{"interventions":[{"severity":"urgent"}]}'::jsonb)`),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("aptlss_manager_runs_worker_created_idx").on(table.vaId, table.createdAt, table.id),
+  index("aptlss_manager_runs_proposal_idx").on(table.vaId, table.proposalHash, table.createdAt, table.id),
+  index("aptlss_manager_runs_review_idx").on(table.vaId, table.reviewDigest, table.proposalHash, table.mode, table.createdAt, table.id, table.reviewUrgent),
+]);
+
+export const aptlssManagerChecks = pgTable("aptlss_manager_checks", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId").notNull(),
+  runId: integer("runId").notNull(),
+  inputHash: varchar("inputHash", { length: 64 }).notNull(),
+  sourceHash: varchar("sourceHash", { length: 64 }).notNull(),
+  baseSnapshotHash: varchar("baseSnapshotHash", { length: 64 }).notNull(),
+  snapshotHash: varchar("snapshotHash", { length: 64 }).notNull(),
+  snapshotPatchJson: text("snapshotPatchJson").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("aptlss_manager_checks_worker_idx").on(table.vaId, table.id),
+  index("aptlss_manager_checks_run_idx").on(table.runId, table.id),
+  foreignKey({ columns: [table.runId], foreignColumns: [aptlssManagerRuns.id], name: "manager_check_run_fk" }),
+]);
+
+export const aptlssManagerReviews = pgTable("aptlss_manager_reviews", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId").notNull(),
+  runId: integer("runId").notNull(),
+  proposalHash: varchar("proposalHash", { length: 64 }).notNull(),
+  verdict: enumText("verdict", ["correct", "incorrect", "insufficient"]).notNull(),
+  critical: boolean("critical").notNull().default(false),
+  correction: text("correction").notNull(),
+  source: text("source").notNull(),
+  reviewerId: integer("reviewerId").notNull(),
+  reviewedAt: timestamp("reviewedAt").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("aptlss_manager_review_run_unique").on(table.runId),
+  index("aptlss_manager_review_worker_idx").on(table.vaId, table.reviewedAt),
+  index("aptlss_manager_reviews_proposal_idx").on(table.vaId, table.proposalHash, table.runId),
+  foreignKey({ columns: [table.runId], foreignColumns: [aptlssManagerRuns.id], name: "manager_review_run_fk" }),
+]);
+
+export const aptlssManagerControl = pgTable("aptlss_manager_control", {
+  id: integer("id").primaryKey(),
+  activeVaId: integer("activeVaId"),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdateFn(() => new Date()).notNull(),
+});
+
+export const aptlssManagerTrialEvents = pgTable("aptlss_manager_trial_events", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId").notNull(),
+  trialKey: varchar("trialKey", { length: 64 }).notNull(),
+  event: enumText("event", ["started", "closed"]).notNull(),
+  afterRunId: integer("afterRunId").notNull(),
+  implementationDigest: varchar("implementationDigest", { length: 64 }).notNull(),
+  actorId: integer("actorId").notNull(),
+  reason: text("reason").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, table => [
+  uniqueIndex("aptlss_manager_trial_event_unique").on(table.vaId, table.trialKey, table.event),
+  index("aptlss_manager_trial_worker_idx").on(table.vaId, table.id),
+]);
+
+export const aptlssManagerCorrections = pgTable("aptlss_manager_corrections", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  vaId: integer("vaId").notNull(),
+  reviewId: integer("reviewId").notNull(),
+  scope: enumText("scope", ["card", "worker"]).notNull().default("card"),
+  cardId: varchar("cardId", { length: 64 }),
+  topic: varchar("topic", { length: 64 }).notNull(),
+  correction: text("correction").notNull(),
+  conditionsJson: text("conditionsJson").notNull(),
+  evidenceJson: text("evidenceJson").notNull(),
+  validFrom: timestamp("validFrom").notNull(),
+  validUntil: timestamp("validUntil").notNull(),
+  createdBy: integer("createdBy").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  revokedAt: timestamp("revokedAt"),
+  revokedBy: integer("revokedBy"),
+  revocationReason: text("revocationReason"),
+}, table => [
+  uniqueIndex("aptlss_manager_correction_review_unique").on(table.reviewId),
+  index("aptlss_manager_correction_scope_idx").on(table.vaId, table.scope, table.cardId, table.validUntil),
+  foreignKey({ columns: [table.reviewId], foreignColumns: [aptlssManagerReviews.id], name: "manager_correction_review_fk" }),
+]);
+
+export const aptlssManagerQueue = pgTable(
+  "aptlss_manager_queue",
+  {
+    vaId: integer("vaId").primaryKey(),
+    state: enumText("state", ["idle", "pending", "leased", "failed"])
+      .notNull()
+      .default("idle"),
+    generation: integer("generation").notNull().default(0),
+    claimedGeneration: integer("claimedGeneration").notNull().default(0),
+    priority: integer("priority").notNull().default(0),
+    trigger: varchar("trigger", { length: 40 }).notNull().default("periodic"),
+    availableAt: timestamp("availableAt", { precision: 3 }).notNull().defaultNow(),
+    requestedAt: timestamp("requestedAt", { precision: 3 }).notNull().defaultNow(),
+    attempts: integer("attempts").notNull().default(0),
+    leaseToken: varchar("leaseToken", { length: 64 }),
+    leaseUntil: timestamp("leaseUntil", { precision: 3 }),
+    lastError: varchar("lastError", { length: 255 }),
+    completedAt: timestamp("completedAt", { precision: 3 }),
+    updatedAt: timestamp("updatedAt", { precision: 3 })
+      .notNull()
+      .defaultNow(),
+  },
+  t => [
+    index("manager_queue_ready_idx").on(t.state, t.availableAt, t.priority),
+    index("manager_queue_lease_idx").on(t.state, t.leaseUntil),
+  ]
+);
+
+export const aptlssManagerQueueEvents = pgTable(
+  "aptlss_manager_queue_events",
+  {
+    eventHash: varchar("eventHash", { length: 64 }).primaryKey(),
+    vaId: integer("vaId").notNull(),
+    createdAt: timestamp("createdAt", { precision: 3 }).notNull().defaultNow(),
+  },
+  t => [index("manager_queue_event_worker_idx").on(t.vaId, t.createdAt)]
+);
+
+export const aptlssManagerQueueSlots = pgTable(
+  "aptlss_manager_queue_slots",
+  {
+    id: integer("id").primaryKey(),
+    vaId: integer("vaId"),
+    token: varchar("token", { length: 64 }),
+    leaseUntil: timestamp("leaseUntil", { precision: 3 }),
+  }
+);
+
+export type WorkerInvitation = typeof workerInvitations.$inferSelect;
+export type InsertWorkerInvitation = typeof workerInvitations.$inferInsert;
+export type Commitment = typeof commitments.$inferSelect;
+export type InsertCommitment = typeof commitments.$inferInsert;
+export type ReminderRule = typeof reminderRules.$inferSelect;
+export type InsertReminderRule = typeof reminderRules.$inferInsert;
+export type ReminderPolicy = typeof reminderPolicies.$inferSelect;
+export type InsertReminderPolicy = typeof reminderPolicies.$inferInsert;
+export type ReminderSchedule = typeof reminderSchedules.$inferSelect;
+export type InsertReminderSchedule = typeof reminderSchedules.$inferInsert;
+export type ReminderAuditEvent = typeof reminderAuditEvents.$inferSelect;
+export type InsertReminderAuditEvent = typeof reminderAuditEvents.$inferInsert;
+export type HaiConnectorToken = typeof haiConnectorTokens.$inferSelect;
+export type InsertHaiConnectorToken = typeof haiConnectorTokens.$inferInsert;
+export type MaintenanceJobSetting = typeof maintenanceJobSettings.$inferSelect;
+export type InsertMaintenanceJobSetting = typeof maintenanceJobSettings.$inferInsert;
+
+// Explicit exports keep Drizzle migration metadata aware of additive feature enums.
+export const pgFeatureEnum1 = pgEnum("enum_disposition_1i5lqtm", ["recorded","approved","rejected"]);
+export const pgFeatureEnum2 = pgEnum("enum_sourcetype_sc6x9c", ["manual","trello","gmail","google_drive","system"]);
+export const pgFeatureEnum3 = pgEnum("enum_status_80la47", ["open","completed","cancelled"]);
+export const pgFeatureEnum4 = pgEnum("enum_triggertype_1e5pmd7", ["before_due","at_due","after_due","no_update","manual"]);
+export const pgFeatureEnum5 = pgEnum("enum_channel_bw44qm", ["in_app","email"]);
+export const pgFeatureEnum6 = pgEnum("enum_state_wxzr3j", ["scheduled","preparing","draft_ready","sending","sent","failed","needs_review","escalated","skipped","cancelled"]);
+export const pgFeatureEnum7 = pgEnum("enum_mode_1k2zd19", ["shadow","active"]);
+export const pgFeatureEnum8 = pgEnum("enum_verdict_19ukde9", ["correct","incorrect","insufficient"]);
+export const pgFeatureEnum9 = pgEnum("enum_event_axqosm", ["started","closed"]);
+export const pgFeatureEnum10 = pgEnum("enum_scope_hwjjq7", ["card","worker"]);
+export const pgFeatureEnum11 = pgEnum("enum_state_iy851n", ["idle","pending","leased","failed"]);

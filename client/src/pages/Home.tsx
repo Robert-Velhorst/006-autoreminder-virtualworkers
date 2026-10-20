@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Timeline } from "@/components/Timeline";
 import { OverflowTasks } from "@/components/OverflowTasks";
@@ -29,6 +29,7 @@ import { ConversationDialog } from "@/components/ConversationDialog";
 import { BulkTaskActions } from "@/components/BulkTaskActions";
 import { GoalInterviewDialog } from "@/components/GoalInterviewDialog";
 import { taskCache, CACHE_KEYS } from "@/lib/taskCache";
+import { AtisOperationClient, canStartAtisOperation, INITIAL_ATIS_OPERATION_VIEW, type AtisOperationView } from "@/lib/atis-operation";
 
 // No longer using mock data - fetch from Trello API
 
@@ -47,7 +48,13 @@ export default function Home() {
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isLoadingTasks, setIsLoadingTasks] = useState(true);
-  const [isSyncing, setIsSyncing] = useState(false);
+  const [hasLoadedTasks, setHasLoadedTasks] = useState(false);
+  const [taskLoadFailed, setTaskLoadFailed] = useState(false);
+  const taskRequestInFlight = useRef(false);
+  const taskSourceAvailable = useRef(false);
+  const [atisOperation, setAtisOperation] = useState<AtisOperationView>(INITIAL_ATIS_OPERATION_VIEW);
+  const atisClient = useRef<AtisOperationClient | null>(null);
+  const isSyncing = !canStartAtisOperation(atisOperation);
   const [searchQuery, setSearchQuery] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -74,6 +81,7 @@ export default function Home() {
   // Listen for conversation dialog events from TaskCard
   useEffect(() => {
     const handleOpenConversations = (e: CustomEvent<{ cardId: string; cardName: string }>) => {
+      if (!taskSourceAvailable.current) return;
       setConversationCard(e.detail);
     };
     window.addEventListener('openConversations', handleOpenConversations as EventListener);
@@ -210,7 +218,7 @@ export default function Home() {
   });
 
   const applyReschedule = async () => {
-    if (isRescheduling) return;
+    if (!taskSourceAvailable.current || isRescheduling) return;
 
     setIsRescheduling(true);
     try {
@@ -234,9 +242,15 @@ export default function Home() {
     }
   };
 
-  const fetchTasks = useCallback(async () => {
+  const fetchTasks = useCallback(async (forceRefresh = false) => {
+    if (taskRequestInFlight.current) return;
+    taskRequestInFlight.current = true;
+    taskSourceAvailable.current = false;
+    setConversationCard(null);
+    setInterviewTask(null);
     setIsLoadingTasks(true);
     try {
+      if (forceRefresh) taskCache.invalidate(CACHE_KEYS.TIMELINE_TASKS);
       // Check cache first
       const cachedTasks = taskCache.get(CACHE_KEYS.TIMELINE_TASKS);
       if (cachedTasks) {
@@ -245,19 +259,26 @@ export default function Home() {
         setClients(cachedTasks.clients);
         setStats(cachedTasks.stats);
         setOverflowTasks(cachedTasks.overflowTasks);
-        setIsLoadingTasks(false);
+        setHasLoadedTasks(true);
+        setTaskLoadFailed(false);
+        taskSourceAvailable.current = true;
         return;
       }
 
       const atisResponse = await fetch(`/api/atis/timeline-tasks?filter=all`, {
         credentials: 'include',
       });
-      if (atisResponse.ok) {
-        const atisData = await atisResponse.json();
-        const scheduledTasks = atisData.scheduled || atisData.tasks || [];
-        const overflowTasks = atisData.overflow || [];
-        if (scheduledTasks && scheduledTasks.length > 0) {
-          const atisTasks: Task[] = scheduledTasks.map((t: any) => ({
+      if (!atisResponse.ok) {
+        await atisResponse.arrayBuffer();
+        throw new Error('Failed to load the ATIS work queue');
+      }
+      const atisData = await atisResponse.json();
+      const scheduledTasks = atisData?.scheduled ?? atisData?.tasks;
+      const overflowTasks = atisData?.overflow ?? [];
+      if (!Array.isArray(scheduledTasks) || !Array.isArray(overflowTasks)) {
+        throw new Error('Invalid work queue response');
+      }
+      const atisTasks: Task[] = scheduledTasks.map((t: any) => ({
             id: `atis-${t.id}`,
             cardId: t.trelloId,
             cardName: t.name,
@@ -287,127 +308,65 @@ export default function Home() {
             atisCardId: t.atisCardId || t.id,
             memberIds: t.memberIds || [],
             synced: false,
-          }));
-          setTasks(atisTasks);
-
-          const clientCounts = new Map<string, number>();
-          atisTasks.forEach(t => {
-            if (t.client) {
-              clientCounts.set(t.client, (clientCounts.get(t.client) || 0) + 1);
-            }
-          });
-          const clientsList = Array.from(clientCounts.entries())
-            .map(([client, count]) => ({ client, count }))
-            .sort((a, b) => b.count - a.count);
-          setClients(clientsList);
-
-          const metrics = atisData.metrics || {};
-          const totalTasksCount = metrics.totalScheduled || atisData.total || atisTasks.length;
-          const completedTasks = atisTasks.filter(t => t.isCompleted).length;
-          const totalHours = (metrics.totalScheduledMinutes || 0) / 60;
-          const completedHours = atisTasks.filter(t => t.isCompleted).reduce((acc, t) => acc + t.durationHours, 0);
-
-          setOverflowTasks(overflowTasks && overflowTasks.length > 0 ? overflowTasks : []);
-          const stats = {
-            totalTasks: totalTasksCount,
-            completedTasks,
-            totalHours,
-            completedHours,
-            accuracy: 100
-          };
-          setStats(stats);
-
-          // Cache the fetched data for 5 minutes
-          const cacheData = {
-            tasks: atisTasks,
-            clients: clientsList,
-            stats,
-            overflowTasks: overflowTasks && overflowTasks.length > 0 ? overflowTasks : [],
-          };
-          taskCache.set(CACHE_KEYS.TIMELINE_TASKS, cacheData);
-          console.log('[TaskCache] Cached tasks for 5 minutes');
-
-          // Auto-refresh when background AI analysis completes for cards missing breakdowns
-          const pendingCount = atisData.pendingAnalysis || 0;
-          if (pendingCount > 0) {
-            console.log(`[AutoAnalysis] ${pendingCount} cards are being auto-analyzed in the background. Will refresh in 15s...`);
-            // The server auto-triggered analysis when it saw cards without breakdowns.
-            // We just need to wait a bit and refresh to show the new detailed steps.
-            setTimeout(() => {
-              taskCache.invalidate(CACHE_KEYS.TIMELINE_TASKS);
-              void fetchTasks();
-            }, 15000); // Refresh after 15 seconds to pick up new breakdowns
-          }
-
-          try {
-            const typesResponse = await fetch('/api/atis/task-types', {
-              credentials: 'include',
-            });
-            if (typesResponse.ok) {
-              const types = await typesResponse.json();
-              setTaskTypes(types);
-            }
-          } catch (e) {
-            console.error('Failed to fetch task types:', e);
-          }
-          return;
+      }));
+      const clientCounts = new Map<string, number>();
+      atisTasks.forEach(t => {
+        if (t.client) {
+          clientCounts.set(t.client, (clientCounts.get(t.client) || 0) + 1);
         }
-      }
+      });
+      const clientsList = Array.from(clientCounts.entries())
+        .map(([client, count]) => ({ client, count }))
+        .sort((a, b) => b.count - a.count);
+      const metrics = atisData.metrics || {};
+      const totalTasksCount = metrics.totalScheduled || atisData.total || atisTasks.length;
+      const completedTasks = atisTasks.filter(t => t.isCompleted).length;
+      const totalHours = (metrics.totalScheduledMinutes || 0) / 60;
+      const completedHours = atisTasks.filter(t => t.isCompleted).reduce((acc, t) => acc + t.durationHours, 0);
 
-      const response = await fetch('/api/trello/tasks');
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-        console.error('Error fetching tasks:', errorData);
-        if (response.status !== 401) {
-          toast.error(`Failed to load tasks: ${errorData.error || response.statusText}`);
-        }
-        return;
-      }
-      const data = await response.json();
-
-      if (data.error) {
-        console.error('Error fetching tasks:', data.error);
-        toast.error(`Failed to load tasks: ${data.error}`);
-        return;
-      }
-
-      const tasksArray = Array.isArray(data) ? data : (data.tasks || []);
-      if (!Array.isArray(tasksArray)) {
-        console.error('Invalid tasks data:', data);
-        toast.error('Invalid tasks data received from server');
-        return;
-      }
-
-      const loadedTasks = (tasksArray as Task[]).filter(t => !t.isArchived);
-      setTasks(loadedTasks);
-      const totalTasks = loadedTasks.length;
-      const completedTasks = loadedTasks.filter(t => t.isCompleted).length;
-      const totalHours = loadedTasks.reduce((acc, t) => acc + t.durationHours, 0);
-      const completedHours = loadedTasks.filter(t => t.isCompleted).reduce((acc, t) => acc + t.durationHours, 0);
-
-      setStats({
-        totalTasks,
+      const stats = {
+        totalTasks: totalTasksCount,
         completedTasks,
         totalHours,
         completedHours,
         accuracy: 100
-      });
-    } catch (error) {
-      let errorMessage = 'Unknown error';
-      if (error instanceof Error) {
-        errorMessage = error.message;
-        console.error('Error fetching tasks:', error.message, error.stack);
-      } else if (typeof error === 'object' && error !== null) {
-        // Handle object errors (like response errors)
-        errorMessage = JSON.stringify(error);
-        console.error('Error fetching tasks:', errorMessage);
-      } else {
-        errorMessage = String(error);
-        console.error('Error fetching tasks:', errorMessage);
+      };
+      // Cache the fetched data for 5 minutes
+      const cacheData = {
+        tasks: atisTasks,
+        clients: clientsList,
+        stats,
+        overflowTasks: overflowTasks && overflowTasks.length > 0 ? overflowTasks : [],
+      };
+      taskCache.set(CACHE_KEYS.TIMELINE_TASKS, cacheData);
+      setTasks(atisTasks);
+      setClients(clientsList);
+      setOverflowTasks(cacheData.overflowTasks);
+      setStats(stats);
+      setHasLoadedTasks(true);
+      setTaskLoadFailed(false);
+      taskSourceAvailable.current = true;
+      console.log('[TaskCache] Cached tasks for 5 minutes');
+
+      try {
+        const typesResponse = await fetch('/api/atis/task-types', {
+          credentials: 'include',
+        });
+        if (typesResponse.ok) {
+          const types = await typesResponse.json();
+          setTaskTypes(types);
+        }
+      } catch (e) {
+        console.error('Failed to fetch task types:', e);
       }
-      setTasks([]);
-      toast.error(`Failed to load tasks: ${errorMessage}`);
+      return;
+    } catch {
+      taskCache.invalidate(CACHE_KEYS.TIMELINE_TASKS);
+      taskSourceAvailable.current = false;
+      setTaskLoadFailed(true);
+      toast.error('Work queue unavailable. Please try again.');
     } finally {
+      taskRequestInFlight.current = false;
       setIsLoadingTasks(false);
     }
   }, []);
@@ -418,65 +377,44 @@ export default function Home() {
     }
   }, [fetchTasks, isAuthenticated, user]);
 
-  const syncFromTrello = useCallback(async () => {
-    setIsSyncing(true);
-    try {
-      const res = await fetch('/api/atis/sync', {
-        method: 'POST',
-        credentials: 'include',
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        toast.error(`Sync failed: ${data.error || res.statusText}`);
-        return;
-      }
-      toast.success(
-        `Synced ${data.totalBoards} boards and ${data.totalCards} cards from Trello`,
-        { description: `${data.newBoards} new boards, ${data.newCards} new cards added.` }
-      );
-      // Clear client-side cache so fetchTasks re-fetches fresh data
-      taskCache.invalidate(CACHE_KEYS.TIMELINE_TASKS);
-      await fetchTasks();
+  useEffect(() => {
+    if (!isAuthenticated || !user) return;
+    const client = new AtisOperationClient({
+      onState: setAtisOperation,
+      onCompleted: async operation => {
+        const counts = operation.result;
+        if (operation.kind === 'sync') {
+          const hasCounts = [counts?.totalBoards, counts?.totalCards].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0);
+          toast.success(hasCounts ? `Synced ${counts!.totalBoards} boards and ${counts!.totalCards} cards from Trello` : 'Trello sync completed.');
+        } else {
+          const processed = counts?.processed;
+          toast.success(typeof processed === 'number' && Number.isFinite(processed) && processed >= 0 ? `AI analyzed ${processed} cards` : 'Card analysis completed.', {
+            description: typeof counts?.failed === 'number' && counts.failed > 0 ? `${counts.failed} cards could not be analyzed.` : undefined,
+          });
+        }
+        await fetchTasks(true);
+      },
+    });
+    atisClient.current = client;
+    void client.resume();
+    return () => {
+      client.stop();
+      if (atisClient.current === client) atisClient.current = null;
+    };
+  }, [fetchTasks, isAuthenticated, user?.id]);
 
-      // Automatically trigger AI analysis for all cards without understanding (background, non-blocking)
-      const analysisToastId = 'auto-analysis';
-      toast.loading('AI is analyzing your cards in the background...', { id: analysisToastId, duration: 60000 });
-      fetch('/api/atis/understanding/process', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ limit: 50 }),
-      })
-        .then(r => r.json())
-        .then(result => {
-          if (result.processed > 0) {
-            toast.success(`AI analyzed ${result.processed} cards`, {
-              id: analysisToastId,
-              description: result.failed > 0 ? `${result.failed} failed — will retry on next sync.` : 'All cards analyzed successfully.',
-            });
-            // Refresh tasks to show newly analyzed cards
-            taskCache.invalidate(CACHE_KEYS.TIMELINE_TASKS);
-            void fetchTasks();
-          } else {
-            toast.dismiss(analysisToastId);
-          }
-        })
-        .catch(err => {
-          console.warn('[Auto-Analysis] Background analysis failed:', err);
-          toast.dismiss(analysisToastId);
-        });
-    } catch (err) {
-      toast.error('Sync failed — is the server running?');
-    } finally {
-      setIsSyncing(false);
-    }
+  const syncFromTrello = useCallback(async () => {
+    if (!taskSourceAvailable.current) return;
+    await atisClient.current?.startSync();
   }, [fetchTasks]);
 
   const handleOpenInterview = (task: Task) => {
+    if (!taskSourceAvailable.current) return;
     setInterviewTask(task);
   };
 
   const handleInterviewComplete = async (finalGoal: any) => {
+    if (!taskSourceAvailable.current) return;
     if (!interviewTask) {
       return;
     }
@@ -547,6 +485,7 @@ export default function Home() {
   };
 
   const handleToggleTask = async (id: string) => {
+    if (!taskSourceAvailable.current) return;
     const task = tasks.find(t => t.id === id);
     if (!task) return;
 
@@ -628,7 +567,9 @@ export default function Home() {
                 {new Date().getHours() < 12 ? 'Good Morning' : new Date().getHours() < 17 ? 'Good Afternoon' : 'Good Evening'}, {user?.name?.split(' ')[0] || 'there'}! {new Date().getHours() < 12 ? '☀️' : new Date().getHours() < 17 ? '🌤️' : '🌙'}
               </h2>
               <p className="text-xs text-muted-foreground">
-                You have <span className="font-bold text-primary">{tasks.filter(t => !t.isCompleted).length} tasks</span> remaining.
+                {hasLoadedTasks ? (
+                  <>You have <span className="font-bold text-primary">{tasks.filter(t => !t.isCompleted).length} tasks</span> remaining.{taskLoadFailed && ' Last successful result; may be out of date.'}</>
+                ) : isLoadingTasks ? 'Loading work queue...' : 'Task count unavailable.'}
               </p>
             </div>
             <Button
@@ -730,6 +671,41 @@ export default function Home() {
       </header>
 
       <main className="flex-1 container py-4 md:py-8">
+        {atisOperation.status !== 'idle' && (
+          <section role={['unconfirmed', 'failed', 'interrupted'].includes(atisOperation.status) ? 'alert' : 'status'} className="mb-4 border-b pb-4 space-y-2" aria-label="Sync and analysis status">
+            <p className="text-sm">{atisOperation.message}</p>
+            {atisOperation.operation && <p className="text-xs text-muted-foreground">Operation #{atisOperation.operation.id}</p>}
+            {atisOperation.status === 'unconfirmed' && (
+              <Button variant="outline" size="sm" disabled={atisOperation.busy} onClick={() => void atisClient.current?.resume()}>
+                <RefreshCw className="size-4 mr-2" /> Check status
+              </Button>
+            )}
+            {atisOperation.status === 'interrupted' && (
+              <Button variant="outline" size="sm" disabled={atisOperation.busy} onClick={() => void atisClient.current?.acknowledgeAndRestart()}>
+                <RefreshCw className="size-4 mr-2" /> Acknowledge interruption and restart {atisOperation.operation?.kind === 'sync' ? 'sync' : 'analysis'}
+              </Button>
+            )}
+            {atisOperation.status === 'completed' && atisOperation.operation?.kind === 'sync' && !atisOperation.busy && (
+              <Button variant="outline" size="sm" onClick={() => void atisClient.current?.startUnderstanding()}>
+                <RefreshCw className="size-4 mr-2" /> Analyze synced cards
+              </Button>
+            )}
+          </section>
+        )}
+        {taskLoadFailed && (
+          <section role="alert" aria-labelledby="work-queue-error-heading" className="mb-4 border border-destructive/40 rounded-lg p-4 space-y-2">
+            <h2 id="work-queue-error-heading" className="text-lg font-semibold">Work queue unavailable</h2>
+            <p className="text-sm text-muted-foreground">
+              {hasLoadedTasks
+                ? 'Refresh failed. The last successfully loaded work queue and metrics may be out of date. Task actions are paused until access is checked again.'
+                : 'We could not load your work queue. Task counts and completion metrics are unavailable.'}
+            </p>
+            <Button variant="outline" size="sm" onClick={() => void fetchTasks(true)} disabled={isLoadingTasks}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${isLoadingTasks ? 'animate-spin' : ''}`} />
+              {isLoadingTasks ? 'Retrying...' : 'Try again'}
+            </Button>
+          </section>
+        )}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 md:gap-8">
           {/* Left Sidebar - Stats - Collapsible */}
           <div className={`transition-all duration-300 ${sidebarOpen ? 'lg:col-span-4' : 'lg:col-span-0'} ${sidebarOpen ? 'block' : 'hidden'} space-y-4 md:space-y-8 order-2 lg:order-1`}>
@@ -745,7 +721,7 @@ export default function Home() {
                 variant="outline" 
                 className="w-full"
                 onClick={applyReschedule}
-                disabled={isRescheduling}
+                disabled={isRescheduling || isLoadingTasks || taskLoadFailed || !hasLoadedTasks}
               >
                 {isRescheduling ? (
                   <RefreshCw className="h-4 w-4 animate-spin" />
@@ -756,10 +732,10 @@ export default function Home() {
               </Button>
             </div>
             
-            <StatsPanel stats={stats} />
+            {hasLoadedTasks && <StatsPanel stats={stats} />}
             
             {/* Weekly Progress Dashboard */}
-            <WeeklyProgressDashboard />
+            {hasLoadedTasks && <WeeklyProgressDashboard />}
             
 
           </div>
@@ -767,7 +743,7 @@ export default function Home() {
           {/* Main Content - Timeline */}
           <div className={`transition-all duration-300 ${sidebarOpen ? 'lg:col-span-8' : 'lg:col-span-12'} order-1 lg:order-2`}>
             <div className="timeline-section bg-card rounded-2xl shadow-sm border min-h-[400px] md:min-h-[600px] relative overflow-hidden">
-              <div className="absolute top-0 left-0 right-0 h-20 md:h-32 bg-[url('https://files.manuscdn.com/user_upload_by_module/session_file/90835377/juXmFpmTtEuXvBVT.png')] bg-cover opacity-20" />
+              <div aria-hidden="true" className="absolute top-0 left-0 right-0 h-20 md:h-32 bg-muted/20" />
               <div className="relative z-10 p-4 md:p-6">
                 <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-2 md:gap-4 mb-4">
                   <h2 className="text-lg md:text-xl font-bold">Workload Timeline</h2>
@@ -802,7 +778,7 @@ export default function Home() {
 
 
                 {/* Original Task Filters */}
-                <div className="mb-4">
+                {hasLoadedTasks && <div className="mb-4">
                   <TaskFilters
                     filters={filters}
                     onFiltersChange={setFilters}
@@ -811,10 +787,10 @@ export default function Home() {
                     totalTasks={tasks.length}
                     filteredCount={filteredTasks.length}
                   />
-                </div>
+                </div>}
                 
                 {/* Search results info */}
-                {searchQuery && (
+                {hasLoadedTasks && searchQuery && (
                   <div className="mb-4 p-3 bg-secondary/50 rounded-lg flex items-center justify-between">
                     <span className="text-sm">
                       {filteredTasks.length === 0 
@@ -829,7 +805,7 @@ export default function Home() {
                 )}
                 
                 {/* Overflow Tasks Alert */}
-                {overflowTasks.length > 0 && (
+                {!taskLoadFailed && !isLoadingTasks && overflowTasks.length > 0 && (
                   <div className="mb-4">
                     <OverflowTasks tasks={overflowTasks} />
                   </div>
@@ -859,18 +835,26 @@ export default function Home() {
                   </div>
                 )}
                 
-                <Timeline 
+                {isLoadingTasks && hasLoadedTasks && <p role="status" className="mb-4 text-sm text-muted-foreground">Refreshing work queue...</p>}
+                {hasLoadedTasks && (taskLoadFailed || isLoadingTasks) && <section aria-label="Last loaded work" className="border-t py-4">
+                  <h3 className="text-sm font-medium">Last loaded work (read-only)</h3>
+                  <ul className="mt-2 divide-y text-sm text-muted-foreground">
+                    {filteredTasks.map(task => <li key={task.id} className="py-2 break-words">{task.cardName}</li>)}
+                    {overflowTasks.map((task, index) => <li key={`overflow-${index}`} className="py-2 break-words">{task.name || task.cardName}</li>)}
+                  </ul>
+                </section>}
+                {!taskLoadFailed && !isLoadingTasks && hasLoadedTasks && <Timeline
                   tasks={filteredTasks} 
                   onToggleTask={handleToggleTask} 
-                  isLoading={isLoadingTasks}
-                  onRefresh={() => void fetchTasks()}
+                  isLoading={isLoadingTasks && !hasLoadedTasks}
+                  onRefresh={() => void fetchTasks(true)}
                   onSync={() => void syncFromTrello()}
                   isSyncing={isSyncing}
                   allExpanded={allExpanded}
                   onExpandChange={(expanded: boolean) => setAllExpanded(expanded)}
                   onStartInterview={handleOpenInterview}
                   viewMode={viewMode}
-                />
+                />}
               </div>
             </div>
           </div>

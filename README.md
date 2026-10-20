@@ -37,7 +37,7 @@ This repository is actively developed. A versioned container image and tagged re
 ## Requirements
 
 - Docker Engine and Docker Compose v2 for the application container.
-- Node.js 26.11.1 and pnpm 12.13.0 for development outside Docker.
+- Node.js 26.12.0 and pnpm 12.14.0 for development outside Docker, matching the checked-in runtime and package-manager pins.
 - A separately provisioned PostgreSQL database. Redis is optional and external.
 
 ## Quick Start: Docker Compose
@@ -54,13 +54,15 @@ This repository is actively developed. A versioned container image and tagged re
    pnpm db:migrate
    ```
 
-4. Build and start the single application container:
+4. For a new database, provision the pending owner from a trusted operator environment using the [first-owner procedure](docs/OWNER_PROVISIONING.md). It defaults to dry run and does not create a worker profile. Finish the one-time owner setup before inviting workers.
+
+5. Build and start the single application container:
 
    ```powershell
    docker compose --env-file .env up -d --build
    ```
 
-5. Open `http://127.0.0.1:3025/worker` and verify the health endpoint at
+6. Open `http://127.0.0.1:3025/worker` and verify the health endpoint at
    `http://127.0.0.1:3025/api/health`.
 
 Compose starts only the application. It does not provision PostgreSQL/Redis or
@@ -132,3 +134,7 @@ Please do not report vulnerabilities in public issues. See [SECURITY.md](SECURIT
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## APTLSS shadow-pilot source integration
+
+The manager, evidence and reminder features are being reconciled with the canonical PostgreSQL runtime. See [PR99 integration](docs/PR99_INTEGRATION.md) for source changes and acceptance boundaries. Historical MySQL deployment and pilot verification documents do not establish current PostgreSQL or provider acceptance.

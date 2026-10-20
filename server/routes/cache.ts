@@ -6,8 +6,10 @@ import {
   invalidateAllCache, 
   cleanupExpiredCache 
 } from '../services/trello-cache';
+import { requireAdmin } from '../middleware/auth';
 
 const router = Router();
+router.use('/cache', requireAdmin);
 
 // Get cache statistics
 router.get('/cache/stats', async (req: any, res: Response) => {

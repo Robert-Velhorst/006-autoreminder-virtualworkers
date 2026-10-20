@@ -17,6 +17,8 @@ import {
 export interface ScheduleHistoryRecord {
   id: string;
   taskId: string;
+  founderId: number;
+  assignmentId: number;
   cardTrelloId?: string;
   previousStartTime?: Date;
   previousEndTime?: Date;
@@ -70,9 +72,14 @@ function mapScheduledTask(row: typeof taskAssignments.$inferSelect): ScheduledTa
 }
 
 function mapScheduleHistory(row: typeof taskScheduleHistory.$inferSelect): ScheduleHistoryRecord {
+  if (row.founderId === null || row.assignmentId === null) {
+    throw new Error("Schedule history has no verified workspace assignment");
+  }
   return {
     id: row.id,
     taskId: row.taskId,
+    founderId: row.founderId,
+    assignmentId: row.assignmentId,
     cardTrelloId: row.cardTrelloId ?? undefined,
     previousStartTime: row.previousStartTime ?? undefined,
     previousEndTime: row.previousEndTime ?? undefined,
@@ -108,6 +115,8 @@ export async function insertScheduleHistory(record: Omit<ScheduleHistoryRecord, 
   await db.insert(taskScheduleHistory).values({
     id,
     taskId: record.taskId,
+    founderId: record.founderId,
+    assignmentId: record.assignmentId,
     cardTrelloId: record.cardTrelloId ?? null,
     previousStartTime: record.previousStartTime ?? null,
     previousEndTime: record.previousEndTime ?? null,
@@ -122,13 +131,13 @@ export async function insertScheduleHistory(record: Omit<ScheduleHistoryRecord, 
   return id;
 }
 
-export async function getScheduleHistory(taskId: string, limit: number = 50): Promise<ScheduleHistoryRecord[]> {
+export async function getScheduleHistory(taskId: string, assignmentId: number, limit: number = 50): Promise<ScheduleHistoryRecord[]> {
   const db = await getDb();
   if (!db) return [];
 
   const safeLimit = Math.max(1, Number.parseInt(String(limit), 10) || 50);
   const rows = await db.select().from(taskScheduleHistory)
-    .where(eq(taskScheduleHistory.taskId, taskId))
+    .where(and(eq(taskScheduleHistory.taskId, taskId), eq(taskScheduleHistory.assignmentId, assignmentId)))
     .orderBy(desc(taskScheduleHistory.createdAt))
     .limit(safeLimit);
   return rows.map(mapScheduleHistory);
@@ -164,7 +173,7 @@ export async function getScheduleHistoryForActor(
   if (!ownedTask) return null;
   const safeLimit = Math.max(1, Math.min(Number.parseInt(String(limit), 10) || 50, 200));
   const rows = await db.select().from(taskScheduleHistory)
-    .where(eq(taskScheduleHistory.taskId, taskId))
+    .where(and(eq(taskScheduleHistory.taskId, taskId), eq(taskScheduleHistory.assignmentId, ownedTask.id)))
     .orderBy(desc(taskScheduleHistory.createdAt))
     .limit(safeLimit);
   return rows.map(mapScheduleHistory);
@@ -208,6 +217,8 @@ export async function rescheduleTaskForActor(
     await tx.insert(taskScheduleHistory).values({
       id: historyId,
       taskId: assignment.taskId,
+      founderId: assignment.founderId,
+      assignmentId: assignment.id,
       cardTrelloId,
       previousStartTime: assignment.startTime ?? null,
       previousEndTime: assignment.endTime ?? null,
@@ -255,7 +266,7 @@ export async function undoLastRescheduleForActor(
     const assignment = mapScheduledTask(row);
 
     const [previous] = await tx.select().from(taskScheduleHistory)
-      .where(eq(taskScheduleHistory.taskId, assignment.taskId))
+      .where(and(eq(taskScheduleHistory.taskId, assignment.taskId), eq(taskScheduleHistory.assignmentId, assignment.id)))
       .orderBy(desc(taskScheduleHistory.createdAt))
       .limit(1)
       .for('update');
@@ -274,6 +285,8 @@ export async function undoLastRescheduleForActor(
     await tx.insert(taskScheduleHistory).values({
       id: historyId,
       taskId: assignment.taskId,
+      founderId: assignment.founderId,
+      assignmentId: assignment.id,
       cardTrelloId,
       previousStartTime: assignment.startTime ?? null,
       previousEndTime: assignment.endTime ?? null,
@@ -360,6 +373,7 @@ const batchUpdateColumns = {
   failedTasks: batchOperations.failedTasks,
   currentTaskIndex: batchOperations.currentTaskIndex,
   currentTaskName: batchOperations.currentTaskName,
+  estimatedTimeSeconds: batchOperations.estimatedTimeSeconds,
   results: batchOperations.results,
   errorLog: batchOperations.errorLog,
   startedAt: batchOperations.startedAt,

@@ -11,27 +11,9 @@ import {
   RotateCcw
 } from 'lucide-react';
 import { BatchOperationsProgress } from './BatchOperationsProgress';
+import type { NormalizedBatchOperation } from '@/lib/batch-operations-client';
 
-interface BatchOperation {
-  jobId: string;
-  operationType: 're_analyze' | 'reschedule' | 'conflict_resolution' | 'optimization';
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-  progress: number;
-  totalTasks: number;
-  completedTasks: number;
-  failedTasks: number;
-  currentTaskName?: string;
-  currentTaskIndex: number;
-  elapsedTimeSeconds?: number;
-  estimatedTimeSeconds?: number;
-  tasks: any[];
-  results?: Record<string, any>;
-  errorLog?: string[];
-  isPaused?: boolean;
-  createdAt: Date;
-  startedAt?: Date;
-  completedAt?: Date;
-}
+type BatchOperation = NormalizedBatchOperation;
 
 interface BatchOperationsQueueProps {
   operations: BatchOperation[];

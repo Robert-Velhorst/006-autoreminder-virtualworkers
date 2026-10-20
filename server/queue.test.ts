@@ -304,6 +304,19 @@ describe('Request Queue Service', () => {
   });
 
   describe('Error handling', () => {
+    it('rejects a new unique request when the pending queue is at capacity', async () => {
+      const boundedQueue = new RequestQueue(1);
+      const first = boundedQueue.execute('first', () => new Promise<string>(() => {}));
+      first.catch(() => {});
+
+      await expect(
+        boundedQueue.execute('second', async () => 'should not run'),
+      ).rejects.toThrow('Request queue is at capacity');
+
+      boundedQueue.clearAll();
+      await expect(first).rejects.toThrow('Queue cleared');
+    });
+
     it('should handle errors in deduplicated requests', async () => {
       const errorExecutor = async () => {
         await new Promise(resolve => setTimeout(resolve, 100));

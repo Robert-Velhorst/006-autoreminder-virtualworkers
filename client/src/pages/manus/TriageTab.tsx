@@ -100,7 +100,7 @@ const TRIAGE_STEPS = [
     color: "bg-purple-50 dark:bg-purple-950/30",
     borderColor: "border-purple-400",
     instruction: "Open your assigned Trello cards. Log each 'Doing' task below with an estimated time.",
-    link: "https://trello.com/u/joyjemimajj1/cards",
+    link: "https://trello.com/",
   },
 ];
 

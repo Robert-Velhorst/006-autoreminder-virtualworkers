@@ -3,8 +3,11 @@ import type { Request, Response } from 'express';
 import { getDb } from '../db';
 import { userWorkingHours, vaProfiles } from '../../drizzle/schema.postgres';
 import { eq, and } from 'drizzle-orm';
+import { requireAdmin } from '../middleware/auth';
+import { validateWorkingHoursSettings } from '../workingHoursValidation';
 
 const router = Router();
+router.use(requireAdmin);
 
 // -------------------------------------------------------
 // Shared default settings (used when no record exists)
@@ -33,6 +36,14 @@ const DEFAULT_SETTINGS = {
   dailyHoursMin: 9.5,
   dailyHoursMax: 11.5,
 };
+
+function definedValues(values: Record<string, unknown>) {
+  return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined));
+}
+
+function hasMinutePrecision(value: unknown) {
+  return typeof value === 'string' && /^\d{2}:(?!00$)\d{2}$/.test(value);
+}
 
 // -------------------------------------------------------
 // Helper: map a vaProfiles row + global defaults → settings shape
@@ -136,6 +147,7 @@ router.post('/settings', async (req: any, res: Response) => {
 
     const workerId = req.query.workerId ? parseInt(req.query.workerId as string) : null;
 
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
     const {
       workStartHour, workStartMinute, workEndHour, workEndMinute,
       breakfastTime, breakfastDuration,
@@ -147,10 +159,24 @@ router.post('/settings', async (req: any, res: Response) => {
       workingDays, timezone, country,
       weeklyHoursMin, weeklyHoursMax,
       dailyHoursMin, dailyHoursMax,
-    } = req.body;
+    } = body;
+    const updates = definedValues({
+      workStartHour, workStartMinute, workEndHour, workEndMinute,
+      breakfastTime, breakfastDuration, lunchTime, lunchDuration, dinnerTime, dinnerDuration,
+      enableBreaks, shortBreakInterval, shortBreakDuration, longBreakInterval, longBreakDuration,
+      workingDays, timezone, country, weeklyHoursMin, weeklyHoursMax, dailyHoursMin, dailyHoursMax,
+    });
 
     // ---- Save per-worker ----
     if (workerId) {
+      const globalRows = await db
+        .select()
+        .from(userWorkingHours)
+        .where(eq(userWorkingHours.userOpenId, user.openId))
+        .limit(1);
+      const globalDefaults = globalRows.length > 0
+        ? { ...globalRows[0], enableBreaks: Boolean(globalRows[0].enableBreaks) }
+        : DEFAULT_SETTINGS;
       const [worker] = await db
         .select()
         .from(vaProfiles)
@@ -158,6 +184,18 @@ router.post('/settings', async (req: any, res: Response) => {
         .limit(1);
 
       if (!worker) return res.status(404).json({ error: 'Worker not found' });
+
+      const candidate = { ...workerToSettings(worker, globalDefaults), ...updates };
+      const validation = validateWorkingHoursSettings(candidate);
+      if (!validation.ok) return res.status(400).json({ error: validation.error });
+      const workerUsesMinutes = [workStartMinute, workEndMinute]
+        .some((minute) => minute !== undefined && minute !== 0)
+        || [breakfastTime, lunchTime, dinnerTime].some(hasMinutePrecision);
+      if (workerUsesMinutes) {
+        return res.status(400).json({
+          error: 'Worker profile schedules support whole hours only. Use a whole-hour time or update the worker schedule storage first.',
+        });
+      }
 
       // Convert HH:MM string back to integer hour for vaProfiles columns
       const timeToInt = (val: string | null | undefined) => {
@@ -191,21 +229,33 @@ router.post('/settings', async (req: any, res: Response) => {
       .where(eq(userWorkingHours.userOpenId, user.openId))
       .limit(1);
 
+    const candidate = { ...(existing[0] ?? DEFAULT_SETTINGS), ...updates };
+    const validation = validateWorkingHoursSettings(candidate);
+    if (!validation.ok) return res.status(400).json({ error: validation.error });
+
     const payload = {
-      workStartHour, workStartMinute, workEndHour, workEndMinute,
-      breakfastTime, breakfastDuration,
-      lunchTime, lunchDuration,
-      dinnerTime, dinnerDuration,
-      enableBreaks: enableBreaks ? 1 : 0,
-      shortBreakInterval, shortBreakDuration,
-      longBreakInterval, longBreakDuration,
-      workingDays: workingDays || '1,2,3,4,5',
-      timezone: timezone || 'UTC',
-      country: country || 'US',
-      weeklyHoursMin: weeklyHoursMin || 55,
-      weeklyHoursMax: weeklyHoursMax || 60,
-      dailyHoursMin: String(dailyHoursMin || 9.5),
-      dailyHoursMax: String(dailyHoursMax || 11.5),
+      workStartHour: candidate.workStartHour,
+      workStartMinute: candidate.workStartMinute,
+      workEndHour: candidate.workEndHour,
+      workEndMinute: candidate.workEndMinute,
+      breakfastTime: candidate.breakfastTime,
+      breakfastDuration: candidate.breakfastDuration,
+      lunchTime: candidate.lunchTime,
+      lunchDuration: candidate.lunchDuration,
+      dinnerTime: candidate.dinnerTime,
+      dinnerDuration: candidate.dinnerDuration,
+      enableBreaks: candidate.enableBreaks ? 1 : 0,
+      shortBreakInterval: candidate.shortBreakInterval,
+      shortBreakDuration: candidate.shortBreakDuration,
+      longBreakInterval: candidate.longBreakInterval,
+      longBreakDuration: candidate.longBreakDuration,
+      workingDays: candidate.workingDays,
+      timezone: candidate.timezone,
+      country: candidate.country,
+      weeklyHoursMin: candidate.weeklyHoursMin,
+      weeklyHoursMax: candidate.weeklyHoursMax,
+      dailyHoursMin: String(candidate.dailyHoursMin),
+      dailyHoursMax: String(candidate.dailyHoursMax),
     };
 
     if (existing.length === 0) {

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { protectedProcedure, router, publicProcedure } from "../_core/trpc";
+import { adminProcedure, operatorAccountProcedure, router, publicProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import {
   timeEntries,
@@ -19,17 +19,31 @@ import {
   emailTasks,
   cardSnoozes,
   vaProfiles,
+  aptlssPlans,
+  aptlssWaitingReasons,
+  cardStates,
+  taskAssignments,
+  trelloCachedCards,
+  users,
 } from "../../drizzle/schema.postgres";
-import { eq, and, desc, asc, gte, lte, sql, isNull, isNotNull } from "drizzle-orm";
+import { eq, and, desc, asc, gte, lte, sql, isNull, isNotNull, inArray } from "drizzle-orm";
 import { collectComplianceSnapshot } from "../services/manus-scheduler";
 import { parseDateKey } from "../utils/date-only";
 import { calculateCompliancePercentage } from "../complianceMetrics";
 import { dateKeyInTimeZone, dateWindowInTimeZone } from "../../shared/workerTime";
 import { resolveWorkerOperatorContext } from "../workerOperatorContext";
+import { canStartTimerForCard, managerActionNeedsSourceVerification, managerActionSourceRequirements, managerExecutionCoverageComplete, managerIntervenesOnCard, timerExecutionBlockReason } from "../timerAccess";
+import { isManagerPilotWorker } from "../aptlssManagerPilot";
+import { enqueueManagerTask } from "../aptlssManagerQueue";
+import { WORKER_EXECUTION_HOLD_MESSAGE } from "../../shared/aptlssManager";
+import { parseManagerAssignmentReference, readManagerAssignmentState } from "../aptlssManagerAssignments";
+import { selectWorkerProfile } from "../workerOperatorContext";
+import { getGoogleEvidenceStatus } from "../googleEvidence";
+import { readCurrentManagerHistory } from "../aptlssManagerHistoryDb";
 
 // ─── Payment Cycles Router ──────────────────────────────────────────────────
 export const paymentRouter = router({
-  getAllCycles: protectedProcedure.query(async ({ ctx }) => {
+  getAllCycles: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return [];
     const founderId = Number(ctx.user.id);
@@ -38,7 +52,7 @@ export const paymentRouter = router({
       .orderBy(asc(paymentCycles.cycleStart));
   }),
 
-  getCurrentCycle: protectedProcedure.query(async ({ ctx }) => {
+  getCurrentCycle: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return null;
     const founderId = Number(ctx.user.id);
@@ -51,27 +65,39 @@ export const paymentRouter = router({
     return all[0] ?? null;
   }),
 
-  markPaid: protectedProcedure
+  markPaid: adminProcedure
     .input(z.object({ cycleId: z.number() }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const founderId = Number(ctx.user.id);
 
-      await db
-        .update(paymentCycles)
-        .set({ isPaid: true, paidAt: new Date(), paidBy: String(ctx.user.openId) })
-        .where(and(eq(paymentCycles.id, input.cycleId), eq(paymentCycles.founderId, founderId)));
-
-      // Fetch current cycle
-      const cycle = await db
+      const [cycle] = await db
         .select()
         .from(paymentCycles)
-        .where(eq(paymentCycles.id, input.cycleId))
+        .where(and(eq(paymentCycles.id, input.cycleId), eq(paymentCycles.founderId, founderId)))
         .limit(1);
+      if (!cycle) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Payment cycle not found" });
+      }
+      if (cycle.isPaid) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Payment cycle is already settled" });
+      }
 
-      if (cycle[0]) {
-        const currentEnd = new Date(cycle[0].cycleEnd);
+      const updateResult = await db
+        .update(paymentCycles)
+        .set({ isPaid: true, paidAt: new Date(), paidBy: String(ctx.user.openId) })
+        .where(and(
+          eq(paymentCycles.id, input.cycleId),
+          eq(paymentCycles.founderId, founderId),
+          eq(paymentCycles.isPaid, false),
+        ));
+      if ((updateResult.rowCount ?? 0) !== 1) {
+        throw new TRPCError({ code: "CONFLICT", message: "Payment cycle was already settled" });
+      }
+
+      {
+        const currentEnd = new Date(cycle.cycleEnd);
         const nextStart = new Date(currentEnd);
         nextStart.setDate(nextStart.getDate() + 1);
         const nextEnd = new Date(nextStart);
@@ -96,7 +122,7 @@ export const paymentRouter = router({
 
 // ─── Weekly Pay Log Router ──────────────────────────────────────────────────
 export const payLogRouter = router({
-  getAll: protectedProcedure
+  getAll: operatorAccountProcedure
     .input(z.object({ limit: z.number().optional(), vaId: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -112,7 +138,7 @@ export const payLogRouter = router({
         .limit(input.limit ?? 10);
     }),
 
-  getByWeek: protectedProcedure
+  getByWeek: operatorAccountProcedure
     .input(z.object({ weekStart: z.string(), vaId: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -128,7 +154,7 @@ export const payLogRouter = router({
       return results[0] ?? null;
     }),
 
-  upsert: protectedProcedure
+  upsert: adminProcedure
     .input(z.object({
       vaId: z.number().optional(),
       weekStart: z.string(),
@@ -155,8 +181,7 @@ export const payLogRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const founderId = Number(ctx.user.id);
-      const isWorker = ctx.user.role === "worker";
-      const vaId = isWorker ? founderId : (input.vaId || founderId);
+      const vaId = input.vaId || founderId;
 
       const totalMerits = input.meritM1 + input.meritM2 + input.meritM3 + input.meritStreak;
       const totalDemerits = input.demeritD1 + input.demeritD2 + input.demeritD3 + input.demeritD4 +
@@ -210,7 +235,7 @@ export const payLogRouter = router({
 
 // ─── Daily Triage Router ──────────────────────────────────────────────────────
 export const triageRouter = router({
-  getByDate: protectedProcedure
+  getByDate: operatorAccountProcedure
     .input(z.object({ date: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -222,7 +247,7 @@ export const triageRouter = router({
       return rows[0] ?? null;
     }),
 
-  upsert: protectedProcedure
+  upsert: operatorAccountProcedure
     .input(z.object({
       triageDate: z.string(),
       step1Done: z.boolean().optional(),
@@ -274,7 +299,7 @@ export const triageRouter = router({
       }
     }),
 
-  getRecent: protectedProcedure
+  getRecent: operatorAccountProcedure
     .input(z.object({ limit: z.number().optional(), vaId: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -292,7 +317,7 @@ export const triageRouter = router({
 
 // ─── ON-HOLD Daily Checks Router ─────────────────────────────────────────────
 export const onHoldChecksRouter = router({
-  getByDate: protectedProcedure
+  getByDate: operatorAccountProcedure
     .input(z.object({ date: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -303,7 +328,7 @@ export const onHoldChecksRouter = router({
       );
     }),
 
-  markChecked: protectedProcedure
+  markChecked: operatorAccountProcedure
     .input(z.object({
       cardId: z.string(),
       cardName: z.string(),
@@ -346,7 +371,7 @@ export const onHoldChecksRouter = router({
 
 // ─── Streak Router ──────────────────────────────────────────────────────────
 export const streakRouter = router({
-  get: protectedProcedure
+  get: operatorAccountProcedure
     .input(z.object({ vaId: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -387,7 +412,7 @@ export const streakRouter = router({
       return { currentStreak, longestStreak };
     }),
 
-  record: protectedProcedure
+  record: operatorAccountProcedure
     .input(z.object({
       streakDate: z.string(),
       completedBeforeDeadline: z.boolean(),
@@ -421,7 +446,7 @@ export const streakRouter = router({
 
 // ─── Sunday Checklist Router ───────────────────────────────────────────────
 export const sundayRouter = router({
-  getByDate: protectedProcedure
+  getByDate: operatorAccountProcedure
     .input(z.object({ date: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -433,7 +458,7 @@ export const sundayRouter = router({
       return rows[0] ?? null;
     }),
 
-  upsert: protectedProcedure
+  upsert: operatorAccountProcedure
     .input(z.object({
       sundayDate: z.string(),
       trelloArchived: z.boolean().optional(),
@@ -478,7 +503,7 @@ export const sundayRouter = router({
 
 // ─── Time Tracker Router ────────────────────────────────────────────────────
 export const timerRouter = router({
-  start: protectedProcedure
+  start: operatorAccountProcedure
     .input(z.object({
       cardId: z.string(),
       cardName: z.string(),
@@ -490,69 +515,160 @@ export const timerRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const vaId = Number(ctx.user.id);
-      const profiles = await db.select({ founderId: vaProfiles.founderId })
-        .from(vaProfiles)
-        .where(eq(vaProfiles.userId, vaId))
-        .limit(1);
-      const founderId = profiles[0]?.founderId ?? vaId;
-
-      const running = await db.select().from(timeEntries).where(
-        and(eq(timeEntries.vaId, vaId), isNull(timeEntries.endTime))
-      ).limit(1);
-      if (running[0]) {
-        const now = new Date();
-        const durationSeconds = Math.round((now.getTime() - running[0].startTime.getTime()) / 1000);
-        const durationMinutes = Math.round(durationSeconds / 60);
-        await db.update(timeEntries).set({
-          endTime: now,
-          durationSeconds,
-          durationMinutes,
-        }).where(eq(timeEntries.id, running[0].id));
-      }
-
-      const startTime = new Date();
-      const [result] = await db.insert(timeEntries).values({
-        taskId: input.cardId,
-        vaId,
-        founderId,
-        cardId: input.cardId,
-        cardName: input.cardName,
-        cardUrl: input.cardUrl,
-        boardName: input.boardName,
-        listName: input.listName,
-        startTime,
-      }).returning({ id: timeEntries.id });
-
-      return { id: result?.id, cardId: input.cardId, cardName: input.cardName, startedAt: startTime };
+      return db.transaction(async tx => {
+        // Serialize all timer transitions for this account before checking mutable work state.
+        const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, vaId)).for("update");
+        if (!account) throw new TRPCError({ code: "UNAUTHORIZED", message: "Account no longer exists" });
+        const profiles = ctx.user.role === "worker"
+          ? await tx.select({ id: vaProfiles.id, founderId: vaProfiles.founderId, status: vaProfiles.status }).from(vaProfiles)
+            .where(eq(vaProfiles.userId, vaId)).orderBy(vaProfiles.id).for("update")
+          : [];
+        const profile = selectWorkerProfile(profiles);
+        if (ctx.user.role === "worker" && !profile) {
+          const activeProfileCount = profiles.filter(candidate => candidate.status === "active").length;
+          throw new TRPCError({
+            code: activeProfileCount > 1 ? "PRECONDITION_FAILED" : "FORBIDDEN",
+            message: activeProfileCount > 1
+              ? "Your worker profile is ambiguous. Ask an administrator to resolve it before tracking time."
+              : "A worker profile is required before tracking time.",
+          });
+        }
+        const managerPilot = ctx.user.role === "worker" && isManagerPilotWorker(vaId);
+        const [workerPlan] = ctx.user.role === "worker"
+          ? await tx.select().from(aptlssPlans)
+            .where(and(eq(aptlssPlans.vaId, vaId), eq(aptlssPlans.cardId, input.cardId)))
+            .limit(1)
+          : [];
+        if (ctx.user.role === "worker") {
+          const assignments = await tx.select({ taskId: taskAssignments.taskId, status: taskAssignments.status })
+            .from(taskAssignments)
+            .where(and(
+              eq(taskAssignments.vaId, profile!.id),
+              eq(taskAssignments.founderId, profile!.founderId),
+              inArray(taskAssignments.status, ["assigned", "in_progress", "blocked"]),
+            ))
+            .orderBy(taskAssignments.taskId)
+            .limit(251)
+            .for("update");
+          if (assignments.length > 250) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Your current task assignments could not be verified. Refresh your work list before tracking time." });
+          }
+          const cardAssignments = assignments.filter(assignment =>
+            parseManagerAssignmentReference(assignment.taskId)?.cardId === input.cardId,
+          );
+          if (!cardAssignments.some(assignment => assignment.status === "assigned" || assignment.status === "in_progress")) {
+            if (cardAssignments.some(assignment => assignment.status === "blocked")) {
+              throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This task is blocked. Ask the founder to update the assignment before tracking time." });
+            }
+            throw new TRPCError({ code: "FORBIDDEN", message: "This task is not currently assigned to your worker profile." });
+          }
+        }
+        if (!canStartTimerForCard(ctx.user.role, Boolean(workerPlan))) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "You can only start a timer for a card in your work queue" });
+        }
+        if (workerPlan) {
+          const [waiting] = await tx.select({ id: aptlssWaitingReasons.id }).from(aptlssWaitingReasons)
+            .where(and(eq(aptlssWaitingReasons.vaId, vaId), eq(aptlssWaitingReasons.cardId, input.cardId), eq(aptlssWaitingReasons.status, "active")))
+            .limit(1);
+          const [cardState] = await tx.select({ state: cardStates.state }).from(cardStates)
+            .where(and(eq(cardStates.vaId, vaId), eq(cardStates.cardId, input.cardId))).limit(1);
+          let hasManagerIntervention = false;
+          let hasStaleRequiredSource = false;
+          if (managerPilot) {
+            try {
+              const { snapshot } = await readCurrentManagerHistory(tx as unknown as NonNullable<Awaited<ReturnType<typeof getDb>>>, vaId);
+              if (!snapshot) throw new Error("Manager history is unavailable");
+              const snapshotJson = JSON.stringify(snapshot);
+              const assignmentState = await readManagerAssignmentState(tx as unknown as NonNullable<Awaited<ReturnType<typeof getDb>>>, vaId);
+              if (!assignmentState.complete || !managerExecutionCoverageComplete(snapshotJson, assignmentState.fingerprint)) {
+                throw new Error("Work list coverage is incomplete");
+              }
+              const sourceRequirements = managerActionSourceRequirements(snapshotJson, input.cardId);
+              let googleStatus: Awaited<ReturnType<typeof getGoogleEvidenceStatus>> | null = null;
+              if (sourceRequirements.sourceKeys.some(key => key === "gmail" || key === "google_drive")) {
+                try { googleStatus = await getGoogleEvidenceStatus(vaId); }
+                catch { googleStatus = null; }
+              }
+              let trelloCache: { cachedAt: string; expiresAt: string } | null = null;
+              if (sourceRequirements.sourceKeys.includes("trello")) {
+                const [cached] = await tx.select({ cachedAt: trelloCachedCards.cachedAt, expiresAt: trelloCachedCards.expiresAt })
+                  .from(trelloCachedCards)
+                  .where(and(eq(trelloCachedCards.userId, vaId), eq(trelloCachedCards.cardId, input.cardId)))
+                  .orderBy(desc(trelloCachedCards.cachedAt)).limit(1);
+                if (cached) trelloCache = { cachedAt: cached.cachedAt.toISOString(), expiresAt: cached.expiresAt.toISOString() };
+              }
+              hasStaleRequiredSource = managerActionNeedsSourceVerification(sourceRequirements, {
+                trelloCache,
+                gmail: googleStatus?.gmail ?? null,
+                drive: googleStatus?.drive ?? null,
+                googleConnectionReady: googleStatus?.credentialsReady ?? null,
+                now: Date.now(),
+              });
+              hasManagerIntervention = managerIntervenesOnCard(snapshotJson, input.cardId);
+            } catch {
+              throw new TRPCError({ code: "PRECONDITION_FAILED", message: WORKER_EXECUTION_HOLD_MESSAGE });
+            }
+          }
+          const reason = timerExecutionBlockReason({ listName: workerPlan.listName,
+            hasActiveWaitingReason: Boolean(waiting), actionability: cardState?.state ?? null, hasManagerIntervention, hasStaleRequiredSource });
+          if (reason) throw new TRPCError({ code: "PRECONDITION_FAILED", message: reason });
+        }
+        const founderId = ctx.user.role === "worker" ? profile!.founderId : vaId;
+        const running = await tx.select().from(timeEntries).where(
+          and(eq(timeEntries.vaId, vaId), isNull(timeEntries.endTime))
+        ).orderBy(desc(timeEntries.startTime));
+        const sameCard = running.find(entry => entry.cardId === input.cardId);
+        if (sameCard && running.length === 1) {
+          return { id: sameCard.id, cardId: input.cardId, cardName: sameCard.cardName ?? input.cardName, startedAt: sameCard.startTime };
+        }
+        const startTime = new Date();
+        for (const entry of running) {
+          const durationSeconds = Math.max(0, Math.round((startTime.getTime() - entry.startTime.getTime()) / 1000));
+          await tx.update(timeEntries).set({ endTime: startTime, durationSeconds,
+            durationMinutes: Math.round(durationSeconds / 60) }).where(eq(timeEntries.id, entry.id));
+        }
+        const cardName = workerPlan?.cardName ?? input.cardName;
+        const [result] = await tx.insert(timeEntries).values({
+          taskId: input.cardId, vaId, founderId, cardId: input.cardId, cardName,
+          cardUrl: workerPlan?.cardUrl ?? input.cardUrl,
+          boardName: workerPlan?.boardName ?? input.boardName,
+          listName: workerPlan?.listName ?? input.listName,
+          startTime,
+        }).returning({ id: timeEntries.id });
+        const id = result.id;
+        if (managerPilot) {
+          await enqueueManagerTask(tx, { vaId, trigger: "timer_changed", eventKey: `timer-start:${id}` });
+        }
+        return { id, cardId: input.cardId, cardName, startedAt: startTime };
+      });
     }),
 
-  stop: protectedProcedure
+  stop: operatorAccountProcedure
     .input(z.object({ cardId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const vaId = Number(ctx.user.id);
-
-      const running = await db.select().from(timeEntries).where(
-        and(eq(timeEntries.cardId, input.cardId), eq(timeEntries.vaId, vaId), isNull(timeEntries.endTime))
-      ).limit(1);
-
-      if (!running[0]) return null;
-
-      const now = new Date();
-      const durationSeconds = Math.round((now.getTime() - running[0].startTime.getTime()) / 1000);
-      const durationMinutes = Math.round(durationSeconds / 60);
-
-      await db.update(timeEntries).set({
-        endTime: now,
-        durationSeconds,
-        durationMinutes,
-      }).where(eq(timeEntries.id, running[0].id));
-
-      return { ...running[0], stoppedAt: now, durationSeconds };
+      return db.transaction(async tx => {
+        const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, vaId)).for("update");
+        if (!account) throw new TRPCError({ code: "UNAUTHORIZED", message: "Account no longer exists" });
+        const [running] = await tx.select().from(timeEntries).where(
+          and(eq(timeEntries.cardId, input.cardId), eq(timeEntries.vaId, vaId), isNull(timeEntries.endTime))
+        ).limit(1);
+        if (!running) return null;
+        const now = new Date();
+        const durationSeconds = Math.max(0, Math.round((now.getTime() - running.startTime.getTime()) / 1000));
+        const durationMinutes = Math.round(durationSeconds / 60);
+        await tx.update(timeEntries).set({ endTime: now, durationSeconds, durationMinutes })
+          .where(and(eq(timeEntries.id, running.id), isNull(timeEntries.endTime)));
+        if (isManagerPilotWorker(vaId)) {
+          await enqueueManagerTask(tx, { vaId, trigger: "timer_changed", eventKey: `timer-stop:${running.id}:${now.toISOString()}` });
+        }
+        return { ...running, stoppedAt: now, durationSeconds };
+      });
     }),
 
-  getActive: protectedProcedure.query(async ({ ctx }) => {
+  getActive: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return null;
     const vaId = Number(ctx.user.id);
@@ -571,7 +687,7 @@ export const timerRouter = router({
       : null;
   }),
 
-  getByCard: protectedProcedure
+  getByCard: operatorAccountProcedure
     .input(z.object({ cardId: z.string(), limit: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -582,7 +698,7 @@ export const timerRouter = router({
       ).orderBy(desc(timeEntries.startTime)).limit(input.limit ?? 20);
     }),
 
-  getDailySummary: protectedProcedure
+  getDailySummary: operatorAccountProcedure
     .input(z.object({ date: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -624,7 +740,7 @@ export const timerRouter = router({
       return Array.from(map.values()).sort((a, b) => b.totalSeconds - a.totalSeconds);
     }),
 
-  getWeeklyTotal: protectedProcedure
+  getWeeklyTotal: operatorAccountProcedure
     .input(z.object({ startDate: z.string(), endDate: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -651,7 +767,7 @@ export const timerRouter = router({
       };
     }),
 
-  delete: protectedProcedure
+  delete: operatorAccountProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
@@ -661,7 +777,7 @@ export const timerRouter = router({
       return { success: true };
     }),
 
-  updateEntry: protectedProcedure
+  updateEntry: operatorAccountProcedure
     .input(z.object({
       id: z.number(),
       durationSeconds: z.number().int().min(0).max(86400),
@@ -679,16 +795,32 @@ export const timerRouter = router({
       const entry = rows[0];
       const newStoppedAt = new Date(new Date(entry.startTime).getTime() + input.durationSeconds * 1000);
 
-      await db.update(timeEntries).set({
+      const updateResult = await db.update(timeEntries).set({
         durationSeconds: input.durationSeconds,
         durationMinutes: Math.round(input.durationSeconds / 60),
         endTime: newStoppedAt,
-      }).where(eq(timeEntries.id, input.id));
+      }).where(and(eq(timeEntries.id, input.id), eq(timeEntries.vaId, vaId)));
+
+      const affectedRows = updateResult.rowCount ?? 0;
+      if (affectedRows === 0) {
+        const [stillOwned] = await db.select({
+          durationSeconds: timeEntries.durationSeconds,
+          endTime: timeEntries.endTime,
+        }).from(timeEntries).where(and(
+          eq(timeEntries.id, input.id),
+          eq(timeEntries.vaId, vaId),
+        )).limit(1);
+        if (!stillOwned) throw new TRPCError({ code: "NOT_FOUND", message: "Time entry not found" });
+        if (stillOwned.durationSeconds !== input.durationSeconds
+          || stillOwned.endTime?.getTime() !== newStoppedAt.getTime()) {
+          throw new TRPCError({ code: "CONFLICT", message: "Time entry changed while it was being updated" });
+        }
+      }
 
       return { success: true, id: input.id, durationSeconds: input.durationSeconds, stoppedAt: newStoppedAt };
     }),
 
-  getEntriesForCard: protectedProcedure
+  getEntriesForCard: operatorAccountProcedure
     .input(z.object({ cardId: z.string(), date: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -717,7 +849,7 @@ export const timerRouter = router({
       }));
     }),
 
-  getWeeklyBreakdown: protectedProcedure
+  getWeeklyBreakdown: operatorAccountProcedure
     .input(z.object({ startDate: z.string(), endDate: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -789,7 +921,7 @@ function normalizeComplianceSnapshot(row: ComplianceSnapshot) {
 }
 
 export const complianceRouter = router({
-  getHistory: protectedProcedure
+  getHistory: operatorAccountProcedure
     .input(z.object({ limit: z.number().optional(), vaId: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -805,7 +937,7 @@ export const complianceRouter = router({
       return rows.map(normalizeComplianceSnapshot);
     }),
 
-  getRollingAvg: protectedProcedure
+  getRollingAvg: operatorAccountProcedure
     .input(z.object({ days: z.number().int().min(1).max(365).default(7) }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -824,7 +956,7 @@ export const complianceRouter = router({
       };
     }),
 
-  getWeekAvg: protectedProcedure
+  getWeekAvg: operatorAccountProcedure
     .input(z.object({ weekStart: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -847,7 +979,7 @@ export const complianceRouter = router({
       };
     }),
 
-  recordNow: protectedProcedure.mutation(async ({ ctx }) => {
+  recordNow: operatorAccountProcedure.mutation(async ({ ctx }) => {
     const db = await getDb();
     if (!db) {
       throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
@@ -866,15 +998,27 @@ export const complianceRouter = router({
 });
 
 // ─── Email Inbox Router ──────────────────────────────────────────────────────
+function isDuplicateEmailMessageError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error
+    && (error as { code?: unknown }).code === "ER_DUP_ENTRY";
+}
+
+function emailTaskOwnershipConflict() {
+  return new TRPCError({
+    code: "CONFLICT",
+    message: "One or more email tasks could not be saved. Refresh and try again.",
+  });
+}
+
 export const emailInboxRouter = router({
-  getAll: protectedProcedure.query(async ({ ctx }) => {
+  getAll: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return [];
     const vaId = Number(ctx.user.id);
     return db.select().from(emailTasks).where(eq(emailTasks.vaId, vaId)).orderBy(desc(emailTasks.receivedAt));
   }),
 
-  getPending: protectedProcedure.query(async ({ ctx }) => {
+  getPending: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return [];
     const vaId = Number(ctx.user.id);
@@ -883,7 +1027,7 @@ export const emailInboxRouter = router({
     ).orderBy(desc(emailTasks.receivedAt));
   }),
 
-  getPendingCount: protectedProcedure.query(async ({ ctx }) => {
+  getPendingCount: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return { count: 0 };
     const vaId = Number(ctx.user.id);
@@ -893,7 +1037,7 @@ export const emailInboxRouter = router({
     return { count: Number(results[0]?.count || 0) };
   }),
 
-  updateStatus: protectedProcedure
+  updateStatus: operatorAccountProcedure
     .input(z.object({
       id: z.number().int(),
       status: z.enum(["pending", "processed", "archived"]),
@@ -917,7 +1061,7 @@ export const emailInboxRouter = router({
       return { success: true };
     }),
 
-  archiveAll: protectedProcedure.mutation(async ({ ctx }) => {
+  archiveAll: operatorAccountProcedure.mutation(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
     const vaId = Number(ctx.user.id);
@@ -928,7 +1072,7 @@ export const emailInboxRouter = router({
     return { success: true, archived: result.length };
   }),
 
-  upsertBatch: protectedProcedure
+  upsertBatch: operatorAccountProcedure
     .input(z.array(z.object({
       gmailMessageId: z.string(),
       gmailThreadId: z.string(),
@@ -950,26 +1094,41 @@ export const emailInboxRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const vaId = Number(ctx.user.id);
-      let upserted = 0;
-      for (const task of input) {
-        await db.insert(emailTasks).values({
-          vaId,
-          ...task,
-        }).onConflictDoUpdate({
-          target: emailTasks.gmailMessageId,
-          set: {
-            ...task,
+      return db.transaction(async tx => {
+        let upserted = 0;
+        for (const task of input) {
+          const findExisting = () => tx.select({ id: emailTasks.id, vaId: emailTasks.vaId })
+            .from(emailTasks)
+            .where(eq(emailTasks.gmailMessageId, task.gmailMessageId))
+            .limit(1)
+            .for("update");
+          let [existing] = await findExisting();
+
+          if (existing && existing.vaId !== vaId) throw emailTaskOwnershipConflict();
+
+          if (!existing) {
+            const inserted = await tx.insert(emailTasks).values({ vaId, ...task })
+              .onConflictDoNothing({ target: emailTasks.gmailMessageId }).returning({ id: emailTasks.id });
+            if (inserted.length) { upserted++; continue; }
+            [existing] = await findExisting();
+            if (!existing) throw new TRPCError({ code: "CONFLICT", message: "Email task reservation changed; reload before retrying" });
+            if (existing.vaId !== vaId) throw emailTaskOwnershipConflict();
           }
-        });
-        upserted++;
-      }
-      return { success: true, upserted };
+
+          await tx.update(emailTasks).set(task).where(and(
+            eq(emailTasks.id, existing.id),
+            eq(emailTasks.vaId, vaId),
+          ));
+          upserted++;
+        }
+        return { success: true, upserted };
+      });
     }),
 });
 
 // ─── Card Snoozes Router ─────────────────────────────────────────────────────
 export const cardSnoozeRouter = router({
-  snooze: protectedProcedure
+  snooze: operatorAccountProcedure
     .input(z.object({
       cardId: z.string(),
       cardName: z.string(),
@@ -980,18 +1139,41 @@ export const cardSnoozeRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const vaId = Number(ctx.user.id);
-      await db.insert(cardSnoozes).values({
-        vaId,
-        cardId: input.cardId,
-        cardName: input.cardName,
-        cardUrl: input.cardUrl,
-        snoozedUntil: input.snoozedUntil,
-        isActive: true,
+      return db.transaction(async tx => {
+        // Serialize a worker's snooze updates because this legacy table has no
+        // unique key for (vaId, cardId) to make an upsert atomic.
+        const [account] = await tx.select({ id: users.id }).from(users)
+          .where(eq(users.id, vaId)).for("update");
+        if (!account) throw new TRPCError({ code: "UNAUTHORIZED", message: "Account no longer exists" });
+
+        const existing = await tx.select({ id: cardSnoozes.id }).from(cardSnoozes)
+          .where(and(eq(cardSnoozes.vaId, vaId), eq(cardSnoozes.cardId, input.cardId)))
+          .orderBy(desc(cardSnoozes.updatedAt), desc(cardSnoozes.id))
+          .for("update");
+        const [current, ...duplicates] = existing;
+
+        if (current) {
+          await tx.update(cardSnoozes).set({ snoozedUntil: input.snoozedUntil, isActive: true })
+            .where(and(eq(cardSnoozes.id, current.id), eq(cardSnoozes.vaId, vaId)));
+          for (const duplicate of duplicates) {
+            await tx.update(cardSnoozes).set({ isActive: false })
+              .where(and(eq(cardSnoozes.id, duplicate.id), eq(cardSnoozes.vaId, vaId)));
+          }
+        } else {
+          await tx.insert(cardSnoozes).values({
+            vaId,
+            cardId: input.cardId,
+            cardName: input.cardName,
+            cardUrl: input.cardUrl,
+            snoozedUntil: input.snoozedUntil,
+            isActive: true,
+          });
+        }
+        return { success: true };
       });
-      return { success: true };
     }),
 
-  cancel: protectedProcedure
+  cancel: operatorAccountProcedure
     .input(z.object({ cardId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
@@ -1003,7 +1185,7 @@ export const cardSnoozeRouter = router({
       return { success: true };
     }),
 
-  getActive: protectedProcedure.query(async ({ ctx }) => {
+  getActive: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return [];
     const vaId = Number(ctx.user.id);
@@ -1012,7 +1194,7 @@ export const cardSnoozeRouter = router({
     );
   }),
 
-  getForCard: protectedProcedure
+  getForCard: operatorAccountProcedure
     .input(z.object({ cardId: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
@@ -1024,7 +1206,7 @@ export const cardSnoozeRouter = router({
       return results[0] ?? null;
     }),
 
-  getSnoozedIds: protectedProcedure.query(async ({ ctx }) => {
+  getSnoozedIds: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return { cardIds: [] };
     const vaId = Number(ctx.user.id);

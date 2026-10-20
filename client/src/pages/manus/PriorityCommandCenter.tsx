@@ -6,7 +6,7 @@
  *   2. Five priority buckets (collapsible groups)
  *   3. Each card shows: why-shown, next best action, confidence chip, checklist progress
  *   4. ON-HOLD cards show smart sub-classification with action buttons
- *   5. Batch actions: keep on hold, move to doing, draft daily updates, follow up, snooze
+ *   5. Batch actions: keep on hold, move to doing, draft daily updates, snooze
  *   6. Escalation rules panel
  *   7. Automation history per card (inline expandable)
  */
@@ -34,7 +34,6 @@ import {
   BellRing,
   Copy,
   CheckCheck,
-  Send,
   Eye,
   EyeOff,
 } from "lucide-react";
@@ -261,7 +260,6 @@ function CardRow({
   showOnHoldActions,
   onKeepOnHold,
   onMoveToDoing,
-  onFollowUp,
   onDraftUpdate,
 }: {
   card: EnrichedCard;
@@ -270,7 +268,6 @@ function CardRow({
   showOnHoldActions?: boolean;
   onKeepOnHold?: (id: string) => void;
   onMoveToDoing?: (id: string) => void;
-  onFollowUp?: (id: string) => void;
   onDraftUpdate?: (id: string, name: string) => void;
 }) {
   const s = TIER_STYLES[card.tier] ?? TIER_STYLES.MEDIUM;
@@ -367,11 +364,6 @@ function CardRow({
               <Pause className="w-3 h-3 mr-1" /> Keep ON-HOLD
             </Button>
           )}
-          {(card.onHoldClassification === 'needs_escalation' || card.onHoldClassification === 'still_waiting') && (
-            <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={() => onFollowUp?.(card.cardId)}>
-              <Send className="w-3 h-3 mr-1" /> Ask VA to Follow Up
-            </Button>
-          )}
           {card.onHoldClassification === 'needs_Admin' && (
             <span className="text-[10px] text-red-600 dark:text-red-400 font-medium flex items-center gap-1">
               <AlertCircle className="w-3 h-3" /> Needs Admin decision
@@ -406,7 +398,6 @@ function BucketSection({
   showOnHoldActions,
   onKeepOnHold,
   onMoveToDoing,
-  onFollowUp,
   onDraftUpdate,
   batchActions,
 }: {
@@ -422,7 +413,6 @@ function BucketSection({
   showOnHoldActions?: boolean;
   onKeepOnHold?: (id: string) => void;
   onMoveToDoing?: (id: string) => void;
-  onFollowUp?: (id: string) => void;
   onDraftUpdate?: (id: string, name: string) => void;
   batchActions?: React.ReactNode;
 }) {
@@ -459,7 +449,6 @@ function BucketSection({
               showOnHoldActions={showOnHoldActions}
               onKeepOnHold={onKeepOnHold}
               onMoveToDoing={onMoveToDoing}
-              onFollowUp={onFollowUp}
               onDraftUpdate={onDraftUpdate}
             />
           ))}
@@ -472,14 +461,10 @@ function BucketSection({
 // ── Daily Update Draft Modal ──────────────────────────────────────────────────
 function DailyUpdateDraftModal({
   drafts,
-  onPost,
   onClose,
-  isPosting,
 }: {
-  drafts: Array<{ cardId: string; cardName: string; cardUrl: string; draft: string; confidenceScore: number; autoPosted: boolean }>;
-  onPost: (cardId: string, cardName: string, draft: string) => void;
+  drafts: Array<{ cardId: string; cardName: string; cardUrl: string; draft: string; confidenceScore: number }>;
   onClose: () => void;
-  isPosting: boolean;
 }) {
   const [copied, setCopied] = useState<string | null>(null);
   if (drafts.length === 0) return null;
@@ -502,35 +487,24 @@ function DailyUpdateDraftModal({
                   label={d.confidenceScore >= 80 ? 'High' : d.confidenceScore >= 60 ? 'Medium' : 'Low'}
                   score={d.confidenceScore}
                 />
-                {d.autoPosted && <span className="text-[10px] text-green-600 font-medium">Auto-posted ✓</span>}
               </div>
               <pre className="text-xs text-muted-foreground whitespace-pre-wrap font-sans bg-muted/50 rounded p-2">{d.draft}</pre>
-              {!d.autoPosted && (
-                <div className="flex gap-2 mt-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 text-xs"
-                    onClick={() => {
-                      navigator.clipboard.writeText(d.draft);
-                      setCopied(d.cardId);
-                      setTimeout(() => setCopied(null), 2000);
-                    }}
-                  >
-                    {copied === d.cardId ? <CheckCheck className="w-3 h-3 mr-1" /> : <Copy className="w-3 h-3 mr-1" />}
-                    Copy
-                  </Button>
-                  <Button
-                    size="sm"
-                    className="h-7 text-xs"
-                    disabled={isPosting}
-                    onClick={() => onPost(d.cardId, d.cardName, d.draft)}
-                  >
-                    {isPosting ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Send className="w-3 h-3 mr-1" />}
-                    Post to Trello
-                  </Button>
-                </div>
-              )}
+              <div className="flex gap-2 mt-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs"
+                  onClick={() => {
+                    navigator.clipboard.writeText(d.draft);
+                    setCopied(d.cardId);
+                    setTimeout(() => setCopied(null), 2000);
+                  }}
+                >
+                  {copied === d.cardId ? <CheckCheck className="w-3 h-3 mr-1" /> : <Copy className="w-3 h-3 mr-1" />}
+                  Copy draft
+                </Button>
+                <span className="self-center text-xs text-muted-foreground">Review and send it directly in Trello.</span>
+              </div>
             </div>
           ))}
         </div>
@@ -557,7 +531,7 @@ export default function PriorityCommandCenter() {
   const [showSnoozeMenu, setShowSnoozeMenu] = useState(false);
   const [draftModalData, setDraftModalData] = useState<Array<{
     cardId: string; cardName: string; cardUrl: string;
-    draft: string; confidenceScore: number; autoPosted: boolean;
+    draft: string; confidenceScore: number;
   }>>([]);
   const [showEscalations, setShowEscalations] = useState(false);
 
@@ -569,24 +543,12 @@ export default function PriorityCommandCenter() {
   });
   const batchMoveToDoing = trpc.aptlss.batchMoveToDoing.useMutation({
     onSuccess: (res) => {
-      toast.success(`Moved ${res.count} card(s) to DOING`, { description: "Trello comment posted." });
-      utils.aptlss.getCommandCenter.invalidate();
-    },
-  });
-  const batchFollowUp = trpc.aptlss.batchFollowUp.useMutation({
-    onSuccess: (res) => {
-      toast.success(`Follow-up posted on ${res.count} card(s)`, { description: "Trello comment posted." });
+      toast.success(`Moved ${res.count} card(s) to DOING`, { description: "Trello card state updated." });
       utils.aptlss.getCommandCenter.invalidate();
     },
   });
   const batchDraftUpdates = trpc.aptlss.batchDraftDailyUpdates.useMutation({
     onSuccess: (res) => setDraftModalData(res.drafts),
-  });
-  const postDailyUpdate = trpc.aptlss.postDailyUpdateDraft.useMutation({
-    onSuccess: () => {
-      toast.success("Daily update posted to Trello");
-      utils.aptlss.getCommandCenter.invalidate();
-    },
   });
   const batchSnooze = trpc.aptlss.batchSnooze.useMutation({
     onSuccess: (res) => {
@@ -691,15 +653,10 @@ export default function PriorityCommandCenter() {
                     <ArrowRight className="w-3 h-3 mr-1" /> Move to DOING
                   </Button>
                   <Button size="sm" variant="outline" className="h-7 text-xs"
-                    onClick={() => batchDraftUpdates.mutate({ cardIds: selectedArray, autoPost: false })}
+                    onClick={() => batchDraftUpdates.mutate({ cardIds: selectedArray })}
                     disabled={batchDraftUpdates.isPending}>
                     {batchDraftUpdates.isPending ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <BarChart2 className="w-3 h-3 mr-1" />}
                     Draft Updates
-                  </Button>
-                  <Button size="sm" variant="outline" className="h-7 text-xs"
-                    onClick={() => batchFollowUp.mutate({ cardIds: selectedArray })}
-                    disabled={batchFollowUp.isPending}>
-                    <Send className="w-3 h-3 mr-1" /> Follow Up
                   </Button>
                   <div className="relative">
                     <div className="flex items-stretch rounded-md border border-border overflow-hidden h-7">
@@ -802,7 +759,7 @@ export default function PriorityCommandCenter() {
           defaultOpen={true}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
-          onDraftUpdate={(id, name) => batchDraftUpdates.mutate({ cardIds: [id], autoPost: false })}
+          onDraftUpdate={(id, name) => batchDraftUpdates.mutate({ cardIds: [id] })}
         />
 
         {/* ── Bucket 2: Ready to Act ────────────────────────────────────────── */}
@@ -816,7 +773,7 @@ export default function PriorityCommandCenter() {
           defaultOpen={true}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
-          onDraftUpdate={(id, name) => batchDraftUpdates.mutate({ cardIds: [id], autoPost: false })}
+          onDraftUpdate={(id, name) => batchDraftUpdates.mutate({ cardIds: [id] })}
           batchActions={
             (data?.readyToAct.length ?? 0) > 0 ? (
               <Button
@@ -826,7 +783,7 @@ export default function PriorityCommandCenter() {
                 onClick={() => {
                   const ids = (data?.readyToAct ?? []).filter(c => (c.confidenceScore ?? 0) >= 80).map(c => c.cardId);
                   if (ids.length === 0) { toast.info("No high-confidence cards found"); return; }
-                  batchDraftUpdates.mutate({ cardIds: ids, autoPost: false });
+                  batchDraftUpdates.mutate({ cardIds: ids });
                 }}
                 disabled={batchDraftUpdates.isPending}
               >
@@ -841,30 +798,13 @@ export default function PriorityCommandCenter() {
         <BucketSection
           icon={<Users className="w-4 h-4 text-blue-400" />}
           title="Waiting External"
-          description="Someone else must reply first — monitor and follow up if silent"
+          description="Someone else must reply first — prepare a draft for the worker to review and send"
           count={data?.waitingExternal.length ?? 0}
           cards={data?.waitingExternal ?? []}
           colorClass="bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/20"
           defaultOpen={false}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
-          onFollowUp={(id) => batchFollowUp.mutate({ cardIds: [id] })}
-          batchActions={
-            (data?.waitingExternal.length ?? 0) > 0 ? (
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7 text-xs"
-                onClick={() => {
-                  const ids = (data?.waitingExternal ?? []).map(c => c.cardId);
-                  batchFollowUp.mutate({ cardIds: ids });
-                }}
-                disabled={batchFollowUp.isPending}
-              >
-                <Send className="w-3 h-3 mr-1" /> Follow Up on All Stale External Cards
-              </Button>
-            ) : undefined
-          }
         />
 
         {/* ── Bucket 4: Needs Admin Decision ──────────────────────────────── */}
@@ -923,7 +863,6 @@ export default function PriorityCommandCenter() {
           showOnHoldActions={true}
           onKeepOnHold={(id) => batchKeepOnHold.mutate({ cardIds: [id] })}
           onMoveToDoing={(id) => batchMoveToDoing.mutate({ cardIds: [id] })}
-          onFollowUp={(id) => batchFollowUp.mutate({ cardIds: [id] })}
           batchActions={
             (data?.onHoldCards.length ?? 0) > 0 ? (
               <div className="flex gap-2 flex-wrap">
@@ -978,9 +917,7 @@ export default function PriorityCommandCenter() {
       {draftModalData.length > 0 && (
         <DailyUpdateDraftModal
           drafts={draftModalData}
-          onPost={(cardId, cardName, draft) => postDailyUpdate.mutate({ cardId, cardName, draft })}
           onClose={() => setDraftModalData([])}
-          isPosting={postDailyUpdate.isPending}
         />
       )}
     </div>

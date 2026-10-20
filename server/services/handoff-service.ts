@@ -1,13 +1,14 @@
 import { getDb } from '../db';
 import { dailyBriefings, taskAssignments, vaProfiles } from '../../drizzle/schema.postgres';
 import { eq, and } from 'drizzle-orm';
+import { didUpdateSingleTaskAssignment } from '../taskAssignmentMutation';
 
 export async function saveHandoffNote(taskId: string, workerId: number, notes: string): Promise<boolean> {
   const db = await getDb();
   if (!db) return false;
 
   try {
-    await db.update(taskAssignments)
+    const result = await db.update(taskAssignments)
       .set({ 
         handoffNotes: notes,
         lastWorkedAt: new Date()
@@ -16,7 +17,7 @@ export async function saveHandoffNote(taskId: string, workerId: number, notes: s
         eq(taskAssignments.taskId, taskId),
         eq(taskAssignments.vaId, workerId)
       ));
-    return true;
+    return didUpdateSingleTaskAssignment(result);
   } catch (error) {
     console.error('Failed to save handoff note:', error);
     return false;

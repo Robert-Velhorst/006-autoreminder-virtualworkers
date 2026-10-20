@@ -1,6 +1,7 @@
 import { createServer } from "http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { io as ioClient, type Socket as ClientSocket } from "socket.io-client";
+import { WebSocket } from "ws";
 import { isAllowedWebSocketOrigin, WebSocketService } from "./services/websocket";
 
 function waitForEvent<T>(socket: ClientSocket, event: string, timeoutMs = 2_000) {
@@ -50,11 +51,13 @@ describe("WebSocket Service", () => {
     await new Promise<void>(resolve => httpServer.close(() => resolve()));
   });
 
-  function connect(openId?: string, userId = 1, role: "worker" | "admin" = "worker") {
+  function connect(openId?: string, userId = 1, role: "worker" | "admin" = "worker", origin?: string) {
     const client = ioClient(`http://127.0.0.1:${port}`, {
       path: "/ws",
       transports: ["websocket"],
       autoConnect: false,
+      reconnection: false,
+      extraHeaders: origin ? { Origin: origin } : undefined,
       auth: { openId, userId, role },
     });
     clients.push(client);
@@ -78,6 +81,29 @@ describe("WebSocket Service", () => {
     await expect(authenticated).resolves.toMatchObject({ success: true });
     expect(wsService.getConnectedClientsCount()).toBe(1);
     expect(wsService.getConnectedUsers()).toEqual(["worker-1"]);
+  });
+
+  it("accepts an explicitly allowed browser origin on the shared upgrade route", async () => {
+    const client = connect("worker-1", 1, "worker", "http://localhost");
+    const authenticated = waitForEvent(client, "authenticated");
+    client.connect();
+    await expect(authenticated).resolves.toMatchObject({ success: true });
+  });
+
+  it("still requires authentication when the browser origin is allowed", async () => {
+    const client = connect(undefined, 1, "worker", "http://localhost");
+    const error = waitForEvent(client, "connect_error");
+    client.connect();
+    await expect(error).resolves.toMatchObject({ message: "Authentication required" });
+  });
+
+  it("returns the reported HTTP 400 for an unconfigured browser origin without Vite or another upgrade handler", async () => {
+    const client = new WebSocket(`ws://127.0.0.1:${port}/ws/?EIO=4&transport=websocket`, {
+      origin: "http://127.0.0.1:3035", handshakeTimeout: 2_000,
+    });
+    const error = await new Promise<Error>(resolve => client.once("error", resolve));
+    expect(error.message).toBe("Unexpected server response: 400");
+    expect(wsService.getConnectedClientsCount()).toBe(0);
   });
 
   it("broadcasts task events only to other clients for the same user", async () => {
@@ -136,6 +162,8 @@ describe("WebSocket Service", () => {
 describe("WebSocket origin policy", () => {
   it("accepts configured origins and rejects untrusted browser origins", () => {
     expect(isAllowedWebSocketOrigin("https://dashboard.example", ["https://dashboard.example/app"])).toBe(true);
+    expect(isAllowedWebSocketOrigin("http://127.0.0.1:3025", ["http://127.0.0.1:3025"])).toBe(true);
+    expect(isAllowedWebSocketOrigin("http://127.0.0.1:4040", ["http://127.0.0.1:3025"])).toBe(false);
     expect(isAllowedWebSocketOrigin("https://attacker.example", ["https://dashboard.example"])).toBe(false);
     expect(isAllowedWebSocketOrigin(undefined, [])).toBe(true);
   });

@@ -44,9 +44,69 @@ docs
 tmp
 temp
 *.tmp
+
 *.zip
+# Reviewed distributable required by the production build seal.
+!client/public/downloads/worker-browser-collector.zip
 *.tgz
 .vscode
 .idea
 .DS_Store
 Thumbs.db
+
+# Additional local secrets, source artifacts and runtime state exclusions.
+# Dependencies
+node_modules
+.pnpm-store
+
+# Build outputs
+dist
+.vite
+
+# Environment files
+.env
+.env.*
+
+# Logs
+logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Testing
+coverage
+.nyc_output
+playwright-report
+test-results
+
+# Local runtime state and database backups
+.local
+.superpowers
+artifacts
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Documentation
+*.md
+docs
+
+# Manus data
+.manus
+
+# Temporary files
+tmp
+temp
+*.tmp

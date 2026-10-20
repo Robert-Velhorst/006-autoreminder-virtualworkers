@@ -47,54 +47,14 @@ interface PerformanceMetricsProps {
   showSection?: 'cache' | 'queue' | 'websocket';
 }
 
-const MOCK_METRICS: PerformanceMetrics = {
-  cache: {
-    hits: 8420,
-    misses: 1580,
-    totalRequests: 10000,
-    hitRate: 84.2,
-    missRate: 15.8,
-    lastUpdated: new Date().toISOString(),
-  },
-  queue: {
-    totalRequests: 5240,
-    uniqueRequests: 1850,
-    deduplicatedRequests: 3390,
-    deduplicationRate: 64.7,
-    activeRequests: 12,
-    pendingRequests: 8,
-  },
-  websocket: {
-    connected: true,
-    totalClients: 156,
-    userClients: 142,
-    totalUsers: 89,
-    status: 'connected',
-  },
-  performance: {
-    apiCallsSaved: 3390,
-    apiCallReduction: 64.7,
-    timeSavedMs: 2450,
-    timeSavedSeconds: 2.45,
-    avgCacheHitTime: 12,
-    avgApiCallTime: 245,
-  },
-  summary: {
-    overallHealth: 'excellent',
-    recommendations: [
-      'Cache hit rate is excellent at 84.2%. Consider increasing cache TTL for frequently accessed data.',
-      'Request deduplication is performing well at 64.7%. Monitor for potential optimization opportunities.',
-      'WebSocket connections are stable with 156 active clients across 89 users.',
-      'API call reduction is saving significant time - approximately 2.45 seconds per request cycle.',
-    ],
-  },
-};
-
 export function PerformanceMetrics({ showSection }: PerformanceMetricsProps = {}) {
   const [metrics, setMetrics] = useState<PerformanceMetrics | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [clearingCache, setClearingCache] = useState(false);
+  const [isDocumentVisible, setIsDocumentVisible] = useState(
+    () => document.visibilityState === 'visible',
+  );
 
   const handleClearCache = async () => {
     if (!window.confirm('Are you sure you want to clear the cache? This will reset all cached data.')) {
@@ -103,32 +63,9 @@ export function PerformanceMetrics({ showSection }: PerformanceMetricsProps = {}
 
     setClearingCache(true);
     try {
-      // Try to call the backend endpoint
-      try {
-        const response = await fetch('/api/cache/clear', { method: 'POST' });
-        
-        if (!response.ok) {
-          throw new Error('Backend endpoint not available');
-        }
-      } catch (fetchError) {
-        // If endpoint doesn't exist, proceed with client-side reset
-        console.warn('Cache clear endpoint not available, resetting metrics locally');
-      }
-
-      // Reset cache metrics
-      if (metrics) {
-        setMetrics({
-          ...metrics,
-          cache: {
-            hits: 0,
-            misses: 0,
-            totalRequests: 0,
-            hitRate: 0,
-            missRate: 0,
-            lastUpdated: new Date().toISOString(),
-          },
-        });
-      }
+      const response = await fetch('/api/cache', { method: 'DELETE' });
+      if (!response.ok) throw new Error('Cache clear request failed');
+      await fetchMetrics();
       
       toast.success('Cache cleared successfully');
     } catch (error) {
@@ -156,10 +93,9 @@ export function PerformanceMetrics({ showSection }: PerformanceMetricsProps = {}
       }
     } catch (error) {
       console.error('Error fetching metrics:', error);
-      // Use mock data as fallback
-      setMetrics(MOCK_METRICS);
+      setMetrics(null);
       if (showToast) {
-        toast.success('Metrics refreshed (using demo data)');
+        toast.error('Performance metrics are unavailable');
       }
     } finally {
       setLoading(false);
@@ -168,13 +104,17 @@ export function PerformanceMetrics({ showSection }: PerformanceMetricsProps = {}
   };
 
   useEffect(() => {
-    fetchMetrics();
-    
-    // Auto-refresh every 30 seconds
-    const interval = setInterval(() => fetchMetrics(), 30000);
-    
-    return () => clearInterval(interval);
+    const syncVisibility = () => setIsDocumentVisible(document.visibilityState === 'visible');
+    document.addEventListener('visibilitychange', syncVisibility);
+    return () => document.removeEventListener('visibilitychange', syncVisibility);
   }, []);
+
+  useEffect(() => {
+    if (!isDocumentVisible) return;
+    void fetchMetrics();
+    const interval = setInterval(() => void fetchMetrics(), 30000);
+    return () => clearInterval(interval);
+  }, [isDocumentVisible]);
 
   // Show loading state only briefly, then show error or content
   if (loading) {
@@ -415,7 +355,7 @@ export function PerformanceMetrics({ showSection }: PerformanceMetricsProps = {}
               </div>
               <div>
                 <p className="text-sm text-muted-foreground">Avg Clients/User</p>
-                <p className="text-2xl font-bold">{(metrics.websocket.totalClients / metrics.websocket.totalUsers).toFixed(1)}</p>
+                <p className="text-2xl font-bold">{metrics.websocket.totalUsers > 0 ? (metrics.websocket.totalClients / metrics.websocket.totalUsers).toFixed(1) : '0.0'}</p>
               </div>
             </div>
           </CardContent>

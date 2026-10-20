@@ -110,6 +110,58 @@ server requires a persistent container runtime for Express, tRPC, scheduled
 work, Redis, and WebSockets. Retire obsolete hosting Git integrations only
 after the public container replacement passes the production cutover gate.
 
+## October 1, 2026: reliability changes without capability removal
+
+| Existing capability | Change | Preservation and verification |
+| --- | --- | --- |
+| Developer admin workload timeline | Replace the decorative third-party image with a local background | Timeline, schedule data, filters and navigation remain unchanged. A real browser trace reproduced the external DNS failure; the final live browser matrix is recorded in the dated production verification dossier. |
+| Attachment extraction | Use the installed PDFParse v2 API and await parser cleanup | PDF text and page counts remain available; no generated page-footers are inserted into evidence. Real-parser regressions run with the frozen dependency set. |
+| Attachment downloads | Await asynchronous rejection inside the error boundary and use redacted failure labels | Pinned-address HTTPS, byte limit and unavailable-result semantics are retained. No provider credential or attachment address is added to logs. |
+| Developer and operator migration lineage | Verify generated values in bounded indexed batches | All records and canonical expressions are checked; none are sampled, removed or rewritten. Full database rerun fingerprints are still required separately. |
+| Redis cache and realtime transport | Recover from sustained outages and Redis missing at startup, with each retry delay capped at two seconds and one stable socket adapter | Application commands have finite retries and no offline queue. Only the dedicated subscriber retains fixed internal subscriptions. Offline adapter publications stay local; disconnect-race rejections are handled. Both clients must be ready for healthy readiness. Real cross-process recovery and offline-shutdown/session checks are recorded in the verification dossier; no data or service is removed. |
+
+Session-recovery follow-up: canonical Express/tRPC authentication now distinguishes
+infrastructure failure from rejected credentials. Unverified writes fail closed
+with 503; an outage neither grants nor clears a cookie. Developer users/roles and
+worker-profile checks remain authoritative. Compiled-image MySQL outage/startup
+tests preserve all synthetic records except intentional login timestamps; the VA
+gets recovery instructions without AI or driver diagnostics.
+
+These are uncommitted changes in the shadow-pilot branch. Candidate image checks
+do not authorize a production cutover, replace role-based access, or establish
+live provider readiness. See `PRODUCTION_VERIFICATION_20260930.md` for the
+source-specific passing and failed reports.
+
+## October 1: Shared Scheduled-Job Ownership
+
+The existing `scheduled_job_leases` and `scheduled_job_runs` remain authoritative;
+no migration, discarded history or parallel job subsystem was introduced.
+The shared runner uses database-clock ownership, a post-acquisition completion
+check, transactional start/completion fencing and owner-scoped cleanup.
+Interrupted attempts retain their abandoned record. Briefing/EOD delivery checks
+ownership before its provider call. The separate manager queue and reminder
+transactions retain their existing contracts. Source: this checkout's scoped
+production-hardening changes; no transplanted third-party commit or authorship.
+Evidence and explicit external-provider limitations are recorded in
+`docs/PRODUCTION_VERIFICATION_20260930.md`, October 1 shared-job section.
+
+## October 1: Operation-Level Ownership Fences
+
+The existing maintenance, timer, Google evidence, source-commitment, Trello reply,
+checklist-generation, webhook and email modules now carry the shared job's
+ownership/cancellation checks. Transactional checks reuse the current connection;
+maintenance eligibility and its run record are claimed atomically. Timer stop
+preserves concurrent manual edits. Webhook inventory failures cannot authorize
+bulk removals, and rejected preload cleanup is handled. Manual actions retain
+their existing contracts and approval gates. No migration, removed developer
+capability, transplanted source commit or authorship change is involved.
+
+The current source-specific candidate and passing evidence are recorded in
+`PRODUCTION_VERIFICATION_20260930.md`, operation-level section. Its 2,786 ordinary
+assertions, focused assertions and separate SQL assertions overlap; do not sum
+them. Synthetic local proof is not live provider acceptance or authorization to
+cut over production. Provider outcome reconciliation remains a separate gate.
+
 ## Deployment branch reconciliation (2026-10-19)
 
 PR #103 keeps the current PostgreSQL runtime, verified TLS, source/release gates,

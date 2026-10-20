@@ -25,13 +25,16 @@ const DEFAULT_POLICIES: Omit<AptlssOperationalPolicy, "id" | "vaId" | "createdAt
   { ruleKey: "follow_up_hours_legal", label: "Legal/Formal Follow-up Delay (hours)", description: "Hours before drafting a formal reminder for legal/official matters.", value: "72", category: "follow_up", enabled: 1 },
   { ruleKey: "escalate_blocked_days", label: "Escalate Blocked After (days)", description: "Number of days a card can be blocked before escalating to Robert.", value: "3", category: "escalation", enabled: 1 },
   { ruleKey: "escalate_missed_deadlines", label: "Escalate After Missed Deadlines", description: "Number of missed deadlines by a freelancer before escalating to Robert.", value: "2", category: "escalation", enabled: 1 },
-  { ruleKey: "autopilot_level", label: "Autopilot Level (0–5)", description: "0=Read only, 1=Internal Trello actions, 2=Internal execution support, 3=Draft external comms, 4=Send low-risk follow-ups, 5=Full operational automation.", value: "2", category: "autopilot", enabled: 1 },
+  { ruleKey: "autopilot_level", label: "Autopilot Level (0–5)", description: "0=Read only, 1=Internal Trello actions, 2=Internal execution support, 3=Prepare external message drafts, 4–5=Expanded internal automation. External messages are always sent manually by the worker.", value: "2", category: "autopilot", enabled: 1 },
   { ruleKey: "done_gate_require_summary", label: "Done Gate: Require Final Summary", description: "Block Done if no final summary comment exists on the card.", value: "true", category: "done_gate", enabled: 1 },
   { ruleKey: "done_gate_require_checklist_complete", label: "Done Gate: Require Checklist Complete", description: "Block Done if any APTLSS checklist item is still open.", value: "true", category: "done_gate", enabled: 1 },
   { ruleKey: "done_gate_require_no_unanswered", label: "Done Gate: Require No Unanswered Questions", description: "Block Done if there is an unanswered question in the card comments.", value: "true", category: "done_gate", enabled: 1 },
   { ruleKey: "confidence_auto_proceed_threshold", label: "Confidence Auto-Proceed Threshold (%)", description: "Plans with confidence above this threshold may proceed automatically.", value: "85", category: "scheduling", enabled: 1 },
-  { ruleKey: "confidence_flag_threshold", label: "Confidence Flag-for-Review Threshold (%)", description: "Plans with confidence below this threshold are flagged for Joyce review.", value: "65", category: "scheduling", enabled: 1 },
+  { ruleKey: "confidence_flag_threshold", label: "Confidence Flag-for-Review Threshold (%)", description: "Plans with confidence below this threshold are flagged for worker review.", value: "65", category: "scheduling", enabled: 1 },
 ];
+
+const LEGACY_CONFIDENCE_REVIEW_DESCRIPTION = "Plans with confidence below this threshold are flagged for assigned-worker review.";
+const LEGACY_AUTOPILOT_SEND_DESCRIPTION = "0=Read only, 1=Internal Trello actions, 2=Internal execution support, 3=Draft external comms, 4=Send low-risk follow-ups, 5=Full operational automation.";
 
 export async function getAllPolicies(vaId: number): Promise<AptlssOperationalPolicy[]> {
   const db = await getDb();
@@ -53,7 +56,27 @@ export async function getAllPolicies(vaId: number): Promise<AptlssOperationalPol
       .where(eq(aptlssOperationalPolicies.vaId, vaId))
       .orderBy(aptlssOperationalPolicies.category, aptlssOperationalPolicies.ruleKey);
   }
-  return rows;
+  const descriptionUpdates = new Map<number, string>();
+  const legacyReviewPolicy = rows.find((policy) => policy.ruleKey === "confidence_flag_threshold"
+    && policy.description === LEGACY_CONFIDENCE_REVIEW_DESCRIPTION);
+  if (legacyReviewPolicy) {
+    descriptionUpdates.set(legacyReviewPolicy.id,
+      DEFAULT_POLICIES.find((policy) => policy.ruleKey === "confidence_flag_threshold")!.description!);
+  }
+  const legacyAutopilotPolicy = rows.find((policy) => policy.ruleKey === "autopilot_level"
+    && policy.description === LEGACY_AUTOPILOT_SEND_DESCRIPTION);
+  if (legacyAutopilotPolicy) {
+    descriptionUpdates.set(legacyAutopilotPolicy.id,
+      DEFAULT_POLICIES.find((policy) => policy.ruleKey === "autopilot_level")!.description!);
+  }
+  for (const [id, description] of descriptionUpdates) {
+    await db.update(aptlssOperationalPolicies)
+      .set({ description, updatedAt: new Date() })
+      .where(eq(aptlssOperationalPolicies.id, id));
+  }
+  return rows.map((policy) => descriptionUpdates.has(policy.id)
+    ? { ...policy, description: descriptionUpdates.get(policy.id)! }
+    : policy);
 }
 
 export async function getPolicyByKey(vaId: number, ruleKey: string): Promise<AptlssOperationalPolicy | null> {
@@ -128,6 +151,31 @@ export async function getFollowUpDraftById(id: number): Promise<AutoFollowUpDraf
   if (!db) return null;
   const rows = await db.select().from(autoFollowUpDrafts).where(eq(autoFollowUpDrafts.id, id)).limit(1);
   return rows[0] ?? null;
+}
+
+export async function getFollowUpDraftByIdForWorker(
+  vaId: number,
+  id: number,
+): Promise<AutoFollowUpDraft | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db.select().from(autoFollowUpDrafts)
+    .where(and(eq(autoFollowUpDrafts.id, id), eq(autoFollowUpDrafts.vaId, vaId)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function setFollowUpDraftStatusForWorker(
+  vaId: number,
+  id: number,
+  status: "sent" | "dismissed",
+): Promise<boolean> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db.update(autoFollowUpDrafts)
+    .set({ status, updatedAt: new Date() })
+    .where(and(eq(autoFollowUpDrafts.id, id), eq(autoFollowUpDrafts.vaId, vaId)));
+  return result.rowCount === 1;
 }
 
 export async function markFollowUpDraftSent(id: number): Promise<void> {

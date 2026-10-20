@@ -10,6 +10,22 @@ function hasValue(env: Environment, name: string) {
   return Boolean(env[name]?.trim());
 }
 
+function canonicalPublicOrigin(env: Environment) {
+  return env.PUBLIC_URL?.trim()
+    || env.WEBHOOK_BASE_URL?.trim()
+    || env.APP_URL?.trim()
+    || null;
+}
+
+function isHttpsPublicOrigin(value: string | null) {
+  if (!value) return false;
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export function getProductionConfigurationErrors(env: Environment = process.env) {
   if (env.NODE_ENV !== "production") return [];
 
@@ -29,6 +45,10 @@ export function getProductionConfigurationErrors(env: Environment = process.env)
   ) {
     errors.push("DATABASE_URL must be a PostgreSQL connection URL");
   } else {
+    if (!parsedDatabaseUrl.hostname || !parsedDatabaseUrl.username || !parsedDatabaseUrl.password
+      || parsedDatabaseUrl.pathname === "/" || !parsedDatabaseUrl.pathname || parsedDatabaseUrl.hash) {
+      errors.push("DATABASE_URL must include a host, database, username and password without a fragment");
+    }
     const sslModes = parsedDatabaseUrl.searchParams.getAll("sslmode");
     if (sslModes.length !== 1 || sslModes[0] !== "verify-full" || parsedDatabaseUrl.searchParams.has("ssl")) {
       errors.push("DATABASE_URL must enable verified TLS with one sslmode=verify-full option and no ssl override");
@@ -42,6 +62,12 @@ export function getProductionConfigurationErrors(env: Environment = process.env)
   }
   if (!hasValue(env, "TRELLO_TOKEN")) {
     errors.push("TRELLO_TOKEN is required");
+  }
+  const managerProvider = env.APTLSS_MANAGER_PROVIDER?.trim() || "codex-subscription";
+  if (managerProvider !== "codex-subscription" && managerProvider !== "openai-api") {
+    errors.push("APTLSS_MANAGER_PROVIDER must be codex-subscription or openai-api");
+  } else if (managerProvider === "openai-api" && !hasValue(env, "OPENAI_API_KEY")) {
+    errors.push("OPENAI_API_KEY is required");
   }
 
   const publicOrigins = ["PUBLIC_URL", "APP_URL", "VITE_FRONTEND_URL"].map(name => {
@@ -104,16 +130,31 @@ export function getProductionConfigurationErrors(env: Environment = process.env)
   if (!host || LOOPBACK_HOSTS.has(host)) {
     errors.push("HOST must bind to a non-loopback interface in production");
   }
+  if (!isHttpsPublicOrigin(canonicalPublicOrigin(env))) {
+    errors.push("PUBLIC_URL, WEBHOOK_BASE_URL, or APP_URL must provide an HTTPS public origin in production");
+  }
   if (env.LOCAL_AUTH_BYPASS === "true") {
     errors.push("LOCAL_AUTH_BYPASS cannot be enabled in production");
   }
+  if (hasValue(env, "OWNER_BOOTSTRAP_TOKEN") && (env.OWNER_BOOTSTRAP_TOKEN?.trim().length ?? 0) < 24) {
+    errors.push("OWNER_BOOTSTRAP_TOKEN must contain at least 24 characters when configured");
+  }
+  if (env.BRIEFING_SCHEDULER_ENABLED === "true" && env.NOTIFICATIONS_ENABLED !== "true") {
+    errors.push("BRIEFING_SCHEDULER_ENABLED requires NOTIFICATIONS_ENABLED=true");
+  }
+  if (hasValue(env, "TRELLO_WEBHOOK_CALLBACK_URL")
+    && !hasValue(env, "TRELLO_WEBHOOK_SECRET")
+    && !hasValue(env, "TRELLO_POWERUP_SECRET")) {
+    errors.push("TRELLO_WEBHOOK_SECRET is required when Trello webhooks are enabled");
+  }
+  if (hasValue(env, "VERCEL")) {
+    errors.push("Vercel request-only runtime is unsupported; deploy the unified Docker container");
+  }
+
   for (const name of ["DATABASE_URL", "JWT_SECRET", "TRELLO_API_KEY", "TRELLO_TOKEN", "REDIS_URL"] as const) {
     if (isTemplatePlaceholder(env[name]?.trim() ?? "")) {
       errors.push(`${name} must not contain template placeholder values`);
     }
-  }
-  if (env.VERCEL?.trim()) {
-    errors.push("Vercel request-only runtime is unsupported; deploy the unified Docker container");
   }
   return errors;
 }

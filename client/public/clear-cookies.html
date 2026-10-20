@@ -106,8 +106,8 @@
             Ready to clear cookies. Click the button below.
         </div>
 
-        <button id="clearBtn" onclick="clearCookies()">Clear Cookies</button>
-        <button id="goBtn" onclick="goToDashboard()" disabled>Go to Dashboard</button>
+        <button id="clearBtn">Clear Cookies</button>
+        <button id="goBtn" disabled>Go to Dashboard</button>
 
         <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee;">
             <h3>Alternative Method (Manual)</h3>
@@ -122,78 +122,6 @@
         </div>
     </div>
 
-    <script>
-        function clearCookies() {
-            const statusDiv = document.getElementById('status');
-            const clearBtn = document.getElementById('clearBtn');
-            const goBtn = document.getElementById('goBtn');
-
-            try {
-                // Get all cookies
-                const cookies = document.cookie.split(";");
-                let clearedCount = 0;
-
-                // Clear each cookie
-                cookies.forEach(cookie => {
-                    const eqPos = cookie.indexOf("=");
-                    const name = eqPos > -1 ? cookie.substr(0, eqPos).trim() : cookie.trim();
-                    
-                    // Clear for current path
-                    document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/";
-                    
-                    // Clear for root path
-                    document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;";
-                    
-                    // Clear with domain
-                    document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain=" + window.location.hostname;
-                    
-                    clearedCount++;
-                });
-
-                // Check if we're on localhost:3001
-                if (window.location.hostname === 'localhost' && window.location.port === '3001') {
-                    statusDiv.className = 'status success';
-                    statusDiv.innerHTML = `
-                        ✅ Success! Cleared ${clearedCount} cookie(s).<br>
-                        Click "Go to Dashboard" to test the login form.
-                    `;
-                    clearBtn.disabled = true;
-                    goBtn.disabled = false;
-                } else {
-                    statusDiv.className = 'status error';
-                    statusDiv.innerHTML = `
-                        ⚠️ Warning: This page is not opened from localhost:3001.<br>
-                        Current location: ${window.location.href}<br><br>
-                        Please open this file at: <code>http://localhost:3001/clear-cookies.html</code>
-                    `;
-                }
-            } catch (error) {
-                statusDiv.className = 'status error';
-                statusDiv.innerHTML = `
-                    ❌ Error clearing cookies: ${error.message}<br>
-                    Please use the manual method below.
-                `;
-            }
-        }
-
-        function goToDashboard() {
-            window.location.href = '/';
-        }
-
-        // Check if we're on the right domain on page load
-        window.addEventListener('load', () => {
-            const statusDiv = document.getElementById('status');
-            if (window.location.hostname !== 'localhost' || window.location.port !== '3001') {
-                statusDiv.className = 'status error';
-                statusDiv.innerHTML = `
-                    ⚠️ This page must be opened from the dev server!<br><br>
-                    <strong>Current location:</strong> ${window.location.href}<br>
-                    <strong>Required location:</strong> <code>http://localhost:3001/clear-cookies.html</code><br><br>
-                    Please copy this file to <code>va-dashboard/client/public/</code> and access it through the dev server.
-                `;
-                document.getElementById('clearBtn').disabled = true;
-            }
-        });
-    </script>
+    <script type="module" src="./clear-cookies.js"></script>
 </body>
 </html>

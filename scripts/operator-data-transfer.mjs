@@ -1,11 +1,12 @@
-import "dotenv/config";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import mysql from "mysql2/promise";
-import { redactSensitiveSettings } from "./operator-data-transfer-utils.mjs";
+import { pathToFileURL } from "node:url";
+import {
+  TRANSFER_EXPORT_FORMAT, redactSensitiveSettings, sourceIdentity, transferIdentity, transferOperatorRecords,
+} from "./operator-data-transfer-utils.mjs";
 
-const TABLES = [
+export const TABLES = [
   { name: "app_settings", keys: ["key"] },
   { name: "aptlss_plans", keys: ["vaId", "cardId"] },
   { name: "aptlss_steps", keys: ["id"] },
@@ -19,12 +20,12 @@ const TABLES = [
   { name: "aptlss_assessment_feedback", keys: ["assessmentId"] },
   { name: "aptlss_waiting_reasons", keys: ["id"] },
   { name: "decision_outcomes", keys: ["stepId"] },
-  { name: "workspace_evidence_items", keys: ["source", "sourceId"] },
+  { name: "workspace_evidence_items", keys: ["vaId", "source", "sourceId"] },
   { name: "workspace_evidence_links", keys: ["evidenceId", "cardId"] },
-  { name: "communication_evidence", keys: ["channel", "externalId"] },
-  { name: "compliance_card_evidence", keys: ["snapshotDate", "cardId"] },
-  { name: "compliance_communication_evidence", keys: ["snapshotDate", "evidenceKey"] },
-  { name: "compliance_clarification_requests", keys: ["snapshotDate", "evidenceKey"] },
+  { name: "communication_evidence", keys: ["vaId", "channel", "externalId"] },
+  { name: "compliance_card_evidence", keys: ["vaId", "snapshotDate", "cardId"] },
+  { name: "compliance_communication_evidence", keys: ["vaId", "snapshotDate", "evidenceKey"] },
+  { name: "compliance_clarification_requests", keys: ["vaId", "snapshotDate", "evidenceKey"] },
   { name: "time_day_reviews", keys: ["dateKey"] },
   { name: "time_entry_events", keys: ["id"] },
   { name: "time_reconciliation_items", keys: ["fingerprint"] },
@@ -34,167 +35,154 @@ const TABLES = [
   { name: "browser_tab_daily_evidence", keys: ["vaId", "snapshotDate"] },
 ];
 
-function option(name, fallback) {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : fallback;
-}
-
-function quote(identifier) {
-  if (!/^[A-Za-z0-9_]+$/.test(identifier)) throw new Error(`Unsafe identifier: ${identifier}`);
-  return `\`${identifier}\``;
+export function parseTransferArguments(argv, env = {}) {
+  const command = argv[0];
+  if (!["export", "import", "reconcile"].includes(command)) {
+    throw new Error("Usage: operator-data-transfer.mjs <export|import|reconcile> [options]");
+  }
+  const options = { command, execute: false, dryRun: false, acknowledgeCredentialOmissions: false };
+  const names = command === "export" ? ["--source", "--out"] : ["--target", "--in", "--worker-user-id", "--founder-user-id", "--worker-profile-id"];
+  const seen = new Set();
+  for (let index = 1; index < argv.length; index++) {
+    const flag = argv[index];
+    if (seen.has(flag)) throw new Error("Duplicate transfer option");
+    seen.add(flag);
+    if (command !== "export" && flag === "--acknowledge-credential-omissions") {
+      options.acknowledgeCredentialOmissions = true;
+    } else if (command === "import" && ["--execute", "--dry-run"].includes(flag)) {
+      options[flag === "--execute" ? "execute" : "dryRun"] = true;
+    } else {
+      if (!names.includes(flag) || !argv[index + 1] || argv[index + 1].startsWith("--")) {
+        throw new Error("Invalid transfer option or missing value");
+      }
+      options[flag.slice(2)] = argv[++index];
+    }
+  }
+  if (options.execute && options.dryRun) throw new Error("--execute and --dry-run are mutually exclusive");
+  options.source ??= env.LEGACY_MYSQL_DATABASE_URL;
+  options.target ??= env.TARGET_DATABASE_URL;
+  if (command !== "export") {
+    options.identity = transferIdentity(
+      options["worker-user-id"], options["founder-user-id"], options["worker-profile-id"],
+    );
+  }
+  return options;
 }
 
 function digest(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-async function connect(url) {
-  if (!url?.startsWith("mysql://")) throw new Error("A MySQL connection URL is required");
-  return mysql.createConnection({ uri: url, dateStrings: true, multipleStatements: false });
+export function verifyExport(payload) {
+  if (payload.format !== TRANSFER_EXPORT_FORMAT) throw new Error("Unsupported export format; re-export with explicit user/profile identities");
+  const { digest: supplied, ...contents } = payload;
+  if (typeof supplied !== "string" || supplied !== digest(contents)) throw new Error("Export digest verification failed");
+  return payload;
 }
 
-async function tableExists(connection, table) {
-  const [rows] = await connection.query(
-    "SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
-    [table],
-  );
-  return Number(rows[0]?.count ?? 0) === 1;
+async function connectTarget(value) {
+  const url = new URL(value);
+  if (!["postgres:", "postgresql:"].includes(url.protocol)) throw new Error("A PostgreSQL target connection URL is required");
+  if (process.env.NODE_ENV === "production" && (url.searchParams.getAll("sslmode").length !== 1
+    || url.searchParams.get("sslmode") !== "verify-full" || url.searchParams.has("ssl"))) {
+    throw new Error("Production PostgreSQL targets require sslmode=verify-full with no ssl override");
+  }
+  const { default: pg } = await import("pg");
+  const client = new pg.Client({
+    connectionString: value, connectionTimeoutMillis: 10000,
+    // Keep date and timestamp-without-time-zone comparisons independent of host timezone.
+    types: { getTypeParser: (oid, format) => [1082, 1114].includes(oid) && format !== "binary"
+      ? value => value : pg.types.getTypeParser(oid, format) },
+  });
+  await client.connect();
+  return client;
 }
 
-async function exportData() {
-  const sourceUrl = option("--source", process.env.LEGACY_MYSQL_DATABASE_URL);
-  const output = path.resolve(option("--out", ".local/operator-export.json"));
-  const connection = await connect(sourceUrl);
+export async function exportOperatorData(connection, output, files = { mkdir, writeFile }) {
+  await connection.query("SET SESSION time_zone = '+00:00'");
+  await connection.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+  await connection.query("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY");
   try {
     const datasets = {};
     const skipped = [];
+    const counts = {};
+    let credentialOmissions = [];
     for (const table of TABLES) {
-      if (!(await tableExists(connection, table.name))) {
+      const [exists] = await connection.query(
+        "SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?", [table.name]);
+      if (Number(exists[0]?.count ?? 0) !== 1) {
         skipped.push(table.name);
         continue;
       }
-      const [rows] = await connection.query(`SELECT * FROM ${quote(table.name)}`);
-      datasets[table.name] = table.name === "app_settings" ? redactSensitiveSettings(rows) : rows;
+      const [rows] = await connection.query("SELECT * FROM \x60" + table.name + "\x60");
+      counts[table.name] = rows.length;
+      if (table.name === "app_settings") {
+        const redacted = redactSensitiveSettings(rows);
+        datasets[table.name] = redacted.rows;
+        credentialOmissions = redacted.credentialOmissions;
+      } else datasets[table.name] = rows;
     }
+    const [profiles] = await connection.query(
+      "SELECT p.id AS workerProfileId, p.userId AS workerUserId, p.founderId AS founderUserId, p.trelloMemberId AS trelloMemberId, "
+      + "u.openId AS workerOpenId, f.openId AS founderOpenId "
+      + "FROM va_profiles p LEFT JOIN users u ON u.id = p.userId LEFT JOIN users f ON f.id = p.founderId");
     const payload = {
-      format: "joyce-operator-export-v1",
-      createdAt: new Date().toISOString(),
-      tables: datasets,
-      skipped,
-      counts: Object.fromEntries(Object.entries(datasets).map(([name, rows]) => [name, rows.length])),
+      format: TRANSFER_EXPORT_FORMAT, createdAt: new Date().toISOString(), tables: datasets, skipped,
+      identities: profiles.map(sourceIdentity), counts, credentialOmissions,
     };
     payload.digest = digest(payload);
-    await mkdir(path.dirname(output), { recursive: true });
-    await writeFile(output, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-    console.log(JSON.stringify({ success: true, output, counts: payload.counts, skipped }, null, 2));
-  } finally {
-    await connection.end();
-  }
-}
-
-async function loadExport() {
-  const input = path.resolve(option("--in", ".local/operator-export.json"));
-  const payload = JSON.parse(await readFile(input, "utf8"));
-  if (payload.format !== "joyce-operator-export-v1") throw new Error("Unsupported export format");
-  const suppliedDigest = payload.digest;
-  delete payload.digest;
-  if (suppliedDigest !== digest(payload)) throw new Error("Export digest verification failed");
-  payload.digest = suppliedDigest;
-  return { input, payload };
-}
-
-async function importData() {
-  const { input, payload } = await loadExport();
-  const targetUrl = option("--target", process.env.TARGET_DATABASE_URL);
-  const workerId = Number(option("--worker-id", process.env.OPERATOR_IMPORT_WORKER_ID));
-  const founderId = Number(option("--founder-id", process.env.OPERATOR_IMPORT_FOUNDER_ID));
-  const connection = await connect(targetUrl);
-  const report = {
-    insertedOrUpdated: {},
-    skipped: [],
-    conflicts: [],
-    identityMapping: {
-      workerId: Number.isInteger(workerId) && workerId > 0 ? workerId : null,
-      founderId: Number.isInteger(founderId) && founderId > 0 ? founderId : null,
-    },
-  };
-  try {
-    await connection.beginTransaction();
-    for (const definition of TABLES) {
-      const rows = payload.tables[definition.name] ?? [];
-      if (!rows.length) continue;
-      if (!(await tableExists(connection, definition.name))) {
-        report.skipped.push({ table: definition.name, reason: "target table missing" });
-        continue;
-      }
-      const [columnRows] = await connection.query(`SHOW COLUMNS FROM ${quote(definition.name)}`);
-      const allowedColumns = new Set(columnRows.map((item) => item.Field));
-      let processed = 0;
-      for (const sourceRow of rows) {
-        const row = { ...sourceRow };
-        if (allowedColumns.has("vaId") && row.vaId == null) {
-          if (!Number.isInteger(workerId) || workerId <= 0) {
-            throw new Error(`${definition.name} requires --worker-id because the source row has no developer identity`);
-          }
-          row.vaId = workerId;
-        }
-        if (allowedColumns.has("founderId") && row.founderId == null) {
-          if (!Number.isInteger(founderId) || founderId <= 0) {
-            throw new Error(`${definition.name} requires --founder-id because the source row has no developer identity`);
-          }
-          row.founderId = founderId;
-        }
-        if (definition.name === "time_entries" && row.taskId == null && row.cardId != null) {
-          row.taskId = row.cardId;
-        }
-        const columns = Object.keys(row).filter((column) => allowedColumns.has(column));
-        if (!definition.keys.every((key) => columns.includes(key))) {
-          report.conflicts.push({ table: definition.name, keys: definition.keys, reason: "natural key missing" });
-          continue;
-        }
-        const updateColumns = columns.filter((column) => column !== "id" && !definition.keys.includes(column));
-        const sql = `INSERT INTO ${quote(definition.name)} (${columns.map(quote).join(",")}) VALUES (${columns.map(() => "?").join(",")}) ON DUPLICATE KEY UPDATE ${updateColumns.length ? updateColumns.map((column) => `${quote(column)}=VALUES(${quote(column)})`).join(",") : `${quote(definition.keys[0])}=VALUES(${quote(definition.keys[0])})`}`;
-        await connection.execute(sql, columns.map((column) => row[column]));
-        processed += 1;
-      }
-      report.insertedOrUpdated[definition.name] = processed;
-    }
-    await connection.commit();
-    console.log(JSON.stringify({ success: true, input, ...report }, null, 2));
+    await connection.query("COMMIT");
+    await files.mkdir(path.dirname(output), { recursive: true });
+    // Never replace a retained source export or backup.
+    await files.writeFile(output, JSON.stringify(payload, null, 2) + "\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    return { success: skipped.length === 0 && credentialOmissions.length === 0, exportWritten: true,
+      completion: credentialOmissions.length ? "private-credential-restoration-required" : skipped.length ? "incomplete" : "complete",
+      output, counts: payload.counts, skipped, credentialOmissions };
   } catch (error) {
-    await connection.rollback();
+    await connection.query("ROLLBACK");
     throw error;
-  } finally {
-    await connection.end();
   }
 }
 
-async function reconcileData() {
-  const { input, payload } = await loadExport();
-  const targetUrl = option("--target", process.env.TARGET_DATABASE_URL);
-  const connection = await connect(targetUrl);
-  try {
-    const counts = {};
-    for (const definition of TABLES) {
-      if (!(await tableExists(connection, definition.name))) {
-        counts[definition.name] = { source: payload.counts[definition.name] ?? 0, target: null, status: "missing" };
-        continue;
-      }
-      const [rows] = await connection.query(`SELECT COUNT(*) AS count FROM ${quote(definition.name)}`);
-      const source = payload.counts[definition.name] ?? 0;
-      const target = Number(rows[0]?.count ?? 0);
-      counts[definition.name] = { source, target, status: target >= source ? "preserved" : "short" };
+async function run(options) {
+  if (options.command === "export") {
+    if (!options.source?.startsWith("mysql://")) throw new Error("A MySQL source connection URL is required");
+    const { default: mysql } = await import("mysql2/promise");
+    const connection = await mysql.createConnection({
+      uri: options.source, dateStrings: true, multipleStatements: false,
+      supportBigNumbers: true, bigNumberStrings: true,
+    });
+    try {
+      const report = await exportOperatorData(connection, path.resolve(options.out ?? ".local/operator-export.json"));
+      console.log(JSON.stringify(report, null, 2));
+      if (!report.success) process.exitCode = 2;
+    } finally {
+      await connection.end();
     }
-    const success = Object.values(counts).every((row) => row.status === "preserved");
-    console.log(JSON.stringify({ success, input, counts }, null, 2));
-    if (!success) process.exitCode = 2;
+    return;
+  }
+  const input = path.resolve(options.in ?? ".local/operator-export.json");
+  const payload = verifyExport(JSON.parse(await readFile(input, "utf8")));
+  const connection = await connectTarget(options.target);
+  try {
+    const report = await transferOperatorRecords(connection, payload, TABLES, {
+      identity: options.identity, execute: options.execute, reconcile: options.command === "reconcile",
+      acknowledgeCredentialOmissions: options.acknowledgeCredentialOmissions,
+    });
+    console.log(JSON.stringify({ input, ...report }, null, 2));
+    if (!report.success) process.exitCode = 2;
   } finally {
     await connection.end();
   }
 }
 
-const command = process.argv[2];
-if (command === "export") await exportData();
-else if (command === "import") await importData();
-else if (command === "reconcile") await reconcileData();
-else throw new Error("Usage: operator-data-transfer.mjs <export|import|reconcile> [options]");
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  try {
+    await import("dotenv/config");
+    await run(parseTransferArguments(process.argv.slice(2), process.env));
+  } catch {
+    // Driver errors and arguments may include credentials or private row content.
+    console.error("Operator transfer failed: verify the source identity, worker/founder IDs, schema and keyed content. No successful transfer or reconciliation is claimed.");
+    process.exitCode = 1;
+  }
+}

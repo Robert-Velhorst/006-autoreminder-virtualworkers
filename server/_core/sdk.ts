@@ -3,7 +3,9 @@ import { ForbiddenError } from "@shared/_core/errors";
 import axios, { type AxiosInstance } from "axios";
 import { parse as parseCookieHeader } from "cookie";
 import type { Request } from "express";
+import { isDatabaseUnavailable, DatabaseUnavailableError } from "../databaseAvailability";
 import { SignJWT, jwtVerify } from "jose";
+import { randomUUID } from "crypto";
 import type { User } from "../../drizzle/schema.postgres";
 import * as db from "../db";
 import { ENV } from "./env";
@@ -24,6 +26,7 @@ export type SessionPayload = {
   openId: string;
   appId: string;
   name: string;
+  sessionId?: string;
 };
 
 const EXCHANGE_TOKEN_PATH = `/webdev.v1.WebDevAuthPublicService/ExchangeToken`;
@@ -81,6 +84,7 @@ const createOAuthHttpClient = (): AxiosInstance =>
   axios.create({
     baseURL: ENV.oAuthServerUrl,
     timeout: AXIOS_TIMEOUT_MS,
+    maxRedirects: 0,
   });
 
 class SDKServer {
@@ -194,13 +198,14 @@ class SDKServer {
       name: payload.name,
     })
       .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+      .setJti(randomUUID())
       .setExpirationTime(expirationSeconds)
       .sign(secretKey);
   }
 
   async verifySession(
     cookieValue: string | undefined | null
-  ): Promise<{ openId: string; appId: string; name: string } | null> {
+  ): Promise<{ openId: string; appId: string; name: string; sessionId: string; expiresAt: Date } | null> {
     if (!cookieValue) {
       return null;
     }
@@ -210,12 +215,14 @@ class SDKServer {
       const { payload } = await jwtVerify(cookieValue, secretKey, {
         algorithms: ["HS256"],
       });
-      const { openId, appId, name } = payload as Record<string, unknown>;
+      const { openId, appId, name, jti, exp } = payload as Record<string, unknown>;
 
       if (
         !isNonEmptyString(openId) ||
         !isNonEmptyString(appId) ||
         !isNonEmptyString(name) ||
+        !isNonEmptyString(jti) ||
+        typeof exp !== "number" ||
         appId !== getSessionAudience()
       ) {
         console.warn("[Auth] Session payload missing required fields");
@@ -226,6 +233,8 @@ class SDKServer {
         openId,
         appId,
         name,
+        sessionId: jti,
+        expiresAt: new Date(exp * 1000),
       };
     } catch (error) {
       console.warn("[Auth] Session verification failed", String(error));
@@ -266,7 +275,7 @@ class SDKServer {
     const sessionCookie = cookies.get(COOKIE_NAME);
     const session = await this.verifySession(sessionCookie);
 
-    if (!session) {
+    if (!session || await db.isSessionRevoked(session.sessionId)) {
       throw ForbiddenError("Invalid session cookie");
     }
 
@@ -286,7 +295,8 @@ class SDKServer {
         });
         user = await db.getUserByOpenId(userInfo.openId);
       } catch (error) {
-        console.error("[Auth] Failed to sync user from OAuth:", error);
+        if (isDatabaseUnavailable(error)) throw new DatabaseUnavailableError();
+        console.error("[Auth] Failed to sync user from OAuth");
         throw ForbiddenError("Failed to sync user info");
       }
     }
@@ -296,6 +306,13 @@ class SDKServer {
     }
 
     return user;
+  }
+
+  async revokeSession(cookieValue: string | undefined | null): Promise<void> {
+    if (!cookieValue) return;
+    const session = await this.verifySession(cookieValue);
+    if (!session) return;
+    await db.revokeSession(session.sessionId, session.expiresAt);
   }
 }
 

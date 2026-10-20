@@ -44,10 +44,21 @@ async function getFromRedis(key: string): Promise<any | null> {
 }
 
 async function setInRedis(key: string, value: any, ttlSeconds: number): Promise<void> {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    return;
+  }
+
+  await setSerializedInRedis(key, serialized, ttlSeconds);
+}
+
+async function setSerializedInRedis(key: string, serialized: string, ttlSeconds: number): Promise<void> {
   const redis = getRedis();
   if (!redis || !isRedisAvailable()) return;
   try {
-    await redis.set(key, JSON.stringify(value), 'EX', ttlSeconds);
+    await redis.set(key, serialized, 'EX', ttlSeconds);
   } catch {
     // non-fatal
   }
@@ -75,6 +86,18 @@ export interface CacheStats {
   hitRate: number;
   lastFetched: Date | null;
   expiresAt: Date | null;
+}
+
+// MEDIUMTEXT is capped at 16 MiB. Leave space for character encoding and
+// future response metadata rather than allowing a cache write to fail.
+export const MAX_TASK_CACHE_BYTES = 12 * 1024 * 1024;
+
+export function isTaskCachePayloadWithinLimit(tasks: unknown): boolean {
+  try {
+    return Buffer.byteLength(JSON.stringify(tasks), 'utf8') <= MAX_TASK_CACHE_BYTES;
+  } catch {
+    return false;
+  }
 }
 
 type MemoryCacheEntry = {
@@ -177,7 +200,7 @@ export async function getCachedTasks(
   userId: number,
   userOpenId: string,
   options: CacheOptions = {}
-): Promise<any[] | null> {
+): Promise<any | null> {
   const { ttlSeconds = 300, forceRefresh = false } = options;
 
   if (forceRefresh) {
@@ -298,8 +321,22 @@ export async function setCachedTasks(
   tasks: any,
   ttlSeconds: number = 300
 ): Promise<void> {
-  // Always write to Redis if available (fire-and-forget, non-blocking)
-  void setInRedis(redisTaskKey(userId, userOpenId), tasks, ttlSeconds);
+  let serializedTasks: string;
+  try {
+    serializedTasks = JSON.stringify(tasks);
+  } catch (error) {
+    console.warn('[Trello cache] Skipping a non-serializable task response:', error);
+    return;
+  }
+
+  if (Buffer.byteLength(serializedTasks, 'utf8') > MAX_TASK_CACHE_BYTES) {
+    console.warn('[Trello cache] Skipping an oversized task response that exceeds the durable cache limit');
+    return;
+  }
+
+  // Cache persistence is an optimization. It must never make a successful
+  // Trello scheduling response fail after the external request completed.
+  void setSerializedInRedis(redisTaskKey(userId, userOpenId), serializedTasks, ttlSeconds);
 
   const db = await getDb();
   if (!db) {
@@ -328,59 +365,63 @@ export async function setCachedTasks(
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
 
-  // Delete existing cache
-  await db
-    .delete(trelloCachedTasks)
-    .where(
-      and(
-        eq(trelloCachedTasks.userId, userId),
-        eq(trelloCachedTasks.userOpenId, userOpenId)
-      )
-    );
-
-  // Insert new cache
-  await db.insert(trelloCachedTasks).values({
-    userId,
-    userOpenId,
-    taskData: JSON.stringify(tasks),
-    cachedAt: now,
-    expiresAt,
-  });
-
-  // Update or create metadata
-  const existingMetadata = await db
-    .select()
-    .from(trelloCacheMetadata)
-    .where(
-      and(
-        eq(trelloCacheMetadata.userId, userId),
-        eq(trelloCacheMetadata.userOpenId, userOpenId),
-        eq(trelloCacheMetadata.cacheKey, 'tasks')
-      )
-    )
-    .limit(1);
-
-  if (existingMetadata.length > 0) {
+  try {
+    // Delete existing cache
     await db
-      .update(trelloCacheMetadata)
-      .set({
+      .delete(trelloCachedTasks)
+      .where(
+        and(
+          eq(trelloCachedTasks.userId, userId),
+          eq(trelloCachedTasks.userOpenId, userOpenId)
+        )
+      );
+
+    // Insert new cache
+    await db.insert(trelloCachedTasks).values({
+      userId,
+      userOpenId,
+      taskData: serializedTasks,
+      cachedAt: now,
+      expiresAt,
+    });
+
+    // Update or create metadata
+    const existingMetadata = await db
+      .select()
+      .from(trelloCacheMetadata)
+      .where(
+        and(
+          eq(trelloCacheMetadata.userId, userId),
+          eq(trelloCacheMetadata.userOpenId, userOpenId),
+          eq(trelloCacheMetadata.cacheKey, 'tasks')
+        )
+      )
+      .limit(1);
+
+    if (existingMetadata.length > 0) {
+      await db
+        .update(trelloCacheMetadata)
+        .set({
+          lastFetched: now,
+          expiresAt,
+          ttlSeconds,
+          updatedAt: now,
+        })
+        .where(eq(trelloCacheMetadata.id, existingMetadata[0].id));
+    } else {
+      await db.insert(trelloCacheMetadata).values({
+        userId,
+        userOpenId,
+        cacheKey: 'tasks',
         lastFetched: now,
         expiresAt,
         ttlSeconds,
-        updatedAt: now,
-      })
-      .where(eq(trelloCacheMetadata.id, existingMetadata[0].id));
-  } else {
-    await db.insert(trelloCacheMetadata).values({
-      userId,
-      userOpenId,
-      cacheKey: 'tasks',
-      lastFetched: now,
-      expiresAt,
-      ttlSeconds,
-      hitCount: 0,
-      missCount: 0,
-    });
+        hitCount: 0,
+        missCount: 0,
+      });
+    }
+  } catch (error) {
+    console.warn('[Trello cache] Durable cache write failed; returning live scheduling data without caching it:', error);
   }
 }
 

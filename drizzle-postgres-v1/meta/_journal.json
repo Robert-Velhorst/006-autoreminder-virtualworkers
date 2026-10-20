@@ -15,6 +15,27 @@
       "when": 1791977937806,
       "tag": "0001_add_atis_postgres_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792364329767,
+      "tag": "0002_aptlss_reminder_manager_features",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792364469645,
+      "tag": "0003_feature_data_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792485905541,
+      "tag": "0004_browser_capture_sequence_range",
+      "breakpoints": true
     }
   ]
 }

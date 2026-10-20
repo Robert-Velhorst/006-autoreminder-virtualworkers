@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "cross-env NODE_ENV=development tsx watch server/_core/index.ts",
-    "build": "vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --external:./vite.js --outdir=dist",
+    "build": "vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --external:./vite.js --outdir=dist && tsx scripts/seal-aptlss-build.ts",
     "start": "cross-env NODE_ENV=production node dist/index.js",
     "check": "tsc --noEmit",
     "check:db-transfer": "tsc --noEmit --ignoreConfig --target ES2022 --module ESNext --moduleResolution bundler --esModuleInterop --skipLibCheck --types node scripts/migrate-mysql-to-postgres.ts server/scripts/mysqlPostgresTransferCore.ts",
@@ -27,10 +27,17 @@
     "operator:data:export": "node scripts/operator-data-transfer.mjs export",
     "operator:data:import": "node scripts/operator-data-transfer.mjs import",
     "operator:data:reconcile": "node scripts/operator-data-transfer.mjs reconcile",
+    "owner:provision": "tsx scripts/provision-owner.ts",
     "docker:build": "docker build -t va-dashboard:latest .",
     "docker:run": "docker compose --env-file .env up -d",
     "docker:stop": "docker compose --env-file .env down",
-    "docker:logs": "docker compose --env-file .env logs -f app"
+    "docker:logs": "docker compose --env-file .env logs -f app",
+    "test:aptlss-safety": "tsx scripts/verify-aptlss-safety.ts",
+    "test:codex-supervisor": "node --test scripts/manager-codex-supervisor.test.mjs",
+    "audit:prod": "pnpm audit --prod --audit-level=high",
+    "dashboard:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-local-dashboard.ps1",
+    "doctor": "node scripts/doctor.mjs",
+    "test:legacy-mysql": "node scripts/run-mysql-integration.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1100.0",
@@ -110,7 +117,11 @@
     "vaul": "^1.1.2",
     "wouter": "3.13.0",
     "ws": "^8.21.1",
-    "zod": "^4.1.12"
+    "zod": "^4.1.12",
+    "compression": "1.8.2",
+    "nodemailer": "^10.0.10",
+    "sanitize-html": "2.18.1",
+    "html-to-text": "10.0.1"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",
@@ -141,7 +152,14 @@
     "vite": "^8.3.4",
     "vite-plugin-manus-runtime": "^0.0.59",
     "vitest": "5.0.5",
-    "vitest-dom": "^0.1.1"
+    "vitest-dom": "^0.1.1",
+    "@axe-core/playwright": "4.12.1",
+    "@tailwindcss/typography": "^0.5.15",
+    "@types/bcryptjs": "^3.0.0",
+    "@types/compression": "1.8.1",
+    "typescript-legacy": "npm:typescript@5.9.3",
+    "@types/sanitize-html": "2.16.2",
+    "@types/html-to-text": "9.0.4"
   },
   "packageManager": "pnpm@12.14.0+sha512.wYum2HmT09Fky16JSPMrLAbuhUSH4GzY2GeBNC+z5btGNDZwNHEehoArqpw3vqkGzhkprQjXCITJfYAd8TOJpg=="
 }
