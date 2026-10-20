@@ -1,19 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ createPool: vi.fn(), drizzle: vi.fn(), end: vi.fn() }));
-vi.mock("mysql2/promise", () => ({ default: { createPool: mocks.createPool } }));
-vi.mock("drizzle-orm/mysql2", () => ({ drizzle: mocks.drizzle }));
+vi.mock("pg", () => ({ Pool: class { constructor(...args: unknown[]) { return mocks.createPool(...args); } } }));
+vi.mock("drizzle-orm/node-postgres", () => ({ drizzle: mocks.drizzle }));
 afterEach(() => { vi.unstubAllEnvs(); vi.resetModules(); vi.clearAllMocks(); vi.restoreAllMocks(); });
 describe("lazy database lifecycle", () => {
   it("does not confuse a configured but unavailable pool with a missing user", async () => {
-    vi.stubEnv("DATABASE_URL", "mysql://fixture:fixture@localhost/never_connect");
+    vi.stubEnv("DATABASE_URL", "postgresql://fixture:fixture@localhost/never_connect");
     mocks.createPool.mockImplementationOnce(() => { throw new Error("private-driver-failure"); });
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const db = await import("./db");
     await expect(db.getUserByOpenId("fixture")).rejects.toMatchObject({ name: "DatabaseUnavailableError" });
   }, 20_000);
   it("creates one lazy pool, closes once, and supports reinitialization without migrations", async () => {
-    vi.stubEnv("DATABASE_URL", "mysql://unused:unused@localhost/never_connect");
-    const pool = { end: mocks.end.mockResolvedValue(undefined) };
+    vi.stubEnv("DATABASE_URL", "postgresql://unused:unused@localhost/never_connect");
+    const pool = { on: vi.fn(), end: mocks.end.mockResolvedValue(undefined) };
     mocks.createPool.mockReturnValue(pool);
     mocks.drizzle.mockReturnValue({ identity: "db" });
     const db = await import("./db");
@@ -35,8 +35,8 @@ describe("lazy database lifecycle", () => {
     expect(mocks.createPool).not.toHaveBeenCalled();
   });
   it("does not expose credentials when pool creation fails", async () => {
-    vi.stubEnv("DATABASE_URL", "mysql://fixture:fixture@localhost/never_connect");
-    const error = Object.assign(new Error("mysql://admin:private-password@db/dashboard"), {
+    vi.stubEnv("DATABASE_URL", "postgresql://fixture:fixture@localhost/never_connect");
+    const error = Object.assign(new Error("postgresql://admin:private-password@db/dashboard"), {
       sqlMessage: "private-query-data",
     });
     mocks.createPool.mockImplementationOnce(() => { throw error; });
@@ -49,9 +49,9 @@ describe("lazy database lifecycle", () => {
     expect(JSON.stringify(warn.mock.calls)).not.toContain("private-query-data");
   });
   it("closes a partially initialized pool without logging its driver error", async () => {
-    vi.stubEnv("DATABASE_URL", "mysql://fixture:fixture@localhost/never_connect");
+    vi.stubEnv("DATABASE_URL", "postgresql://fixture:fixture@localhost/never_connect");
     const error = new Error("private-schema-driver-data");
-    mocks.createPool.mockReturnValueOnce({ end: mocks.end.mockResolvedValue(undefined) });
+    mocks.createPool.mockReturnValueOnce({ on: vi.fn(), end: mocks.end.mockResolvedValue(undefined) });
     mocks.drizzle.mockImplementationOnce(() => { throw error; });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const db = await import("./db");
@@ -61,15 +61,15 @@ describe("lazy database lifecycle", () => {
     expect(JSON.stringify(warn.mock.calls)).not.toContain("private-schema-driver-data");
   });
   it("preserves an upsert failure without logging user or query data", async () => {
-    vi.stubEnv("DATABASE_URL", "mysql://fixture:fixture@localhost/never_connect");
+    vi.stubEnv("DATABASE_URL", "postgresql://fixture:fixture@localhost/never_connect");
     const error = Object.assign(new Error("fixture-private-user@example.test"), {
       sql: "private-insert-query",
       parameters: ["private-driver-token"],
     });
-    mocks.createPool.mockReturnValueOnce({ end: mocks.end.mockResolvedValue(undefined) });
+    mocks.createPool.mockReturnValueOnce({ on: vi.fn(), end: mocks.end.mockResolvedValue(undefined) });
     mocks.drizzle.mockReturnValueOnce({
       insert: vi.fn().mockReturnValue({ values: vi.fn().mockReturnValue({
-        onDuplicateKeyUpdate: vi.fn().mockRejectedValue(error),
+        onConflictDoUpdate: vi.fn().mockRejectedValue(error),
       }) }),
     });
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});

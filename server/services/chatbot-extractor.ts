@@ -11,7 +11,8 @@
  */
 
 import { getDb } from '../db';
-import { sql } from 'drizzle-orm';
+import { and, isNotNull, ne, sql } from 'drizzle-orm';
+import { atisCards, atisComments } from '../../drizzle/schema.postgres';
 import { fetchWithRetry } from '../utils/retry';
 
 interface ChatbotConversation {
@@ -294,12 +295,9 @@ export class ChatbotExtractorService {
     const detected: DetectedUrl[] = [];
 
     // Scan card descriptions
-    const cardsResult = await db.execute(sql`
-      SELECT id, description
-      FROM atis_cards
-      WHERE description IS NOT NULL AND description != ''
-    `);
-    const cards = (cardsResult as any)[0] || [];
+    const cards = await db.select({ id: atisCards.id, description: atisCards.description })
+      .from(atisCards)
+      .where(and(isNotNull(atisCards.description), ne(atisCards.description, '')));
 
     for (const card of cards) {
       const urls = this.detectUrls(card.description || '');
@@ -314,12 +312,9 @@ export class ChatbotExtractorService {
     }
 
     // Scan comments
-    const commentsResult = await db.execute(sql`
-      SELECT id, cardId, text
-      FROM atis_comments
-      WHERE text IS NOT NULL AND text != ''
-    `);
-    const comments = (commentsResult as any)[0] || [];
+    const comments = await db.select({ id: atisComments.id, cardId: atisComments.cardId, text: atisComments.text })
+      .from(atisComments)
+      .where(ne(atisComments.text, ''));
 
     for (const comment of comments) {
       const urls = this.detectUrls(comment.text || '');
@@ -371,10 +366,11 @@ export class ChatbotExtractorService {
           ${fullContent.substring(0, 65000)},
           NOW()
         )
+        RETURNING id
       `);
 
-      const insertResult = result as any;
-      return insertResult[0]?.insertId || null;
+      const inserted = result.rows[0] as { id: number } | undefined;
+      return inserted?.id ?? null;
     } catch (error: any) {
       console.error('[ChatbotExtractor] Failed to store conversation:', error.message);
       return null;
@@ -396,9 +392,8 @@ export class ChatbotExtractorService {
     const existingResult = await db.execute(sql`
       SELECT url FROM atis_chatbot_conversations
     `);
-    const existingUrls = new Set(
-      ((existingResult as any)[0] || []).map((r: any) => r.url)
-    );
+    const existingRows = existingResult.rows as Array<{ url: string }>;
+    const existingUrls = new Set(existingRows.map(row => row.url));
 
     // Scan for new URLs
     const detected = await this.scanForChatbotUrls();
@@ -457,7 +452,13 @@ export class ChatbotExtractorService {
       ORDER BY extracted_at DESC
     `);
 
-    const rows = (result as any)[0] || [];
+    const rows = result.rows as Array<{
+      platform: ChatbotConversation['platform'];
+      url: string;
+      title: string | null;
+      messages_json: string | null;
+      extracted_at: Date | string;
+    }>;
     return rows.map((r: any) => ({
       platform: r.platform,
       url: r.url,
@@ -487,7 +488,7 @@ export class ChatbotExtractorService {
       FROM atis_chatbot_conversations
       GROUP BY platform
     `);
-    const counts = (countResult as any)[0] || [];
+    const counts = countResult.rows as Array<{ platform: string; count: string | number }>;
     
     const byPlatform: Record<string, number> = {};
     let total = 0;
@@ -500,9 +501,8 @@ export class ChatbotExtractorService {
     const existingResult = await db.execute(sql`
       SELECT url FROM atis_chatbot_conversations
     `);
-    const existingUrls = new Set(
-      ((existingResult as any)[0] || []).map((r: any) => r.url)
-    );
+    const existingRows = existingResult.rows as Array<{ url: string }>;
+    const existingUrls = new Set(existingRows.map(row => row.url));
 
     // Scan for all URLs
     const detected = await this.scanForChatbotUrls();

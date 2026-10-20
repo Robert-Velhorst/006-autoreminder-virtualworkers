@@ -1,4 +1,5 @@
 import sgMail from '@sendgrid/mail';
+import { areNotificationsEnabled } from './notificationPolicy';
 import nodemailer, { type Transporter } from 'nodemailer';
 import { ScheduledJobLeaseLostError, type ScheduledJobContext } from '../scheduledJobRuntime';
 import {
@@ -9,7 +10,7 @@ import {
 
 // Delivery must be explicitly enabled. Running in production alone must never
 // make the application send email with an unverified sender configuration.
-const EMAIL_NOTIFICATIONS_ENABLED = process.env.NOTIFICATIONS_ENABLED === 'true';
+const EMAIL_NOTIFICATIONS_ENABLED = areNotificationsEnabled();
 
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const SENDGRID_FROM_EMAIL = process.env.SENDGRID_FROM_EMAIL?.trim();

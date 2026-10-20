@@ -5,6 +5,8 @@ import { initializeWebhookAutoRegister, registerWebhookForBoard, removeWebhookFo
 const mocks = vi.hoisted(() => ({ getDb: vi.fn() }));
 vi.mock("../db", () => ({ getDb: mocks.getDb }));
 
+import { atisBoards } from "../../drizzle/schema.postgres";
+
 const board = { trelloId: "board-1", name: "Board" };
 const stored = { trelloWebhookId: "webhook-old", modelId: "board-old", modelType: "board" };
 
@@ -23,11 +25,25 @@ function harness(boards = [board], storedWebhooks: typeof stored[] = [], loseAft
   };
   const selectBoards = vi.fn(async () => { touch("boards-read"); return boards; });
   const execute = vi.fn(async () => {
-    if (++executes === 1) { touch("stored-read"); return [storedWebhooks]; }
+    if (++executes === 1) { touch("stored-read"); return { rows: storedWebhooks }; }
     touch("local-write");
-    return [{ affectedRows: 1 }];
+    return { rows: [], rowCount: 1 };
   });
-  mocks.getDb.mockResolvedValue({ select: () => ({ from: selectBoards }), execute });
+  const select = () => {
+    const query: any = {
+      from: (table: unknown) => table === atisBoards ? selectBoards() : query,
+      where: () => query,
+      limit: () => query,
+      then: (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) =>
+        Promise.resolve(execute()).then(result => result.rows ?? []).then(resolve, reject),
+    };
+    return query;
+  };
+  mocks.getDb.mockResolvedValue({ select,
+    insert: () => ({ values: () => ({ onConflictDoUpdate: () => execute() }) }),
+    delete: () => ({ where: () => execute() }),
+    execute,
+  });
   const fetchMock = vi.fn(async (_url: string, options: RequestInit) => {
     touch(`provider-${options.method}`);
     return { ok: true, json: async () => {
@@ -87,7 +103,7 @@ describe("webhook scheduled ownership fence", () => {
   it.each(["POST", "DELETE"])("does not report success or continue after local registry persistence fails following %s", async method => {
     const state = method === "POST" ? harness([board, { ...board, trelloId: "next" }])
       : harness([], [stored, { ...stored, modelId: "next", trelloWebhookId: "next" }]);
-    state.execute.mockResolvedValueOnce([method === "POST" ? [] : [stored, { ...stored, modelId: "next", trelloWebhookId: "next" }]])
+    state.execute.mockResolvedValueOnce({ rows: method === "POST" ? [] : [stored, { ...stored, modelId: "next", trelloWebhookId: "next" }] })
       .mockRejectedValueOnce(new Error("Synthetic registry persistence failure"));
     await expect(syncWebhooks(state.context)).rejects.toThrow(/persist/i);
     expect(state.fetchMock).toHaveBeenCalledTimes(1);
@@ -199,9 +215,9 @@ describe("webhook scheduled ownership fence", () => {
 
   it("preserves manual registration and removal without context", async () => {
     const state = harness();
-    state.execute.mockResolvedValue([{ affectedRows: 1 }]);
+    state.execute.mockResolvedValue({ rows: [], rowCount: 1 });
     await expect(registerWebhookForBoard("board-1", "Board")).resolves.toBe(true);
-    state.execute.mockResolvedValue([[{ trelloWebhookId: "webhook-new" }]]);
+    state.execute.mockResolvedValue({ rows: [{ trelloWebhookId: "webhook-new" }] });
     await expect(removeWebhookForBoard("board-1")).resolves.toBe(true);
     expect(state.fetchMock.mock.calls.map(([, options]) => options.method)).toEqual(["POST", "DELETE"]);
   });

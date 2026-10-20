@@ -13,7 +13,7 @@ import { getDb } from './db';
 import { 
   trelloCacheMetadata, 
   trelloCachedTasks 
-} from '../drizzle/schema';
+} from '../drizzle/schema.postgres';
 import { eq, and } from 'drizzle-orm';
 
 describe('Trello Cache Service', () => {

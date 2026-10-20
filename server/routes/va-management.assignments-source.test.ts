@@ -1,8 +1,8 @@
 import express from 'express';
 import request from 'supertest';
-import { MySqlDialect } from 'drizzle-orm/mysql-core';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { atisBoards, atisCards, taskAssignments } from '../../drizzle/schema';
+import { atisBoards, atisCards, taskAssignments } from '../../drizzle/schema.postgres';
 
 const mocks = vi.hoisted(() => ({ getDb: vi.fn(), fetchWithRetry: vi.fn() }));
 vi.mock('../db', () => ({ getDb: mocks.getDb }));
@@ -172,7 +172,7 @@ describe('founder assignment source access', () => {
     const response = await request(app('admin')).get('/api/va/assignments');
     expect(response.status).toBe(200);
     expect(response.body).toEqual([expect.objectContaining({ cardName: 'Authorized task', taskId: 'test-card', status: 'unassigned' })]);
-    const dialect = new MySqlDialect();
+    const dialect = new PgDialect();
     const cardQuery = dialect.sqlToQuery(conditions[0] as any);
     expect(cardQuery.params).toEqual([0, boardA, boardB]);
     const assignmentJoin = joins.find(join => join.table === taskAssignments)!;

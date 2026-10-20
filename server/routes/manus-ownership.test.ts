@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TrpcContext } from "../_core/context";
-import { aptlssManagerChecks, aptlssManagerRuns, aptlssManagerState, aptlssPlans, aptlssWaitingReasons, cardStates, emailTasks, taskAssignments, timeEntries, users, vaProfiles } from "../../drizzle/schema";
+import { aptlssManagerChecks, aptlssManagerRuns, aptlssManagerState, aptlssPlans, aptlssWaitingReasons, cardStates, emailTasks, taskAssignments, timeEntries, users, vaProfiles } from "../../drizzle/schema.postgres";
 import { managerHistoryHash } from "../aptlssManagerHistory";
 import { readManagerAssignmentState } from "../aptlssManagerAssignments";
 import { WORKER_EXECUTION_HOLD_MESSAGE } from "../../shared/aptlssManager";
@@ -50,24 +50,13 @@ function makeDb(initialRows: EmailRow[], beforeInsert?: (rows: EmailRow[], value
     }),
     insert: vi.fn(() => ({
       values(values: Record<string, unknown>) {
-        const execute = async (duplicateUpdate?: Record<string, unknown>) => {
+        return { onConflictDoNothing: () => ({ returning: async () => {
           beforeInsert?.(rows, values);
-          const existing = rows.find(row => row.gmailMessageId === values.gmailMessageId);
-          if (existing) {
-            if (duplicateUpdate) {
-              Object.assign(existing, duplicateUpdate);
-              return [{ affectedRows: 1 }];
-            }
-            throw Object.assign(new Error("Duplicate entry"), { code: "ER_DUP_ENTRY" });
-          }
-          rows.push({ id: nextId++, ...values } as EmailRow);
-          return [{ affectedRows: 1 }];
-        };
-        return {
-          onDuplicateKeyUpdate: ({ set }: { set: Record<string, unknown> }) => execute(set),
-          then: (resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) =>
-            execute().then(resolve, reject),
-        };
+          if (rows.some(row => row.gmailMessageId === values.gmailMessageId)) return [];
+          const created = { id: nextId++, ...values } as EmailRow;
+          rows.push(created);
+          return [{ id: created.id }];
+        } }) };
       },
     })),
     update: vi.fn(() => ({
@@ -76,7 +65,7 @@ function makeDb(initialRows: EmailRow[], beforeInsert?: (rows: EmailRow[], value
           where: async () => {
             const row = rows.find(candidate => candidate.vaId === 10);
             if (row) Object.assign(row, values);
-            return [{ affectedRows: row ? 1 : 0 }];
+            return { rowCount: row ? 1 : 0 };
           },
         };
       },
@@ -191,10 +180,10 @@ function makeTimerDb(
       };
       return query;
     }),
-    insert: vi.fn(() => ({ values: vi.fn(async (values: Record<string, unknown>) => {
+    insert: vi.fn(() => ({ values: vi.fn((values: Record<string, unknown>) => ({ returning: async () => {
       inserted.push(values);
-      return [{ insertId: 101 }];
-    }) })),
+      return [{ id: 101 }];
+    } })) })),
   };
   return {
     db: { transaction: vi.fn(async (run: (transaction: any) => Promise<unknown>) => run(tx)) },

@@ -1,7 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { timeEntries, users, vaProfiles } from "../../drizzle/schema";
+import { timeEntries, users, vaProfiles } from "../../drizzle/schema.postgres";
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),
@@ -69,11 +69,11 @@ function makeDb(profiles: Profile[] = [], options: {
   }
 
   const transactionInsert = vi.fn(() => ({
-    values: vi.fn(async (values: Record<string, unknown>) => {
+    values: vi.fn((values: Record<string, unknown>) => ({ returning: vi.fn(async () => {
       insertedValues.push(values);
       insertedEntry = { id: 501, ...values, startTime: new Date(), endTime: null };
-      return [{ insertId: 501 }];
-    }),
+      return [insertedEntry];
+    }) })),
   }));
   const transactionUpdate = vi.fn(() => ({
     set: vi.fn(() => ({ where: vi.fn(async () => []) })),

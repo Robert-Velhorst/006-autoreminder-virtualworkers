@@ -1,5 +1,5 @@
 import { and, desc, eq, inArray, like } from "drizzle-orm";
-import { aptlssPlans, aptlssSteps, founderDecisionDeadlines, notificationHistory, priorityScores, trelloCachedCards, users } from "../drizzle/schema";
+import { aptlssPlans, aptlssSteps, founderDecisionDeadlines, notificationHistory, priorityScores, trelloCachedCards, users } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 import { recordFounderDecisionAlertForStep } from "./founderDecisionAlerts";
 import { enqueueManagerTask } from "./aptlssManagerQueue";
@@ -152,7 +152,7 @@ export async function setFounderDecisionDeadline(input: {
     }
     const [created] = await tx.insert(founderDecisionDeadlines).values({
       vaId: input.vaId, stepId: input.stepId, dueAt: input.dueAt, source, recordedBy: input.recordedBy,
-    }).$returningId();
+    }).returning({ id: founderDecisionDeadlines.id });
     await enqueueManagerTask(tx, {
       vaId: input.vaId,
       trigger: "decision_deadline_changed",

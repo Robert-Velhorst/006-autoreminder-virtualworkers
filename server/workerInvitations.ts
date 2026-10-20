@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "crypto";
 import bcrypt from "bcryptjs";
 import { PASSWORD_MIN_LENGTH, validatePassword } from "./passwordPolicy";
 import { and, eq, gt, isNull } from "drizzle-orm";
-import { users, vaProfiles, workerInvitations } from "../drizzle/schema";
+import { users, vaProfiles, workerInvitations } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 
 export const WORKER_INVITATION_TTL_MS = 48 * 60 * 60 * 1_000;
@@ -99,7 +99,7 @@ export async function createWorkerInvitation(founderId: number, input: WorkerInv
       loginMethod: "local",
       role: "worker",
       passwordHash: null,
-    }).$returningId();
+    }).returning({ id: users.id });
 
     const [profile] = await tx.insert(vaProfiles).values({
       founderId,
@@ -120,7 +120,7 @@ export async function createWorkerInvitation(founderId: number, input: WorkerInv
       dinnerDuration: input.dinnerDuration ?? 0,
       trelloMemberId: input.trelloMemberId || null,
       status: "inactive",
-    }).$returningId();
+    }).returning({ id: vaProfiles.id });
 
     const [invitation] = await tx.insert(workerInvitations).values({
       userId: user.id,
@@ -129,7 +129,7 @@ export async function createWorkerInvitation(founderId: number, input: WorkerInv
       email,
       tokenHash,
       expiresAt,
-    }).$returningId();
+    }).returning({ id: workerInvitations.id });
 
     return { userId: user.id, vaId: profile.id, invitationId: invitation.id };
   });
@@ -235,9 +235,7 @@ export async function acceptWorkerInvitation(token: string, password: string) {
           gt(workerInvitations.expiresAt, acceptedAt),
         ),
       );
-    const affectedRows = Array.isArray(updateResult)
-      ? Number((updateResult[0] as { affectedRows?: number })?.affectedRows ?? 0)
-      : 0;
+    const affectedRows = updateResult.rowCount ?? 0;
     if (affectedRows !== 1) throw new WorkerInvitationError("This invitation has already been used.", "used");
 
     const userUpdate = await tx
@@ -252,9 +250,7 @@ export async function acceptWorkerInvitation(token: string, password: string) {
           isNull(users.passwordHash),
         ),
       );
-    const userAffectedRows = Array.isArray(userUpdate)
-      ? Number((userUpdate[0] as { affectedRows?: number })?.affectedRows ?? 0)
-      : 0;
+    const userAffectedRows = userUpdate.rowCount ?? 0;
     if (userAffectedRows !== 1)
       throw new WorkerInvitationError("This invitation no longer matches its worker account.", "invalid");
 
@@ -270,9 +266,7 @@ export async function acceptWorkerInvitation(token: string, password: string) {
           eq(vaProfiles.status, "inactive"),
         ),
       );
-    const profileAffectedRows = Array.isArray(profileUpdate)
-      ? Number((profileUpdate[0] as { affectedRows?: number })?.affectedRows ?? 0)
-      : 0;
+    const profileAffectedRows = profileUpdate.rowCount ?? 0;
     if (profileAffectedRows !== 1)
       throw new WorkerInvitationError("This invitation no longer matches its worker account.", "invalid");
 

@@ -243,9 +243,9 @@ describe("APTLSS generation retries", () => {
   });
 
   it("reuses an existing checklist only when its successful sync record matches it", async () => {
-    const execute = vi.fn().mockResolvedValue([[
+    const execute = vi.fn().mockResolvedValue({ rows: [
       { trello_checklist_id: "checklist-2", items_synced: 2, synced_at: new Date() },
-    ]]);
+    ] });
     mocks.getDb.mockResolvedValue({ execute });
 
     const result = await generateAptlssForCard({

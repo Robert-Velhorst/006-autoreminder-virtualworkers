@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { maintenanceJobSettings, vaProfiles } from "../drizzle/schema";
+import { maintenanceJobSettings, vaProfiles } from "../drizzle/schema.postgres";
 import type { ScheduledJobContext } from "./scheduledJobRuntime";
 
 const controls = vi.hoisted(() => ({ getDb: vi.fn(), run: vi.fn(), ownership: vi.fn(), google: vi.fn(),
@@ -38,7 +38,7 @@ function database() {
       });
       return query;
     } }) }),
-    insert: () => ({ values: (values: any) => ({ onDuplicateKeyUpdate: async () => {
+    insert: () => ({ values: (values: any) => ({ onConflictDoUpdate: async () => {
       writes++;
       setting ??= { ...values, lastScheduledAt: null };
     } }) }),

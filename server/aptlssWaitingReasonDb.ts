@@ -1,5 +1,5 @@
 import { and, desc, eq } from "drizzle-orm";
-import { aptlssPlans, aptlssWaitingReasons, type AptlssWaitingReason } from "../drizzle/schema";
+import { aptlssPlans, aptlssWaitingReasons, type AptlssWaitingReason } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 import type { AptlssWaitingSignal, WaitingReasonInterpretation } from "./aptlssWaitingReason";
 
@@ -109,7 +109,7 @@ export async function recordAptlssWaitingReason({
         recordedBy,
         createdAt,
       })
-      .$returningId();
+      .returning({ id: aptlssWaitingReasons.id });
     if (!created?.id) throw new WaitingReasonError("Waiting reason could not be recorded");
 
     return {

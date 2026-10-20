@@ -6,7 +6,7 @@ import type { Request } from "express";
 import { isDatabaseUnavailable, DatabaseUnavailableError } from "../databaseAvailability";
 import { SignJWT, jwtVerify } from "jose";
 import { randomUUID } from "crypto";
-import type { User } from "../../drizzle/schema";
+import type { User } from "../../drizzle/schema.postgres";
 import * as db from "../db";
 import { ENV } from "./env";
 import type {

@@ -3,7 +3,7 @@
  *
  * Provides a shared Redis client with graceful degradation.
  * If REDIS_URL is not configured, all operations are no-ops and the app
- * falls back to the MySQL-backed cache layer transparently.
+ * falls back to the PostgreSQL-backed cache layer transparently.
  *
  * Usage:
  *   import { getRedis, isRedisAvailable } from './redis';
@@ -50,7 +50,7 @@ export async function initializeRedis(): Promise<void> {
 
   const url = process.env.REDIS_URL;
   if (!url) {
-    console.log('[Redis] REDIS_URL not set — running without Redis (MySQL cache fallback active)');
+    console.log('[Redis] REDIS_URL not set — running without Redis (PostgreSQL cache fallback active)');
     return;
   }
 

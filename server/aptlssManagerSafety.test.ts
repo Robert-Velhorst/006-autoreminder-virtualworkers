@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { managerSafetyDigest, managerSafetyVerified, MANAGER_IMPLEMENTATION_VERSION } from "./aptlssManagerSafety";
 
 const folders: string[] = [];
@@ -115,6 +115,7 @@ it("requires a numeric integer count in the safety attestation", () => {
   const { root } = fixture();
   const attestationPath = join(root,"attestation.json");
   const previousPath = process.env.APTLSS_SAFETY_ATTESTATION;
+  const workingDirectory = vi.spyOn(process, "cwd").mockReturnValue(root);
   const digest = managerSafetyDigest();
   const proof = {
     version: MANAGER_IMPLEMENTATION_VERSION,
@@ -123,7 +124,7 @@ it("requires a numeric integer count in the safety attestation", () => {
     activeModeVerified: false,
     success: true,
     regressionTests: 100,
-    mysqlIntegration: true,
+    postgresIntegration: true,
     browserIntegration: true,
   };
   try {
@@ -135,6 +136,7 @@ it("requires a numeric integer count in the safety attestation", () => {
     writeFileSync(attestationPath, JSON.stringify({ ...proof, regressionTests: 100.5 }));
     expect(managerSafetyVerified()).toBe(false);
   } finally {
+    workingDirectory.mockRestore();
     if (previousPath === undefined) delete process.env.APTLSS_SAFETY_ATTESTATION;
     else process.env.APTLSS_SAFETY_ATTESTATION = previousPath;
   }

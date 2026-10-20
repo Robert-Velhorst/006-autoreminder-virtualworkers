@@ -16,7 +16,7 @@ import {
   InsertCardState,
   PriorityScore,
   InsertPriorityScore,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { eq, and, inArray, notInArray, desc, sql } from "drizzle-orm";
 
 // ─── aptlss_steps ─────────────────────────────────────────────────────────────
@@ -140,9 +140,8 @@ export async function getAllFounderDecisionSteps(vaId?: number): Promise<AptlssS
     .orderBy(desc(aptlssSteps.createdAt));
 }
 
-function affectedRows(result: unknown): number {
-  const value = Array.isArray(result) ? result[0] : result;
-  return Number((value as { affectedRows?: unknown } | undefined)?.affectedRows ?? 0);
+function affectedRows(result: { rowCount: number | null }): number {
+  return result.rowCount ?? 0;
 }
 
 /** Update a Trello-backed step only when it belongs to the active worker. */
@@ -189,7 +188,7 @@ export async function getCardStepProgress(vaId: number, cardId: string) {
 export async function upsertCardState(state: InsertCardState): Promise<void> {
   const db = await getDb();
   if (!db) return;
-  await db.insert(cardStates).values(state).onDuplicateKeyUpdate({
+  await db.insert(cardStates).values(state).onConflictDoUpdate({ target: [cardStates.vaId, cardStates.cardId],
     set: {
       cardName: state.cardName ?? "",
       boardName: state.boardName ?? "",
@@ -234,7 +233,7 @@ export async function upsertPriorityScore(
 ): Promise<void> {
   const db = await getDb();
   if (!db) return;
-  await db.insert(priorityScores).values(score).onDuplicateKeyUpdate({
+  await db.insert(priorityScores).values(score).onConflictDoUpdate({ target: [priorityScores.vaId, priorityScores.cardId],
     set: {
       cardName: score.cardName ?? "",
       score: score.score ?? 0,

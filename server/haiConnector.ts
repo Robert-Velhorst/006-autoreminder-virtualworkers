@@ -4,7 +4,7 @@ import {
   commitments,
   haiConnectorTokens,
   reminderAuditEvents,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 
 const TOKEN_PREFIX = "vwc_hai_";

@@ -13,7 +13,7 @@ import {
   trelloCachedCards,
   workspaceEvidenceItems,
   workspaceEvidenceLinks,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { getActiveWaitingReason, getActiveWaitingReasons, getWaitingReasonHistory, recordAptlssWaitingReason, resolveAptlssWaitingReason, WaitingReasonCardChangedError, WaitingReasonNotInQueueError } from "./aptlssWaitingReasonDb";
 import { selectWorkQueueNextAction } from "./aptlssWorkQueue";
 import {
@@ -26,7 +26,7 @@ import {
 import { getDb } from "./db";
 import { DecisionOutcomeError, getDecisionHistory, recordDecisionOutcome } from "./decisionOutcomesDb";
 import { FounderDecisionDeadlineError, deferFounderDecisionDeadline, getFounderDecisionInbox, setFounderDecisionDeadline } from "./founderDecisionInbox";
-import { generateOperatorDailyPlan, getOperatorDailyPlan, OperatorDailyPlanConflictError, OperatorDailyPlanScopeError, toWorkerOperatorDailyPlan, updateOperatorDailyPlan, type OperatorDailyPlanPayload } from "./operatorDailyPlan";
+import { generateOperatorDailyPlan, getOperatorDailyPlan, replanOperatorRemainingDay, OperatorDailyPlanConflictError, OperatorDailyPlanScopeError, toWorkerOperatorDailyPlan, updateOperatorDailyPlan, type OperatorDailyPlanPayload } from "./operatorDailyPlan";
 import {
   clearGoogleRefreshToken,
   getGoogleEvidenceStatus,
@@ -553,6 +553,25 @@ export const operatorRouter = router({
         }
         throw error;
       }
+    }),
+  replanRemainingDay: workerMutation
+    .input(z.object({
+      dateKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      completedBlockIds: z.array(z.string()).default([]),
+      activeBlockId: z.string().optional(),
+      now: z.string().datetime().optional(),
+    }).optional())
+    .mutation(async ({ input, ctx }) => {
+      const worker = await resolveWorkerOperatorContext(ctx.user);
+      if (isManagerPilotWorker(Number(ctx.user.id))) assertManagerPlanMutationAllowed(Number(ctx.user.id));
+      return toWorkerOperatorDailyPlan(await replanOperatorRemainingDay({
+        vaId: worker.userId,
+        dateKey: input?.dateKey,
+        completedBlockIds: input?.completedBlockIds ?? [],
+        activeBlockId: input?.activeBlockId,
+        now: input?.now ? new Date(input.now) : new Date(),
+        worker,
+      }));
     }),
   updateDailyPlan: workerMutation
     .input(dailyPlanUpdatePayloadSchema)

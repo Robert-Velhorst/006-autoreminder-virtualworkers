@@ -9,7 +9,7 @@ import { getDb } from "./db";
 import { enqueueManagerTask } from "./aptlssManagerQueue";
 import { assessManagerEvidence } from "./aptlssManagerFacts";
 import type { ManagerCard } from "../shared/aptlssManager";
-import { aptlssEvidenceConflicts, aptlssEvidenceRevisions, aptlssVerificationFollowups, workspaceEvidenceItems } from "../drizzle/schema";
+import { aptlssEvidenceConflicts, aptlssEvidenceRevisions, aptlssVerificationFollowups, workspaceEvidenceItems } from "../drizzle/schema.postgres";
 
 vi.mock("./db", () => ({ getDb: vi.fn() }));
 vi.mock("./aptlssManagerQueue", () => ({ enqueueManagerTask: vi.fn() }));
@@ -223,11 +223,11 @@ function databaseFor(rows: unknown[][], failedUpdate?: unknown) {
     }),
     insert: vi.fn((table: unknown) => ({ values: (values: Record<string, unknown>) => {
       inserts.push({ table, values });
-      return { $returningId: async () => [{ id: 400 }] };
+      return { returning: async () => [{ id: 400 }] };
     } })),
     update: vi.fn((table: unknown) => ({ set: (values: Record<string, unknown>) => ({ where: async () => {
       updates.push({ table, values });
-      return [{ affectedRows: table === failedUpdate ? 0 : 1 }];
+      return { rowCount: table === failedUpdate ? 0 : 1 };
     } }) })),
   };
   vi.mocked(getDb).mockResolvedValue(tx as unknown as NonNullable<Awaited<ReturnType<typeof getDb>>>);

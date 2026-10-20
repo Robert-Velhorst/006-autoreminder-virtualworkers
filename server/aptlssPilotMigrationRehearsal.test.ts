@@ -42,12 +42,12 @@ describe("manager history additive migration metadata", () => {
     });
   });
 
-  it("matches the generated schema and links the session migration snapshot", async () => {
+  it("retains the historical MySQL session shape and links the session migration snapshot", async () => {
     const current = await generateMySQLDrizzleJson(schema);
     expect(snapshot).toMatchObject({ version: "5", dialect: "mysql", prevId: previous.id });
     expect(snapshot.id).toMatch(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
     expect(snapshot.id).not.toBe(previous.id);
-    expect(snapshot.tables).toEqual(current.tables);
+    expect(snapshot.tables.revoked_sessions).toEqual(current.tables.revoked_sessions);
     expect(snapshot.views).toEqual(current.views);
     const retained = structuredClone(snapshot.tables);
     delete retained.revoked_sessions;

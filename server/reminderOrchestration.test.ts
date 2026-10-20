@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MySqlDialect } from "drizzle-orm/mysql-core";
+import { PgDialect } from "drizzle-orm/pg-core";
 import {
   buildReminderAuditScopeFilter,
   buildReminderScheduleScopeFilter,
@@ -25,7 +25,7 @@ const policy = {
 describe("durable reminder policy", () => {
   it("limits worker audit history to their own activity and assigned reminder objects", () => {
     const scope = buildReminderAuditScopeFilter({ id: 42, role: "worker", openId: "worker-42", email: "worker@example.com" }, 7);
-    const query = new MySqlDialect().sqlToQuery(scope!);
+    const query = new PgDialect().sqlToQuery(scope!);
 
     expect(query.sql).toContain("workspaceOwnerId");
     expect(query.sql).toContain("actorUserId");
@@ -37,7 +37,7 @@ describe("durable reminder policy", () => {
 
   it("keeps the founder audit view scoped to their workspace", () => {
     const scope = buildReminderAuditScopeFilter({ id: 7, role: "admin", openId: "admin-7", email: "admin@example.com" }, 7);
-    const query = new MySqlDialect().sqlToQuery(scope);
+    const query = new PgDialect().sqlToQuery(scope);
 
     expect(query.sql).toContain("workspaceOwnerId");
     expect(query.sql).not.toContain("actorUserId");
@@ -48,7 +48,7 @@ describe("durable reminder policy", () => {
 
   it("scopes worker reminder rows to their current workspace, assignment, and recipient", () => {
     const scope = buildReminderScheduleScopeFilter({ id: 42, role: "worker", openId: "worker-42", email: "worker@example.com" }, 7);
-    const query = new MySqlDialect().sqlToQuery(scope!);
+    const query = new PgDialect().sqlToQuery(scope!);
 
     expect(query.sql).toContain("workspaceOwnerId");
     expect(query.sql).toContain("assignedUserId");

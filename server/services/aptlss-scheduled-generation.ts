@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { and, asc, eq, lte } from "drizzle-orm";
-import { generationItems, generationJobs, scheduledJobs } from "../../drizzle/schema";
+import { generationItems, generationJobs, scheduledJobs } from "../../drizzle/schema.postgres";
 import { getDb } from "../db";
 import { runScheduledJob, ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader } from "../scheduledJobRuntime";
 import { assertAptlssJobOwnership, getAptlssChecklistWriteAuthorization } from "./trello-checklist-sync";
@@ -75,8 +75,7 @@ function parsePersistedGenerationResult(value: unknown, cardId: string) {
 }
 
 function affectedRows(result: unknown) {
-  const value = Array.isArray(result) ? result[0] : result;
-  return Number((value as { affectedRows?: unknown } | undefined)?.affectedRows ?? 0);
+  return Number((result as { rowCount?: unknown } | undefined)?.rowCount ?? 0);
 }
 
 function generationItemId(jobId: string, index: number, cardId: string) {
@@ -117,7 +116,8 @@ export async function executeAptlssGenerationBatch(input: BatchInput): Promise<A
     settings: JSON.stringify(settings),
     createdBy: input.createdBy,
     completedAt: null,
-  }).onDuplicateKeyUpdate({
+  }).onConflictDoUpdate({
+    target: generationJobs.id,
     set: {
       totalCards: cardIds.length,
       completedCards: 0,
@@ -184,7 +184,8 @@ export async function executeAptlssGenerationBatch(input: BatchInput): Promise<A
         maxAttempts,
         error: reason.slice(0, 8_000),
         result: null,
-      }).onDuplicateKeyUpdate({
+      }).onConflictDoUpdate({
+        target: generationItems.id,
         set: {
           status: "failed",
           attempts: 0,
@@ -214,7 +215,8 @@ export async function executeAptlssGenerationBatch(input: BatchInput): Promise<A
         maxAttempts,
         error: UNKNOWN_TRELLO_OUTCOME_MESSAGE,
         result: null,
-      }).onDuplicateKeyUpdate({
+      }).onConflictDoUpdate({
+        target: generationItems.id,
         set: {
           status: UNKNOWN_TRELLO_OUTCOME,
           attempts: 0,
@@ -269,7 +271,8 @@ export async function executeAptlssGenerationBatch(input: BatchInput): Promise<A
         maxAttempts,
         error: null,
         result: JSON.stringify(result),
-      }).onDuplicateKeyUpdate({
+      }).onConflictDoUpdate({
+        target: generationItems.id,
         set: {
           status: result.validation.needsReview ? "needs_review" : "completed",
           attempts,
@@ -301,7 +304,8 @@ export async function executeAptlssGenerationBatch(input: BatchInput): Promise<A
           ? `${UNKNOWN_TRELLO_OUTCOME_MESSAGE} Last error: ${lastError}`
           : lastError).slice(0, 8_000),
         result: null,
-      }).onDuplicateKeyUpdate({
+      }).onConflictDoUpdate({
+        target: generationItems.id,
         set: {
           status: applyToTrello ? UNKNOWN_TRELLO_OUTCOME : "failed",
           attempts,

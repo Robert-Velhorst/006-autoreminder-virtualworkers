@@ -1,7 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { atisCards, taskAssignments, timeEntries, users, vaProfiles } from "../../drizzle/schema";
+import { atisCards, taskAssignments, timeEntries, users, vaProfiles } from "../../drizzle/schema.postgres";
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),
@@ -71,10 +71,10 @@ function makeDb(options: {
       return query;
     }),
       insert: vi.fn(() => ({
-        values: vi.fn(async (values: Record<string, unknown>) => {
+        values: vi.fn((values: Record<string, unknown>) => ({ returning: vi.fn(async () => {
           inserted(values);
-          return [{ insertId: 100 }];
-        }),
+          return [{ ...entry, ...values, id: 100 }];
+        }) })),
       })),
   };
   const db = { transaction: vi.fn(async <T>(callback: (transaction: typeof tx) => Promise<T>) => callback(tx)) };

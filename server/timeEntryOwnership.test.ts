@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MySqlDialect } from 'drizzle-orm/mysql-core';
-import { timeEntries, vaProfiles } from '../drizzle/schema';
+import { timeEntries, vaProfiles } from '../drizzle/schema.postgres';
 import {
   attributeTimeEntriesToProfiles,
   loadAccountTimeEntries,

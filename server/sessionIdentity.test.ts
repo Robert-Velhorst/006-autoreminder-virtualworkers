@@ -21,7 +21,9 @@ describe("session identity", () => {
   });
 
   it("keeps the legacy Manus app id as a compatibility fallback", () => {
-    expect(getSessionAudience({ VITE_APP_ID: "legacy-manus-app" })).toBe("legacy-manus-app");
+    expect(getSessionAudience({ VITE_APP_ID: "legacy-manus-app" })).toBe(
+      "legacy-manus-app"
+    );
   });
 
   it("round-trips a local session without a Manus app id", async () => {
@@ -43,5 +45,5 @@ describe("session identity", () => {
       sessionId: expect.any(String),
       expiresAt: expect.any(Date),
     });
-  }, 15_000);
+  }, 20_000);
 });

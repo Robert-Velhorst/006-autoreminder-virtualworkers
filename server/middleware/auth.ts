@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { eq } from "drizzle-orm";
-import { vaProfiles, type User } from "../../drizzle/schema";
+import { vaProfiles, type User } from "../../drizzle/schema.postgres";
 import { getDb } from "../db";
 import { getActiveWorkerProfileId, selectWorkerProfile } from "../workerOperatorContext";
 

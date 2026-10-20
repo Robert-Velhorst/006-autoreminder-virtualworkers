@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
-import type { User } from "../../drizzle/schema";
+import type { User } from "../../drizzle/schema.postgres";
 import { HttpError } from "../../shared/_core/errors";
 import { respondDatabaseUnavailable } from "../databaseAvailability";
 import { sdk } from "./sdk";

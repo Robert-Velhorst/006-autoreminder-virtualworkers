@@ -8,7 +8,7 @@
  */
 
 import { getDb } from '../db';
-import { vaProfiles, timeEntries } from '../../drizzle/schema';
+import { vaProfiles, timeEntries } from '../../drizzle/schema.postgres';
 import { eq, and, desc, gte, sql } from 'drizzle-orm';
 import { sendProactiveCheckIn } from './ai-chatbot-handler';
 import { isTrelloCommentAutomationEnabled, postTrelloComment } from './trello-chatbot';

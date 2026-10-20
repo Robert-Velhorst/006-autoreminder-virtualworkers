@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { chatbotConversations, taskAssignments, vaProfiles } from "../../drizzle/schema";
+import { chatbotConversations, taskAssignments, vaProfiles } from "../../drizzle/schema.postgres";
 import { getDb } from "../db";
 import { requireAuthenticated, requestUser, resolveWorkerProfileId } from "../middleware/auth";
 import {
@@ -23,8 +23,7 @@ function workerQuestionKey(userId: number, workerId: number, taskId: string, que
 }
 
 function affectedRows(result: unknown) {
-  const value = Array.isArray(result) ? result[0] : result;
-  return Number((value as { affectedRows?: unknown } | undefined)?.affectedRows ?? 0);
+  return Number((result as { rowCount?: number | null } | undefined)?.rowCount ?? 0);
 }
 
 router.post("/ask-founder", async (req, res) => {
@@ -110,7 +109,7 @@ router.post("/ask-founder", async (req, res) => {
         responseText: normalizedQuestion,
         responseStatus: "pending",
         receivedAt,
-      }).$returningId();
+      }).returning({ id: chatbotConversations.id });
 
       if (!created?.id) throw new Error("Could not reserve the outbound question");
       return { kind: "reserved" as const, conversationId: created.id };

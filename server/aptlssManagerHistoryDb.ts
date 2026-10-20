@@ -1,5 +1,5 @@
 import { and, desc, eq } from "drizzle-orm";
-import { aptlssManagerChecks, aptlssManagerRuns, aptlssManagerState } from "../drizzle/schema";
+import { aptlssManagerChecks, aptlssManagerRuns, aptlssManagerState } from "../drizzle/schema.postgres";
 import type { ManagerSnapshot } from "../shared/aptlssManager";
 import type { getDb } from "./db";
 import { restoreManagerHistorySnapshot } from "./aptlssManagerHistory";

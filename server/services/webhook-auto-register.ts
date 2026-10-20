@@ -7,7 +7,7 @@
 
 import { getDb } from '../db';
 import { eq, sql, and, isNull } from 'drizzle-orm';
-import { atisBoards, chatbotWebhooks } from '../../drizzle/schema';
+import { atisBoards, chatbotWebhooks } from '../../drizzle/schema.postgres';
 import { ScheduledJobLeaseLostError, type ScheduledJobContext } from '../scheduledJobRuntime';
 
 const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
@@ -187,20 +187,28 @@ async function storeWebhook(
 ): Promise<void> {
   const db = await getDb();
   await checkpoint(context);
-  if (!db) throw new Error('Database unavailable for webhook registry persistence');
+  if (!db || !callbackUrl) throw new Error("Database or configured webhook callback unavailable");
 
   try {
-    await db.execute(sql`
-      INSERT INTO chatbot_webhooks (trelloWebhookId, modelId, modelType, description, callbackUrl, isActive)
-      VALUES (${trelloWebhookId}, ${modelId}, ${modelType}, ${description}, ${callbackUrl}, ${isActive ? 1 : 0})
-      ON DUPLICATE KEY UPDATE
-        modelId = ${modelId},
-        modelType = ${modelType},
-        description = ${description},
-        callbackUrl = ${callbackUrl},
-        isActive = ${isActive ? 1 : 0},
-        updatedAt = NOW()
-    `);
+    await db.insert(chatbotWebhooks).values({
+      trelloWebhookId,
+      modelId,
+      modelType,
+      description,
+      callbackUrl,
+      isActive: isActive ? 1 : 0,
+      updatedAt: new Date(),
+    }).onConflictDoUpdate({
+      target: chatbotWebhooks.trelloWebhookId,
+      set: {
+        modelId,
+        modelType,
+        description,
+        callbackUrl,
+        isActive: isActive ? 1 : 0,
+        updatedAt: new Date(),
+      },
+    });
     await checkpoint(context);
   } catch (error) {
     await rethrowLeaseLoss(error, context);
@@ -217,9 +225,7 @@ async function removeWebhookFromDb(trelloWebhookId: string, context?: ScheduledJ
   if (!db) throw new Error('Database unavailable for webhook registry persistence');
 
   try {
-    await db.execute(sql`
-      DELETE FROM chatbot_webhooks WHERE trelloWebhookId = ${trelloWebhookId}
-    `);
+    await db.delete(chatbotWebhooks).where(eq(chatbotWebhooks.trelloWebhookId, trelloWebhookId));
     await checkpoint(context);
   } catch (error) {
     await rethrowLeaseLoss(error, context);
@@ -240,11 +246,13 @@ async function getStoredWebhooks(context?: ScheduledJobContext): Promise<Array<{
   if (!db) throw new Error('Database unavailable for webhook registry inventory');
 
   try {
-    const result = await db.execute(sql`
-      SELECT trelloWebhookId, modelId, modelType FROM chatbot_webhooks
-    `);
+    const rows = await db.select({
+      trelloWebhookId: chatbotWebhooks.trelloWebhookId,
+      modelId: chatbotWebhooks.modelId,
+      modelType: chatbotWebhooks.modelType,
+    }).from(chatbotWebhooks);
     await checkpoint(context);
-    return (result as any)[0] || [];
+    return rows;
   } catch (error) {
     await rethrowLeaseLoss(error, context);
     throw new Error('Webhook registry inventory unavailable; provider reconciliation stopped');
@@ -396,10 +404,10 @@ export async function removeWebhookForBoard(boardTrelloId: string): Promise<bool
   if (!db) return false;
 
   try {
-    const result = await db.execute(sql`
-      SELECT trelloWebhookId FROM chatbot_webhooks WHERE modelId = ${boardTrelloId}
-    `);
-    const rows = (result as any)[0] || [];
+    const rows = await db.select({ trelloWebhookId: chatbotWebhooks.trelloWebhookId })
+      .from(chatbotWebhooks)
+      .where(eq(chatbotWebhooks.modelId, boardTrelloId))
+      .limit(1);
     
     if (rows.length > 0) {
       const webhookId = rows[0].trelloWebhookId;

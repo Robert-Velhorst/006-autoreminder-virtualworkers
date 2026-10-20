@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appSettings, vaProfiles } from "../drizzle/schema";
+import { appSettings, vaProfiles } from "../drizzle/schema.postgres";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({

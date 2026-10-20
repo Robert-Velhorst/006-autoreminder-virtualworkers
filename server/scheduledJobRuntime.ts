@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { and, desc, eq, sql } from "drizzle-orm";
-import { scheduledJobLeases, scheduledJobRuns } from "../drizzle/schema";
+import { scheduledJobLeases, scheduledJobRuns } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 
 export type ScheduledJobTrigger = "cron" | "external" | "manual";
@@ -27,10 +27,6 @@ export type ScheduledJobContext = {
   assertOwnership: (transaction?: ScheduledJobOwnershipReader) => Promise<void>;
 };
 
-function insertId(result: unknown) {
-  if (Array.isArray(result)) return Number((result[0] as { insertId?: unknown } | undefined)?.insertId ?? 0);
-  return Number((result as { insertId?: unknown } | undefined)?.insertId ?? 0);
-}
 
 function cleanJobKey(jobKey: string) {
   const normalized = jobKey.trim();
@@ -69,22 +65,20 @@ export async function runScheduledJob(
   const now = new Date();
   const ownerToken = randomBytes(24).toString("hex");
   // Every server uses the database clock for ownership, not its own wall clock.
-  const databaseNow = sql`CURRENT_TIMESTAMP`;
-  const leaseExpiry = sql`TIMESTAMPADD(MICROSECOND, ${leaseMs * 1000}, CURRENT_TIMESTAMP)`;
-  await db.execute(sql`
-    INSERT INTO ${scheduledJobLeases} (${scheduledJobLeases.jobKey}, ${scheduledJobLeases.ownerToken}, ${scheduledJobLeases.acquiredAt}, ${scheduledJobLeases.heartbeatAt}, ${scheduledJobLeases.leaseExpiresAt})
-    VALUES (${jobKey}, ${ownerToken}, ${databaseNow}, ${databaseNow}, ${leaseExpiry})
-    ON DUPLICATE KEY UPDATE
-      ${scheduledJobLeases.ownerToken} = IF(${scheduledJobLeases.leaseExpiresAt} <= ${databaseNow}, VALUES(${scheduledJobLeases.ownerToken}), ${scheduledJobLeases.ownerToken}),
-      ${scheduledJobLeases.acquiredAt} = IF(${scheduledJobLeases.leaseExpiresAt} <= ${databaseNow}, VALUES(${scheduledJobLeases.acquiredAt}), ${scheduledJobLeases.acquiredAt}),
-      ${scheduledJobLeases.heartbeatAt} = IF(${scheduledJobLeases.leaseExpiresAt} <= ${databaseNow}, VALUES(${scheduledJobLeases.heartbeatAt}), ${scheduledJobLeases.heartbeatAt}),
-      ${scheduledJobLeases.leaseExpiresAt} = IF(${scheduledJobLeases.leaseExpiresAt} <= ${databaseNow}, VALUES(${scheduledJobLeases.leaseExpiresAt}), ${scheduledJobLeases.leaseExpiresAt})
-  `);
+  const databaseNow = sql<Date>`clock_timestamp()`;
+  const leaseExpiry = sql<Date>`clock_timestamp() + (${leaseMs}::double precision * interval '1 millisecond')`;
+  await db.insert(scheduledJobLeases).values({
+    jobKey, ownerToken, acquiredAt: databaseNow, heartbeatAt: databaseNow, leaseExpiresAt: leaseExpiry,
+  }).onConflictDoUpdate({
+    target: scheduledJobLeases.jobKey,
+    set: { ownerToken, acquiredAt: databaseNow, heartbeatAt: databaseNow, leaseExpiresAt: leaseExpiry },
+    setWhere: sql`${scheduledJobLeases.leaseExpiresAt} <= clock_timestamp()`,
+  });
 
   let runId = 0;
   const controller = new AbortController();
   const ownershipCondition = and(eq(scheduledJobLeases.jobKey, jobKey),
-    eq(scheduledJobLeases.ownerToken, ownerToken), sql`${scheduledJobLeases.leaseExpiresAt} > CURRENT_TIMESTAMP`);
+    eq(scheduledJobLeases.ownerToken, ownerToken), sql`${scheduledJobLeases.leaseExpiresAt} > clock_timestamp()`);
   const assertOwnership = async (transaction?: ScheduledJobOwnershipReader) => {
     if (controller.signal.aborted) throw new ScheduledJobLeaseLostError();
     const query = (transaction ?? db).select({ jobKey: scheduledJobLeases.jobKey }).from(scheduledJobLeases)
@@ -121,18 +115,17 @@ export async function runScheduledJob(
       await tx.update(scheduledJobRuns).set({ status: "abandoned", finishedAt: databaseNow,
         errorMessage: "Previous owner interrupted; task outcome is not verified.",
       }).where(and(eq(scheduledJobRuns.jobKey, jobKey), eq(scheduledJobRuns.status, "running")));
-      return tx.insert(scheduledJobRuns).values({ jobKey, trigger, status: "running", startedAt: databaseNow });
+      return tx.insert(scheduledJobRuns).values({ jobKey, trigger, status: "running", startedAt: databaseNow }).returning({ id: scheduledJobRuns.id });
     });
     if (!runResult) return { state: "skipped", reason: "not_due" };
-    runId = insertId(runResult);
+    runId = runResult[0]?.id ?? 0;
     if (!runId) throw new Error("Scheduled job run could not be recorded");
     await assertOwnership();
     heartbeatTimer = setInterval(() => {
       if (heartbeatPending || controller.signal.aborted) return;
       heartbeatPending = db.update(scheduledJobLeases).set({ heartbeatAt: databaseNow, leaseExpiresAt: leaseExpiry })
         .where(ownershipCondition).then(result => {
-          const header = Array.isArray(result) ? result[0] : result;
-          if (Number((header as { affectedRows?: number }).affectedRows) !== 1) controller.abort();
+          if (result.rowCount !== 1) controller.abort();
         }).catch(() => {
           controller.abort();
           console.warn("[ScheduledJob] Lease renewal unavailable; ownership must be re-established");

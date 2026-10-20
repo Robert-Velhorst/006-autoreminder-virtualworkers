@@ -573,7 +573,7 @@ describe('Trello Config Routes', () => {
       const requestUrl = new URL(String(fetchMock.mock.calls[0][0]));
       expect(requestUrl.searchParams.get('key')).toBe('key+/ with spaces');
       expect(requestUrl.searchParams.get('token')).toBe('token?&secret');
-      expect(fetchMock.mock.calls[0][1]?.redirect).toBe('error');
+      expect(fetchMock.mock.calls[0][1]?.redirect).toBe('manual');
       expect(response.body).toEqual({ success: true, card: { id: 'card-123', name: 'Updated title' } });
       expect(JSON.stringify(response.body)).not.toContain('token?&secret');
     });
@@ -684,7 +684,7 @@ describe('Trello Config Routes', () => {
 
     it('saves worker completion labels under the authenticated worker identity', async () => {
       const duplicateUpdate = vi.fn();
-      const values = vi.fn().mockReturnValue({ onDuplicateKeyUpdate: duplicateUpdate });
+      const values = vi.fn().mockReturnValue({ onConflictDoUpdate: duplicateUpdate });
       mocks.getDb.mockResolvedValue({ insert: vi.fn().mockReturnValue({ values }) });
       const workerApp = express();
       workerApp.use(express.json());
@@ -717,7 +717,7 @@ describe('Trello Config Routes', () => {
       query.from.mockReturnValue(query);
       query.where.mockReturnValue(query);
       const duplicateUpdate = vi.fn();
-      const values = vi.fn().mockReturnValue({ onDuplicateKeyUpdate: duplicateUpdate });
+      const values = vi.fn().mockReturnValue({ onConflictDoUpdate: duplicateUpdate });
       const insert = vi.fn().mockReturnValue({ values });
       mocks.getDb.mockResolvedValue({ select: vi.fn(() => query), insert });
 
@@ -778,3 +778,4 @@ describe('Trello Config Routes', () => {
     });
   });
 });
+

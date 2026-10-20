@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { users, userWorkingHours } from "../drizzle/schema";
+import { users, userWorkingHours } from "../drizzle/schema.postgres";
 vi.mock("./db", () => ({ getDb: vi.fn().mockResolvedValue(null) }));
 import { getDb } from "./db";
 import { resolveWorkerOperatorContextById } from "./workerOperatorContext";

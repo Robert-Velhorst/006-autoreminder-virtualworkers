@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getTableName, type SQL } from "drizzle-orm";
-import { MySqlDialect } from "drizzle-orm/mysql-core";
-import { appSettings, aptlssManagerRuns, aptlssManagerState, aptlssManagerTrialEvents, aptlssPlans, aptlssSteps, dailyPlans, taskAssignments, vaProfiles } from "../drizzle/schema";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { appSettings, aptlssManagerRuns, aptlssManagerState, aptlssManagerTrialEvents, aptlssPlans, aptlssSteps, dailyPlans, taskAssignments, vaProfiles } from "../drizzle/schema.postgres";
 import type { WorkerOperatorContext } from "./workerOperatorContext";
 
 const dependencies = vi.hoisted(() => ({ getDb: vi.fn(), model: vi.fn(), worker: vi.fn(), emit: vi.fn() }));
@@ -62,11 +62,11 @@ function storage() {
     },
     insert: (table: any) => ({ values: (values: any) => {
       writes.push({ table: getTableName(table), values });
-      return { $returningId: async () => {
+      return { returning: async () => {
         const id = 42 + retainedRuns.length;
         if (table === aptlssManagerRuns) retainedRuns.push({ ...values, id });
         return [{ id }];
-      }, onDuplicateKeyUpdate: async () => {
+      }, onConflictDoUpdate: async () => {
         if (table === appSettings) runtime = values;
         if (table === aptlssManagerState) Object.assign(state, values);
       } };
@@ -204,13 +204,13 @@ describe("manager shadow execution", () => {
     expect(writes.find(w => w.table === "aptlss_manager_runs")!.values).toMatchObject({ mode: "shadow", previousPlanJson: null, appliedPlanHash: null });
     expect(canonicalPlan).toEqual(before);
     expect(dependencies.model).toHaveBeenCalledTimes(1);
-    const dialect = new MySqlDialect();
+    const dialect = new PgDialect();
     for (const table of ["workspace_evidence_links", "aptlss_evidence_subject_links", "communication_evidence"]) {
       const scoped = reads.filter(r => r.table === table);
       expect(scoped.length).toBeGreaterThan(0);
       for (const read of scoped) {
         const query = dialect.sqlToQuery(read.condition!);
-        expect(query.sql).toContain("`vaId` = ?");
+        expect(query.sql).toMatch(/"vaId" = \$[0-9]+/);
         expect(query.params).toContain(2);
       }
     }

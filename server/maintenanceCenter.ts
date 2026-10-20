@@ -3,7 +3,7 @@ import {
   maintenanceJobSettings,
   scheduledJobRuns,
   vaProfiles,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { getAllAptlssPlans } from "./aptlssDb";
 import { upsertWeeklyAnalysis } from "./aptlssPoliciesDb";
 import { getAllCardStates } from "./aptlssStepsDb";
@@ -279,7 +279,7 @@ async function recordMaintenanceSchedule(jobKey: MaintenanceJobKey, context: Sch
   const definition = definitionFor(jobKey)!;
   await tx.insert(maintenanceJobSettings).values({ jobKey, enabled: definition.defaultEnabled,
     intervalMinutes: definition.defaultIntervalMinutes,
-  }).onDuplicateKeyUpdate({ set: { jobKey } });
+  }).onConflictDoUpdate({ target: maintenanceJobSettings.jobKey, set: { jobKey } });
   const [due] = await tx.select({ jobKey: maintenanceJobSettings.jobKey }).from(maintenanceJobSettings)
     .where(dueMaintenanceCondition(jobKey)).limit(1).for("update");
   if (!due) return false;
@@ -311,7 +311,7 @@ export async function updateMaintenanceSetting(jobKey: MaintenanceJobKey, enable
   if (!db) throw new Error("Database not available");
   const interval = clampInterval(jobKey, intervalMinutes);
   await db.insert(maintenanceJobSettings).values({ jobKey, enabled, intervalMinutes: interval })
-    .onDuplicateKeyUpdate({ set: { enabled, intervalMinutes: interval, updatedAt: new Date() } });
+    .onConflictDoUpdate({ target: maintenanceJobSettings.jobKey, set: { enabled, intervalMinutes: interval, updatedAt: new Date() } });
   return { jobKey, enabled, intervalMinutes: interval };
 }
 

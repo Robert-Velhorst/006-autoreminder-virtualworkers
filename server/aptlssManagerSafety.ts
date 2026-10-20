@@ -61,6 +61,6 @@ export function managerSafetyVerified() {
     return proof.version === MANAGER_IMPLEMENTATION_VERSION && proof.digest === managerSafetyDigest()
       && proof.scope === "shadow-pilot" && proof.activeModeVerified === false
       && proof.success === true && Number.isSafeInteger(proof.regressionTests) && proof.regressionTests >= 100
-      && proof.mysqlIntegration === true && proof.browserIntegration === true;
+      && proof.postgresIntegration === true && proof.browserIntegration === true;
   } catch { return false; }
 }

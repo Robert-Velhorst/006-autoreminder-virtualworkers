@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SQL } from "drizzle-orm";
-import { MySqlDialect } from "drizzle-orm/mysql-core";
-import { dailyComplianceSnapshots, timeEntries, users, vaProfiles } from "../../drizzle/schema";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { dailyComplianceSnapshots, timeEntries, users, vaProfiles } from "../../drizzle/schema.postgres";
 import type { ScheduledJobContext } from "../scheduledJobRuntime";
 
 const controls = vi.hoisted(() => ({
@@ -40,12 +40,12 @@ function timer(id = 1, overrides: Partial<typeof timeEntries.$inferSelect> = {})
 // Evaluate the emitted equality/null predicates against mutable rows. This
 // makes stale-read tests depend on the real Drizzle update condition.
 function matches(condition: SQL, row: Record<string, unknown>) {
-  const query = new MySqlDialect().sqlToQuery(condition);
+  const query = new PgDialect().sqlToQuery(condition);
   let parameter = 0;
   const driverValue = (value: unknown) => value instanceof Date
-    ? value.toISOString().slice(0, 23).replace("T", " ")
-    : typeof value === "boolean" ? Number(value) : value;
-  const predicates = [...query.sql.matchAll(/`time_entries`\.`([^`]+)` (= (?:BINARY )?\?|is null)/g)];
+    ? value.toISOString()
+    : value;
+  const predicates = [...query.sql.matchAll(/"time_entries"\."([^"]+)"(?: COLLATE "C")? (= \$[0-9]+(?:::text COLLATE "C")?|is null)/g)];
   if (!predicates.length) throw new Error(`Unexpected predicate: ${query.sql}`);
   const outcomes = predicates.map(([, key, operator]) => operator === "is null"
     ? row[key] === null
@@ -67,10 +67,10 @@ function database(entries = [timer()]) {
       affectedRows++;
     }
     state.afterUpdate();
-    return state.updateResult ?? [{ affectedRows }];
+    return state.updateResult ?? { rowCount: affectedRows };
   } }) }));
   const insert = vi.fn(() => ({ values: (values: Record<string, unknown>) => ({
-    onDuplicateKeyUpdate: async () => { state.snapshot = values; },
+    onConflictDoUpdate: async () => { state.snapshot = values; },
   }) }));
   const db = { update, insert, select: () => ({ from: (table: unknown) => ({ where: (condition: SQL) => {
     const rows = table === vaProfiles ? [worker]
@@ -200,8 +200,8 @@ describe("Manus automatic timer stop ownership", () => {
     state.beforeUpdate = () => { state.entries[0].notes = notes; };
     await expect(scheduledWork(ownership().context)).resolves.toMatchObject({ recordsProcessed: 0 });
     expect(state.entries[0].endTime).toBeNull();
-    expect(new MySqlDialect().sqlToQuery(state.conditions[0]).sql)
-      .toContain("BINARY `time_entries`.`notes` = BINARY ?");
+    expect(new PgDialect().sqlToQuery(state.conditions[0]).sql)
+      .toMatch(/"time_entries"\."notes" COLLATE "C" = \$\d+::text COLLATE "C"/);
     expect(controls.notify).not.toHaveBeenCalled();
   });
 
@@ -226,7 +226,7 @@ describe("Manus automatic timer stop ownership", () => {
 
   it("handles a bare update header and preserves the existing 12-hour cap", async () => {
     const { state } = database([timer(1, { startTime: new Date("2026-09-30T08:00:00Z") })]);
-    state.updateResult = { affectedRows: 1 };
+    state.updateResult = { rowCount: 1 };
     await expect(scheduledWork(ownership().context)).resolves.toMatchObject({ recordsProcessed: 1 });
     expect(state.entries[0].durationSeconds).toBe(12 * 3600);
     expect(controls.notify).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining("(capped at 12h)") }));

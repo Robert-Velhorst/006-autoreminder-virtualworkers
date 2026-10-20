@@ -15,7 +15,7 @@ import {
   type InsertAptlssAuditLog,
   type AdminSyncLog,
   type InsertAdminSyncLog,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { eq, desc, and, gte, sql } from "drizzle-orm";
 
 // ─── Audit Log ────────────────────────────────────────────────────────────────
@@ -72,8 +72,11 @@ export async function pruneOldAuditLog(): Promise<number> {
   const db = await getDb();
   if (!db) return 0;
   const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-  const result = await db.delete(aptlssAuditLog).where(sql`${aptlssAuditLog.createdAt} < ${cutoff}`);
-  return (result as unknown as { rowsAffected?: number }).rowsAffected ?? 0;
+  const result = await db
+    .delete(aptlssAuditLog)
+    .where(sql`${aptlssAuditLog.createdAt} < ${cutoff}`)
+    .returning({ id: aptlssAuditLog.id });
+  return result.length;
 }
 
 // ─── Admin Sync Log ───────────────────────────────────────────────────────────

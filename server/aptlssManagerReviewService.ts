@@ -13,7 +13,7 @@ import {
   or,
   sql,
 } from "drizzle-orm";
-import { alias } from "drizzle-orm/mysql-core";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import {
   aptlssManagerControl,
@@ -25,7 +25,7 @@ import {
   dailyPlans,
   timeEntries,
   users,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import type {
   ManagerAction,
   ManagerCard,
@@ -722,7 +722,7 @@ function proposalGroups(
       ),
       occurrences: sql<number>`COUNT(*)`.as("occurrences"),
       urgent:
-        sql<number>`MAX(${aptlssManagerRuns.reviewUrgent})`.as(
+        sql<boolean>`bool_or(${aptlssManagerRuns.reviewUrgent})`.as(
           "urgent"
         ),
       critical:
@@ -973,7 +973,7 @@ export async function recordManagerReview(
     await tx
       .insert(aptlssManagerControl)
       .values({ id: 1 })
-      .onDuplicateKeyUpdate({ set: { id: 1 } });
+      .onConflictDoUpdate({ target: aptlssManagerControl.id, set: { id: 1 } });
     await tx
       .select()
       .from(aptlssManagerControl)
@@ -1046,7 +1046,7 @@ export async function recordManagerReview(
         reviewerId: actorId,
         proposalHash: run.proposalHash,
       })
-      .$returningId();
+      .returning({ id: aptlssManagerReviews.id });
     let correctionId: number | null = null;
     if (knowledge) {
       const [stored] = await tx
@@ -1057,7 +1057,7 @@ export async function recordManagerReview(
           reviewId: review.id,
           createdBy: actorId,
         })
-        .$returningId();
+        .returning({ id: aptlssManagerCorrections.id });
       correctionId = stored.id;
       await tx
         .update(aptlssManagerState)
@@ -1097,7 +1097,7 @@ async function transitionManagerTrial(
     await tx
       .insert(aptlssManagerControl)
       .values({ id: 1 })
-      .onDuplicateKeyUpdate({ set: { id: 1 } });
+      .onConflictDoUpdate({ target: aptlssManagerControl.id, set: { id: 1 } });
     await tx
       .select()
       .from(aptlssManagerControl)
@@ -1155,7 +1155,7 @@ async function transitionManagerTrial(
     await tx
       .insert(aptlssManagerState)
       .values({ vaId: input.vaId, ...values })
-      .onDuplicateKeyUpdate({
+      .onConflictDoUpdate({ target: aptlssManagerState.vaId,
         set: {
           ...values,
           policyRevision: sql`${aptlssManagerState.policyRevision} + 1`,
@@ -1237,7 +1237,7 @@ export async function setManagerMode(
     await tx
       .insert(aptlssManagerControl)
       .values({ id: 1 })
-      .onDuplicateKeyUpdate({ set: { id: 1 } });
+      .onConflictDoUpdate({ target: aptlssManagerControl.id, set: { id: 1 } });
     const [pilot] = await tx
       .select()
       .from(aptlssManagerControl)
@@ -1249,7 +1249,7 @@ export async function setManagerMode(
     await tx
       .insert(aptlssManagerState)
       .values({ vaId, mode })
-      .onDuplicateKeyUpdate({
+      .onConflictDoUpdate({ target: aptlssManagerState.vaId,
         set: {
           mode,
           inputHash: null,
@@ -1277,7 +1277,7 @@ export async function restoreManagerPlan(
       await tx
         .insert(aptlssManagerControl)
         .values({ id: 1 })
-        .onDuplicateKeyUpdate({ set: { id: 1 } });
+        .onConflictDoUpdate({ target: aptlssManagerControl.id, set: { id: 1 } });
       await tx
         .select()
         .from(aptlssManagerControl)

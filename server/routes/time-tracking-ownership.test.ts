@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { User } from '../../drizzle/schema';
+import type { User } from '../../drizzle/schema.postgres';
 import { timeTrackingOwnership } from './time-tracking';
 
 function user(role: User['role']): User {

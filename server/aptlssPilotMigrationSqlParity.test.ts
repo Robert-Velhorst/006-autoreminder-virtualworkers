@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const root = path.resolve(import.meta.dirname, "..");
-const sql = readFileSync(path.join(root, "drizzle/0045_aptlss_pilot_consolidation.sql"), "utf8");
+const sql = readFileSync(path.join(root, "drizzle/0045_aptlss_pilot_consolidation.sql"), "utf8").replace(/\r\n/g, "\n");
 const snapshot = JSON.parse(readFileSync(path.join(root, "drizzle/meta/0045_snapshot.json"), "utf8"));
 const baseline = JSON.parse(readFileSync(path.join(root, "drizzle/contracts/0045-canonical-baseline.json"), "utf8"));
 const compact = (s: string) => s.replace(/\s+/g, "").toLowerCase();

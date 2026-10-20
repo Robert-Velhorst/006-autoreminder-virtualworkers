@@ -1,126 +1,70 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
-const { execute, getDb } = vi.hoisted(() => ({
-  execute: vi.fn(),
-  getDb: vi.fn(),
-}));
-
-vi.mock("./db", () => ({
-  getDb,
-  incrementPayLogD1: vi.fn(),
-}));
-
+import { drizzle } from "drizzle-orm/node-postgres";
+import * as schema from "../drizzle/schema.postgres";
+const { query, getDb } = vi.hoisted(() => ({ query: vi.fn(), getDb: vi.fn() }));
+vi.mock("./db", () => ({ getDb, incrementPayLogD1: vi.fn() }));
 import {
-  getAllReplyThreads,
-  getAllUnsignedFlags,
-  getAllVagueReplyFlags,
-  deactivateMissingTrelloReplyThreads,
-  MAX_REPLY_MONITOR_PAGE_SIZE,
-  normalizeReplyMonitorLimit,
-  resolveUnsignedFlag,
-  resolveVagueReplyFlag,
+  getAllReplyThreads, getAllUnsignedFlags, getAllVagueReplyFlags,
+  deactivateMissingTrelloReplyThreads, MAX_REPLY_MONITOR_PAGE_SIZE,
+  normalizeReplyMonitorLimit, resolveUnsignedFlag, resolveVagueReplyFlag,
   upsertReplyThread,
 } from "./replyMonitorDb";
-import { MySqlDialect } from "drizzle-orm/mysql-core";
 
-describe("reply monitor data access", () => {
+describe("reply monitor PostgreSQL data access", () => {
   beforeEach(() => {
-    execute.mockReset();
-    getDb.mockResolvedValue({ execute });
+    query.mockReset().mockResolvedValue({ rowCount: 0, rows: [] });
+    // Real Drizzle compiles and maps the PG queries; only the network is mocked.
+    getDb.mockResolvedValue(drizzle({ query } as never, { schema }));
   });
-
-  it("clamps result limits before using them in database queries", async () => {
-    execute.mockResolvedValue([[]]);
-
-    await getAllReplyThreads(7, Number.POSITIVE_INFINITY);
+  it("bounds pages, including invalid caller limits", async () => {
+    await getAllReplyThreads(7, Infinity);
     await getAllVagueReplyFlags(7, -3);
-    await getAllUnsignedFlags(7, 10_000);
-
-    expect(execute.mock.calls).toHaveLength(3);
-    for (const call of execute.mock.calls) {
-      expect(call).toHaveLength(1);
-      expect(call[0]).not.toBeTypeOf("string");
-    }
+    await getAllUnsignedFlags(7, 10000);
+    expect(query.mock.calls.map(call => call[1].at(-1))).toEqual([100, 1, MAX_REPLY_MONITOR_PAGE_SIZE]);
   });
-
-  it("scopes manual flag resolution to the authenticated worker", async () => {
-    execute.mockResolvedValue([{ affectedRows: 1 }]);
-
+  it("scopes both manual resolutions to the authenticated worker", async () => {
+    query.mockResolvedValue({ rowCount: 1, rows: [] });
     await expect(resolveVagueReplyFlag(7, 41)).resolves.toBe(true);
-    await expect(resolveUnsignedFlag(7, 42, "Checked with the client")).resolves.toBe(true);
-
-    for (const call of execute.mock.calls) {
-      expect(call).toHaveLength(1);
-      expect(call[0]).not.toBeTypeOf("string");
+    await expect(resolveUnsignedFlag(7, 42, "Checked with client")).resolves.toBe(true);
+    for (const [configuration, values] of query.mock.calls) {
+      expect(configuration.text).toMatch(/where .*"id" = \$[0-9]+.*"vaId" = \$[0-9]+.*"resolvedAt" is null/i);
+      expect(values.slice(-2)).toEqual([values.includes(41) ? 41 : 42, 7]);
     }
-
-    const dialect = new MySqlDialect();
-    const vagueQuery = dialect.sqlToQuery(execute.mock.calls[0][0]);
-    expect(vagueQuery.sql).toContain("WHERE id = ? AND vaId = ? AND resolvedAt IS NULL");
-    expect(vagueQuery.params).toEqual([41, 7]);
-    const unsignedQuery = dialect.sqlToQuery(execute.mock.calls[1][0]);
-    expect(unsignedQuery.sql).toContain("WHERE id = ? AND vaId = ? AND resolvedAt IS NULL");
-    expect(unsignedQuery.params).toEqual(["Checked with the client", 42, 7]);
+    expect(query.mock.calls[1][1]).toContain("Checked with client");
   });
-
-  it("treats already-resolved owned flags as idempotent and rejects missing or foreign flags", async () => {
-    execute
-      .mockResolvedValueOnce([{ affectedRows: 0 }])
-      .mockResolvedValueOnce([[{ id: 41 }]])
-      .mockResolvedValueOnce([{ affectedRows: 0 }])
-      .mockResolvedValueOnce([[]]);
-
+  it("treats already resolved owned flags as idempotent while rejecting foreign flags", async () => {
+    query.mockResolvedValueOnce({ rowCount: 0, rows: [] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [[41]] })
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] })
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] });
     await expect(resolveVagueReplyFlag(7, 41)).resolves.toBe(true);
-    await expect(resolveUnsignedFlag(7, 42, "Checked with the client")).resolves.toBe(false);
-
-    const dialect = new MySqlDialect();
-    expect(dialect.sqlToQuery(execute.mock.calls[1][0]).params).toEqual([41, 7]);
-    expect(dialect.sqlToQuery(execute.mock.calls[3][0]).params).toEqual([42, 7]);
+    await expect(resolveUnsignedFlag(7, 42)).resolves.toBe(false);
+    expect(query.mock.calls[1][1]).toEqual([41, 7, 1]);
+    expect(query.mock.calls[3][1]).toEqual([42, 7, 1]);
   });
-
-  it("propagates storage failures instead of reporting a successful resolution", async () => {
-    execute.mockRejectedValue(new Error("database unavailable"));
-
-    await expect(resolveVagueReplyFlag(7, 41)).rejects.toThrow("database unavailable");
-    await expect(resolveUnsignedFlag(7, 42)).rejects.toThrow("database unavailable");
+  it("propagates storage failures", async () => {
+    query.mockRejectedValue(new Error("database unavailable"));
+    await expect(resolveVagueReplyFlag(7, 41)).rejects.toMatchObject({ cause: { message: "database unavailable" } });
+    await expect(resolveUnsignedFlag(7, 42)).rejects.toMatchObject({ cause: { message: "database unavailable" } });
   });
-
-  it("normalizes invalid values without allowing an unbounded query", () => {
+  it("normalizes invalid page values", () => {
     expect(normalizeReplyMonitorLimit(undefined, 50)).toBe(50);
     expect(normalizeReplyMonitorLimit(2.9, 50)).toBe(2);
-    expect(normalizeReplyMonitorLimit(Number.NaN, 50)).toBe(50);
+    expect(normalizeReplyMonitorLimit(NaN, 50)).toBe(50);
   });
-
-  it("deactivates only missing Trello threads for the authenticated worker", async () => {
-    execute.mockResolvedValue([{ affectedRows: 2 }]);
-
-    const changed = await deactivateMissingTrelloReplyThreads(7, ["card-a", "card-b"]);
-
-    expect(changed).toBe(2);
-    expect(execute.mock.calls[0]).toHaveLength(1);
-    expect(execute.mock.calls[0][0]).not.toBeTypeOf("string");
+  it("deactivates only missing active Trello threads in the worker's scope", async () => {
+    query.mockResolvedValue({ rowCount: 2, rows: [] });
+    expect(await deactivateMissingTrelloReplyThreads(7, ["a", "b"])).toBe(2);
+    const [configuration, values] = query.mock.calls[0];
+    expect(configuration.text).toContain('"cardId" not in');
+    expect(values).toEqual(expect.arrayContaining([7, "trello", "pending", "overdue", "a", "b"]));
   });
-
-  it("keeps legacy reply evidence columns synchronized during an upsert", async () => {
-    execute.mockResolvedValue([{ affectedRows: 1 }]);
-
-    await upsertReplyThread(7, {
-      source: "trello",
-      cardId: "card-a",
-      cardName: "Card A",
-      cardUrl: "https://trello.com/c/card-a",
-      boardName: "Board",
-      listName: "Doing",
-      lastNonWorkerMsgAt: new Date("2026-08-14T12:00:00Z"),
-      lastNonWorkerAuthor: "Client",
-      lastNonWorkerText: "Please confirm.",
-      lastWorkerReplyAt: null,
-      status: "pending",
-      demerited: false,
-    });
-
-    const [query] = execute.mock.calls[0];
-    expect(execute.mock.calls[0]).toHaveLength(1);
-    expect(query).not.toBeTypeOf("string");
+  it("upserts canonical PG reply evidence under the worker/card/source unique key", async () => {
+    await upsertReplyThread(7, { source: "trello", cardId: "a", cardName: "A", cardUrl: "https://trello.com/c/a",
+      boardName: "Board", listName: "Doing", lastNonWorkerMsgAt: new Date("2026-08-14T12:00:00Z"),
+      lastNonWorkerAuthor: "Client", lastNonWorkerText: "Please confirm.", lastWorkerReplyAt: null,
+      status: "pending", demerited: false });
+    expect(query.mock.calls[0][0].text).toContain('on conflict ("vaId","cardId","source") do update');
+    expect(query.mock.calls[0][1]).toContain("Please confirm.");
   });
 });

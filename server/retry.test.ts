@@ -16,7 +16,7 @@ describe('Retry Mechanism', () => {
       const mockResponse = new Response('success', { status: 200 });
       global.fetch = vi.fn().mockResolvedValue(mockResponse);
 
-      const result = await fetchWithRetry('https://api.example.com/test');
+      const result = await fetchWithRetry('https://api.trello.com/test');
 
       expect(result).toBe(mockResponse);
       expect(global.fetch).toHaveBeenCalledTimes(1);
@@ -25,12 +25,12 @@ describe('Retry Mechanism', () => {
     it('adds a bounded timeout unless the caller supplies a cancellation signal', async () => {
       global.fetch = vi.fn().mockResolvedValue(new Response('success', { status: 200 }));
 
-      await fetchWithRetry('https://api.example.com/default-timeout');
+      await fetchWithRetry('https://api.trello.com/default-timeout');
       const defaultInit = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
       expect(defaultInit.signal).toBeInstanceOf(AbortSignal);
 
       const controller = new AbortController();
-      await fetchWithRetry('https://api.example.com/custom-signal', { signal: controller.signal });
+      await fetchWithRetry('https://api.trello.com/custom-signal', { signal: controller.signal });
       const suppliedInit = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[1][1] as RequestInit;
       expect(suppliedInit.signal).toBe(controller.signal);
     });
@@ -45,7 +45,7 @@ describe('Retry Mechanism', () => {
 
       const onRetry = vi.fn();
 
-      const promise = fetchWithRetry('https://api.example.com/test', undefined, {
+      const promise = fetchWithRetry('https://api.trello.com/test', undefined, {
         maxRetries: 3,
         initialDelayMs: 1000,
         onRetry
@@ -73,7 +73,7 @@ describe('Retry Mechanism', () => {
         .mockResolvedValueOnce(failResponse)
         .mockResolvedValueOnce(successResponse);
 
-      const promise = fetchWithRetry('https://api.example.com/test', undefined, {
+      const promise = fetchWithRetry('https://api.trello.com/test', undefined, {
         maxRetries: 3,
         initialDelayMs: 1000
       });
@@ -90,7 +90,7 @@ describe('Retry Mechanism', () => {
 
       global.fetch = vi.fn().mockResolvedValue(notFoundResponse);
 
-      const result = await fetchWithRetry('https://api.example.com/test', undefined, {
+      const result = await fetchWithRetry('https://api.trello.com/test', undefined, {
         maxRetries: 3
       });
 
@@ -104,7 +104,7 @@ describe('Retry Mechanism', () => {
       global.fetch = vi.fn().mockResolvedValue(failResponse);
       const onRetry = vi.fn();
 
-      const promise = fetchWithRetry('https://api.example.com/test', undefined, {
+      const promise = fetchWithRetry('https://api.trello.com/test', undefined, {
         maxRetries: 3,
         initialDelayMs: 1000,
         backoffMultiplier: 2,
@@ -133,7 +133,7 @@ describe('Retry Mechanism', () => {
       global.fetch = vi.fn().mockResolvedValue(failResponse);
       const onRetry = vi.fn();
 
-      const promise = fetchWithRetry('https://api.example.com/test', undefined, {
+      const promise = fetchWithRetry('https://api.trello.com/test', undefined, {
         maxRetries: 5,
         initialDelayMs: 1000,
         maxDelayMs: 3000,
@@ -156,7 +156,7 @@ describe('Retry Mechanism', () => {
 
       global.fetch = vi.fn().mockResolvedValue(failResponse);
 
-      const promise = fetchWithRetry('https://api.example.com/test', undefined, {
+      const promise = fetchWithRetry('https://api.trello.com/test', undefined, {
         maxRetries: 2,
         initialDelayMs: 100
       });
@@ -167,6 +167,104 @@ describe('Retry Mechanism', () => {
       // Should return the failed response after max retries
       expect(result.status).toBe(429);
       expect(global.fetch).toHaveBeenCalledTimes(3); // Initial + 2 retries
+    });
+
+    it('rejects non-allowlisted destinations before making a request', async () => {
+      global.fetch = vi.fn();
+
+      await expect(fetchWithRetry('https://127.0.0.1/admin')).rejects.toThrow('Outbound URL host is not allowed');
+      await expect(fetchWithRetry('https://api.trello.com.evil.example/test')).rejects.toThrow('Outbound URL host is not allowed');
+      await expect(fetchWithRetry('https://api.trello.com:8443/test')).rejects.toThrow('Outbound URL host is not allowed');
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('validates every redirect destination before following it', async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/admin' } }),
+      );
+
+      await expect(fetchWithRetry('https://api.trello.com/test')).rejects.toThrow('Outbound URL host is not allowed');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('follows redirects between approved chatbot hosts without automatic redirect handling', async () => {
+      const redirectResponse = new Response(null, {
+        status: 302,
+        headers: { location: 'https://gemini.google.com/share/example?token=must-not-leak' },
+      });
+      const finalResponse = new Response('conversation', { status: 200 });
+      const fetchMock = vi.fn().mockResolvedValueOnce(redirectResponse).mockResolvedValueOnce(finalResponse);
+      global.fetch = fetchMock;
+
+      const result = await fetchWithRetry('https://g.co/gemini/share/example', {
+        headers: { Authorization: 'Bearer secret' },
+      });
+
+      expect(result).toBe(finalResponse);
+      expect(global.fetch).toHaveBeenNthCalledWith(
+        1,
+        expect.any(URL),
+        expect.objectContaining({ redirect: 'manual' }),
+      );
+      expect(fetchMock.mock.calls[1][0].toString()).toBe('https://gemini.google.com/share/example');
+      expect(fetchMock.mock.calls[1][1]?.redirect).toBe('manual');
+      expect(new Headers(fetchMock.mock.calls[1][1]?.headers).has('authorization')).toBe(false);
+    });
+
+    it('blocks unapproved cross-origin redirects between otherwise allowed hosts', async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: 'https://chatgpt.com/share/example' } }),
+      );
+
+      await expect(fetchWithRetry('https://claude.ai/share/example')).rejects.toThrow(
+        'Outbound redirect destination is not allowed',
+      );
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not forward mutation bodies or custom headers across approved origins', async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        new Response(null, { status: 307, headers: { location: 'https://gemini.google.com/share/example' } }),
+      );
+
+      await expect(fetchWithRetry('https://g.co/gemini/share/example', {
+        method: 'POST',
+        headers: { 'X-Internal-Secret': 'secret' },
+        body: 'private payload',
+      })).rejects.toThrow('Outbound request cannot redirect across origins');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('strips echoed credentials from an approved cross-origin redirect', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(new Response(null, {
+          status: 302,
+          headers: { location: 'https://gemini.google.com/share/example?ToKeN=secret&x=public' },
+        }))
+        .mockResolvedValueOnce(new Response('conversation', { status: 200 }));
+      global.fetch = fetchMock;
+
+      await fetchWithRetry('https://g.co/gemini/share/example?key=secret', {
+        headers: { 'X-Internal-Secret': 'secret', Accept: 'text/html' },
+      });
+
+      expect(fetchMock.mock.calls[1][0].toString()).toBe('https://gemini.google.com/share/example?x=public');
+      expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('x-internal-secret')).toBeNull();
+      expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('accept')).toBe('text/html');
+    });
+
+    it('rejects credentials reflected into an approved redirect path', async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'https://gemini.google.com/share/secret-value' },
+        }),
+      );
+
+      await expect(fetchWithRetry('https://g.co/gemini/share/example?key=secret-value')).rejects.toThrow(
+        'Outbound redirect reflected a credential',
+      );
+      expect(global.fetch).toHaveBeenCalledTimes(1);
     });
   });
 

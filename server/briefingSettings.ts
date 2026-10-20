@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { appSettings } from "../drizzle/schema";
+import { appSettings } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 
 const clockTime = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/);
@@ -77,7 +77,8 @@ export async function saveBriefingSettings(founderId: number, value: unknown) {
     vaId: null,
     key: briefingSettingsKey(founderId),
     value: JSON.stringify(settings),
-  }).onDuplicateKeyUpdate({
+  }).onConflictDoUpdate({
+    target: appSettings.key,
     set: { value: JSON.stringify(settings), vaId: null },
   });
 

@@ -14,7 +14,7 @@
  */
 
 import { getDb } from '../db';
-import { vaProfiles, timeEntries, atisCardUnderstanding } from '../../drizzle/schema';
+import { vaProfiles, timeEntries, atisCardUnderstanding } from '../../drizzle/schema.postgres';
 import { eq, and, desc } from 'drizzle-orm';
 import { fetchWithRetry } from '../utils/retry';
 

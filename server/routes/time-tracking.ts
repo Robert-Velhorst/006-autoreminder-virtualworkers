@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { getDb } from '../db';
-import { timeEntries, vaProfiles, taskAssignments, atisCards, aptlssPlans, aptlssWaitingReasons, cardStates, trelloCachedCards, users, type User } from '../../drizzle/schema';
+import { timeEntries, vaProfiles, taskAssignments, atisCards, aptlssPlans, aptlssWaitingReasons, cardStates, trelloCachedCards, users, type User } from '../../drizzle/schema.postgres';
 import { eq, and, desc, gte, lte, sql, inArray } from 'drizzle-orm';
 import { requireAuthenticated } from '../middleware/auth';
 import { isManagerPilotWorker } from '../aptlssManagerPilot';
@@ -472,15 +472,15 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
       if (active) return { status: 400, body: { error: 'Timer already active', activeTaskId: active.taskId } };
       const workerVaId = scope.vaIds.includes(user.id) ? user.id : scope.vaIds[0];
       const ownership = timeTrackingOwnership(user, profile?.founderId, workerVaId);
-      const [result] = await tx.insert(timeEntries).values({ taskId, ...ownership, startTime: new Date(), notes });
+      const [entry] = await tx.insert(timeEntries).values({ taskId, ...ownership, startTime: new Date(), notes }).returning();
+      if (!entry) throw new Error("Time entry insert returned no row");
       if (user.role === 'worker' && isManagerPilotWorker(user.id)) {
         await enqueueManagerTask(tx, {
           vaId: user.id,
           trigger: "timer_changed",
-          eventKey: `timer-start:${result.insertId}`,
+          eventKey: `timer-start:${entry.id}`,
         });
       }
-      const [entry] = await tx.select().from(timeEntries).where(eq(timeEntries.id, result.insertId)).limit(1);
       return { status: 200, body: { success: true, entry } };
     });
     res.status(outcome.status).json(outcome.body);
@@ -657,7 +657,7 @@ router.get('/time-tracking/weekly-progress', async (req: any, res: Response) => 
       );
       const actualHours = Math.round(actualMinutes / 60 * 10) / 10;
 
-      const { userWorkingHours } = await import('../../drizzle/schema');
+      const { userWorkingHours } = await import('../../drizzle/schema.postgres');
       const settings = await connection.select()
         .from(userWorkingHours)
         .where(eq(userWorkingHours.userOpenId, user.openId))

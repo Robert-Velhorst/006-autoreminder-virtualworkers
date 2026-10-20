@@ -3,256 +3,219 @@
 ## Target Runtime
 
 The consolidated application requires a persistent Node.js container runtime,
-MySQL, Redis, HTTPS, and WebSocket support. It also runs scheduled work inside
+PostgreSQL, HTTPS, and WebSocket support. Redis is optional and external. It also runs scheduled work inside
 the application process. A static or request-only serverless deployment does
 not preserve the complete runtime contract.
 
-Use `Dockerfile` and `docker-compose.yml` for a single-host deployment, or map
-the same services to a managed container platform. Keep one application
-instance active until scheduled-job locking has been verified on the target
-platform.
-
-For a standby or owned compatibility rehearsal, set `BACKGROUND_JOBS_ENABLED=false`
-in a build that actually supports it. This suppresses the six automatic startup
-workers without weakening login or role checks. It does not make the instance
-read-only or prevent authorized callbacks/manual writes. Keep it away from live
-incoming traffic and compare complete data/schema checkpoints. The normal active
-instance defaults to enabled workers; do not disable its required scheduled work
-as a substitute for delivery acceptance. See
-[Background startup isolation](BACKGROUND_STARTUP_ISOLATION.md). The exact old
-rollback image still needs its own compatibility proof.
-
-The supported single-host public entrypoint is `pnpm docker:public`. It runs
-the application and ngrok in the same Compose network, binds the app and
-database ports to loopback only, and records the current public endpoint in
-`.local/public-dashboard.json`. Because an automatically assigned ngrok URL
-can change after a restart, rerun the command after reboot so the backend and
-Trello callback use the current URL.
-
-Set `NGROK_URL` in `.env.db.local` when the account has more than one endpoint
-or another application already uses the account's default developer domain.
+Use `Dockerfile` and `docker-compose.yml` for deployment on the Hetzner host.
+Compose runs only one application container; PostgreSQL and optional Redis must
+be provisioned separately. Put the application behind the host's HTTPS reverse proxy and point the
+production DNS name and Trello callback at that stable domain. Keep one
+application instance active until scheduled-job locking has been verified on
+the target platform. The application port binds to loopback. Do not expose the
+database or cache publicly; use a private network or loopback-bound host services.
 Public password registration is disabled; existing workers authenticate with
 their registered Trello identity or a separately provisioned local password.
 
-Do not point either obsolete Vercel project at the repository root. A Vercel
-deployment would omit the persistent process, scheduled work, and WebSocket
-runtime required by the platform. Production startup rejects the Vercel
-runtime explicitly so an incomplete frontend cannot be mistaken for an
-operational deployment.
+Set `PUBLIC_URL`, `APP_URL`, and `VITE_FRONTEND_URL` in the same
+`/opt/va-dashboard/.env` file passed to `docker compose --env-file`. All three
+must be the public HTTPS origin (for example `https://dashboard.example.com`),
+without a trailing path; do not leave the localhost defaults from `.env.example`
+in production. Compose uses `PUBLIC_URL` and `TRELLO_WEBHOOK_CALLBACK_URL` for
+origin and callback configuration, so both must also be present in that file.
+If Trello webhooks are enabled, set `TRELLO_WEBHOOK_CALLBACK_URL` to the exact
+URL `https://dashboard.example.com/api/trello-webhook` and configure
+`TRELLO_WEBHOOK_SECRET`. Keep the callback unset if webhooks are not deliberately
+enabled. Production startup rejects missing, non-HTTPS, or mismatched public
+origins and rejects a webhook callback that does not match the public origin and
+exact callback path. It also rejects a callback configured without its signing
+secret, or a signing secret configured without the callback.
+
+## Release and Deployment Gate
+
+Production deployment is started manually from protected `main`. The selected
+release must be a published stable `vMAJOR.MINOR.PATCH` tag whose commit is
+contained in `main`. The workflow verifies the GHCR image's provenance against
+that exact source commit before connecting to the host. The GitHub `production`
+environment requires Robert Velhorst as reviewer and allows him to approve his
+own deployment. The administrator bypass remains enabled as an explicit
+emergency recovery path; administrators can therefore override the configured
+deployment protection. Use that bypass only when the normal deployment gate is
+unavailable and record the reason. Deployments remain restricted to protected
+branches, and the workflow validates these settings before it starts the
+production job.
+
+Configure these four GitHub Actions secrets on the `production` environment;
+they are SSH transport credentials and are separate from the application's
+runtime `.env` on the host:
+
+- `HETZNER_SSH_HOST`: server DNS name or IPv4 address on SSH port 22.
+- `HETZNER_SSH_USER`: dedicated, least-privilege deployment account.
+- `HETZNER_SSH_PRIVATE_KEY`: private key for that account; never commit it or
+  paste it into a pull request or chat.
+- `HETZNER_SSH_KNOWN_HOSTS`: verified host-key line for the server.
+
+The deploy workflow does not provision the host or create `/opt/va-dashboard/.env`.
+Prepare that directory, the runtime environment file, Docker, HTTPS reverse
+proxy, persistent PostgreSQL, backups, and SSH account before dispatching a
+deployment. Do not proceed if host identity or the database restore path has
+not been verified.
+
+The former hosting projects and GitHub integration were retired at the owner's
+request before production cutover. Do not recreate or reconnect them as a
+deployment target: a request-only deployment would omit the persistent process,
+scheduled work, and WebSocket runtime required by the platform. Production
+startup rejects the request-only runtime explicitly so an incomplete frontend cannot
+be mistaken for an operational deployment.
 
 ## Required Secrets
 
 Configure these values in the deployment platform's secret store:
 
-- `DATABASE_URL`: MySQL connection URL.
+- `DATABASE_URL`: PostgreSQL connection URL for the Hetzner runtime.
 - `JWT_SECRET`: newly generated random value of at least 32 characters.
 - `TRELLO_API_KEY`: active Trello API key.
 - `TRELLO_TOKEN`: active Trello member token.
-- `OPENAI_API_KEY`: active OpenAI API key for existing non-APTLSS platform AI
-  features when used, or the explicitly selected `openai-api` manager provider.
-  Subscription-mode startup does not require this key; legacy API-backed
-  features remain unavailable without it. It is never an APTLSS fallback.
-- `REDIS_URL`: authenticated Redis connection URL.
 
-For Docker Compose, also set `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`,
-`MYSQL_USER`, `MYSQL_PASSWORD`, and `REDIS_PASSWORD`. Do not commit `.env`.
+Set `DATABASE_URL` in `.env` to the separately provisioned PostgreSQL service.
+For PostgreSQL installed on the Docker host, use `host.docker.internal`; for
+production, use private networking and add one `sslmode=verify-full` option to
+the URL without an `ssl` override. Node.js then verifies the certificate and
+hostname using its TLS trust configuration. Set `REDIS_URL` only
+when an external Redis service is configured. Do not commit `.env`.
+
+**The production PostgreSQL service and VA Dashboard database do not yet
+exist.** The owner intends to consolidate their GitHub tools on a shared
+open-source PostgreSQL service. Provision the service with private network
+access, TLS, automated backups, and tested recovery. Create a separate VA
+Dashboard database and least-privilege role; other apps must have separate
+databases and credentials. No legacy data source or import plan has been
+identified. Apply this app's migrations to the new database, then test backup,
+restore, application behavior, and the live Hetzner runtime. Do not run a
+legacy transfer unless an actual source containing VA Dashboard data is
+identified and its import is explicitly approved.
+
+### MySQL-to-PostgreSQL Transfer Rehearsal (Conditional)
+
+This procedure is retained for a possible future use only. It is not applicable
+to the new PostgreSQL installation unless an actual MySQL source containing VA
+Dashboard data is identified and an import is explicitly approved.
+
+Use a trusted operator shell, not the app container. Configure
+`LEGACY_MYSQL_DATABASE_URL` with a read-only MySQL account and `DATABASE_URL`
+with the empty PostgreSQL target that has already received the Drizzle
+migrations. Do not put the legacy URL in the app's runtime secret set.
+
+```powershell
+$env:LEGACY_MYSQL_DATABASE_URL = 'mysql://readonly_user:<url-encoded-password>@legacy-host:3306/legacy_database'
+$env:DATABASE_URL = 'postgresql://migration_user:<url-encoded-password>@postgres-host:5432/va_dashboard'
+pnpm db:migrate
+pnpm db:migrate:mysql-to-postgres preflight
+```
+
+Preflight is read-only. It requires matching source/target tables, columns, and
+primary keys; InnoDB source tables; an empty PostgreSQL application schema; and
+only the three explicitly recognized PostgreSQL-only tables. Fix every
+reported mismatch before proceeding. Take and restore-test a source backup
+first, then rehearse against that restored copy.
+
+The transfer sets the MySQL session timezone to UTC before opening its
+consistent snapshot. MySQL `TIMESTAMP` values are therefore read in UTC and
+stored as UTC wall-clock values in the PostgreSQL schema's `timestamp without
+time zone` columns. `DATETIME` and `DATE` values retain their stored wall-clock
+or calendar values. Before cutover, confirm that application code and reports
+interpret these timestamp columns consistently; do not apply an additional
+timezone conversion to the imported rows.
+
+For the rehearsed cutover only, stop app writes to the target and run:
+
+```powershell
+pnpm db:migrate:mysql-to-postgres copy --execute
+```
+
+The copy holds one PostgreSQL transaction, locks target application tables,
+reads the source from a consistent read-only snapshot, and rolls back all target
+rows if a copy or reconciliation check fails. It rejects MySQL zero-dates and
+unsupported boolean values instead of guessing. Each copied table is checked
+for exact row count and a normalized SHA-256 digest of every row. Save the
+resulting report with the cutover record; it contains counts and hashes, not
+credentials. Keep the source and its backups intact through the rollback
+window. This command has not been accepted against the real source yet.
 
 The server accepts the old local names `TrelloAPIKey` and `TrelloAPIToken`
 during transition, but production configuration should use the canonical
 uppercase names.
 
-`OPENAI_REQUEST_TIMEOUT_MS` is optional. It defaults to 120 seconds and is
-capped at five minutes so an unavailable provider cannot hold operator work
-indefinitely.
-
-## APTLSS subscription review
-
-APTLSS defaults to `APTLSS_MANAGER_PROVIDER=codex-subscription`, which uses the
-official Codex CLI authenticated through ChatGPT on a separately running host
-runner. It begins with Luna low and escalates only as needed to medium or high.
-There is no OpenAI API fallback. If the host runner or subscription is
-unavailable, deterministic checks remain available and the semantic review is
-reported as unavailable.
-
-The host runner must stay online and authenticated. For the shadow-pilot
-deployment, provide `APTLSS_CODEX_QUEUE_DIR` in the app and mount only the
-private transport queue using `deployment/codex-subscription.yml`; never mount
-the Codex home directory, authentication files, or runner working directory.
-Set `APTLSS_MANAGER_PILOT_WORKER_IDS` to exactly one explicitly selected
-numeric worker ID. An empty allowlist keeps the manager disabled. The pilot is
-shadow-only and does not send messages or mutate Trello.
-
 ## Optional Integrations
 
+- AI provider API keys are optional and are not enabled by default. The
+  self-hosted server does not currently authenticate with Codex subscription
+  credentials; do not assume subscription-backed AI is available in Hetzner.
+  AI-dependent features are not part of the production acceptance gate unless
+  an explicitly supported provider is configured and its behavior is verified.
+- `REDIS_URL` is optional and enables shared cache/realtime coordination when
+  an external Redis service is provisioned.
 - `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, and
-  `NOTIFICATIONS_ENABLED=true` enable outbound email notifications and
-  automated Trello comments.
+  `NOTIFICATIONS_ENABLED=true` explicitly enables outbound email and automated Trello-comment notifications. Notifications remain disabled when unset or set to any other value, including in production.
 - `TRELLO_WEBHOOK_CALLBACK_URL` and `TRELLO_WEBHOOK_SECRET` enable verified
-  Trello push updates after a public HTTPS domain exists.
+  Trello push updates after a public HTTPS domain exists. Set the callback to
+  the exact `https://<domain>/api/trello-webhook` URL. The secret is the Trello
+  app secret used to verify `X-Trello-Webhook`; unsigned callbacks are rejected.
+  Webhook registration, deletion, manual comments, and check-ins require an admin.
 - `SCHEDULED_TASK_SECRET` protects explicitly exposed scheduled-task routes.
-- Founder decision deadline alerts require migration `0049` before starting the
-  updated server. They persist only in the admin's in-app notification history;
-  `FOUNDER_DECISION_ALERTS_ENABLED=false` disables the periodic scan. They do
-  not send email or perform Trello actions.
 
-Do not migrate the legacy MongoDB URL, Twilio credentials, React frontend URL,
+Do not migrate legacy database URLs, Twilio credentials, the old frontend URL,
 or old reminder timing variables. They belong to the retired split
 application, not the consolidated runtime.
 
 ## Verification Gate
 
-Before traffic is moved:
+Before the first production traffic is enabled:
 
-1. Back up the source database.
-2. Deploy MySQL and Redis with persistent storage.
-3. Apply the canonical Drizzle migrations. Docker Compose runs the one-shot
-   `migrate` service and starts the app only after it succeeds.
-4. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and
+1. Provision the shared PostgreSQL service with persistent storage, private
+   network access, TLS, automated backups, and a tested restore procedure.
+   Create a dedicated VA Dashboard database and least-privilege role; never
+   reuse another app's role or database.
+2. Apply the PostgreSQL Drizzle migrations from a trusted administration
+   environment using `pnpm db:migrate`; Compose does not start a migration container.
+3. Do not transfer legacy data unless an actual source containing VA Dashboard
+   data is identified and its import is approved. If the source is confirmed as
+   MySQL, follow the conditional rehearsal below; otherwise design and review a
+   source-specific transfer before touching data.
+4. Before starting the application, verify that the target has its initial
+   founder account and the authentication records required by the application.
+   For a fresh/no-import target, execute a documented, one-time,
+   operator-only bootstrap after migrations to create the founder account and
+   its required `users` and `va_profiles` rows. Do not rely on public
+   registration: production rejects `/api/auth/register`. If no supported
+   bootstrap path exists, implement and validate one before deployment. For an
+   approved import, verify that the imported account and profile records are
+   present and usable. Verify founder/admin/worker role boundaries without
+   local auth bypass, and retain only redacted evidence. Do not start the
+   production application until this bootstrap/import check succeeds.
+5. Test the PostgreSQL backup and restore, verify sequences and app read/write
+   behavior, and document the exact rollback point before any traffic move.
+6. Start the application with `NODE_ENV=production`, `HOST=0.0.0.0`, and
    `LOCAL_AUTH_BYPASS=false`.
-5. Confirm `/api/health`, authenticated founder/admin/worker access,
-   WebSockets, scheduled jobs, Trello, Gmail, Drive, and other required legacy
-   platform AI features. Separately verify the Codex host runner and
-   APTLSS subscription review without enabling active plan changes.
-6. Confirm no unapproved Trello comment, move, email, or other external action
+7. Confirm the public origin variables resolve to the stable HTTPS domain and,
+   when enabled, the Trello callback is the exact configured HTTPS URL.
+8. Confirm `/api/health` and `/api/health/ready` report healthy only after the
+   current PostgreSQL migration is applied; confirm `/api/health/live` remains
+   independent of database availability. Then verify authenticated
+   founder/admin/worker access, WebSockets, scheduled jobs, Trello, and each
+   optional integration deliberately configured for production. Do not mark an
+   unconfigured integration as verified or treat an unavailable optional
+   integration as a successful smoke test.
+9. Confirm no unapproved Trello comment, move, email, or other external action
    occurs during smoke testing.
-7. Point the public domain and Trello webhook callback at the new runtime.
-8. Retain the prior build and database snapshot through the rollback window.
+10. Point the public domain and Trello webhook callback at the new runtime.
+11. Retain tested database backups and the prior build through the rollback
+    window. If data was imported, retain its source through acceptance.
 
-### Session-revocation rollback constraint
+Compose does not provision or alter database storage. Keep verified database
+backups through the public verification gate and rollback window.
 
-The pre-`0054_revoked_sessions` application verifies JWT signatures but does
-not check the revocation table. If it is exposed to user traffic after the
-newer application has accepted logouts, a logged-out but unexpired cookie can
-become valid again. Therefore the untouched prior image is not an acceptable
-security-equivalent live fallback. Before public cutover, prepare and verify a
-fallback based on the prior application that includes the session-ID issuance,
-revocation lookup, and logout revocation behavior, or keep rollback isolated
-from user traffic until that compatibility fix is applied. Test both directions
-against the full restored dataset and verify that revoked cookies remain
-rejected after each switch.
-
-Do not rotate `JWT_SECRET` as a shortcut: it also derives the encryption key
-for stored Google refresh tokens. A future key rotation must first migrate and
-verify those encrypted credentials with an explicit key-versioned procedure.
-
-The canonical role enum is currently `admin`, `worker`, and `user`. The founder
-portal uses an admin-role account with founder-owned worker-profile scoping;
-it is not a fourth, independently permissioned founder role. Verify the actual
-ownership boundary and wrong-role rejection, and do not describe a separate
-founder login as proof of distinct founder/admin privileges. If deployment
-requires founder accounts without global administrative access, that remains
-an explicit authorization-model change before those accounts are provisioned.
-
-The configured candidate has an isolated HTTPS/MySQL/authenticated-Redis
-rehearsal, including real signed-cookie logins, wrong-role and cross-site
-rejection, WebSocket authentication/origin/worker-room checks, compiled role
-pages and existing-session survival through an application restart. The Redis
-recovery candidate also recovers after an observed 45-second Redis outage.
-The subsequent cold-start candidate preserves sockets when Redis is missing
-at startup, restores actual cross-process worker-room delivery when Redis returns,
-and shuts down normally with Redis unavailable. Application publications are
-not queued for replay; only fixed internal subscriber registrations wait for Redis.
-See [the rehearsal guide](PRODUCTION_RUNTIME_REHEARSAL.md) and the dated
-verification dossier for exact image/report identities. Self-signed fixture TLS,
-synthetic accounts and disabled external jobs do not prove live providers,
-public TLS, scheduled-job delivery or a full-data application rollback.
-
-Before reusing an existing database volume, create a logical SQL backup and
-keep the previous stopped database container until the public verification
-gate passes. `MYSQL_VOLUME_NAME` selects the preserved volume explicitly.
-
-For the established Windows operational database, use
-`node scripts/aptlss-pilot-backup.mjs --native`. Docker-exec dumping is deliberately
-refused: terminating its Windows CLI does not prove that the remote dump stopped.
-The native producer is awaited and terminated on timeout or stream failure. It
-uses an exclusive output file, a one-hour deadline and a 12 GiB free-space reserve,
-checked throughout the stream. Failed SQL files remain for inspection and never
-receive a successful manifest. Successful output is flushed, checked for its final
-completion marker and recorded with its SHA-256, duration, source migration
-identities and the observed rollback image. Credentials are passed only to the
-native client's environment; unrelated provider secrets are not inherited.
-
-The source must be the known loopback database on port 3307, with InnoDB tables.
-Normal writes continue under mysqldump's single-transaction snapshot. Do not run
-DDL or migrations during the backup. The before/after table-name and migration
-inventories detect inventory changes but cannot prove that an untracked ALTER or
-an alteration followed by reversal did not occur. A later source row count is
-not the same snapshot as the dump and must not be presented as exact preservation
-proof. Compare original records within the isolated restored snapshot instead.
-
-Record-preservation fingerprints now stream table rows in a read-only transaction
-and retain only per-row digests, with the existing checkpoint format unchanged.
-They are not backups. The native restore utility now checks SQL files in 64 KiB
-chunks and rechecks the same open file during import. It requires the isolated
-server on loopback port 33317 to have `event_scheduler=DISABLED` at startup and
-requires complete event visibility. `OFF` is insufficient because imported SQL
-could re-enable it. Native client commands, login-path defaults, local file loading
-and automatic reconnection are disabled. Import has a 30-minute timeout.
-Before creating the isolated database, restore requires free disk space at least
-equal to the SQL file's size plus a 12 GiB reserve. It rechecks that reserve
-before input, at bounded stream intervals, every second while the client is
-active (including input backpressure), and after successful client exit.
-A resource failure terminates and awaits only the owned native client, prevents
-acceptance, and retains the partial isolated database. It never clears other
-backups or databases to make space. This guard assumes the owned native data
-directory and backup directory are on the same filesystem; verify that placement.
-
-Any restored event definition prevents acceptance, even though it cannot execute
-on that server. Failed restores remain available for inspection; they are not
-silently deleted or retried over an existing database. Checkpoint capture accepts
-an optional JSON filename directly under `.local/pilot`; use a new name for each
-rehearsal. Preservation reports are timestamped and never overwrite older proof.
-For a current backup, set `APTLSS_REHEARSAL_SOURCE_MANIFEST` to its manifest
-basename when running the native migration assertions. This uses the backup's
-captured source identities rather than overwriting the September 5 ledger.
-The restored/fresh rerun checks allow up to 30 minutes only when that current
-manifest is explicitly supplied, because they hash every row twice. Ordinary
-historical checks retain their original 60-second deadline.
-
-The native assertions now cover the current lineage through 0052, including
-generated review columns. An isolated restore of the 12.5 MB September 5 backup
-and subsequent migration/preservation checks passed. This is historical-data
-regression evidence, not proof that today's multi-gigabyte production database
-can be restored within the rollback window. That current-size rehearsal remains
-mandatory before cutover.
-
-On a current-size restore, generated-column verification uses bounded indexed
-keyset batches rather than one unbounded aggregate over the complete JSON history.
-Each stored generated value is compared with its checked-in canonical expression
-for every record. Coverage must equal the transaction's inventory; mismatches,
-missing records, invalid cursors and bounded query failures prevent acceptance.
-This is not sampling and does not replace whole-table schema/data/ledger
-fingerprints before and after an idempotent migration rerun. Retain failed
-rehearsal reports as well as the final passing report.
-
-The current operational backup captured on 2026-09-30 contains 14,441,189,811
-bytes and 53 source migration identities, and completed in 1,417,893 ms.
-Its verified SHA-256 is
-`704bd569e39d4ab2cc81ff9c6a5239e04964e301830735a18f15d78c80b81325`.
-The isolated full-size restore subsequently completed in 1,684,982 ms with the
-same hash and byte count and the scheduler still startup-DISABLED. This establishes
-database restoration, not a measured application rollback. The subsequent
-checkpoint comparison preserved all 94,674 original records across 132 data
-tables, with their original selected columns. Schema and migration-rerun assertions
-have their separate reports; they do not replace public application verification.
-Retain the private manifest
-`.local/pilot/backup-2026-09-30T23-45-47-073Z.json` and its SQL file locally;
-do not include them in source exports or CI artifacts.
-
-The new additive lineage through `0053_manager_history_checks` has separate
-isolated SQL verification. The full-size restoration and preservation results
-above are for the previous 53-identity lineage; they must not be relabeled as
-proof for migration 0053. A subsequent October 1 rehearsal applied migration
-0053 to the retained full-size restore and passed all 11 native assertions with
-no failures or skips, including complete schema, record-digest and migration-ledger
-preservation on rerun. Its separate receipt is
-`artifacts/production-current-restore-history-0053-20261001.json`.
-The restored ledger retains 56 historical identities; the clean canonical ledger
-contains 54. These historical identities must not be removed to make the counts
-equal. This is database migration proof, not full-data application rollback. See
-[assessment history storage](APTLSS_HISTORY_STORAGE.md) for compatibility,
-integrity checks and the required full-run materialization before rolling back
-to an older binary. No historical full runs are deleted by this feature.
-
-Only disconnect or delete the obsolete Vercel projects after this gate passes
-against the public replacement.
+The former hosting projects were removed before this gate passed. That removal
+does not constitute a production cutover or acceptance of the Hetzner runtime;
+complete every migration, deployment, and rollback check above before moving
+production traffic.

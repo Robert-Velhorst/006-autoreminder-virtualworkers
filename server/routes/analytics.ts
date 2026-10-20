@@ -1,7 +1,7 @@
 import { Router, type Request } from 'express';
 import { and, eq, inArray } from 'drizzle-orm';
 import { getDb } from '../db';
-import { taskAssignments, vaProfiles, timeEntries } from '../../drizzle/schema';
+import { taskAssignments, vaProfiles, timeEntries } from '../../drizzle/schema.postgres';
 import { requireActiveWorkerProfile, requireAuthenticated, requestUser } from '../middleware/auth';
 import { attributeTimeEntriesToProfiles, loadAccountTimeEntries } from '../timeEntryOwnership';
 import { selectWorkerProfile } from '../workerOperatorContext';

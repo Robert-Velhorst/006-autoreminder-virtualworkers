@@ -25,7 +25,7 @@ import { trelloRouter, aptlssRouter, replyMonitorRouter } from "./routes/manus-t
 import { aggregateCardContext, formatContextForAI } from "./services/context-aggregator";
 import { websocketService } from "./services/websocket";
 import { getDb } from "./db";
-import { taskAssignments, vaProfiles } from "../drizzle/schema";
+import { taskAssignments, vaProfiles } from "../drizzle/schema.postgres";
 import { eq, inArray, and } from "drizzle-orm";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";

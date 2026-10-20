@@ -3,10 +3,10 @@ import { fork, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq, inArray } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/mysql2";
-import { createPool, type Pool, type RowDataPacket } from "mysql2/promise";
-import * as schema from "../drizzle/schema";
-import { assertIntegrationDatabase } from "../scripts/run-mysql-integration.mjs";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool, type PoolClient } from "pg";
+import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
+import * as schema from "../drizzle/schema.postgres";
 
 const controls = vi.hoisted(() => ({ db: undefined as any }));
 vi.mock("./db", () => ({ getDb: async () => controls.db }));
@@ -19,7 +19,7 @@ function deferred() {
 }
 
 const url = process.env.APTLSS_TEST_DATABASE_URL;
-describe.skipIf(!url)("scheduled job runtime real MySQL ownership", { timeout: 30_000, hookTimeout: 30_000 }, () => {
+describe.skipIf(!url)("scheduled job runtime real PostgreSQL ownership", { timeout: 30_000 }, () => {
   let pool: Pool;
   let db: ReturnType<typeof drizzle<typeof schema>>;
   const owned: string[] = [];
@@ -29,17 +29,16 @@ describe.skipIf(!url)("scheduled job runtime real MySQL ownership", { timeout: 3
   const gate = () => { const value = deferred(); gates.push(value); return value; };
 
   beforeAll(async () => {
-    assertIntegrationDatabase(url);
-    pool = createPool({ uri: url!, connectionLimit: 8, timezone: "Z", connectTimeout: 10_000 });
-    db = drizzle(pool, { schema, mode: "default" });
+    requireIsolatedPostgresTestDatabase(url, process.env.NODE_ENV === "production");
+    pool = new Pool({ connectionString: url!, max: 8, connectionTimeoutMillis: 10_000 });
+    db = drizzle(pool, { schema });
     controls.db = db;
-    const [identity] = await pool.query<RowDataPacket[]>("SELECT DATABASE() AS name, VERSION() AS version");
+    const { rows: identity } = await pool.query("SELECT current_database() AS name, current_setting('server_version') AS version");
     expect(identity[0].name).toBe(new URL(url!).pathname.slice(1));
-    expect(identity[0].version).toMatch(/^8\./);
-    const [tables] = await pool.query<RowDataPacket[]>(`SELECT ENGINE AS engine FROM information_schema.TABLES
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('scheduled_job_leases', 'scheduled_job_runs')`);
+    expect(identity[0].version).toMatch(/^18\./);
+    const { rows: tables } = await pool.query(`SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name IN ('scheduled_job_leases', 'scheduled_job_runs')`);
     expect(tables).toHaveLength(2);
-    expect(tables.every(row => row.engine === "InnoDB")).toBe(true);
   });
   afterEach(async () => {
     vi.useRealTimers();
@@ -83,9 +82,21 @@ describe.skipIf(!url)("scheduled job runtime real MySQL ownership", { timeout: 3
   it("rechecks completed work after a stale preflight but before invoking its callback", async () => {
     const jobKey = key(), stale = gate(), release = gate();
     controls.db = new Proxy(db, { get(target, property) {
-      if (property === "execute") return async (statement: unknown) => {
-        stale.resolve(); await release.promise;
-        return target.execute(statement as any);
+      if (property === "insert") return (...args: Parameters<typeof target.insert>) => {
+        const operation = target.insert(...args);
+        return new Proxy(operation, { get(insert, key) {
+          if (key === "values") return (...values: unknown[]) => {
+            const query = (insert.values as (...v: unknown[]) => any)(...values);
+            return new Proxy(query, { get(builder, field) {
+              if (field === "onConflictDoUpdate") return (configuration: unknown) => ({ then: async (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) => {
+                stale.resolve(); await release.promise;
+                return builder.onConflictDoUpdate(configuration).then(resolve, reject);
+              } });
+              const value = Reflect.get(builder, field); return typeof value === "function" ? value.bind(builder) : value;
+            } });
+          };
+          const value = Reflect.get(insert, key); return typeof value === "function" ? value.bind(insert) : value;
+        } });
       };
       const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
     } });
@@ -200,8 +211,8 @@ describe.skipIf(!url)("scheduled job runtime real MySQL ownership", { timeout: 3
   });
 
   it("uses one pool connection for eligibility and transactional ownership checkpoints", async () => {
-    const singlePool = createPool({ uri: url!, connectionLimit: 1, timezone: "Z", connectTimeout: 5_000 });
-    const singleDb = drizzle(singlePool, { schema, mode: "default" });
+    const singlePool = new Pool({ connectionString: url!, max: 1, connectionTimeoutMillis: 5_000 });
+    const singleDb = drizzle(singlePool, { schema });
     const jobKey = key();
     controls.db = singleDb;
     try {
@@ -274,9 +285,21 @@ describe.skipIf(!url)("scheduled job runtime real MySQL ownership", { timeout: 3
     const jobKey = key(), stale = gate(), release = gate();
     let due = true;
     controls.db = new Proxy(db, { get(target, property) {
-      if (property === "execute") return async (statement: unknown) => {
-        stale.resolve(); await release.promise;
-        return target.execute(statement as any);
+      if (property === "insert") return (...args: Parameters<typeof target.insert>) => {
+        const operation = target.insert(...args);
+        return new Proxy(operation, { get(insert, key) {
+          if (key === "values") return (...values: unknown[]) => {
+            const query = (insert.values as (...v: unknown[]) => any)(...values);
+            return new Proxy(query, { get(builder, field) {
+              if (field === "onConflictDoUpdate") return (configuration: unknown) => ({ then: async (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) => {
+                stale.resolve(); await release.promise;
+                return builder.onConflictDoUpdate(configuration).then(resolve, reject);
+              } });
+              const value = Reflect.get(builder, field); return typeof value === "function" ? value.bind(builder) : value;
+            } });
+          };
+          const value = Reflect.get(insert, key); return typeof value === "function" ? value.bind(insert) : value;
+        } });
       };
       const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
     } });

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../db';
-import { generationJobs, generationItems, scheduledJobs, userWorkingHours, holidays, vaProfiles, taskAssignments, taskDependencies, clients } from '../../drizzle/schema';
+import { generationJobs, generationItems, scheduledJobs, userWorkingHours, holidays, vaProfiles, taskAssignments, taskDependencies, clients } from '../../drizzle/schema.postgres';
 import { eq, desc, and, inArray } from 'drizzle-orm';
 import { fetchWithRetry } from '../utils/retry';
 import { getCachedTasks, setCachedTasks, invalidateCache } from '../services/trello-cache';

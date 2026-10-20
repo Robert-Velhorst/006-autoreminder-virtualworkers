@@ -3,7 +3,7 @@
  *
  * Three-tier caching strategy:
  *   L1 — Redis (distributed, survives restarts, shared across instances)
- *   L2 — MySQL via Drizzle ORM (persistent, single-instance fallback)
+ *   L2 — PostgreSQL via Drizzle ORM (persistent, single-instance fallback)
  *   L3 — In-process Map (test environment only)
  *
  * If REDIS_URL is not set, L1 is skipped transparently.
@@ -17,7 +17,7 @@ import {
   trelloCachedTasks, 
   trelloCachedBoards, 
   trelloCachedCards 
-} from '../../drizzle/schema';
+} from '../../drizzle/schema.postgres';
 import { eq, and, lt } from 'drizzle-orm';
 
 // ---------------------------------------------------------------------------
@@ -194,7 +194,7 @@ function resetMemoryCacheForNewTest(): void {
 
 /**
  * Get cached tasks for a user
- * Read order: Redis (L1) → MySQL (L2) → in-process Map (L3/test)
+ * Read order: Redis (L1) → PostgreSQL (L2) → in-process Map (L3/test)
  */
 export async function getCachedTasks(
   userId: number,
@@ -243,7 +243,7 @@ export async function getCachedTasks(
     return cachedTasks.data;
   }
 
-  // --- L2: MySQL ---
+  // --- L2: PostgreSQL ---
   const now = new Date();
 
   // Check if cache exists and is valid
@@ -313,7 +313,7 @@ export async function getCachedTasks(
 
 /**
  * Set cached tasks for a user
- * Write order: Redis (L1) + MySQL (L2) in parallel, or in-process Map (L3/test)
+ * Write order: Redis (L1) + PostgreSQL (L2) in parallel, or in-process Map (L3/test)
  */
 export async function setCachedTasks(
   userId: number,

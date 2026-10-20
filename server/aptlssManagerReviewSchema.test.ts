@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { getTableConfig } from "drizzle-orm/mysql-core";
-import * as schema from "../drizzle/schema";
+import { getTableConfig } from "drizzle-orm/pg-core";
+import * as schema from "../drizzle/schema.postgres";
 
 describe("manager review history and scoped correction schema", () => {
   it("provides append-only trial start/close events with immutable run boundaries", () => {

@@ -4,8 +4,8 @@ import {
   aptlssManagerQueue,
   aptlssManagerQueueEvents,
   aptlssManagerQueueSlots,
-} from "../drizzle/aptlssManagerQueueSchema";
-import { users, aptlssManagerState, vaProfiles } from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
+import { users, aptlssManagerState, vaProfiles } from "../drizzle/schema.postgres";
 import type { getDb } from "./db";
 import { isManagerPilotWorker, managerPilotEnabled, managerPilotWorkerIds } from "./aptlssManagerPilot";
 
@@ -71,10 +71,7 @@ export async function retryQueueTransaction<T>(
           cause?: unknown;
         };
         retryable ||=
-          item.errno === 1213 ||
-          item.errno === 1205 ||
-          item.code === "ER_LOCK_DEADLOCK" ||
-          item.code === "ER_LOCK_WAIT_TIMEOUT";
+          item.code === "40P01" || item.code === "40001" || item.code === "55P03";
         cause = item.cause;
       }
       if (!retryable || attempt >= 2) throw error;
@@ -182,12 +179,10 @@ export function queueFailed(row: QueueState, now: Date): QueueState {
 }
 
 async function databaseNow(db: ManagerQueueConnection) {
-  const [rows] = await db.execute(
-    sql`SELECT UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS nowMs`
+  const result = await db.execute<{ nowMs: string | number }>(
+    sql`SELECT EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS "nowMs"`
   );
-  return new Date(
-    Number((rows as unknown as Array<{ nowMs: string | number }>)[0].nowMs)
-  );
+  return new Date(Number(result.rows[0].nowMs));
 }
 const eligible = () =>
   and(
@@ -244,7 +239,7 @@ export async function enqueueManagerTask(
   await tx
     .insert(aptlssManagerQueue)
     .values({ vaId: event.vaId })
-    .onDuplicateKeyUpdate({ set: { vaId: event.vaId } });
+    .onConflictDoUpdate({ target: aptlssManagerQueue.vaId, set: { vaId: event.vaId } });
   const [row] = await tx
     .select()
     .from(aptlssManagerQueue)

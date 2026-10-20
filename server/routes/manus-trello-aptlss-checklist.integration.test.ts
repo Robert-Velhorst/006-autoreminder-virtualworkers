@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { and, eq } from "drizzle-orm";
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
 import { createPool, type Pool, type RowDataPacket } from "mysql2/promise";
-import * as schema from "../../drizzle/schema";
+import * as schema from "../../drizzle/schema.postgres";
 import type { TrpcContext } from "../_core/context";
 
 const controls = vi.hoisted(() => ({

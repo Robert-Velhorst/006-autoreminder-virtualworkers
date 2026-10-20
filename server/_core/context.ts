@@ -1,5 +1,5 @@
 import type { CreateExpressContextOptions } from "@trpc/server/adapters/express";
-import type { User } from "../../drizzle/schema";
+import type { User } from "../../drizzle/schema.postgres";
 import { TRPCError } from "@trpc/server";
 import { DATABASE_UNAVAILABLE_MESSAGE } from "../databaseAvailability";
 import { resolveRequestAuthentication, type AuthenticatedRequest } from "./requestAuthentication";

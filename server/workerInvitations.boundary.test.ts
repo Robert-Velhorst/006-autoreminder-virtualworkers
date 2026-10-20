@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./db", () => ({ getDb: mocks.getDb }));
 vi.mock("bcryptjs", () => ({ default: { hash: mocks.hash } }));
 
-import { users, vaProfiles, workerInvitations } from "../drizzle/schema";
+import { users, vaProfiles, workerInvitations } from "../drizzle/schema.postgres";
 import {
   acceptWorkerInvitation,
   createWorkerInvitation,
@@ -117,7 +117,7 @@ function createAcceptanceDatabase(fixture: InvitationFixture, token: string) {
             Object.assign(target, values);
             writes.push({ table, values });
           }
-          return [{ affectedRows: eligible ? 1 : 0 }];
+          return { rowCount: eligible ? 1 : 0 };
         },
       }),
     }),
@@ -192,7 +192,7 @@ describe("worker invitation trust boundary", () => {
         inserted.set(table, structuredClone(values));
         nextId += 1;
         const id = nextId;
-        return { $returningId: async () => [{ id }] };
+        return { returning: async () => [{ id }] };
       },
     });
     const tx = { insert: makeInsert };

@@ -12,7 +12,7 @@ import {
   vaProfiles,
   holidays,
   users,
-} from '../../drizzle/schema';
+} from '../../drizzle/schema.postgres';
 import { sql } from 'drizzle-orm';
 
 interface CacheWarmingStats {

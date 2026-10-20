@@ -1,8 +1,8 @@
 import type { Request } from "express";
 import express from "express";
 import request from "supertest";
-import { aptlssManagerChecks, aptlssManagerRuns, aptlssManagerState, taskAssignments, timeEntries, trelloCachedCards, users, vaProfiles } from "../../drizzle/schema";
-import type { User } from "../../drizzle/schema";
+import { aptlssManagerChecks, aptlssManagerRuns, aptlssManagerState, taskAssignments, timeEntries, trelloCachedCards, users, vaProfiles } from "../../drizzle/schema.postgres";
+import type { User } from "../../drizzle/schema.postgres";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { managerHistoryHash } from "../aptlssManagerHistory";
 import { WORKER_EXECUTION_HOLD_MESSAGE } from "../../shared/aptlssManager";
@@ -85,7 +85,7 @@ function database(rowsByTable: Map<unknown, Row[]>) {
         set: (values: Row) => { updates.push({ table, values }); return query; },
         where: (condition: unknown) => {
           const affectedRows = (rowsByTable.get(table) ?? []).filter(row => matchesWhere(row, condition)).length;
-          return Promise.resolve([{ affectedRows }]);
+          return Promise.resolve({ rowCount: affectedRows });
         },
       };
       return query;
@@ -93,7 +93,7 @@ function database(rowsByTable: Map<unknown, Row[]>) {
     insert: vi.fn((table: unknown) => ({
       values: (values: Row) => {
         inserts.push({ table, values });
-        return Promise.resolve([{ insertId: 1 }]);
+        return { returning: async () => [{ id: 1 }] };
       },
     })),
   };

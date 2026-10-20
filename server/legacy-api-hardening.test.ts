@@ -11,7 +11,7 @@ import aptlssRoutes from './routes/aptlss';
 import trelloBoardsRoutes from './routes/trello-boards';
 import performanceRoutes from './routes/performance-optimization';
 import { readFileSync } from 'node:fs';
-import { vaProfiles } from '../drizzle/schema';
+import { vaProfiles } from '../drizzle/schema.postgres';
 import { vi } from 'vitest';
 
 const dbMocks = vi.hoisted(() => ({ getDb: vi.fn() }));

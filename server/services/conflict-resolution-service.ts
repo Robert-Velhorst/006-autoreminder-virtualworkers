@@ -4,7 +4,7 @@
  */
 
 import { getDb } from '../db';
-import { taskAssignments, taskScheduleHistory } from '../../drizzle/schema';
+import { taskAssignments, taskScheduleHistory } from '../../drizzle/schema.postgres';
 import { eq, and, gte, lte, ne } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { log } from '../utils/logger';
@@ -250,7 +250,7 @@ export async function getConflictSettings(userId: number, userOpenId: string) {
     throw new Error('Database not available');
   }
 
-  const { conflictDetectionSettings } = await import('../../drizzle/schema');
+  const { conflictDetectionSettings } = await import('../../drizzle/schema.postgres');
 
   const settings = await db
     .select()

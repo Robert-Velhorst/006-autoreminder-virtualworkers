@@ -1,7 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { aptlssManagerChecks, aptlssManagerRuns, aptlssManagerState, aptlssPlans, atisCards, cardStates, taskAssignments, timeEntries, trelloCachedCards, users, vaProfiles } from "../../drizzle/schema";
+import { aptlssManagerChecks, aptlssManagerRuns, aptlssManagerState, aptlssPlans, atisCards, cardStates, taskAssignments, timeEntries, trelloCachedCards, users, vaProfiles } from "../../drizzle/schema.postgres";
 import { managerHistoryHash } from "../aptlssManagerHistory";
 import { WORKER_EXECUTION_HOLD_MESSAGE } from "../../shared/aptlssManager";
 
@@ -157,7 +157,7 @@ function makeDb(fixture: Fixture = {}) {
         return query;
       }),
       insert: vi.fn(() => ({
-        values: vi.fn(async (values: Record<string, unknown>) => {
+        values: vi.fn((values: Record<string, unknown>) => ({ returning: vi.fn(async () => {
           insertedValues.push(values);
           const inserted: Entry = {
             id: nextEntryId++,
@@ -170,8 +170,8 @@ function makeDb(fixture: Fixture = {}) {
             notes: typeof values.notes === "string" ? values.notes : null,
           };
           entries.push(inserted);
-          return [{ insertId: inserted.id }];
-        }),
+          return [{ ...values, ...inserted }];
+        }) })),
       })),
       update: vi.fn(() => ({
         set: vi.fn((values: Record<string, unknown>) => ({

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { appSettings, users } from "../drizzle/schema";
+import { appSettings, users } from "../drizzle/schema.postgres";
 import type { getDb } from "./db";
 import { assertManagerExecutionAllowed } from "./aptlssManagerReviewService";
 import { codexAttemptSchema, managerSemanticProvider, type CodexManagerAttempt } from "./aptlssManagerCodex";
@@ -35,7 +35,7 @@ async function readRuntime(db: Db, vaId: number): Promise<ManagerSemanticRuntime
 async function writeRuntime(db: Db, vaId: number, runtime: ManagerSemanticRuntime) {
   const validated = runtimeSchema.parse(runtime);
   const values = { vaId, key: key(vaId), value: JSON.stringify(validated) };
-  await db.insert(appSettings).values(values).onDuplicateKeyUpdate({ set: { value: values.value } });
+  await db.insert(appSettings).values(values).onConflictDoUpdate({ target: appSettings.key, set: { value: values.value } });
   return validated;
 }
 

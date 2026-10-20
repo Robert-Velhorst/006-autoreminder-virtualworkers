@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { notificationHistory } from "../drizzle/schema";
+import { notificationHistory } from "../drizzle/schema.postgres";
 
 const mocks = vi.hoisted(() => ({ getDb: vi.fn() }));
 

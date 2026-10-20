@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { generationItems, generationJobs, scheduledJobs, taskAssignments } from "../../drizzle/schema";
+import { generationItems, generationJobs, scheduledJobs, taskAssignments } from "../../drizzle/schema.postgres";
 
 const controls = vi.hoisted(() => ({
   getDb: vi.fn(),
@@ -70,16 +70,16 @@ function createScheduledJobDb(job: Record<string, any>, now: Date) {
     update: (table: unknown) => ({
       set: (values: Record<string, unknown>) => ({
         where: async () => {
-          if (table !== scheduledJobs) return [{ affectedRows: 1 }];
-          if (values.status === "pending" && job.status !== "running") return [{ affectedRows: 0 }];
-          if (values.status === "running" && job.status !== "pending") return [{ affectedRows: 0 }];
+          if (table !== scheduledJobs) return { rowCount: 1 };
+          if (values.status === "pending" && job.status !== "running") return { rowCount: 0 };
+          if (values.status === "running" && job.status !== "pending") return { rowCount: 0 };
           Object.assign(job, values);
-          return [{ affectedRows: 1 }];
+          return { rowCount: 1 };
         },
       }),
     }),
     insert: () => ({
-      values: () => ({ onDuplicateKeyUpdate: async () => undefined }),
+      values: () => ({ onConflictDoUpdate: async () => undefined }),
     }),
   };
 }
@@ -134,7 +134,7 @@ function createGenerationBatchDb(assignmentRows: Array<{ taskId: string; vaId: n
       }),
       insert: (table: unknown) => ({
         values: (row: Record<string, any>) => ({
-          onDuplicateKeyUpdate: async ({ set }: { set: Record<string, unknown> }) => {
+          onConflictDoUpdate: async ({ set }: { set: Record<string, unknown> }) => {
             if (
               table === generationItems
               && row.cardId === failItemWriteForCardId
@@ -152,7 +152,7 @@ function createGenerationBatchDb(assignmentRows: Array<{ taskId: string; vaId: n
           where: async () => {
             const rows = table === generationJobs ? jobs : items;
             for (const [id, row] of rows) rows.set(id, { ...row, ...values });
-            return [{ affectedRows: rows.size ? 1 : 0 }];
+            return { rowCount: rows.size ? 1 : 0 };
           },
         }),
       }),
@@ -228,18 +228,18 @@ describe("processDueAptlssGenerationJobs", () => {
                 await releaseFirstClaim.promise;
               }
               claimStatuses.push(job.status);
-              if (job.status !== "pending") return [{ affectedRows: 0 }];
+              if (job.status !== "pending") return { rowCount: 0 };
               Object.assign(job, values);
-              return [{ affectedRows: 1 }];
+              return { rowCount: 1 };
             }
             if (table === scheduledJobs) Object.assign(job, values);
-            if (table === generationJobs || table === generationItems) return [{ affectedRows: 1 }];
-            return [{ affectedRows: 1 }];
+            if (table === generationJobs || table === generationItems) return { rowCount: 1 };
+            return { rowCount: 1 };
           },
         }),
       }),
       insert: () => ({
-        values: () => ({ onDuplicateKeyUpdate: async () => undefined }),
+        values: () => ({ onConflictDoUpdate: async () => undefined }),
       }),
     };
 

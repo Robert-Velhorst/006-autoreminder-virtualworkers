@@ -1,3 +1,4 @@
+import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -14,17 +15,7 @@ import { hasMinimumLiveBrowserSpecs } from "./aptlss-pilot-validation.mjs";
 
 const url = process.env.APTLSS_TEST_DATABASE_URL;
 if (!url) throw new Error("An explicit APTLSS_TEST_DATABASE_URL is required.");
-const database = new URL(url);
-if (
-  database.protocol !== "mysql:" ||
-  database.search ||
-  database.hash ||
-  !["127.0.0.1", "localhost", "[::1]"].includes(database.hostname) ||
-  !/^\/(?:aptlss_test|recovery_test)$/.test(database.pathname)
-)
-  throw new Error(
-    "An explicit loopback MySQL URL naming aptlss_test or recovery_test is required."
-  );
+requireIsolatedPostgresTestDatabase(url, process.env.NODE_ENV === "production");
 mkdirSync(resolve("artifacts"), { recursive: true });
 const digest = managerSafetyDigest();
 const report = resolve(
@@ -195,7 +186,7 @@ writeFileSync(
       regressionTests: regressionCoverage.cases.length,
       regressionCases: regressionCoverage.cases,
       regressionScenarioEvidence: regressionCoverage.scenarioEvidence,
-      mysqlIntegration: true,
+      postgresIntegration: true,
       browserIntegration: true,
       operationalTrial: {
         verified: false,
@@ -209,6 +200,6 @@ writeFileSync(
   )
 );
 console.log(
-  `Local shadow-safety gate passed: ${regressionCoverage.cases.length} exact named regression cases, real MySQL and browser integration. ` +
+  `Local shadow-safety gate passed: ${regressionCoverage.cases.length} exact named regression cases, real PostgreSQL and browser integration. ` +
     "It does not verify the separate five-working-day, 100-human-reviewed-proposal operational trial. Active mode remains unverified."
 );

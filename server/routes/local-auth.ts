@@ -7,7 +7,7 @@ import bcrypt from 'bcryptjs';
 import { createHash, timingSafeEqual } from 'crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import { COOKIE_NAME, ONE_YEAR_MS } from '@shared/const';
-import { users, vaProfiles } from '../../drizzle/schema';
+import { users, vaProfiles } from '../../drizzle/schema.postgres';
 import { sdk } from '../_core/sdk';
 import { getSessionCookieOptions } from '../_core/cookies';
 import * as db from '../db';
@@ -191,7 +191,7 @@ router.post('/register', async (req: Request, res: Response) => {
     const dbInstance = await (await import('../db')).getDb();
     if (!dbInstance) return respondDatabaseUnavailable(res);
     if (dbInstance) {
-      const { users } = await import('../../drizzle/schema');
+      const { users } = await import('../../drizzle/schema.postgres');
       const { eq } = await import('drizzle-orm');
       await dbInstance
         .update(users)
@@ -307,6 +307,9 @@ router.post('/trello/login-token', async (req: Request, res: Response) => {
     if (!dbInstance) {
       return respondDatabaseUnavailable(res);
     }
+
+    const { vaProfiles, users } = await import('../../drizzle/schema.postgres.js');
+    const { eq } = await import('drizzle-orm');
 
     // Look up VA profile by trelloMemberId
     const matchingProfiles = await dbInstance.select().from(vaProfiles).where(eq(vaProfiles.trelloMemberId, trelloId))

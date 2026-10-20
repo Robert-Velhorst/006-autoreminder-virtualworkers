@@ -3,7 +3,7 @@ import {
   aptlssEvidenceRevisions,
   users,
   workspaceEvidenceItems,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { retainGoogleDriveEvidenceRecord } from "./googleEvidence";
 
 function driveRetentionFixture(existing: Record<string, unknown> | null) {
@@ -39,7 +39,7 @@ function driveRetentionFixture(existing: Record<string, unknown> | null) {
         table === aptlssEvidenceRevisions
           ? (revisionWrites.push(values), Promise.resolve())
           : {
-              onDuplicateKeyUpdate: async ({
+              onConflictDoUpdate: async ({
                 set,
               }: {
                 set: Record<string, unknown>;

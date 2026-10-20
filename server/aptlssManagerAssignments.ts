@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
-import { taskAssignments, vaProfiles } from "../drizzle/schema";
+import { taskAssignments, vaProfiles } from "../drizzle/schema.postgres";
 import type { getDb } from "./db";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;

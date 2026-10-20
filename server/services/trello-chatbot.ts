@@ -14,8 +14,9 @@ import {
   taskAssignments,
   timeEntries, 
   vaProfiles 
-} from '../../drizzle/schema';
+} from '../../drizzle/schema.postgres';
 import { managerPilotWorkerIds } from '../aptlssManagerPilot';
+import { areNotificationsEnabled } from './notificationPolicy';
 
 const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -72,7 +73,7 @@ export function parseBotCommand(
 }
 
 export function isTrelloCommentAutomationEnabled(env: Record<string, string | undefined> = process.env) {
-  return env.NOTIFICATIONS_ENABLED === 'true';
+  return areNotificationsEnabled(env);
 }
 
 export const TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE =
@@ -238,7 +239,7 @@ async function getCardProgress(trelloCardId: string): Promise<{
     const completionsResult = await db.execute(
       sql`SELECT step_index FROM atis_checklist_completion WHERE card_id = ${card.id}`
     );
-    const completionRows = (completionsResult as any)[0] || [];
+    const completionRows = completionsResult.rows;
     const completedStepIds = new Set(completionRows.map((c: any) => c.step_index));
 
     // Parse checklist from understanding

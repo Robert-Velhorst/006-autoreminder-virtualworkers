@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-describe("operator migration contract", () => {
+describe("historical MySQL operator migration contract", () => {
+  const evidenceGraphMigration = readFileSync(new URL("../drizzle/0032_aptlss_evidence_graph.sql", import.meta.url), "utf8");
   const migration = readFileSync(
     new URL("../drizzle/0029_operator_evidence_foundation.sql", import.meta.url),
     "utf8",
@@ -204,5 +205,17 @@ describe("operator migration contract", () => {
     ]) {
       expect(migration).toContain(`CREATE TABLE \`${table}\``);
     }
+  });
+  it("adds an append-only evidence graph without replacing source evidence", () => {
+    for (const table of [
+      "aptlss_evidence_revisions",
+      "aptlss_evidence_subject_links",
+      "aptlss_evidence_conflicts",
+      "aptlss_verification_followups",
+    ]) {
+      expect(evidenceGraphMigration).toContain(`CREATE TABLE \`${table}\``);
+    }
+    expect(evidenceGraphMigration).toContain("workspace_evidence_items");
+    expect(evidenceGraphMigration).toContain("ON DELETE cascade");
   });
 });

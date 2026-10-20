@@ -84,7 +84,7 @@ import {
   upsertWorkerPerformance,
   getAutopilotLevel,
 } from "../aptlssPoliciesDb";
-import { timeEntries } from "../../drizzle/schema";
+import { timeEntries } from "../../drizzle/schema.postgres";
 import { eq, and, gte, lte, sql, inArray, notInArray } from "drizzle-orm";
 import {
   aptlssPlans,
@@ -94,7 +94,7 @@ import {
   decisionOutcomes,
   taskAssignments,
   vaProfiles,
-} from "../../drizzle/schema";
+} from "../../drizzle/schema.postgres";
 import { resolveWorkerOperatorContext } from "../workerOperatorContext";
 import { fetchAuthorizedTrelloCard, TrelloAccessError } from "../trelloCardAccess";
 import { dateKeyInTimeZone, dateWindowInTimeZone, weekDateKeys } from "../../shared/workerTime";
@@ -243,8 +243,7 @@ async function setWorkerChecklistState(userId: number, trelloCheckItemId: string
         eq(aptlssSteps.requiresRobert, false),
         notInArray(aptlssSteps.id, tx.select({ stepId: decisionOutcomes.stepId }).from(decisionOutcomes)),
       ));
-    const resultHeader = Array.isArray(result) ? result[0] : result;
-    if (Number((resultHeader as { affectedRows?: unknown } | undefined)?.affectedRows ?? 0) !== 1) {
+    if ((result.rowCount ?? 0) !== 1) {
       throw new TRPCError({ code: "CONFLICT", message: "This checklist step changed. Refresh the work item and try again." });
     }
   });

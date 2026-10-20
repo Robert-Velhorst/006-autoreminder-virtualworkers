@@ -86,7 +86,7 @@ export function ChatbotSettings() {
     callbackUrl: string | null;
     publicUrl: string | null;
     isConfigured: boolean;
-    isReachable: boolean;
+    isReachable: boolean | null;
     recommendation: string;
   } | null>(null);
 
@@ -306,7 +306,7 @@ export function ChatbotSettings() {
 
       {/* Webhook Status */}
       {webhookStatus && (
-        <Card className={webhookStatus.isReachable ? 'border-green-500/30' : 'border-yellow-500/30'}>
+        <Card className={webhookStatus.isConfigured ? 'border-green-500/30' : 'border-yellow-500/30'}>
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
               <Zap className="h-4 w-4" />
@@ -316,13 +316,15 @@ export function ChatbotSettings() {
           <CardContent>
             <div className="space-y-3">
               <div className="flex items-center gap-2">
-                {webhookStatus.isReachable ? (
+                {webhookStatus.isConfigured ? (
                   <CheckCircle className="h-4 w-4 text-green-500" />
                 ) : (
                   <XCircle className="h-4 w-4 text-yellow-500" />
                 )}
                 <span className="text-sm">
-                  {webhookStatus.isReachable ? 'Webhooks are configured and reachable' : 'Webhooks may not be reachable'}
+                  {webhookStatus.isConfigured
+                    ? 'Configuration present; live delivery not tested'
+                    : 'Webhook setup is incomplete'}
                 </span>
               </div>
               
@@ -334,7 +336,7 @@ export function ChatbotSettings() {
                   </code>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-xs text-muted-foreground">PUBLIC_URL:</span>
+                  <span className="text-xs text-muted-foreground">Trello callback:</span>
                   <code className="text-xs font-mono">
                     {webhookStatus.publicUrl || 'Not set'}
                   </code>
@@ -346,7 +348,7 @@ export function ChatbotSettings() {
               </p>
 
               {/* Setup Instructions */}
-              {!webhookStatus.isReachable && (
+              {!webhookStatus.isConfigured && (
                 <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg space-y-3">
                   <h4 className="font-medium text-sm text-yellow-800 flex items-center gap-2">
                     <AlertCircle className="h-4 w-4" />
@@ -357,13 +359,14 @@ export function ChatbotSettings() {
                       <strong>Step 1:</strong> Publish your app using the Publish button in the top right.
                     </p>
                     <p>
-                      <strong>Step 2:</strong> After publishing, set the PUBLIC_URL environment variable in Settings → Secrets:
+                      <strong>Step 2:</strong> Set the exact callback URL and Trello app secret in the host's secret manager:
                     </p>
                     <div className="bg-white/50 p-2 rounded font-mono text-xs break-all">
-                      PUBLIC_URL=https://your-app.manus.space
+                      TRELLO_WEBHOOK_CALLBACK_URL=https://your-domain.com/api/trello-webhook<br />
+                      TRELLO_WEBHOOK_SECRET=your_trello_app_secret
                     </div>
                     <p>
-                      <strong>Step 3:</strong> Click "Sync All Boards" below to register webhooks with Trello.
+                      <strong>Step 3:</strong> Restart the app, then register or re-register the boards so Trello uses the signed callback.
                     </p>
                   </div>
                 </div>

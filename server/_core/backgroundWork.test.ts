@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import ts from "typescript";
+import ts from "typescript-legacy";
 import { describe, expect, it } from "vitest";
 import { getBackgroundWorkConfiguration } from "./backgroundWork";
 
@@ -7,7 +7,7 @@ const normal = { localAuthBypassEnabled: false };
 const testEnvironment = {
   NODE_ENV: "development",
   APTLSS_TEST_DISABLE_BACKGROUND_JOBS: "true",
-  APTLSS_TEST_DATABASE_URL: "mysql://fixture:private@127.0.0.1:33319/aptlss_test",
+  APTLSS_TEST_DATABASE_URL: "postgresql://fixture:private@127.0.0.1:33319/aptlss_test",
 };
 
 describe("automatic startup work configuration", () => {
@@ -28,16 +28,16 @@ describe("automatic startup work configuration", () => {
       .toEqual({ enabled: false, reason: "Local auth bypass enabled" });
   });
   it.each(["127.0.0.1", "localhost", "[::1]"])("retains isolated test mode at %s", host => {
-    expect(getBackgroundWorkConfiguration({ ...testEnvironment, APTLSS_TEST_DATABASE_URL: `mysql://fixture:private@${host}/recovery_test` }, normal))
+    expect(getBackgroundWorkConfiguration({ ...testEnvironment, APTLSS_TEST_DATABASE_URL: `postgresql://fixture:private@${host}/recovery_test` }, normal))
       .toEqual({ enabled: false, reason: "Isolated APTLSS browser-test mode" });
   });
   it.each([
     { NODE_ENV: "production" },
-    { APTLSS_TEST_DATABASE_URL: "mysql://fixture:private@database/aptlss_test" },
-    { APTLSS_TEST_DATABASE_URL: "mysql://fixture:private@127.0.0.1/production" },
-    { APTLSS_TEST_DATABASE_URL: "postgres://fixture:private@127.0.0.1/aptlss_test" },
-    { APTLSS_TEST_DATABASE_URL: "mysql://fixture:private@127.0.0.1/aptlss_test?unsafe=1" },
-    { APTLSS_TEST_DATABASE_URL: "mysql://fixture:private@127.0.0.1/aptlss_test#unsafe" },
+    { APTLSS_TEST_DATABASE_URL: "postgresql://fixture:private@database/aptlss_test" },
+    { APTLSS_TEST_DATABASE_URL: "postgresql://fixture:private@127.0.0.1/production" },
+    { APTLSS_TEST_DATABASE_URL: "mysql://fixture:private@127.0.0.1/aptlss_test" },
+    { APTLSS_TEST_DATABASE_URL: "postgresql://fixture:private@127.0.0.1/aptlss_test?unsafe=1" },
+    { APTLSS_TEST_DATABASE_URL: "postgresql://fixture:private@127.0.0.1/aptlss_test#unsafe" },
   ])("does not let the global switch excuse unsafe browser-test configuration: %j", override => {
     expect(() => getBackgroundWorkConfiguration({ ...testEnvironment, ...override, BACKGROUND_JOBS_ENABLED: "false" }, normal))
       .toThrow("restricted to non-production loopback test databases");

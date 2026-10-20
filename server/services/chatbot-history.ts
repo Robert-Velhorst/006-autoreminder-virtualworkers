@@ -6,8 +6,10 @@
  */
 
 import { getDb } from '../db';
-import { sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
+import { chatbotCheckinResponses, chatbotConversations } from '../../drizzle/schema.postgres';
 import { BotCommand, BotResponse } from './trello-chatbot';
+type ConversationRow = typeof chatbotConversations.$inferSelect;
 
 export interface ConversationRecord {
   id?: number;
@@ -44,6 +46,39 @@ export interface CheckinResponseRecord {
   responseTimeMinutes?: number;
 }
 
+function mapConversation(row: ConversationRow): ConversationRecord {
+  let commandArgs: string[] | undefined;
+  if (typeof row.commandArgs === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(row.commandArgs);
+      if (Array.isArray(parsed) && parsed.every(value => typeof value === 'string')) {
+        commandArgs = parsed;
+      }
+    } catch {
+      commandArgs = undefined;
+    }
+  }
+
+  return {
+    id: row.id,
+    cardTrelloId: row.cardTrelloId,
+    cardName: row.cardName ?? undefined,
+    boardTrelloId: row.boardTrelloId ?? undefined,
+    command: row.command,
+    commandArgs,
+    authorTrelloId: row.authorTrelloId ?? undefined,
+    authorName: row.authorName ?? undefined,
+    incomingCommentId: row.incomingCommentId ?? undefined,
+    responseCommentId: row.responseCommentId ?? undefined,
+    responseText: row.responseText ?? undefined,
+    responseStatus: row.responseStatus,
+    responseError: row.responseError ?? undefined,
+    receivedAt: row.receivedAt,
+    respondedAt: row.respondedAt ?? undefined,
+    responseTimeMs: row.responseTimeMs ?? undefined,
+  };
+}
+
 /**
  * Store a conversation record
  */
@@ -52,34 +87,27 @@ export async function storeConversation(record: ConversationRecord): Promise<num
   if (!db) return null;
 
   try {
-    const result = await db.execute(sql`
-      INSERT INTO chatbot_conversations (
-        cardTrelloId, cardName, boardTrelloId, command, commandArgs,
-        authorTrelloId, authorName, incomingCommentId, responseCommentId,
-        responseText, responseStatus, responseError, receivedAt, respondedAt, responseTimeMs
-      ) VALUES (
-        ${record.cardTrelloId},
-        ${record.cardName || null},
-        ${record.boardTrelloId || null},
-        ${record.command},
-        ${record.commandArgs ? JSON.stringify(record.commandArgs) : null},
-        ${record.authorTrelloId || null},
-        ${record.authorName || null},
-        ${record.incomingCommentId || null},
-        ${record.responseCommentId || null},
-        ${record.responseText || null},
-        ${record.responseStatus},
-        ${record.responseError || null},
-        ${record.receivedAt},
-        ${record.respondedAt || null},
-        ${record.responseTimeMs || null}
-      )
-    `);
-
-    // Get the inserted ID
-    const idResult = await db.execute(sql`SELECT LAST_INSERT_ID() as id`);
-    const rows = (idResult as any)[0] || [];
-    return rows[0]?.id || null;
+    const [inserted] = await db
+      .insert(chatbotConversations)
+      .values({
+        cardTrelloId: record.cardTrelloId,
+        cardName: record.cardName ?? null,
+        boardTrelloId: record.boardTrelloId ?? null,
+        command: record.command,
+        commandArgs: record.commandArgs ? JSON.stringify(record.commandArgs) : null,
+        authorTrelloId: record.authorTrelloId ?? null,
+        authorName: record.authorName ?? null,
+        incomingCommentId: record.incomingCommentId ?? null,
+        responseCommentId: record.responseCommentId ?? null,
+        responseText: record.responseText ?? null,
+        responseStatus: record.responseStatus,
+        responseError: record.responseError ?? null,
+        receivedAt: record.receivedAt,
+        respondedAt: record.respondedAt ?? null,
+        responseTimeMs: record.responseTimeMs ?? null,
+      })
+      .returning({ id: chatbotConversations.id });
+    return inserted?.id ?? null;
   } catch (error) {
     console.error('[ChatbotHistory] Error storing conversation:', error);
     return null;
@@ -103,26 +131,25 @@ export async function updateConversationResponse(
     const respondedAt = new Date();
     
     // Get the received time to calculate response time
-    const convResult = await db.execute(sql`
-      SELECT receivedAt FROM chatbot_conversations WHERE id = ${conversationId}
-    `);
-    const rows = (convResult as any)[0] || [];
-    const receivedAt = rows[0]?.receivedAt;
+    const [conversation] = await db
+      .select({ receivedAt: chatbotConversations.receivedAt })
+      .from(chatbotConversations)
+      .where(eq(chatbotConversations.id, conversationId))
+      .limit(1);
+    const receivedAt = conversation?.receivedAt;
     
     const responseTimeMs = receivedAt 
       ? respondedAt.getTime() - new Date(receivedAt).getTime()
       : null;
 
-    await db.execute(sql`
-      UPDATE chatbot_conversations SET
-        responseCommentId = ${responseCommentId},
-        responseText = ${responseText},
-        responseStatus = ${status},
-        responseError = ${error || null},
-        respondedAt = ${respondedAt},
-        responseTimeMs = ${responseTimeMs}
-      WHERE id = ${conversationId}
-    `);
+    await db.update(chatbotConversations).set({
+      responseCommentId,
+      responseText,
+      responseStatus: status,
+      responseError: error ?? null,
+      respondedAt,
+      responseTimeMs,
+    }).where(eq(chatbotConversations.id, conversationId));
   } catch (error) {
     console.error('[ChatbotHistory] Error updating conversation response:', error);
   }
@@ -139,31 +166,25 @@ export async function storeCheckinResponse(record: CheckinResponseRecord): Promi
     const responseTimeMinutes = record.responseTimeMinutes || 
       Math.round((record.responseReceivedAt.getTime() - record.checkinSentAt.getTime()) / 60000);
 
-    const result = await db.execute(sql`
-      INSERT INTO chatbot_checkin_responses (
-        conversationId, cardTrelloId, workerTrelloId, workerName, workerId,
-        responseCommentId, responseText, reportedProgress, reportedBlockers,
-        estimatedCompletion, checkinSentAt, responseReceivedAt, responseTimeMinutes
-      ) VALUES (
-        ${record.conversationId},
-        ${record.cardTrelloId},
-        ${record.workerTrelloId || null},
-        ${record.workerName || null},
-        ${record.workerId || null},
-        ${record.responseCommentId || null},
-        ${record.responseText || null},
-        ${record.reportedProgress || null},
-        ${record.reportedBlockers || null},
-        ${record.estimatedCompletion || null},
-        ${record.checkinSentAt},
-        ${record.responseReceivedAt},
-        ${responseTimeMinutes}
-      )
-    `);
-
-    const idResult = await db.execute(sql`SELECT LAST_INSERT_ID() as id`);
-    const rows = (idResult as any)[0] || [];
-    return rows[0]?.id || null;
+    const [inserted] = await db
+      .insert(chatbotCheckinResponses)
+      .values({
+        conversationId: record.conversationId,
+        cardTrelloId: record.cardTrelloId,
+        workerTrelloId: record.workerTrelloId ?? null,
+        workerName: record.workerName ?? null,
+        workerId: record.workerId ?? null,
+        responseCommentId: record.responseCommentId ?? null,
+        responseText: record.responseText ?? null,
+        reportedProgress: record.reportedProgress ?? null,
+        reportedBlockers: record.reportedBlockers ?? null,
+        estimatedCompletion: record.estimatedCompletion ?? null,
+        checkinSentAt: record.checkinSentAt,
+        responseReceivedAt: record.responseReceivedAt,
+        responseTimeMinutes,
+      })
+      .returning({ id: chatbotCheckinResponses.id });
+    return inserted?.id ?? null;
   } catch (error) {
     console.error('[ChatbotHistory] Error storing checkin response:', error);
     return null;
@@ -181,13 +202,11 @@ export async function getCardConversations(
   if (!db) return [];
 
   try {
-    const result = await db.execute(sql`
-      SELECT * FROM chatbot_conversations
-      WHERE cardTrelloId = ${cardTrelloId}
-      ORDER BY receivedAt DESC
-      LIMIT ${limit}
-    `);
-    return (result as any)[0] || [];
+    const rows = await db.select().from(chatbotConversations)
+      .where(eq(chatbotConversations.cardTrelloId, cardTrelloId))
+      .orderBy(desc(chatbotConversations.receivedAt))
+      .limit(limit);
+    return rows.map(mapConversation);
   } catch (error) {
     console.error('[ChatbotHistory] Error getting card conversations:', error);
     return [];
@@ -205,13 +224,11 @@ export async function getAuthorConversations(
   if (!db) return [];
 
   try {
-    const result = await db.execute(sql`
-      SELECT * FROM chatbot_conversations
-      WHERE authorTrelloId = ${authorTrelloId}
-      ORDER BY receivedAt DESC
-      LIMIT ${limit}
-    `);
-    return (result as any)[0] || [];
+    const rows = await db.select().from(chatbotConversations)
+      .where(eq(chatbotConversations.authorTrelloId, authorTrelloId))
+      .orderBy(desc(chatbotConversations.receivedAt))
+      .limit(limit);
+    return rows.map(mapConversation);
   } catch (error) {
     console.error('[ChatbotHistory] Error getting author conversations:', error);
     return [];
@@ -229,13 +246,25 @@ export async function getWorkerCheckinResponses(
   if (!db) return [];
 
   try {
-    const result = await db.execute(sql`
-      SELECT * FROM chatbot_checkin_responses
-      WHERE workerId = ${workerId}
-      ORDER BY responseReceivedAt DESC
-      LIMIT ${limit}
-    `);
-    return (result as any)[0] || [];
+    const rows = await db.select().from(chatbotCheckinResponses)
+      .where(eq(chatbotCheckinResponses.workerId, workerId))
+      .orderBy(desc(chatbotCheckinResponses.responseReceivedAt))
+      .limit(limit);
+    return rows.map(row => ({
+      conversationId: row.conversationId,
+      cardTrelloId: row.cardTrelloId,
+      workerTrelloId: row.workerTrelloId ?? undefined,
+      workerName: row.workerName ?? undefined,
+      workerId: row.workerId ?? undefined,
+      responseCommentId: row.responseCommentId ?? undefined,
+      responseText: row.responseText ?? undefined,
+      reportedProgress: row.reportedProgress ?? undefined,
+      reportedBlockers: row.reportedBlockers ?? undefined,
+      estimatedCompletion: row.estimatedCompletion ?? undefined,
+      checkinSentAt: row.checkinSentAt,
+      responseReceivedAt: row.responseReceivedAt,
+      responseTimeMinutes: row.responseTimeMinutes ?? undefined,
+    }));
   } catch (error) {
     console.error('[ChatbotHistory] Error getting worker checkin responses:', error);
     return [];
@@ -259,17 +288,21 @@ export async function getPendingCheckins(
   try {
     const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000);
     
-    const result = await db.execute(sql`
-      SELECT c.id as conversationId, c.cardTrelloId, c.authorName, c.receivedAt
-      FROM chatbot_conversations c
-      LEFT JOIN chatbot_checkin_responses r ON c.id = r.conversationId
-      WHERE c.command IN ('checkin', 'check', 'update')
-        AND c.responseStatus = 'success'
-        AND c.receivedAt > ${cutoff}
-        AND r.id IS NULL
-      ORDER BY c.receivedAt ASC
-    `);
-    return (result as any)[0] || [];
+    return await db.select({
+      conversationId: chatbotConversations.id,
+      cardTrelloId: chatbotConversations.cardTrelloId,
+      authorName: sql<string>`coalesce(${chatbotConversations.authorName}, 'Unknown')`,
+      receivedAt: chatbotConversations.receivedAt,
+    })
+      .from(chatbotConversations)
+      .leftJoin(chatbotCheckinResponses, eq(chatbotConversations.id, chatbotCheckinResponses.conversationId))
+      .where(and(
+        inArray(chatbotConversations.command, ['checkin', 'check', 'update']),
+        eq(chatbotConversations.responseStatus, 'success'),
+        gt(chatbotConversations.receivedAt, cutoff),
+        isNull(chatbotCheckinResponses.id),
+      ))
+      .orderBy(chatbotConversations.receivedAt);
   } catch (error) {
     console.error('[ChatbotHistory] Error getting pending checkins:', error);
     return [];
@@ -296,18 +329,16 @@ export async function getWorkerResponseRate(
   try {
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     
-    const result = await db.execute(sql`
-      SELECT 
-        COUNT(*) as totalCheckins,
-        SUM(CASE WHEN responseReceivedAt IS NOT NULL THEN 1 ELSE 0 END) as responded,
-        AVG(responseTimeMinutes) as avgResponseMinutes
-      FROM chatbot_checkin_responses
-      WHERE workerId = ${workerId}
-        AND checkinSentAt > ${cutoff}
-    `);
-    
-    const rows = (result as any)[0] || [];
-    const data = rows[0] || {};
+    const [data] = await db.select({
+      totalCheckins: sql<number>`count(*)::int`,
+      responded: sql<number>`count(*) filter (where ${chatbotCheckinResponses.responseReceivedAt} is not null)::int`,
+      avgResponseMinutes: sql<number | null>`avg(${chatbotCheckinResponses.responseTimeMinutes})`,
+    })
+      .from(chatbotCheckinResponses)
+      .where(and(
+        eq(chatbotCheckinResponses.workerId, workerId),
+        gt(chatbotCheckinResponses.checkinSentAt, cutoff),
+      ));
     
     const totalCheckins = Number(data.totalCheckins) || 0;
     const responded = Number(data.responded) || 0;
@@ -337,15 +368,12 @@ export async function getCommandStats(
   try {
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     
-    const result = await db.execute(sql`
-      SELECT command, COUNT(*) as count
-      FROM chatbot_conversations
-      WHERE receivedAt > ${cutoff}
-      GROUP BY command
-      ORDER BY count DESC
-    `);
-    
-    const rows = (result as any)[0] || [];
+    const count = sql<number>`count(*)::int`;
+    const rows = await db.select({ command: chatbotConversations.command, count })
+      .from(chatbotConversations)
+      .where(gt(chatbotConversations.receivedAt, cutoff))
+      .groupBy(chatbotConversations.command)
+      .orderBy(desc(count));
     const stats: Record<string, number> = {};
     
     for (const row of rows) {

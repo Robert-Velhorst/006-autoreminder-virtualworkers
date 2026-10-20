@@ -1,7 +1,7 @@
 import type { Request, Router } from "express";
 import express from "express";
 import request from "supertest";
-import { taskAssignments, timeEntries, vaProfiles, type User } from "../../drizzle/schema";
+import { taskAssignments, timeEntries, vaProfiles, type User } from "../../drizzle/schema.postgres";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ getDb: vi.fn() }));

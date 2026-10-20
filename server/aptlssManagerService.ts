@@ -5,7 +5,7 @@ import {
   aptlssWaitingReasons, cardStates, communicationEvidence, dailyPlans, decisionOutcomes,
   emailTasks, priorityScores, timeEntries, trelloCachedCards, users, workspaceEvidenceItems,
   workspaceEvidenceLinks, aptlssEvidenceSubjectLinks, aptlssEvidenceRevisions, aptlssEvidenceConflicts, timeEntryEvents,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import type { ManagerAction, ManagerCard, ManagerEvidence, ManagerInput, ManagerPolicy, ManagerSnapshot, ManagerSchedulerStatus } from "../shared/aptlssManager";
 import { dateKeyInTimeZone } from "../shared/workerTime";
 import { gmailContentScope } from "../shared/gmailContentScope";
@@ -25,8 +25,8 @@ import { assertManagerExecutionAllowed, ManagerExecutionPausedError, managerPlan
 import { managerSafetyDigest } from "./aptlssManagerSafety";
 import { websocketService } from "./services/websocket";
 import { assertManagerQueueLease, createManagerQueueRunner, enqueueManagerTask, managerQueueEventHash, ManagerQueueLeaseLostError, type ManagerQueueLease } from "./aptlssManagerQueue";
-import { aptlssManagerQueue } from "../drizzle/aptlssManagerQueueSchema";
-import { aptlssManagerQueueEvents } from "../drizzle/aptlssManagerQueueSchema";
+import { aptlssManagerQueue } from "../drizzle/schema.postgres";
+import { aptlssManagerQueueEvents } from "../drizzle/schema.postgres";
 import { finishManagerSemanticReview, reserveManagerSemanticReview, managerSemanticRetryReady } from "./aptlssManagerSemanticRuntime";
 import { assertManagerPilotWorker, assertManagerPlanMutationAllowed, managerPilotEnabled } from "./aptlssManagerPilot";
 import { aggregateManagerTimeSamples, managerTimingPredictions } from "./aptlssManagerTiming";
@@ -73,7 +73,7 @@ async function requireDb() {
 
 export async function loadManagerTimingHistory(db: Db, vaId: number) {
   const history = await db.select({
-    actionsJson: sql<unknown>`CASE WHEN JSON_VALID(${aptlssManagerRuns.snapshotJson}) THEN JSON_EXTRACT(${aptlssManagerRuns.snapshotJson}, '$.actions') ELSE NULL END`,
+    actionsJson: sql<unknown>`CASE WHEN pg_input_is_valid(${aptlssManagerRuns.snapshotJson}, 'jsonb') THEN ${aptlssManagerRuns.snapshotJson}::jsonb -> 'actions' ELSE NULL END`,
     createdAt: aptlssManagerRuns.createdAt,
   }).from(aptlssManagerRuns).where(eq(aptlssManagerRuns.vaId, vaId))
     .orderBy(desc(aptlssManagerRuns.id)).limit(100);
@@ -294,7 +294,7 @@ export async function updateManagerPolicy(vaId: number, policy: Pick<ManagerPoli
     await tx.select().from(users).where(eq(users.id, vaId)).for("update");
     await assertManagerExecutionAllowed(tx as unknown as Db, vaId, true);
     const values = { enabled: policy.enabled, intervalMinutes: policy.intervalMinutes };
-    await tx.insert(aptlssManagerState).values({ vaId, ...values }).onDuplicateKeyUpdate({ set: { ...values, inputHash: null, policyRevision: sql`${aptlssManagerState.policyRevision} + 1` } });
+    await tx.insert(aptlssManagerState).values({ vaId, ...values }).onConflictDoUpdate({ target: aptlssManagerState.vaId, set: { ...values, inputHash: null, policyRevision: sql`${aptlssManagerState.policyRevision} + 1` } });
     return (await stateAndSnapshot(tx as unknown as Db, vaId)).policy;
   });
 }
@@ -339,7 +339,7 @@ function isDuplicateManagerUpdateKeyError(error: unknown) {
   while (typeof current === "object" && current !== null && !visited.has(current)) {
     visited.add(current);
     const candidate = current as { code?: unknown; errno?: unknown; cause?: unknown };
-    if (candidate.code === "ER_DUP_ENTRY" || candidate.errno === 1062) return true;
+    if (candidate.code === "23505") return true;
     current = candidate.cause;
   }
   return false;
@@ -420,7 +420,7 @@ export async function submitManagerUpdate(vaId: number, cardId: string, detail: 
       const isEmailUpdate = cardId.startsWith("email:");
       const assertionReceiptExists = !isEmailUpdate && await workerAssertionQueueReceiptExists(tx as unknown as Db, vaId, cardId, evidenceText);
       if (!isEmailUpdate) await recordWorkerEvidenceAssertion({ vaId, cardId, title: "Worker reality update", detail: evidenceText, recordedBy: String(vaId), database: tx as unknown as Db });
-      const [update] = await tx.insert(aptlssManagerUpdates).values({ vaId, cardId, detail: text, interventionId: interventionId ?? null, requestKey, ...normalized }).$returningId();
+      const [update] = await tx.insert(aptlssManagerUpdates).values({ vaId, cardId, detail: text, interventionId: interventionId ?? null, requestKey, ...normalized }).returning({ id: aptlssManagerUpdates.id });
       // The evidence graph already queues newly recorded assertions. Queue a worker-update
       // receipt only when that assertion event is an old receipt, or for email updates
       // which do not create a graph assertion.
@@ -553,7 +553,7 @@ export async function reportManagerActionCompletion(vaId: number, input: Manager
       vaId, cardId: input.cardId, detail, reportKind: "completion", actionId: action.id,
       assessmentRunId: snapshot.runId, requestKey, outcome: "Update", deadlineDate: null,
       sourceEvidenceId: normalized.sourceEvidenceId, sourceDescription: normalized.sourceDescription,
-    }).$returningId();
+    }).returning({ id: aptlssManagerUpdates.id });
     await enqueueManagerTask(tx, { vaId, eventKey: `worker-completion-report:${created.id}`, trigger: "worker_update" });
     return { reportId: created.id, alreadyRecorded: false as const };
   });
@@ -594,7 +594,7 @@ async function persistManagerFailureIfCurrent(db: Db, vaId: number, expectedVers
     const [latest] = await tx.select().from(aptlssManagerState).where(eq(aptlssManagerState.vaId, vaId)).limit(1).for("update");
     if ((latest ? hash(latest) : null) !== expectedVersion) return;
     await tx.insert(aptlssManagerState).values({ vaId, lastError: message, checkedAt: new Date() })
-      .onDuplicateKeyUpdate({ set: { lastError: message, checkedAt: new Date() } });
+      .onConflictDoUpdate({ target: aptlssManagerState.vaId, set: { lastError: message, checkedAt: new Date() } });
   });
 }
 
@@ -710,19 +710,19 @@ async function executeManager(vaId: number, trigger: string, lease?: ManagerQueu
       snapshot.runId = latestState.run.id;
       const [check] = await tx.insert(aptlssManagerChecks).values({ vaId, runId: snapshot.runId,
         ...fingerprint, baseSnapshotHash: managerHistoryHash(JSON.parse(latestState.run.snapshotJson)),
-        snapshotHash: managerHistoryHash(snapshot), snapshotPatchJson: patch, createdAt: now }).$returningId();
+        snapshotHash: managerHistoryHash(snapshot), snapshotPatchJson: patch, createdAt: now }).returning({ id: aptlssManagerChecks.id });
       currentCheckId = check.id;
     } else {
-      const [created] = await tx.insert(aptlssManagerRuns).values({ vaId, inputHash: fingerprint.inputHash, trigger, snapshotJson: JSON.stringify(snapshot), createdAt: now, mode: policy.mode, proposalHash: snapshot.proposalHash, previousPlanJson: snapshot.applied ? latestPlan?.scheduleJson ?? null : null, appliedPlanHash: appliedPlan ? managerPlanVersion(JSON.stringify(appliedPlan)) : null }).$returningId();
+      const [created] = await tx.insert(aptlssManagerRuns).values({ vaId, inputHash: fingerprint.inputHash, trigger, snapshotJson: JSON.stringify(snapshot), createdAt: now, mode: policy.mode, proposalHash: snapshot.proposalHash, previousPlanJson: snapshot.applied ? latestPlan?.scheduleJson ?? null : null, appliedPlanHash: appliedPlan ? managerPlanVersion(JSON.stringify(appliedPlan)) : null }).returning({ id: aptlssManagerRuns.id });
       snapshot.runId = created.id;
     }
     if (snapshot.applied && appliedPlan) {
       assertManagerPlanMutationAllowed(vaId);
       const planToApply = appliedPlan!;
       const values = { vaId, dateKey, scheduleJson: JSON.stringify(planToApply), dailySummary: reconciled!.changes.join(" ").slice(0, 4000), topPriority: planToApply.blocks[0]?.cardName ?? null, totalScheduledMinutes: planToApply.planHealth.scheduledMinutes, robertItemsCount: planToApply.robertItems.length, autoGenerated: true, generatedAt: now };
-      await tx.insert(dailyPlans).values(values).onDuplicateKeyUpdate({ set: values });
+      await tx.insert(dailyPlans).values(values).onConflictDoUpdate({ target: [dailyPlans.vaId, dailyPlans.dateKey], set: values });
     }
-    await tx.insert(aptlssManagerState).values({ vaId, ...policy, ...fingerprint, currentCheckId, historyScopeHash, checkedAt: now, lastSuccessfulAt: now, lastError: null }).onDuplicateKeyUpdate({ set: { ...fingerprint, currentCheckId, historyScopeHash, mode: policy.mode, checkedAt: now, lastSuccessfulAt: now, lastError: null } });
+    await tx.insert(aptlssManagerState).values({ vaId, ...policy, ...fingerprint, currentCheckId, historyScopeHash, checkedAt: now, lastSuccessfulAt: now, lastError: null }).onConflictDoUpdate({ target: aptlssManagerState.vaId, set: { ...fingerprint, currentCheckId, historyScopeHash, mode: policy.mode, checkedAt: now, lastSuccessfulAt: now, lastError: null } });
     return snapshot;
   }, { isolationLevel: "serializable" });
   const [user] = await db.select({ openId: users.openId }).from(users).where(eq(users.id,vaId)).limit(1);

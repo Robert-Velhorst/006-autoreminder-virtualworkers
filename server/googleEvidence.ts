@@ -10,7 +10,7 @@ import {
   users,
   workspaceEvidenceItems,
   workspaceEvidenceLinks,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 import { upsertSourceCommitment } from "./sourceCommitments";
 import { resolveWorkerOperatorContextById } from "./workerOperatorContext";
@@ -297,21 +297,21 @@ export async function retainGmailEvidenceRecord(
 
   if (!exactDuplicate) {
     await googleOwnershipCheckpoint(context, tx);
-    await tx.insert(emailTasks).values(values).onDuplicateKeyUpdate({
+    await tx.insert(emailTasks).values(values).onConflictDoUpdate({ target: emailTasks.gmailMessageId,
       set: {
-        gmailThreadId: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.gmailThreadId}, ${emailTasks.gmailThreadId})`,
-        subject: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.subject}, ${emailTasks.subject})`,
-        fromAddress: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.fromAddress}, ${emailTasks.fromAddress})`,
-        fromName: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.fromName}, ${emailTasks.fromName})`,
-        snippet: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.snippet ?? null}, ${emailTasks.snippet})`,
-        receivedAt: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.receivedAt}, ${emailTasks.receivedAt})`,
-        category: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.category}, ${emailTasks.category})`,
-        deadlineAt: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.deadlineAt ?? null}, ${emailTasks.deadlineAt})`,
-        trelloCardId: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.trelloCardId ?? null}, ${emailTasks.trelloCardId})`,
-        trelloCardName: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.trelloCardName ?? null}, ${emailTasks.trelloCardName})`,
-        trelloCardUrl: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.trelloCardUrl ?? null}, ${emailTasks.trelloCardUrl})`,
-        suggestedNextAction: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.suggestedNextAction ?? null}, ${emailTasks.suggestedNextAction})`,
-        llmSummary: sql`IF(${emailTasks.vaId} = ${values.vaId}, ${values.llmSummary ?? null}, ${emailTasks.llmSummary})`,
+        gmailThreadId: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.gmailThreadId} ELSE ${emailTasks.gmailThreadId} END`,
+        subject: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.subject} ELSE ${emailTasks.subject} END`,
+        fromAddress: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.fromAddress} ELSE ${emailTasks.fromAddress} END`,
+        fromName: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.fromName} ELSE ${emailTasks.fromName} END`,
+        snippet: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.snippet ?? null} ELSE ${emailTasks.snippet} END`,
+        receivedAt: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.receivedAt} ELSE ${emailTasks.receivedAt} END`,
+        category: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.category} ELSE ${emailTasks.category} END`,
+        deadlineAt: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.deadlineAt ?? null} ELSE ${emailTasks.deadlineAt} END`,
+        trelloCardId: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.trelloCardId ?? null} ELSE ${emailTasks.trelloCardId} END`,
+        trelloCardName: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.trelloCardName ?? null} ELSE ${emailTasks.trelloCardName} END`,
+        trelloCardUrl: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.trelloCardUrl ?? null} ELSE ${emailTasks.trelloCardUrl} END`,
+        suggestedNextAction: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.suggestedNextAction ?? null} ELSE ${emailTasks.suggestedNextAction} END`,
+        llmSummary: sql`CASE WHEN ${emailTasks.vaId} = ${values.vaId} THEN ${values.llmSummary ?? null} ELSE ${emailTasks.llmSummary} END`,
       },
     });
   }
@@ -423,13 +423,13 @@ async function writeSettings(vaId: number, settings: GoogleEvidenceSettings, con
     vaId,
     key: scopedKey(vaId),
     value: serialized,
-  }).onDuplicateKeyUpdate({
+  }).onConflictDoUpdate({ target: appSettings.key,
     set: {
       vaId,
       value: sql`CASE
-        WHEN JSON_VALID(${appSettings.value})
-          AND JSON_UNQUOTE(JSON_EXTRACT(${appSettings.value}, '$.gmailSourceConflictPending')) = 'true'
-        THEN JSON_SET(${serialized}, '$.gmailSourceConflictPending', true)
+        WHEN CASE WHEN pg_input_is_valid(${appSettings.value}, 'jsonb')
+          THEN ${appSettings.value}::jsonb ->> 'gmailSourceConflictPending' = 'true' ELSE false END
+        THEN jsonb_set(${serialized}::jsonb, '{gmailSourceConflictPending}', 'true'::jsonb)::text
         ELSE ${serialized}
       END`,
     },
@@ -479,7 +479,7 @@ async function readGlobalSetting(key: string) {
 async function writeGlobalSetting(key: string, value: string) {
   const db = await getDb();
   if (!db) throw new Error("Database is required to save Google delivery settings");
-  await db.insert(appSettings).values({ vaId: null, key, value }).onDuplicateKeyUpdate({
+  await db.insert(appSettings).values({ vaId: null, key, value }).onConflictDoUpdate({ target: appSettings.key,
     set: { vaId: null, value },
   });
 }
@@ -559,7 +559,7 @@ export async function saveGoogleRefreshToken(vaId: number, refreshToken: string)
     vaId,
     key: scopedTokenKey(vaId),
     value: encryptGoogleRefreshToken(clean),
-  }).onDuplicateKeyUpdate({
+  }).onConflictDoUpdate({ target: appSettings.key,
     set: { vaId, value: encryptGoogleRefreshToken(clean) },
   });
 }
@@ -580,7 +580,7 @@ export async function saveGoogleOAuthState(
   if (!db) throw new Error("Database is required to save Google OAuth state");
   const key = `${OAUTH_STATE_KEY}:${purpose}:${userId}`;
   const value = JSON.stringify({ nonce, expiresAt });
-  await db.insert(appSettings).values({ vaId: userId, key, value }).onDuplicateKeyUpdate({
+  await db.insert(appSettings).values({ vaId: userId, key, value }).onConflictDoUpdate({ target: appSettings.key,
     set: { vaId: userId, value },
   });
 }
@@ -595,12 +595,12 @@ export async function consumeGoogleOAuthState(
   if (!db) throw new Error("Database is required to consume Google OAuth state");
   const key = `${OAUTH_STATE_KEY}:${purpose}:${userId}`;
   const value = JSON.stringify({ nonce, expiresAt });
-  const [result] = await db.delete(appSettings).where(and(
+  const result = await db.delete(appSettings).where(and(
     eq(appSettings.key, key),
     eq(appSettings.vaId, userId),
     eq(appSettings.value, value),
   ));
-  return result.affectedRows === 1;
+  return result.rowCount === 1;
 }
 
 async function configuredGoogleCredentials(vaId: number) {
@@ -1187,7 +1187,7 @@ async function replaceAutomaticEvidenceLinks(
       relevanceScore: match.score,
       matchReason: match.reason,
       linkMethod: "automatic",
-    }).onDuplicateKeyUpdate({
+    }).onConflictDoUpdate({ target: [workspaceEvidenceLinks.evidenceId, workspaceEvidenceLinks.cardId],
       set: { relevanceScore: match.score, matchReason: match.reason, linkMethod: "automatic" },
     });
   }
@@ -1240,7 +1240,7 @@ export async function retainGoogleDriveEvidenceRecord(
     observedAt: changed ? values.observedAt : existing?.observedAt ?? values.observedAt,
   };
   await googleOwnershipCheckpoint(context, tx);
-  await tx.insert(workspaceEvidenceItems).values(stableValues).onDuplicateKeyUpdate({
+  await tx.insert(workspaceEvidenceItems).values(stableValues).onConflictDoUpdate({ target: [workspaceEvidenceItems.vaId, workspaceEvidenceItems.source, workspaceEvidenceItems.sourceId],
     set: {
       vaId: stableValues.vaId,
       sourceContainerId: stableValues.sourceContainerId,

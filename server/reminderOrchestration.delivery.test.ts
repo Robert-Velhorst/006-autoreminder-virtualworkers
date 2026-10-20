@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
-import { MySqlDialect } from "drizzle-orm/mysql-core";
-import { commitments, notificationHistory, reminderAuditEvents, reminderPolicies, reminderRules, reminderSchedules, users, vaProfiles } from "../drizzle/schema";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { commitments, notificationHistory, reminderAuditEvents, reminderPolicies, reminderRules, reminderSchedules, users, vaProfiles } from "../drizzle/schema.postgres";
 
 const controls = vi.hoisted(() => ({ getDb: vi.fn(), sendEmailWithOutcome: vi.fn() }));
 vi.mock("./db", () => ({ getDb: controls.getDb }));
@@ -132,9 +132,9 @@ function makeApprovalDb(
           }
           if (table === commitments && values.status) {
             commitmentStatus = String(values.status);
-            return [{ affectedRows: 1 }];
+            return { rowCount: 1 };
           }
-          if (table !== reminderSchedules || typeof values.state !== "string") return [{ affectedRows: 1 }];
+          if (table !== reminderSchedules || typeof values.state !== "string") return { rowCount: 1 };
           const nextState = values.state;
           const allowed = nextState === "sending"
             ? ["draft_ready", "failed"]
@@ -149,10 +149,10 @@ function makeApprovalDb(
                   : nextState === "cancelled"
                     ? ["scheduled", "preparing", "draft_ready", "failed", "needs_review", "escalated"]
                     : [];
-          if (!allowed.includes(scheduleState)) return [{ affectedRows: 0 }];
+          if (!allowed.includes(scheduleState)) return { rowCount: 0 };
           scheduleState = nextState;
           Object.assign(schedule, values);
-          return [{ affectedRows: 1 }];
+          return { rowCount: 1 };
         },
       }),
     }),
@@ -160,7 +160,7 @@ function makeApprovalDb(
       if (table === reminderAuditEvents) {
         auditEvents.push(...(Array.isArray(values) ? values : [values]).flatMap((value) => value.eventType ? [value.eventType] : []));
       }
-      return [{ affectedRows: 1, insertId: 1 }];
+      return { rowCount: 1, rows: [] };
     } }),
   });
   const executor = makeExecutor(false);
@@ -244,7 +244,7 @@ function makeConcurrentApprovalDb() {
     return release;
   };
   const queryParams = (query: unknown) => query
-    ? new MySqlDialect().sqlToQuery(query as SQL).params
+    ? new PgDialect().sqlToQuery(query as SQL).params
     : [];
 
   const makeExecutor = (inTransaction: boolean) => {
@@ -341,20 +341,20 @@ function makeConcurrentApprovalDb() {
             const whereValues = queryParams(condition);
             if (table === reminderSchedules && typeof values.state === "string") {
               const schedule = schedules.get(Number(whereValues[0]));
-              if (!schedule) return [{ affectedRows: 0 }];
+              if (!schedule) return { rowCount: 0 };
               const allowed = values.state === "sending"
                 ? ["draft_ready", "failed"]
                 : values.state === "sent" || values.state === "failed" || values.state === "needs_review"
                   ? ["sending"]
                   : [];
-              if (!allowed.includes(schedule.state)) return [{ affectedRows: 0 }];
+              if (!allowed.includes(schedule.state)) return { rowCount: 0 };
               Object.assign(schedule, values);
             }
-            return [{ affectedRows: 1 }];
+            return { rowCount: 1 };
           },
         }),
       }),
-      insert: (_table: unknown) => ({ values: async () => [{ affectedRows: 1, insertId: 1 }] }),
+      insert: (_table: unknown) => ({ values: async () => ({ rowCount: 1, rows: [] }) }),
       release: () => releaseRecipientLock?.(),
     };
   };
@@ -426,7 +426,7 @@ function makeConcurrentAutomaticDeliveryDb(withInFlightReservation = false) {
     return release;
   };
   const queryParams = (query: unknown) => query
-    ? new MySqlDialect().sqlToQuery(query as SQL).params
+    ? new PgDialect().sqlToQuery(query as SQL).params
     : [];
 
   const makeExecutor = (inTransaction: boolean) => {
@@ -518,17 +518,17 @@ function makeConcurrentAutomaticDeliveryDb(withInFlightReservation = false) {
         set: (values: Record<string, unknown>) => ({
           where: async (condition: unknown) => {
             const id = Number(queryParams(condition)[0]);
-            if (table !== reminderSchedules || typeof values.state !== "string") return [{ affectedRows: 1 }];
+            if (table !== reminderSchedules || typeof values.state !== "string") return { rowCount: 1 };
             const schedule = schedules.get(id);
-            if (!schedule) return [{ affectedRows: 0 }];
+            if (!schedule) return { rowCount: 0 };
             const allowed = values.state === "preparing"
               ? ["scheduled"]
               : ["sent", "scheduled", "skipped"].includes(values.state)
                 ? ["preparing"]
                 : [];
-            if (!allowed.includes(schedule.state)) return [{ affectedRows: 0 }];
+            if (!allowed.includes(schedule.state)) return { rowCount: 0 };
             Object.assign(schedule, values);
-            return [{ affectedRows: 1 }];
+            return { rowCount: 1 };
           },
         }),
       }),
@@ -537,7 +537,7 @@ function makeConcurrentAutomaticDeliveryDb(withInFlightReservation = false) {
         if (table === reminderAuditEvents) {
           auditEvents.push(...(Array.isArray(values) ? values : [values]).flatMap((value) => value.eventType ? [value.eventType] : []));
         }
-        return [{ affectedRows: 1, insertId: 1 }];
+        return { rowCount: 1, rows: [] };
       } }),
       release: () => releaseRecipientLock?.(),
     };
@@ -570,9 +570,9 @@ describe("scheduled reminder delivery boundary", () => {
       update: () => ({
         set: (values: Record<string, unknown>) => ({
           where: async (condition: SQL) => {
-            const query = new MySqlDialect().sqlToQuery(condition);
+            const query = new PgDialect().sqlToQuery(condition);
             updates.push({ values, sql: query.sql, params: query.params });
-            return [{ affectedRows: 1 }];
+            return { rowCount: 1 };
           },
         }),
       }),
@@ -732,14 +732,14 @@ describe("scheduled reminder delivery boundary", () => {
               else affected = 0;
             }
             if (table === commitments && values.status) commitmentStatus = String(values.status);
-            return [{ affectedRows: affected }];
+            return { rowCount: affected };
           },
         }),
       }),
       insert: (table: unknown) => ({
         values: async () => {
           insertedTables.push(table);
-          return [{ affectedRows: 1, insertId: 1 }];
+          return { rowCount: 1, rows: [] };
         },
       }),
     });
@@ -993,7 +993,7 @@ describe("scheduled reminder delivery boundary", () => {
 
     await approveAndSendReminder(owner, 71);
 
-    const query = new MySqlDialect().sqlToQuery(fixture.statsExpression() as SQL);
+    const query = new PgDialect().sqlToQuery(fixture.statsExpression() as SQL);
     const expectedBounds = zonedCalendarDayBounds(new Date(), "Europe/Amsterdam");
     expect(query.params).toContainEqual(expectedBounds.start);
     expect(query.params).toContainEqual(expectedBounds.end);

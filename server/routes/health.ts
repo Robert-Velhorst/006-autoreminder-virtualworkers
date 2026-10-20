@@ -3,11 +3,11 @@
  * Used by Docker healthcheck and monitoring systems
  */
 
-import { Router } from 'express';
-import type { Request, Response } from 'express';
-import { sql } from 'drizzle-orm';
-import { getDb } from '../db';
-import { isRedisAvailable } from '../services/redis';
+import { Router } from "express";
+import type { Request, Response } from "express";
+import { isDatabaseReachable } from "../db";
+import { isRedisAvailable } from "../services/redis";
+import { logger } from "../utils/logger";
 
 const router = Router();
 
@@ -15,11 +15,9 @@ const router = Router();
  * GET /api/health
  * Basic health check
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get("/", async (req: Request, res: Response) => {
   try {
-    // Check database connection
-    const db = await getDb();
-    const dbHealthy = db !== null && await db.execute(sql`SELECT 1`).then(() => true, () => false);
+    const dbHealthy = await isDatabaseReachable();
 
     // Check Redis connection (optional)
     const redisHealthy = isRedisAvailable();
@@ -34,7 +32,7 @@ router.get('/', async (req: Request, res: Response) => {
       memory: {
         used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
         total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
-        unit: 'MB',
+        unit: "MB",
       },
     };
 
@@ -55,17 +53,15 @@ router.get('/', async (req: Request, res: Response) => {
  * GET /api/health/ready
  * Readiness check (for Kubernetes)
  */
-router.get('/ready', async (req: Request, res: Response) => {
+router.get("/ready", async (req: Request, res: Response) => {
   try {
-    const db = await getDb();
-    if (!db) {
+    if (!(await isDatabaseReachable())) {
       return res.status(503).json({
         ready: false,
-        reason: 'Database not available',
+        reason: "Database not available",
       });
     }
 
-    await db.execute(sql`SELECT 1`);
     if (process.env.REDIS_URL?.trim() && !isRedisAvailable()) {
       return res.status(503).json({
         ready: false,
@@ -90,7 +86,7 @@ router.get('/ready', async (req: Request, res: Response) => {
  * GET /api/health/live
  * Liveness check (for Kubernetes)
  */
-router.get('/live', (req: Request, res: Response) => {
+router.get("/live", (req: Request, res: Response) => {
   res.json({
     alive: true,
     timestamp: new Date().toISOString(),

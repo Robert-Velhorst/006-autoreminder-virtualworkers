@@ -3,12 +3,8 @@ import AxeBuilder from "@axe-core/playwright";
 import { isDisabledProviderResponse, TRELLO_CREDENTIALS_MISSING_MESSAGE, UNLINKED_TRELLO_MESSAGE, UNLINKED_TRELLO_PATH } from "./disabled-provider-response.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
-import {
-  createConnection,
-  type Connection,
-  type ResultSetHeader,
-  type RowDataPacket,
-} from "mysql2/promise";
+import { openFixtureDatabase, fixtureInsert, type FixtureDatabase } from "./isolated-postgres-fixtures";
+import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
 import superjson from "superjson";
 import type { ManagerSnapshot } from "../shared/aptlssManager";
 import { dateKeyInTimeZone } from "../shared/workerTime";
@@ -143,16 +139,7 @@ function isolatedDatabaseUrl() {
     throw new Error(
       "Set APTLSS_TEST_DATABASE_URL; DATABASE_URL fallback is forbidden."
     );
-  const url = new URL(raw);
-  if (
-    url.protocol !== "mysql:" || url.search || url.hash ||
-    !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) ||
-    !/^\/(?:aptlss_test|recovery_test)$/.test(url.pathname)
-  ) {
-    throw new Error(
-      "Live APTLSS fixtures require an explicit loopback MySQL URL naming aptlss_test or recovery_test."
-    );
-  }
+  requireIsolatedPostgresTestDatabase(raw, process.env.NODE_ENV === "production");
   return raw;
 }
 
@@ -381,7 +368,7 @@ test.beforeEach(async ({ page }) => {
   });
   page.on("console", message => {
     if (message.type() !== "error") return;
-    if (controlledRealtimeOutages.has(page) && /^\[WebSocket\] (?:Connection|Reconnection) error: Error: timeout(?:\n|$)/.test(message.text())) {
+    if (controlledRealtimeOutages.has(page) && /^\[WebSocket\] (?:FixtureDatabase|Reconnection) error: Error: timeout(?:\n|$)/.test(message.text())) {
       errors.expected.push(message.text());
       return;
     }
@@ -462,7 +449,7 @@ for (const scenario of [
   },
 ] as const) {
   test.describe.serial(`APTLSS LIVE ${scenario.name}`, () => {
-    let db: Connection | undefined;
+    let db: FixtureDatabase | undefined;
     let seeded = false;
     const mutationStates: MutationState[] = [];
     let workerId = 0,
@@ -475,12 +462,12 @@ for (const scenario of [
       baseline = "";
     const cardName = `Review delivery report (${scenario.name})`;
     const insert = async (sql: string, values: unknown[]) =>
-      (await db!.execute<ResultSetHeader>(sql, values))[0].insertId;
+      fixtureInsert(db!, sql, values);
     const rows = async (sql: string, values: unknown[]) =>
-      (await db!.execute<RowDataPacket[]>(sql, values))[0];
+      (await db!.query(sql, values)).rows;
     const latest = async () => {
       const [row] = await rows(
-        "SELECT id, snapshotJson FROM aptlss_manager_runs WHERE vaId = ? ORDER BY id DESC LIMIT 1",
+        "SELECT id, \"snapshotJson\" FROM aptlss_manager_runs WHERE \"vaId\" = $1 ORDER BY id DESC LIMIT 1",
         [workerId]
       );
       return row
@@ -492,7 +479,7 @@ for (const scenario of [
     };
     const assertUnchanged = async () => {
       const [row] = await rows(
-        "SELECT scheduleJson FROM daily_plans WHERE vaId = ?",
+        "SELECT \"scheduleJson\" FROM daily_plans WHERE \"vaId\" = $1",
         [workerId]
       );
       expect(row.scheduleJson).toBe(baseline);
@@ -507,10 +494,7 @@ for (const scenario of [
       } finally {
         await entry.close();
       }
-      db = await createConnection({
-        uri: isolatedDatabaseUrl(),
-        timezone: "Z",
-      });
+      db = await openFixtureDatabase(isolatedDatabaseUrl());
       prefix = `aptlss-ui-${randomUUID().slice(0, 18)}`;
       cardId = `${prefix}-card`;
       const now = new Date();
@@ -564,10 +548,10 @@ for (const scenario of [
         ],
       });
       const passwordHash = await bcrypt.hash(PASSWORD, 10);
-      await db.beginTransaction();
+      await db.query("BEGIN");
       try {
         workerId = await insert(
-          "INSERT INTO users (id,openId,name,role,loginMethod,passwordHash) VALUES (?,?,?,?,?,?)",
+          "INSERT INTO users (id,\"openId\",name,role,\"loginMethod\",\"passwordHash\") VALUES ($1,$2,$3,$4,$5,$6)",
           [
             Number(process.env.APTLSS_TEST_PILOT_WORKER_IDS!.split(",")[scenario.pilotIndex + test.info().retry * 5]),
             `${prefix}-worker`,
@@ -578,7 +562,7 @@ for (const scenario of [
           ]
         );
         otherId = await insert(
-          "INSERT INTO users (openId,name,role,loginMethod,passwordHash) VALUES (?,?,?,?,?)",
+          "INSERT INTO users (\"openId\",name,role,\"loginMethod\",\"passwordHash\") VALUES ($1,$2,$3,$4,$5)",
           [
             `${prefix}-other`,
             `${prefix} Other`,
@@ -588,27 +572,27 @@ for (const scenario of [
           ]
         );
         adminId = await insert(
-          "INSERT INTO users (openId,name,role,loginMethod,passwordHash) VALUES (?,?,?,?,?)",
+          "INSERT INTO users (\"openId\",name,role,\"loginMethod\",\"passwordHash\") VALUES ($1,$2,$3,$4,$5)",
           [`${prefix}-admin`, `${prefix} Admin`, "admin", "local", passwordHash]
         );
         profileId = await insert(
-          "INSERT INTO va_profiles (userId,founderId,name,timezone,status) VALUES (?,?,?,?,?)",
+          "INSERT INTO va_profiles (\"userId\",\"founderId\",name,timezone,status) VALUES ($1,$2,$3,$4,$5)",
           [workerId, adminId, `${prefix} Worker`, timezone, "active"]
         );
-        await db.execute(
-          "INSERT INTO task_assignments (taskId,vaId,founderId,assignedBy,status) VALUES (?,?,?,?,?)",
+        await db.query(
+          "INSERT INTO task_assignments (\"taskId\",\"vaId\",\"founderId\",\"assignedBy\",status) VALUES ($1,$2,$3,$4,$5)",
           [cardId, profileId, adminId, adminId, "assigned"]
         );
-        await db.execute(
-          "INSERT INTO user_working_hours (userId,userOpenId,timezone,workingDays,workStartHour,workEndHour,enableBreaks) VALUES (?,?,?,?,?,?,?)",
+        await db.query(
+          "INSERT INTO user_working_hours (\"userId\",\"userOpenId\",timezone,\"workingDays\",\"workStartHour\",\"workEndHour\",\"enableBreaks\") VALUES ($1,$2,$3,$4,$5,$6,$7)",
           [workerId, `${prefix}-worker`, timezone, "0,1,2,3,4,5,6", 9, 18, 0]
         );
-        await db.execute(
-          "INSERT INTO aptlss_manager_state (vaId,enabled,intervalMinutes,mode) VALUES (?,1,5,?), (?,0,17,?)",
+        await db.query(
+          "INSERT INTO aptlss_manager_state (\"vaId\",enabled,\"intervalMinutes\",mode) VALUES ($1,TRUE,5,$2), ($3,FALSE,17,$4)",
           [workerId, "shadow", otherId, "shadow"]
         );
-        await db.execute(
-          "INSERT INTO aptlss_plans (vaId,cardId,cardName,cardUrl,boardName,listName,planJson) VALUES (?,?,?,?,?,?,?)",
+        await db.query(
+          "INSERT INTO aptlss_plans (\"vaId\",\"cardId\",\"cardName\",\"cardUrl\",\"boardName\",\"listName\",\"planJson\") VALUES ($1,$2,$3,$4,$5,$6,$7)",
           [
             workerId,
             cardId,
@@ -622,8 +606,8 @@ for (const scenario of [
             }),
           ]
         );
-        await db.execute(
-          "INSERT INTO card_states (vaId,cardId,cardName,state,listName,stateReason) VALUES (?,?,?,?,?,?)",
+        await db.query(
+          "INSERT INTO card_states (\"vaId\",\"cardId\",\"cardName\",state,\"listName\",\"stateReason\") VALUES ($1,$2,$3,$4,$5,$6)",
           [
             workerId,
             cardId,
@@ -633,12 +617,12 @@ for (const scenario of [
             "Review the current delivery report.",
           ]
         );
-        await db.execute(
-          "INSERT INTO priority_scores (vaId,cardId,score,tier) VALUES (?,?,50,?)",
+        await db.query(
+          "INSERT INTO priority_scores (\"vaId\",\"cardId\",score,tier) VALUES ($1,$2,50,$3)",
           [workerId, cardId, "HIGH"]
         );
-        await db.execute(
-          "INSERT INTO aptlss_steps (vaId,cardId,stepNumber,title,estimatedMinutes,category,completionCriteria) VALUES (?,?,1,?,15,?,?)",
+        await db.query(
+          "INSERT INTO aptlss_steps (\"vaId\",\"cardId\",\"stepNumber\",title,\"estimatedMinutes\",category,\"completionCriteria\") VALUES ($1,$2,1,$3,15,$4,$5)",
           [
             workerId,
             cardId,
@@ -647,14 +631,14 @@ for (const scenario of [
             "Record the checked source and current delivery status.",
           ]
         );
-        await db.execute(
-          "INSERT INTO daily_plans (vaId,dateKey,scheduleJson,totalScheduledMinutes) VALUES (?,?,?,15)",
+        await db.query(
+          "INSERT INTO daily_plans (\"vaId\",\"dateKey\",\"scheduleJson\",\"totalScheduledMinutes\") VALUES ($1,$2,$3,15)",
           [workerId, dateKey, baseline]
         );
-        await db.commit();
+        await db.query("COMMIT");
         seeded = true;
       } catch (error) {
-        await db.rollback();
+        await db.query("ROLLBACK");
         throw error;
       }
     });
@@ -672,11 +656,11 @@ for (const scenario of [
             `Retaining fixture ${prefix}: a server mutation may still be running. Stop the dedicated server before manual cleanup.`
           );
         }
-        await db.beginTransaction();
+        await db.query("BEGIN");
         try {
           // Only this fixture's exact source ID and this fixture user's assertions.
           const evidence = await rows(
-            "SELECT id FROM workspace_evidence_items WHERE sourceId IN (?,?) OR sourceId LIKE ? OR sourceId LIKE ?",
+            "SELECT id FROM workspace_evidence_items WHERE \"sourceId\" IN ($1,$2) OR \"sourceId\" LIKE $3 OR \"sourceId\" LIKE $4",
             [`${prefix}-source`, `${prefix}-conflict-source`, `worker-assertion:${workerId}:%`, `verified-conflict-resolution:${workerId}:%`]
           );
           for (const table of [
@@ -685,27 +669,27 @@ for (const scenario of [
             "founder_decision_deadlines",
             "decision_outcomes",
           ])
-            await db.execute(`DELETE FROM ${table} WHERE vaId IN (?,?)`, [
+            await db.query(`DELETE FROM ${table} WHERE "vaId" IN ($1,$2)`, [
               workerId,
               otherId,
             ]);
           for (const item of evidence) {
             const foreign = await rows(
-              "SELECT id FROM aptlss_evidence_subject_links WHERE evidenceId = ? AND vaId NOT IN (?,?)",
+              "SELECT id FROM aptlss_evidence_subject_links WHERE \"evidenceId\" = $1 AND \"vaId\" NOT IN ($2,$3)",
               [item.id, workerId, otherId]
             );
             if (foreign.length)
               throw new Error(
                 "Refusing to remove fixture evidence linked to another worker."
               );
-            await db.execute(
-              "DELETE FROM workspace_evidence_items WHERE id = ?",
+            await db.query(
+              "DELETE FROM workspace_evidence_items WHERE id = $1",
               [item.id]
             );
           }
           // Foreign-key cascades remove only revisions and links of owned sources.
-          await db.execute(
-            "UPDATE aptlss_manager_queue_slots SET vaId = NULL, token = NULL, leaseUntil = NULL WHERE vaId IN (?,?)",
+          await db.query(
+            "UPDATE aptlss_manager_queue_slots SET \"vaId\" = NULL, token = NULL, \"leaseUntil\" = NULL WHERE \"vaId\" IN ($1,$2)",
             [workerId, otherId]
           );
           for (const table of [
@@ -722,23 +706,23 @@ for (const scenario of [
             "daily_plans",
             "app_settings",
           ])
-            await db.execute(`DELETE FROM ${table} WHERE vaId IN (?,?)`, [
+            await db.query(`DELETE FROM ${table} WHERE "vaId" IN ($1,$2)`, [
               workerId,
               otherId,
             ]);
-          await db.execute("DELETE FROM task_assignments WHERE vaId = ?", [profileId]);
-          await db.execute("DELETE FROM va_profiles WHERE id = ?", [profileId]);
-          await db.execute("DELETE FROM user_working_hours WHERE userId = ?", [
+          await db.query("DELETE FROM task_assignments WHERE \"vaId\" = $1", [profileId]);
+          await db.query("DELETE FROM va_profiles WHERE id = $1", [profileId]);
+          await db.query("DELETE FROM user_working_hours WHERE \"userId\" = $1", [
             workerId,
           ]);
-          await db.execute("DELETE FROM users WHERE id IN (?,?,?)", [
+          await db.query("DELETE FROM users WHERE id IN ($1,$2,$3)", [
             workerId,
             otherId,
             adminId,
           ]);
-          await db.commit();
+          await db.query("COMMIT");
         } catch (error) {
-          await db.rollback();
+          await db.query("ROLLBACK");
           throw error;
         }
       } finally {
@@ -796,10 +780,10 @@ for (const scenario of [
       const sourceText =
         "Review delivery report against the retained source record.";
       const hash = createHash("sha256").update(sourceText).digest("hex");
-      await db!.beginTransaction();
+      await db!.query("BEGIN");
       try {
         const sourceId = await insert(
-          "INSERT INTO workspace_evidence_items (source,sourceId,title,content,sourceUrl,observedAt,modifiedAt,contentHash,active) VALUES (?,?,?,?,?,?,?,?,1)",
+          "INSERT INTO workspace_evidence_items (source,\"sourceId\",title,content,\"sourceUrl\",\"observedAt\",\"modifiedAt\",\"contentHash\",active) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,TRUE)",
           [
             "google_drive",
             `${prefix}-source`,
@@ -811,8 +795,8 @@ for (const scenario of [
             hash,
           ]
         );
-        await db!.execute(
-          "INSERT INTO aptlss_evidence_subject_links (evidenceId,vaId,subjectType,subjectId,relevanceScore,linkMethod,matchReason) VALUES (?,?,?,?,100,?,?)",
+        await db!.query(
+          "INSERT INTO aptlss_evidence_subject_links (\"evidenceId\",\"vaId\",\"subjectType\",\"subjectId\",\"relevanceScore\",\"linkMethod\",\"matchReason\") VALUES ($1,$2,$3,$4,100,$5,$6)",
           [
             sourceId,
             workerId,
@@ -822,12 +806,12 @@ for (const scenario of [
             "Explicit isolated fixture source link",
           ]
         );
-        await db!.execute(
-          "INSERT INTO workspace_evidence_links (evidenceId,cardId,relevanceScore,linkMethod,matchReason) VALUES (?,?,100,?,?)",
+        await db!.query(
+          "INSERT INTO workspace_evidence_links (\"evidenceId\",\"cardId\",\"relevanceScore\",\"linkMethod\",\"matchReason\") VALUES ($1,$2,100,$3,$4)",
           [sourceId, cardId, "manual", "Explicit isolated fixture source link"]
         );
-        await db!.execute(
-          "UPDATE aptlss_plans SET contextSnapshot = ? WHERE vaId = ? AND cardId = ?",
+        await db!.query(
+          "UPDATE aptlss_plans SET \"contextSnapshot\" = $1 WHERE \"vaId\" = $2 AND \"cardId\" = $3",
           [
             JSON.stringify({
               id: cardId,
@@ -839,9 +823,9 @@ for (const scenario of [
             cardId,
           ]
         );
-        await db!.commit();
+        await db!.query("COMMIT");
       } catch (error) {
-        await db!.rollback();
+        await db!.query("ROLLBACK");
         throw error;
       }
       const sourcedResponse = await mutateThroughUi<{ applied: boolean }>(
@@ -963,7 +947,7 @@ for (const scenario of [
       expect(
         (
           await rows(
-            "SELECT detail FROM aptlss_manager_updates WHERE vaId = ?",
+            "SELECT detail FROM aptlss_manager_updates WHERE \"vaId\" = $1",
             [workerId]
           )
         ).some(row => row.detail === update)
@@ -1038,11 +1022,11 @@ for (const scenario of [
       );
       expect(forbiddenPolicyUpdate.status()).toBe(403);
       const [own] = await rows(
-        "SELECT enabled,intervalMinutes,mode FROM aptlss_manager_state WHERE vaId = ?",
+        "SELECT enabled,\"intervalMinutes\",mode FROM aptlss_manager_state WHERE \"vaId\" = $1",
         [workerId]
       );
       const [other] = await rows(
-        "SELECT enabled,intervalMinutes,mode FROM aptlss_manager_state WHERE vaId = ?",
+        "SELECT enabled,\"intervalMinutes\",mode FROM aptlss_manager_state WHERE \"vaId\" = $1",
         [otherId]
       );
       expect({ enabled: Number(own.enabled), intervalMinutes: own.intervalMinutes, mode: own.mode }).toEqual({
@@ -1085,7 +1069,7 @@ for (const scenario of [
       );
       await expect(page.getByText("Manager review saved")).toBeVisible();
       const [review] = await rows(
-        "SELECT vaId,reviewerId,verdict,critical FROM aptlss_manager_reviews WHERE runId = ?",
+        "SELECT \"vaId\",\"reviewerId\",verdict,critical FROM aptlss_manager_reviews WHERE \"runId\" = $1",
         [latestRunId]
       );
       expect({
@@ -1115,7 +1099,7 @@ for (const scenario of [
       await expect(page.getByText("Shadow proposal assessed")).toBeVisible();
       await assertUnchanged();
       const [state] = await rows(
-        "SELECT mode FROM aptlss_manager_state WHERE vaId = ?",
+        "SELECT mode FROM aptlss_manager_state WHERE \"vaId\" = $1",
         [workerId]
       );
       expect(state.mode).toBe("shadow");
@@ -1133,27 +1117,27 @@ for (const scenario of [
       page,
     }, testInfo) => {
       const [prerequisite] = await rows(
-        "SELECT id FROM aptlss_steps WHERE vaId = ? AND cardId = ? AND stepNumber = 1",
+        "SELECT id FROM aptlss_steps WHERE \"vaId\" = $1 AND \"cardId\" = $2 AND \"stepNumber\" = 1",
         [workerId, cardId]
       );
       expect(prerequisite).toBeDefined();
       const decisionTitle = `Approve the source-checked follow-up (${scenario.name})`;
       const followUpTitle = `Prepare approved follow-up (${scenario.name})`;
       const followUpCriteria = "The follow-up is prepared for worker review";
-      await db!.beginTransaction();
+      await db!.query("BEGIN");
       let followUpId = 0;
       try {
-        await db!.execute(
-          "UPDATE aptlss_steps SET title = ?, requiresRobert = 1, recommendedDecision = ? WHERE id = ? AND vaId = ?",
+        await db!.query(
+          "UPDATE aptlss_steps SET title = $1, \"requiresRobert\" = TRUE, \"recommendedDecision\" = $2 WHERE id = $3 AND \"vaId\" = $4",
           [decisionTitle, "Approve the source-checked follow-up", prerequisite.id, workerId]
         );
         followUpId = await insert(
-          "INSERT INTO aptlss_steps (vaId,cardId,stepNumber,title,estimatedMinutes,category,blockedBy,completionCriteria) VALUES (?,?,2,?,15,?,?,?)",
+          "INSERT INTO aptlss_steps (\"vaId\",\"cardId\",\"stepNumber\",title,\"estimatedMinutes\",category,\"blockedBy\",\"completionCriteria\") VALUES ($1,$2,2,$3,15,$4,$5,$6)",
           [workerId, cardId, followUpTitle, "internal_work", "Step 1", followUpCriteria]
         );
-        await db!.commit();
+        await db!.query("COMMIT");
       } catch (error) {
-        await db!.rollback();
+        await db!.query("ROLLBACK");
         throw error;
       }
 
@@ -1169,9 +1153,9 @@ for (const scenario of [
       const heldAction = before.actions.find(action => action.stepIds.includes(followUpId));
       expect(heldAction).toMatchObject({ blocked: true });
       expect(await rows(
-        "SELECT status,requiresRobert FROM aptlss_steps WHERE id = ? AND vaId = ?",
+        "SELECT status,\"requiresRobert\" FROM aptlss_steps WHERE id = $1 AND \"vaId\" = $2",
         [prerequisite.id, workerId]
-      )).toMatchObject([{ status: "open", requiresRobert: 1 }]);
+      )).toMatchObject([{ status: "open", requiresRobert: true }]);
       await assertUnchanged();
 
       if (page.viewportSize()!.width < 768)
@@ -1200,7 +1184,7 @@ for (const scenario of [
       await expect(inbox.getByText("No founder decisions are waiting.")).toBeVisible();
 
       const [queued] = await rows(
-        "SELECT state,`trigger` FROM aptlss_manager_queue WHERE vaId = ?",
+        "SELECT state,\"trigger\" FROM aptlss_manager_queue WHERE \"vaId\" = $1",
         [workerId]
       );
       expect(queued).toMatchObject({ state: "pending", trigger: "decision_outcome" });
@@ -1230,7 +1214,7 @@ for (const scenario of [
         completionCriteria: followUpCriteria,
       });
       expect(await rows(
-        "SELECT status FROM aptlss_steps WHERE id = ? AND vaId = ?",
+        "SELECT status FROM aptlss_steps WHERE id = $1 AND \"vaId\" = $2",
         [prerequisite.id, workerId]
       )).toMatchObject([{ status: "complete" }]);
       await assertUnchanged();
@@ -1282,31 +1266,31 @@ for (const scenario of [
       let followupId = 0;
       const verificationTitle = `${prefix} Verify invoice A-12`;
       const observed = new Date(Date.now() - 60_000);
-      await db!.beginTransaction();
+      await db!.query("BEGIN");
       try {
         for (const [index, content] of ["Invoice A-12 is unpaid.", "Invoice A-12 is paid."].entries()) {
           const contentHash = createHash("sha256").update(content).digest("hex");
           const metadata = JSON.stringify({ sourceDate: observed.toISOString() });
           const evidenceId = await insert(
-            "INSERT INTO workspace_evidence_items (vaId,source,sourceId,kind,title,content,sourceUrl,observedAt,modifiedAt,contentHash,metadataJson,active) VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
+            "INSERT INTO workspace_evidence_items (\"vaId\",source,\"sourceId\",kind,title,content,\"sourceUrl\",\"observedAt\",\"modifiedAt\",\"contentHash\",\"metadataJson\",active) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,TRUE)",
             [workerId, "trello", index ? `worker-assertion:${workerId}:${prefix}-conflict-${index}` : `${prefix}-conflict-source`, index ? "worker_assertion" : "record", "Retained invoice status", content, "https://example.invalid/invoice", observed, observed, contentHash, metadata]);
           retained.push(evidenceId);
-          await insert("INSERT INTO aptlss_evidence_revisions (evidenceId,truthClass,content,contentHash,observedAt,metadataJson) VALUES (?,?,?,?,?,?)",
+          await insert("INSERT INTO aptlss_evidence_revisions (\"evidenceId\",\"truthClass\",content,\"contentHash\",\"observedAt\",\"metadataJson\") VALUES ($1,$2,$3,$4,$5,$6)",
             [evidenceId, index ? "worker_assertion" : "source_record", content, contentHash, observed, metadata]);
-          await insert("INSERT INTO aptlss_evidence_subject_links (evidenceId,vaId,subjectType,subjectId,relevanceScore,linkMethod,matchReason) VALUES (?,?,?, ?,100,?,?)",
+          await insert("INSERT INTO aptlss_evidence_subject_links (\"evidenceId\",\"vaId\",\"subjectType\",\"subjectId\",\"relevanceScore\",\"linkMethod\",\"matchReason\") VALUES ($1,$2,$3, $4,100,$5,$6)",
             [evidenceId, workerId, "card", cardId, "confirmed", "Owned contradictory invoice fixture"]);
-          await insert("INSERT INTO workspace_evidence_links (evidenceId,cardId,relevanceScore,linkMethod,matchReason) VALUES (?,?,100,?,?)",
+          await insert("INSERT INTO workspace_evidence_links (\"evidenceId\",\"cardId\",\"relevanceScore\",\"linkMethod\",\"matchReason\") VALUES ($1,$2,100,$3,$4)",
             [evidenceId, cardId, "manual", "Owned contradictory invoice fixture"]);
         }
-        conflictId = await insert("INSERT INTO aptlss_evidence_conflicts (vaId,sourceEvidenceId,assertedEvidenceId,status) VALUES (?,?,?,?)",
+        conflictId = await insert("INSERT INTO aptlss_evidence_conflicts (\"vaId\",\"sourceEvidenceId\",\"assertedEvidenceId\",status) VALUES ($1,$2,$3,$4)",
           [workerId, retained[0], retained[1], "needs_verification"]);
-        followupId = await insert("INSERT INTO aptlss_verification_followups (vaId,cardId,conflictId,title,question,status) VALUES (?,?,?,?,?,?)",
+        followupId = await insert("INSERT INTO aptlss_verification_followups (\"vaId\",\"cardId\",\"conflictId\",title,question,status) VALUES ($1,$2,$3,$4,$5,$6)",
           [workerId, cardId, conflictId, verificationTitle, "Is invoice A-12 paid or unpaid? Check the original record.", "open"]);
         if (process.env.APTLSS_TEST_AUTOMATIC_WORKFLOW === "true") {
-          await db!.execute("INSERT INTO aptlss_manager_queue (vaId,state,generation,priority,`trigger`) VALUES (?,'pending',1,100,'conflict') ON DUPLICATE KEY UPDATE generation=generation+1, priority=100, `trigger`='conflict', state=IF(state='leased','leased','pending'), availableAt=CURRENT_TIMESTAMP(3)", [workerId]);
+          await db!.query("INSERT INTO aptlss_manager_queue (\"vaId\",state,generation,priority,\"trigger\") VALUES ($1,'pending',1,100,'conflict') ON CONFLICT (\"vaId\") DO UPDATE SET generation=aptlss_manager_queue.generation+1, priority=100, \"trigger\"='conflict', state=CASE WHEN aptlss_manager_queue.state='leased' THEN 'leased' ELSE 'pending' END, \"availableAt\"=CURRENT_TIMESTAMP(3)", [workerId]);
         }
-        await db!.commit();
-      } catch (error) { await db!.rollback(); throw error; }
+        await db!.query("COMMIT");
+      } catch (error) { await db!.query("ROLLBACK"); throw error; }
       const manager = page.getByRole("region", { name: "APTLSS work manager" });
       if (process.env.APTLSS_TEST_AUTOMATIC_WORKFLOW === "true") {
         await expect.poll(async () => (await latest())?.interventions.some(item => item.cardId === cardId && item.severity === "urgent"), { timeout: 30_000 }).toBe(true);
@@ -1346,15 +1330,15 @@ for (const scenario of [
       await verification.getByLabel("What did you find?", { exact: true }).fill("I think it is unpaid, but have not verified the source yet.");
       await expect(verification.getByRole("button", { name: "Save verification and close", exact: true })).toBeDisabled();
       await mutateThroughUi(page, "operator.resolveVerificationFollowup", () => verification.getByRole("button", { name: "Save note; keep open", exact: true }).click());
-      expect(await rows("SELECT status FROM aptlss_evidence_conflicts WHERE id = ? AND vaId = ?", [conflictId, workerId])).toMatchObject([{ status: "needs_verification" }]);
-      expect(await rows("SELECT status FROM aptlss_verification_followups WHERE id = ? AND vaId = ?", [followupId, workerId])).toMatchObject([{ status: "open" }]);
+      expect(await rows("SELECT status FROM aptlss_evidence_conflicts WHERE id = $1 AND \"vaId\" = $2", [conflictId, workerId])).toMatchObject([{ status: "needs_verification" }]);
+      expect(await rows("SELECT status FROM aptlss_verification_followups WHERE id = $1 AND \"vaId\" = $2", [followupId, workerId])).toMatchObject([{ status: "open" }]);
       await assertUnchanged();
       await verification.getByLabel("What did you find?", { exact: true }).fill("The original retained record confirms invoice A-12 is unpaid.");
       await verification.getByLabel("Which original source confirms it?", { exact: true }).selectOption(String(retained[0]));
       await verification.getByLabel("Exact sentence from the source", { exact: true }).fill("Invoice A-12 is unpaid.");
       await mutateThroughUi(page, "operator.resolveVerificationFollowup", () => verification.getByRole("button", { name: "Save verification and close", exact: true }).click());
-      expect(await rows("SELECT status FROM aptlss_evidence_conflicts WHERE id = ? AND vaId = ?", [conflictId, workerId])).toMatchObject([{ status: "resolved" }]);
-      expect(await rows("SELECT status FROM aptlss_verification_followups WHERE id = ? AND vaId = ?", [followupId, workerId])).toMatchObject([{ status: "resolved" }]);
+      expect(await rows("SELECT status FROM aptlss_evidence_conflicts WHERE id = $1 AND \"vaId\" = $2", [conflictId, workerId])).toMatchObject([{ status: "resolved" }]);
+      expect(await rows("SELECT status FROM aptlss_verification_followups WHERE id = $1 AND \"vaId\" = $2", [followupId, workerId])).toMatchObject([{ status: "resolved" }]);
       const resolved = (await latest())!;
       expect(resolved.runId).toBeGreaterThan(assessed.runId);
       expect(resolved.policy.mode).toBe("shadow");

@@ -2,171 +2,185 @@ name: Recovery quality gates
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches:
       - main
       - "recovery/**"
-      - "codex/aptlss-shadow-pilot-2026-09-25"
 
 permissions:
   contents: read
 
-concurrency:
-  group: recovery-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
-
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 25
     services:
-      mysql:
-        image: mysql:8.4
+      postgres:
+        image: postgres:18.6
         env:
-          MYSQL_DATABASE: recovery_test
-          MYSQL_USER: recovery
-          MYSQL_PASSWORD: recovery_test
-          MYSQL_ROOT_PASSWORD: root_test
+          POSTGRES_DB: recovery_test
+          POSTGRES_USER: recovery
+          POSTGRES_PASSWORD: recovery_test
         ports:
-          - 3306:3306
+          - 5432:5432
         options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -urecovery -precovery_test --silent"
+          --health-cmd="pg_isready -U recovery -d recovery_test"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=12
     env:
       CI: "true"
-      DATABASE_URL: mysql://recovery:recovery_test@127.0.0.1:3306/recovery_test
+      APTLSS_TEST_DATABASE_URL: postgresql://recovery:recovery_test@127.0.0.1:5432/recovery_test?sslmode=disable
+      APTLSS_TEST_DISABLE_BACKGROUND_JOBS: "true"
+      NOTIFICATIONS_ENABLED: "false"
+      DATABASE_URL: postgresql://recovery:recovery_test@127.0.0.1:5432/recovery_test?sslmode=disable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: pnpm/action-setup@a15d269cd4658e1107c09f1fabf4cbd7bd1f308a # v4.4.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           run_install: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 22
+          node-version: 26.12.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Audit locked dependencies
+        run: pnpm audit --audit-level=low
+      - name: Reject tracked environment files
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            name="${file##*/}"
+            if [[ "$name" == ".env" || ( "$name" == .env.* && "$name" != ".env.example" ) ]]; then
+              echo "Refusing to keep environment file in Git: $file" >&2
+              exit 1
+            fi
+          done < <(git ls-files -z)
       - name: Scan the release tree for secrets
         shell: bash
         run: |
           set +e
           docker run --rm -v "$PWD:/repo" zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
-            --gitleaks-ignore-path /repo/.gitleaksignore dir /repo --no-banner --redact --report-format json --report-path /repo/gitleaks-report.json
+            dir /repo --no-banner --redact --report-format json --report-path /repo/gitleaks-report.json
           status=$?
           if test -s gitleaks-report.json; then
             jq -r '.[] | "gitleaks: \(.RuleID) \(.File):\(.StartLine)"' gitleaks-report.json
           fi
           rm -f gitleaks-report.json
           exit "$status"
-      - name: Require the release test runtime
-        run: node scripts/verify-release-test-runtime.mjs
-      - name: Verify runtime mismatch detection
-        run: node --test scripts/verify-release-test-runtime.test.mjs
-      - name: Reject unsafe full-data rehearsal connections
-        run: node --test scripts/rehearsal-connection.test.mjs scripts/rehearsal-readonly.test.mjs scripts/verify-rehearsal-reader.test.mjs scripts/rehearsal-reader-account.test.mjs
-      - name: Keep private runtime state outside Git publication
-        run: node --test scripts/publication-ignore.test.mjs
       - run: pnpm check
-      - name: Audit dependencies
-        run: pnpm audit --audit-level=high
-      - name: Apply canonical migrations
-        run: pnpm exec drizzle-kit migrate
-      - name: Configure disposable MySQL for isolated integration checks
-        run: >-
-          docker exec ${{ job.services.mysql.id }} mysql -uroot -proot_test -e
-          "SET GLOBAL event_scheduler=OFF;
-          SET GLOBAL log_bin_trust_function_creators=1;
-          GRANT SELECT ON performance_schema.data_locks TO 'recovery'@'%';
-          GRANT SELECT ON performance_schema.data_lock_waits TO 'recovery'@'%';"
-      - name: Verify consolidated schema parity
-        run: pnpm db:verify-parity
-      - run: pnpm test
-      - name: Verify setup diagnostics and browser error classification
-        run: node --test scripts/doctor.test.mjs e2e/disabled-provider-response.test.mjs
-      - name: Verify private Codex host process lifecycle without provider access
-        run: pnpm test:codex-supervisor
-      - name: Require real MySQL integration evidence (no skipped suites)
-        env:
-          APTLSS_TEST_DATABASE_URL: mysql://recovery:recovery_test@127.0.0.1:3306/recovery_test
-        run: pnpm test:mysql
-      - run: pnpm build
-      - name: Install browser engines for the portal smoke matrix
-        run: pnpm exec playwright install --with-deps chromium firefox webkit
-      - name: Run the worker portal browser smoke matrix
+      - run: pnpm check:db-transfer
+      - name: Test deployment release-source validation
+        run: node --test deployment/hetzner/release-source.test.mjs
+      - name: Validate production URL and webhook Compose configuration
         shell: bash
-        env:
-          PORT: "3025"
-          HOST: "127.0.0.1"
-          NODE_ENV: development
-          REMINDER_WORKER_ENABLED: "false"
-          BRIEFING_SCHEDULER_ENABLED: "false"
-          APTLSS_TEST_DATABASE_URL: mysql://recovery:recovery_test@127.0.0.1:3306/recovery_test
-          APTLSS_TEST_DISABLE_BACKGROUND_JOBS: "true"
-          APTLSS_TEST_PILOT_WORKER_IDS: >-
-            150000000,150000100,150000200,150000300,150000400,150000500,150000600,
-            150000700,150000800,150000900,150001000,150001100,150001200,150001300,150001400
-          APTLSS_TEST_PORT: "3025"
-          NOTIFICATIONS_ENABLED: "false"
-          E2E_BASE_URL: http://127.0.0.1:3025
         run: |
           set -euo pipefail
-          pnpm exec tsx scripts/start-aptlss-test-server.ts > server.log 2>&1 &
-          app_pid=$!
+          cp .env.example .env
+          trap 'rm -f .env' EXIT
+          export PUBLIC_URL=https://dashboard.example.com
+          export APP_URL=https://dashboard.example.com
+          export VITE_FRONTEND_URL=https://dashboard.example.com
+          export TRELLO_WEBHOOK_CALLBACK_URL=https://dashboard.example.com/api/trello-webhook
+          docker compose --env-file .env config --format json | node --input-type=module -e '
+            import assert from "node:assert/strict";
+            let input = "";
+            for await (const chunk of process.stdin) input += chunk;
+            const app = JSON.parse(input).services.app;
+            assert.equal(app.environment.PUBLIC_URL, "https://dashboard.example.com");
+            assert.equal(app.environment.TRELLO_WEBHOOK_CALLBACK_URL, "https://dashboard.example.com/api/trello-webhook");
+            assert.equal(app.environment.APP_URL, "https://dashboard.example.com");
+            assert.equal(app.environment.VITE_FRONTEND_URL, "https://dashboard.example.com");
+          '
+      - name: Apply PostgreSQL migrations
+        run: pnpm exec drizzle-kit migrate
+      - name: Verify PostgreSQL schema parity
+        run: pnpm db:verify-parity
+      - run: pnpm test
+      - run: pnpm build
+      - name: Install Chromium for browser smoke tests
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Verify authentication and worker dashboard in a browser
+        env:
+          JWT_SECRET: ci-only-playwright-session-secret-not-for-deployment
+        run: pnpm exec playwright test --project=chromium
+      - name: Verify PostgreSQL backup and isolated restore
+        shell: bash
+        env:
+          RESTORE_DATABASE_URL: postgresql://recovery:recovery_test@127.0.0.1:5432/recovery_restore_verify?sslmode=disable
+        run: |
+          set -euo pipefail
           cleanup() {
-            kill "$app_pid" 2>/dev/null || true
+            docker run --rm --network host \
+              --env DATABASE_URL="$DATABASE_URL" \
+              --env PGPASSWORD=recovery_test \
+              postgres:18.6 dropdb --maintenance-db="$DATABASE_URL" \
+              --if-exists recovery_restore_verify >/dev/null 2>&1 || true
+            docker run --rm --network host \
+              --env DATABASE_URL="$DATABASE_URL" \
+              --env PGPASSWORD=recovery_test \
+              postgres:18.6 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+              -c "DELETE FROM public.users WHERE \"openId\" IN ('ci-backup-restore-probe', 'ci-backup-sequence-probe')" \
+              >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
-          for _ in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:3025/api/health/ready >/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-          if ! curl --fail --silent http://127.0.0.1:3025/api/health/ready >/dev/null; then
-            cat server.log
+
+          docker run --rm -i --network host \
+            --env DATABASE_URL="$DATABASE_URL" \
+            --env RESTORE_DATABASE_URL="$RESTORE_DATABASE_URL" \
+            --env PGPASSWORD=recovery_test \
+            postgres:18.6 sh -s <<'BACKUP_TEST'
+          set -eu
+          source_id="$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -qAt \
+            -c "INSERT INTO public.users (\"openId\", name, role) VALUES ('ci-backup-restore-probe', 'CI backup restore probe', 'worker') RETURNING id")"
+          pg_dump --format=custom --no-owner --no-acl \
+            --dbname="$DATABASE_URL" --file=/tmp/va-dashboard-ci.dump
+          test -s /tmp/va-dashboard-ci.dump
+          createdb --maintenance-db="$DATABASE_URL" recovery_restore_verify
+          pg_restore --exit-on-error --no-owner --no-acl \
+            --dbname="$RESTORE_DATABASE_URL" /tmp/va-dashboard-ci.dump
+          restored_id="$(psql "$RESTORE_DATABASE_URL" -v ON_ERROR_STOP=1 -At \
+            -c "SELECT id FROM public.users WHERE \"openId\" = 'ci-backup-restore-probe'")"
+          if [ "$restored_id" != "$source_id" ]; then
+            printf 'Restored worker ID mismatch: expected %s, got %s\n' "$source_id" "$restored_id" >&2
             exit 1
           fi
-          pnpm test:e2e
-      - name: Run isolated APTLSS browser acceptance with real storage
-        env:
-          APTLSS_TEST_DATABASE_URL: mysql://recovery:recovery_test@127.0.0.1:3306/recovery_test
-        run: pnpm exec playwright test --config playwright.aptlss.config.ts
-      - name: Preserve release verification evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: release-verification-${{ github.run_id }}
-          path: |
-            artifacts/mysql-integration-*/results.json
-            test-results/
-            playwright-report/
-          if-no-files-found: warn
-          retention-days: 14
+          next_id="$(psql "$RESTORE_DATABASE_URL" -v ON_ERROR_STOP=1 -qAt \
+            -c "INSERT INTO public.users (\"openId\", name, role) VALUES ('ci-backup-sequence-probe', 'CI backup sequence probe', 'worker') RETURNING id")"
+          case "$next_id" in
+            ''|*[!0-9]*)
+              printf 'Restored identity sequence returned a non-numeric ID: %s\n' "$next_id" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$next_id" -le "$source_id" ]; then
+            printf 'Restored identity sequence did not advance: source ID %s, next ID %s\n' "$source_id" "$next_id" >&2
+            exit 1
+          fi
+          BACKUP_TEST
+          DATABASE_URL="$RESTORE_DATABASE_URL" pnpm db:verify-parity
       - name: Build the production container
         run: docker build --tag va-dashboard:ci .
-      - name: Verify the actual production image without provider access
-        run: node scripts/verify-production-image.mjs va-dashboard:ci
+      - name: Smoke-test the production image runtime
+        run: |
+          docker run --rm --entrypoint node va-dashboard:ci --input-type=module -e '
+            import assert from "node:assert/strict";
+            import { existsSync } from "node:fs";
+            assert.equal(process.env.NODE_ENV, "production");
+            assert.equal(process.env.LOCAL_AUTH_BYPASS, "false");
+            assert.notEqual(process.getuid(), 0);
+            assert.equal(existsSync("/usr/local/bin/pnpm"), false);
+            assert.ok(existsSync("/app/dist/index.js"));
+            for (const dependency of ["express", "pg", "drizzle-orm"]) {
+              import.meta.resolve(dependency);
+            }
+          '
+      - name: Validate Hetzner deployment script syntax
+        run: bash -n deployment/hetzner/deploy.sh
       - name: Verify migration metadata matches the schema
         shell: bash
         run: |
           pnpm exec drizzle-kit generate --name ci-drift
-          test -z "$(git status --porcelain -- drizzle)"
-
-  codex-host-windows:
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: pnpm/action-setup@a15d269cd4658e1107c09f1fabf4cbd7bd1f308a # v4.4.0
-        with:
-          run_install: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Require the release test runtime
-        run: node scripts/verify-release-test-runtime.mjs
-      - name: Verify runner and supervisor shutdown without accounts or provider access
-        run: pnpm test:codex-supervisor
+          test -z "$(git status --porcelain -- drizzle-postgres-v1)"

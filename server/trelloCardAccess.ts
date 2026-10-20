@@ -1,4 +1,4 @@
-import type { User } from '../drizzle/schema';
+import type { User } from '../drizzle/schema.postgres';
 import { getDb } from './db';
 import { fetchWithRetry } from './utils/retry';
 import { resolveWorkerOperatorContext } from './workerOperatorContext';

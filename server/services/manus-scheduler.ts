@@ -7,7 +7,7 @@ import {
   timeEntries,
   users,
   vaProfiles,
-} from "../../drizzle/schema";
+} from "../../drizzle/schema.postgres";
 import { and, eq, getTableColumns, gte, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import {
   getWorkerCards,
@@ -37,7 +37,7 @@ function unchangedTimer(entry: typeof timeEntries.$inferSelect) {
   // also win against a stale automatic stop.
   return and(...Object.entries(getTableColumns(timeEntries)).map(([key, column]) => {
     const value = entry[key as keyof typeof entry];
-    if (typeof value === "string") return sql`BINARY ${column} = BINARY ${value}`;
+    if (typeof value === "string") return sql`${column} COLLATE "C" = ${value}::text COLLATE "C"`;
     return value === null ? isNull(column) : eq(column, value);
   }));
 }
@@ -134,10 +134,8 @@ async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect, cont
         eq(timeEntries.vaId, worker.userId), eq(timeEntries.founderId, worker.founderId),
         eq(timeEntries.isVoided, false), isNull(timeEntries.endTime), unchangedTimer(entry),
       ));
-    const header = Array.isArray(result) ? result[0] : result;
-    const affectedRows = Number((header as { affectedRows?: unknown } | undefined)?.affectedRows);
-    if (affectedRows === 0) continue;
-    if (affectedRows !== 1) throw new Error("Automatic timer stop outcome could not be confirmed");
+    if (result.rowCount === 0) continue;
+    if (result.rowCount !== 1) throw new Error("Automatic timer stop outcome could not be confirmed");
     stopped.push({ ...entry, durationSeconds, wasCapped });
   }
 
@@ -281,7 +279,8 @@ export async function collectComplianceSnapshot(
   };
 
   await checkpointOwnership(context);
-  await db.insert(dailyComplianceSnapshots).values(values).onDuplicateKeyUpdate({
+  await db.insert(dailyComplianceSnapshots).values(values).onConflictDoUpdate({
+    target: [dailyComplianceSnapshots.vaId, dailyComplianceSnapshots.snapshotDate],
     set: values,
   });
   const rows = await db.select().from(dailyComplianceSnapshots).where(and(

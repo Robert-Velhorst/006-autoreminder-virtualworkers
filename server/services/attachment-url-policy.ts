@@ -126,8 +126,8 @@ export async function resolveSafeAttachmentDownloadUrl(
 }
 
 export function isTrelloAttachmentUrl(value: URL) {
-  const hostname = value.hostname.toLowerCase();
-  return hostname === "trello.com"
-    || hostname.endsWith(".trello.com")
-    || hostname === "trello-attachments.s3.amazonaws.com";
+  return value.protocol === "https:" && !value.username && !value.password
+    && value.hostname.toLowerCase() === "trello.com"
+    && (!value.port || value.port === "443")
+    && /^\/1\/cards\/[^/]+\/attachments\/[^/]+\/download(?:\/|$)/.test(value.pathname);
 }

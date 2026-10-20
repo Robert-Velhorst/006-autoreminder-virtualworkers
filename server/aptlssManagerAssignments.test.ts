@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { taskAssignments, vaProfiles } from "../drizzle/schema";
+import { taskAssignments, vaProfiles } from "../drizzle/schema.postgres";
 import { assessManagerAssignmentCoverage, parseManagerAssignmentReference, readManagerAssignmentState } from "./aptlssManagerAssignments";
 
 const state = (assignments: Array<{ taskId: string; status: "assigned" | "in_progress" | "blocked" }>) => ({

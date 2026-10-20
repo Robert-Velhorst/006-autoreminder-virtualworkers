@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { appSettings, aptlssPlans, aptlssSteps, dailyPlans, timeEntries, userWorkingHours, users, vaProfiles } from "../drizzle/schema";
+import { appSettings, aptlssPlans, aptlssSteps, dailyPlans, timeEntries, userWorkingHours, users, vaProfiles } from "../drizzle/schema.postgres";
 import type { WorkerOperatorContext } from "./workerOperatorContext";
 
 const mocks = vi.hoisted(() => ({
@@ -159,7 +159,7 @@ function makeDatabase(initialPlan: OperatorDailyPlanPayload) {
     select,
     insert: (table: unknown) => ({
       values: (values: Record<string, unknown>) => ({
-        onDuplicateKeyUpdate: () => ({
+        onConflictDoUpdate: () => ({
           then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) => {
             if (table === dailyPlans) {
               state.plan = {

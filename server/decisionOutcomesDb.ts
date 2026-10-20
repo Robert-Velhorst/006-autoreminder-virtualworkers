@@ -1,5 +1,5 @@
 import { and, desc, eq, like } from "drizzle-orm";
-import { aptlssPlans, aptlssSteps, decisionOutcomes, notificationHistory } from "../drizzle/schema";
+import { aptlssPlans, aptlssSteps, decisionOutcomes, notificationHistory } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 import { enqueueManagerTask } from "./aptlssManagerQueue";
 
@@ -65,7 +65,7 @@ export async function recordDecisionOutcome({
         resolvedBy,
         resolvedAt,
       })
-      .$returningId();
+      .returning({ id: decisionOutcomes.id });
 
     await tx
       .update(aptlssSteps)

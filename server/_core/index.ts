@@ -1,5 +1,6 @@
 import "./envBootstrap";
 import express from "express";
+import { rateLimit } from "express-rate-limit";
 import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
@@ -64,7 +65,17 @@ import { initializeWebhookAutoRegister, stopWebhookAutoRegister } from "../servi
 import { startMaintenanceCenter, stopMaintenanceCenter } from "../maintenanceCenter.js";
 import { startManagerScheduler, stopManagerScheduler } from "../aptlssManagerService.js";
 import { startFounderDecisionAlertWorker, stopFounderDecisionAlertWorker } from "../founderDecisionAlerts.js";
-import { closeDb } from "../db.js";
+
+import { closeDatabase, isDatabaseReachable } from "../db.js";
+import { listenOnPort, selectServerPort } from "./portSelection.js";
+
+const apiIpRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Too many requests, please slow down" },
+});
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -92,9 +103,15 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 // them and process them as slots free up.  Requests that wait longer than
 // QUEUE_TIMEOUT_MS are rejected with 503 so the queue never grows unbounded.
 // ---------------------------------------------------------------------------
-function positiveInteger(value: string | undefined, fallback: number, maximum: number) {
+function positiveInteger(
+  value: string | undefined,
+  fallback: number,
+  maximum: number
+) {
   const parsed = Number.parseInt(value ?? "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, maximum) : fallback;
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.min(parsed, maximum)
+    : fallback;
 }
 
 const MAX_CONCURRENT = positiveInteger(process.env.MAX_CONCURRENT_REQUESTS, 100, 10_000);
@@ -124,7 +141,7 @@ function acquireSlot(): Promise<void> {
       settled = true;
       const idx = waitQueue.indexOf(tryAcquire);
       if (idx !== -1) waitQueue.splice(idx, 1);
-      reject(new Error('Request queue timeout'));
+      reject(new Error("Request queue timeout"));
     }, QUEUE_TIMEOUT_MS);
 
     const tryAcquire = () => {
@@ -158,14 +175,16 @@ function concurrencyLimiter(
         released = true;
         releaseSlot();
       };
-      res.once('finish', releaseOnce);
-      res.once('close', releaseOnce);
+      res.once("finish", releaseOnce);
+      res.once("close", releaseOnce);
       next();
     })
     .catch(() => {
-      console.warn(`[Server] Request queue full (${waitQueue.length} waiting, ${activeRequests} active)`);
+      console.warn(
+        `[Server] Request queue full (${waitQueue.length} waiting, ${activeRequests} active)`
+      );
       res.status(503).json({
-        error: 'Server busy — please retry in a moment',
+        error: "Server busy — please retry in a moment",
         retryAfter: Math.ceil(QUEUE_TIMEOUT_MS / 1000),
       });
     });
@@ -174,6 +193,9 @@ function concurrencyLimiter(
 async function startServer() {
   assertProductionConfiguration();
   assertLocalAuthBypassConfiguration();
+  if (process.env.NODE_ENV === "production" && !(await isDatabaseReachable())) {
+    throw new Error("PostgreSQL connectivity check failed during startup");
+  }
   const backgroundWork = getBackgroundWorkConfiguration(process.env, {
     localAuthBypassEnabled: isLocalAuthBypassEnabled(),
   });
@@ -184,10 +206,10 @@ async function startServer() {
   const server = createServer(app);
 
   app.use(securityHeaders);
-  
+
   // Concurrency limiter — queues excess requests instead of hard-rejecting them
   app.use(concurrencyLimiter);
-  
+
   const requestBodyLimit = getRequestBodyLimit();
   app.use(express.json({
     limit: requestBodyLimit,
@@ -204,6 +226,9 @@ async function startServer() {
   // Conventional platform readiness alias. Mounting the health router here
   // makes GET /readyz perform the same database and Redis checks as /api/health.
   app.use("/readyz", healthRoutes);
+
+  // Bound authentication work before credentials are resolved.
+  app.use("/api", apiIpRateLimiter);
 
   // Authentication middleware for all /api routes
   app.use('/api', attachRequestAuthentication);
@@ -288,11 +313,13 @@ async function startServer() {
     })
   );
   // Add 404 handler for unmatched API routes before Vite middleware
-  app.use('/api', (req, res) => {
-    console.log(`[Server] 404 - Unmatched API route: ${req.method} ${req.path}`);
-    res.status(404).json({ error: 'API endpoint not found', path: req.path });
+  app.use("/api", (req, res) => {
+    console.log(
+      `[Server] 404 - Unmatched API route: ${req.method} ${req.path}`
+    );
+    res.status(404).json({ error: "API endpoint not found", path: req.path });
   });
-  
+
   // development mode uses Vite, production mode uses static files
   if (process.env.NODE_ENV === "development") {
     const { setupVite } = await import("./vite.js");
@@ -302,9 +329,12 @@ async function startServer() {
   }
 
   const preferredPort = parseInt(process.env.PORT || "3000");
-  const port = process.env.NODE_ENV === "production"
-    ? preferredPort
-    : await findAvailablePort(preferredPort);
+  const isProduction = process.env.NODE_ENV === "production";
+  const port = await selectServerPort(
+    preferredPort,
+    isProduction,
+    findAvailablePort
+  );
 
   if (process.env.NODE_ENV !== "production" && port !== preferredPort) {
     console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
@@ -330,79 +360,80 @@ async function startServer() {
   }
 
   const host = process.env.HOST ?? "127.0.0.1";
-  server.listen(port, host, async () => {
-    log.info(`Server running on http://${host}:${port}/`, {
-      port,
-      host,
-      environment: process.env.NODE_ENV,
-    });
-    const webhookUrl = process.env.TRELLO_WEBHOOK_CALLBACK_URL?.trim()
-      || process.env.WEBHOOK_BASE_URL?.trim()
-      || process.env.PUBLIC_URL?.trim()
-      || process.env.APP_URL?.trim();
-    if (webhookUrl) {
-      // Configure the callback in memory for explicit authorized actions only.
-      // false must remain explicit: startup never registers provider webhooks.
-      await initializeWebhookAutoRegister(webhookUrl, false);
-    }
+  await listenOnPort(server, port, host);
+  log.info(`Server running on http://${host}:${port}/`, {
+    port,
+    host,
+    environment: process.env.NODE_ENV,
   });
+
+  const webhookUrl = process.env.TRELLO_WEBHOOK_CALLBACK_URL?.trim()
+    || process.env.WEBHOOK_BASE_URL?.trim()
+    || process.env.PUBLIC_URL?.trim()
+    || process.env.APP_URL?.trim();
+  if (webhookUrl) await initializeWebhookAutoRegister(webhookUrl, false);
 
   // Graceful shutdown handling
-  let shuttingDown = false;
+  let shutdownStarted = false;
   const gracefulShutdown = async () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    const shutdownDeadline = setTimeout(() => {
-      log.fatal('Forced shutdown after timeout');
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    log.info("Shutting down gracefully...");
+
+    const forceExit = setTimeout(() => {
+      log.fatal("Forced shutdown after timeout");
       process.exit(1);
     }, 10000);
-    shutdownDeadline.unref();
-    log.info('Shutting down gracefully...');
-    
-    // Close WebSocket connections
-    const io = websocketService.getIO();
-    if (io) {
-      io.close();
-      log.info('WebSocket server closed');
-    }
 
-    // Close Redis connections
-    stopBriefingScheduler();
-    stopManusScheduler();
-    stopReminderWorker();
-    stopFounderDecisionAlertWorker();
-    stopMaintenanceCenter();
-    stopWebhookAutoRegister();
-    // Drain manager leases before ending its database pool.
-    await stopManagerScheduler();
-    await closeRedis();
-    
-    // Close HTTP server
-    server.close(async () => {
-      await closeDb();
-      clearTimeout(shutdownDeadline);
-      log.info('HTTP server closed');
+    try {
+      const io = websocketService.getIO();
+      if (io) {
+        await io.close();
+        log.info("WebSocket and HTTP servers closed");
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          server.close(error => (error ? reject(error) : resolve()));
+        });
+        log.info("HTTP server closed");
+      }
+
+      stopBriefingScheduler();
+      stopManusScheduler();
+      stopReminderWorker();
+      stopFounderDecisionAlertWorker();
+      stopMaintenanceCenter();
+      stopWebhookAutoRegister();
+      await stopManagerScheduler();
+      await closeRedis();
+      await closeDatabase();
+      clearTimeout(forceExit);
+      log.info("Redis and PostgreSQL connections closed");
       process.exit(0);
-    });
-    
+    } catch (error) {
+      clearTimeout(forceExit);
+      log.error("Graceful shutdown failed", error as Error);
+      process.exit(1);
+    }
   };
 
-  process.on('SIGTERM', gracefulShutdown);
-  process.on('SIGINT', gracefulShutdown);
-  
+  process.on("SIGTERM", gracefulShutdown);
+  process.on("SIGINT", gracefulShutdown);
+
   // Handle uncaught exceptions
-  process.on('uncaughtException', (error) => {
-    log.fatal('Uncaught exception', error);
+  process.on("uncaughtException", error => {
+    log.fatal("Uncaught exception", error);
     gracefulShutdown();
   });
-  
+
   // Handle unhandled promise rejections
-  process.on('unhandledRejection', (reason, promise) => {
-    log.error('Unhandled rejection', reason as Error, { promise: String(promise) });
+  process.on("unhandledRejection", (reason, promise) => {
+    log.error("Unhandled rejection", reason as Error, {
+      promise: String(promise),
+    });
   });
 }
 
-startServer().catch((error) => {
-  log.fatal('Failed to start server', error);
+startServer().catch(error => {
+  log.fatal("Failed to start server", error);
   process.exit(1);
 });

@@ -211,17 +211,17 @@ export class AttachmentExtractorService {
         await db.execute(sql`
           UPDATE atis_attachments
           SET 
-            extractedContent = ${truncatedContent},
-            extractionStatus = 'success',
-            extractedAt = NOW()
+            "extractedContent" = ${truncatedContent},
+            "extractionStatus" = 'success',
+            "extractedAt" = NOW()
           WHERE id = ${attachmentId}
         `);
       } else {
         await db.execute(sql`
           UPDATE atis_attachments
           SET 
-            extractionStatus = 'failed',
-            extractionError = ${result.error || 'Unknown error'}
+            "extractionStatus" = 'failed',
+            "extractionError" = ${result.error || 'Unknown error'}
           WHERE id = ${attachmentId}
         `);
       }
@@ -246,13 +246,14 @@ export class AttachmentExtractorService {
 
     // Get pending attachments
     const result = await db.execute(sql`
-      SELECT id, trelloId, cardId, filename as name, url, mimeType, bytes
+      SELECT id, "trelloId", "cardId", COALESCE(filename, '') AS name,
+        COALESCE(url, '') AS url, "mimeType", bytes
       FROM atis_attachments
-      WHERE extractionStatus IS NULL OR extractionStatus = 'pending'
+      WHERE "extractionStatus" IS NULL OR "extractionStatus" = 'pending'
       LIMIT ${limit}
     `);
 
-    const attachments = (result as any)[0] || [];
+    const attachments = result.rows as unknown as AttachmentInfo[];
     let success = 0;
     let failed = 0;
     let skipped = 0;
@@ -262,7 +263,7 @@ export class AttachmentExtractorService {
       if (!this.isExtractable(attachment.name, attachment.mimeType)) {
         await db.execute(sql`
           UPDATE atis_attachments
-          SET extractionStatus = ${UNSUPPORTED_ATTACHMENT_STATUS}
+          SET "extractionStatus" = ${UNSUPPORTED_ATTACHMENT_STATUS}
           WHERE id = ${attachment.id}
         `);
         skipped++;
@@ -313,15 +314,15 @@ export class AttachmentExtractorService {
     const result = await db.execute(sql`
       SELECT 
         COUNT(*) as total,
-        SUM(CASE WHEN extractionStatus = 'success' THEN 1 ELSE 0 END) as completed,
-        SUM(CASE WHEN extractionStatus = 'failed' THEN 1 ELSE 0 END) as failed,
-        SUM(CASE WHEN extractionStatus = 'unreadable' THEN 1 ELSE 0 END) as skipped,
-        SUM(CASE WHEN extractionStatus IS NULL OR extractionStatus = 'pending' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN "extractionStatus" = 'success' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN "extractionStatus" = 'failed' THEN 1 ELSE 0 END) as failed,
+        SUM(CASE WHEN "extractionStatus" = 'unreadable' THEN 1 ELSE 0 END) as skipped,
+        SUM(CASE WHEN "extractionStatus" IS NULL OR "extractionStatus" = 'pending' THEN 1 ELSE 0 END) as pending,
         0 as totalWords
       FROM atis_attachments
     `);
 
-    const row = (result as any)[0]?.[0] || {};
+    const row = result.rows[0] || {};
     return {
       total: Number(row.total) || 0,
       completed: Number(row.completed) || 0,
@@ -340,14 +341,14 @@ export class AttachmentExtractorService {
     if (!db) return [];
 
     const result = await db.execute(sql`
-      SELECT extractedContent
+      SELECT "extractedContent"
       FROM atis_attachments
-      WHERE cardId = ${cardId}
-      AND extractionStatus = 'success'
-      AND extractedContent IS NOT NULL
+      WHERE "cardId" = ${cardId}
+      AND "extractionStatus" = 'success'
+      AND "extractedContent" IS NOT NULL
     `);
 
-    const rows = (result as any)[0] || [];
+    const rows = result.rows;
     return rows.map((r: any) => r.extractedContent).filter(Boolean);
   }
 }

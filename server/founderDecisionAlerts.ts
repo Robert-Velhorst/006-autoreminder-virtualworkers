@@ -1,5 +1,5 @@
 import { and, desc, eq, like, lte, sql } from "drizzle-orm";
-import { aptlssSteps, founderDecisionDeadlines, notificationHistory, userNotificationPreferences, users } from "../drizzle/schema";
+import { aptlssSteps, founderDecisionDeadlines, notificationHistory, userNotificationPreferences, users } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 import { createNonOverlappingRunner } from "./services/non-overlapping-runner";
 

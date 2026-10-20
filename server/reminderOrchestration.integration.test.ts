@@ -9,19 +9,15 @@ import {
   vi,
 } from "vitest";
 import { and, eq, inArray, lte } from "drizzle-orm";
-import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
-import {
-  createPool,
-  type Pool,
-  type PoolConnection,
-  type RowDataPacket,
-} from "mysql2/promise";
-import * as schema from "../drizzle/schema";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
+import { Pool, type PoolClient } from "pg";
+import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
+import * as schema from "../drizzle/schema.postgres";
 import { upsertSourceCommitment } from "./sourceCommitments";
 
 const controls = vi.hoisted(() => ({
   url: process.env.APTLSS_TEST_DATABASE_URL,
-  db: undefined as MySql2Database<typeof schema> | undefined,
+  db: undefined as NodePgDatabase<typeof schema> | undefined,
   sendEmailWithOutcome: vi.fn(),
 }));
 
@@ -49,58 +45,39 @@ const owned = {
 const databaseUrl = controls.url;
 
 describe.skipIf(!databaseUrl)(
-  "reminder orchestration real MySQL race regressions",
-  { timeout: 30_000, hookTimeout: 30_000 },
+  "reminder orchestration real PostgreSQL race regressions",
+  { timeout: 30_000 },
   () => {
     let pool: Pool | undefined;
-    let lock: PoolConnection | undefined;
-    let db: MySql2Database<typeof schema>;
+    let lock: PoolClient | undefined;
+    let db: NodePgDatabase<typeof schema>;
     let reminders: ReminderService;
 
     beforeAll(async () => {
-      const target = new URL(databaseUrl!);
-      const allowedHosts = ["127.0.0.1", "localhost", "[::1]"];
-      const allowedDatabases = ["/aptlss_test", "/recovery_test"];
-      if (
-        target.protocol !== "mysql:" ||
-        !allowedHosts.includes(target.hostname) ||
-        !allowedDatabases.includes(target.pathname) ||
-        target.search ||
-        target.hash
-      ) {
-        throw new Error(
-          "Reminder integration tests require a loopback MySQL URL naming aptlss_test or recovery_test."
-        );
-      }
-
-      pool = createPool({
-        uri: databaseUrl!,
-        connectionLimit: 8,
-        connectTimeout: 10_000,
-        timezone: "Z",
+      const target = new URL(requireIsolatedPostgresTestDatabase(databaseUrl, process.env.NODE_ENV === "production"));
+      pool = new Pool({
+        connectionString: databaseUrl!,
+        max: 8,
+        connectionTimeoutMillis: 10_000,
       });
-      db = drizzle(pool, { schema, mode: "default" });
+      db = drizzle(pool, { schema });
       controls.db = db;
 
-      const [identity] = await pool.query<RowDataPacket[]>(
-        "SELECT DATABASE() AS name, VERSION() AS version"
+      const { rows: identity } = await pool.query(
+        "SELECT current_database() AS name, current_setting('server_version') AS version"
       );
       expect(identity[0]?.name).toBe(target.pathname.slice(1));
-      expect(identity[0]?.version).toMatch(/^8\./);
-      const [engines] = await pool.query<RowDataPacket[]>(
-        `SELECT TABLE_NAME AS tableName, ENGINE AS engine
-         FROM information_schema.TABLES
-         WHERE TABLE_SCHEMA = DATABASE()
-           AND TABLE_NAME IN ('users', 'commitments', 'reminder_schedules', 'reminder_policies', 'notification_history')`
-      );
-      expect(engines).toHaveLength(5);
-      expect(engines.every(row => String(row.engine).toUpperCase() === "INNODB")).toBe(true);
+      expect(identity[0]?.version).toMatch(/^18\./);
+      const { rows: tables } = await pool.query(`SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name IN
+        ('users', 'commitments', 'reminder_schedules', 'reminder_policies', 'notification_history')`);
+      expect(tables).toHaveLength(5);
 
-      lock = await pool.getConnection();
-      const [lockRows] = await lock.query<RowDataPacket[]>(
-        "SELECT GET_LOCK('reminder-orchestration-integration', 30) AS acquired"
+      lock = await pool.connect();
+      const { rows: lockRows } = await lock.query(
+        "SELECT pg_advisory_lock(hashtext('reminder-orchestration-integration'))"
       );
-      expect(Number(lockRows[0]?.acquired)).toBe(1);
+
 
       controls.sendEmailWithOutcome.mockResolvedValue({
         status: "uncertain",
@@ -175,7 +152,7 @@ describe.skipIf(!databaseUrl)(
       controls.db = undefined;
       if (lock) {
         await lock
-          .query("SELECT RELEASE_LOCK('reminder-orchestration-integration')")
+          .query("SELECT pg_advisory_unlock(hashtext('reminder-orchestration-integration'))")
           .catch(() => undefined);
         lock.release();
       }
@@ -195,7 +172,7 @@ describe.skipIf(!databaseUrl)(
           name: "Reminder integration owner",
           role: "admin",
         })
-        .$returningId();
+        .returning();
       owned.userIds.push(owner.id);
       const [worker] = await db
         .insert(schema.users)
@@ -204,7 +181,7 @@ describe.skipIf(!databaseUrl)(
           name: "Reminder integration worker",
           role: "worker",
         })
-        .$returningId();
+        .returning();
       owned.userIds.push(worker.id);
 
       const [profile] = await db
@@ -215,7 +192,7 @@ describe.skipIf(!databaseUrl)(
           name: "Reminder integration worker",
           status: "active",
         })
-        .$returningId();
+        .returning();
       owned.profileIds.push(profile.id);
 
       await db.insert(schema.reminderPolicies).values({
@@ -244,7 +221,7 @@ describe.skipIf(!databaseUrl)(
           title: taskName,
           dueAt: new Date(Date.now() + 60 * 60_000),
         })
-        .$returningId();
+        .returning();
       owned.commitmentIds.push(commitment.id);
 
       const [rule] = await db
@@ -260,7 +237,7 @@ describe.skipIf(!databaseUrl)(
           maxAttempts: 1,
           cooldownMinutes: 0,
         })
-        .$returningId();
+        .returning();
       owned.ruleIds.push(rule.id);
 
       const [schedule] = await db
@@ -276,7 +253,7 @@ describe.skipIf(!databaseUrl)(
           draftTitle: `Reminder: ${taskName}`,
           draftContent: "Review this integration-only reminder.",
         })
-        .$returningId();
+        .returning();
 
       return {
         ownerId: owner.id,
@@ -308,7 +285,7 @@ describe.skipIf(!databaseUrl)(
           name: "Reminder reassignment worker",
           role: "worker",
         })
-        .$returningId();
+        .returning();
       owned.userIds.push(worker.id);
       const [profile] = await db
         .insert(schema.vaProfiles)
@@ -318,7 +295,7 @@ describe.skipIf(!databaseUrl)(
           name: "Reminder reassignment worker",
           status: "active",
         })
-        .$returningId();
+        .returning();
       owned.profileIds.push(profile.id);
       return { id: worker.id, openId, email };
     }
@@ -363,25 +340,23 @@ describe.skipIf(!databaseUrl)(
       expect(controls.sendEmailWithOutcome).not.toHaveBeenCalled();
     }
 
-    async function waitForInnoDbLockWaits(tableName: string, minimum: number) {
+    async function waitForPostgresLockWaits(tableName: string, minimum: number) {
       const deadline = Date.now() + 10_000;
       while (Date.now() < deadline) {
-        const [rows] = await pool!.query<RowDataPacket[]>(
-          `SELECT COUNT(DISTINCT waits.REQUESTING_ENGINE_TRANSACTION_ID) AS waiting
-           FROM performance_schema.data_lock_waits AS waits
-           INNER JOIN performance_schema.data_locks AS requested
-             ON requested.ENGINE = waits.ENGINE
-             AND requested.ENGINE_LOCK_ID = waits.REQUESTING_ENGINE_LOCK_ID
-             AND requested.ENGINE_TRANSACTION_ID = waits.REQUESTING_ENGINE_TRANSACTION_ID
-           WHERE requested.OBJECT_SCHEMA = DATABASE()
-             AND LOWER(requested.OBJECT_NAME) = ?
-             AND requested.LOCK_STATUS = 'WAITING'`,
+        const { rows } = await pool!.query(
+          `SELECT COUNT(DISTINCT blocked.pid) AS waiting
+           FROM pg_stat_activity AS blocked
+           WHERE blocked.datname = current_database()
+             AND blocked.wait_event_type = 'Lock'
+             AND cardinality(pg_blocking_pids(blocked.pid)) > 0
+             AND EXISTS (SELECT 1 FROM pg_locks held JOIN pg_class relation ON relation.oid = held.relation
+               WHERE held.pid = blocked.pid AND lower(relation.relname) = $1)`,
           [tableName.toLowerCase()]
         );
         if (Number(rows[0]?.waiting ?? 0) >= minimum) return;
         await new Promise(resolve => setTimeout(resolve, 15));
       }
-      throw new Error(`Timed out waiting for ${minimum} InnoDB lock wait(s) on ${tableName}`);
+      throw new Error(`Timed out waiting for ${minimum} PostgreSQL lock wait(s) on ${tableName}`);
     }
 
     async function assertNoUnownedWorkForGlobalWorker(
@@ -546,23 +521,23 @@ describe.skipIf(!databaseUrl)(
       await db.update(schema.reminderPolicies).set({ maxPerDay: 1, minIntervalMinutes: 0 })
         .where(eq(schema.reminderPolicies.userId, first.workerId));
 
-      const commitmentGate = await pool!.getConnection();
-      const recipientGate = await pool!.getConnection();
+      const commitmentGate = await pool!.connect();
+      const recipientGate = await pool!.connect();
       let commitmentGateOpen = false;
       let recipientGateOpen = false;
       let deliveries: Promise<unknown> | undefined;
       let deliveriesFinished = false;
       try {
-        await commitmentGate.beginTransaction();
+        await commitmentGate.query("BEGIN");
         commitmentGateOpen = true;
-        await recipientGate.beginTransaction();
+        await recipientGate.query("BEGIN");
         recipientGateOpen = true;
         await commitmentGate.query(
-          "SELECT id FROM commitments WHERE id IN (?, ?) ORDER BY id FOR SHARE",
+          "SELECT id FROM commitments WHERE id IN ($1, $2) ORDER BY id FOR SHARE",
           [first.commitmentId, second.commitmentId]
         );
         await recipientGate.query(
-          "SELECT id FROM users WHERE id = ? FOR SHARE",
+          "SELECT id FROM users WHERE id = $1 FOR SHARE",
           [first.workerId]
         );
 
@@ -576,13 +551,13 @@ describe.skipIf(!databaseUrl)(
 
         // Both workers must pass their early quota reads and reach the locked
         // delivery boundary before either can complete.
-        await waitForInnoDbLockWaits("commitments", 2);
-        await commitmentGate.commit();
+        await waitForPostgresLockWaits("commitments", 2);
+        await commitmentGate.query("COMMIT");
         commitmentGateOpen = false;
-        await waitForInnoDbLockWaits("users", 1);
+        await waitForPostgresLockWaits("users", 1);
         expect(deliveriesFinished).toBe(false);
 
-        await recipientGate.commit();
+        await recipientGate.query("COMMIT");
         recipientGateOpen = false;
         await deliveries;
 
@@ -602,8 +577,8 @@ describe.skipIf(!databaseUrl)(
           ));
         expect(notifications).toHaveLength(1);
       } finally {
-        if (commitmentGateOpen) await commitmentGate.rollback().catch(() => undefined);
-        if (recipientGateOpen) await recipientGate.rollback().catch(() => undefined);
+        if (commitmentGateOpen) await commitmentGate.query("ROLLBACK").catch(() => undefined);
+        if (recipientGateOpen) await recipientGate.query("ROLLBACK").catch(() => undefined);
         commitmentGate.release();
         recipientGate.release();
         if (deliveries) {
@@ -687,7 +662,7 @@ describe.skipIf(!databaseUrl)(
           name: "Duplicate reminder integration worker profile",
           status: "active",
         })
-        .$returningId();
+        .returning();
       owned.profileIds.push(profile.id);
 
       await expectDueReminderHeldForWorkerScope(fixture);

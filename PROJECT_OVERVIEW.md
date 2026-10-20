@@ -426,7 +426,7 @@ Trello API
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                    API LAYER                                 │
-│  Express 4 + tRPC 11 + Node.js 22                           │
+│  Express 4 + tRPC 11 + Node.js 26.11.1                         │
 │  - Task Scheduling (APTLSS)                                 │
 │  - AI Analysis (ATIS)                                        │
 │  - Time Tracking                                             │
@@ -440,7 +440,7 @@ Trello API
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                  DATABASE LAYER                              │
-│  MySQL 8.0 / SQLite 3 + Drizzle ORM                         │
+│  MySQL 9.7.2 / SQLite 3 + Drizzle ORM                      │
 │  - 34 Tables                                                 │
 │  - Relationships & Indexes                                   │
 │  - Migrations & Versioning                                   │
@@ -542,12 +542,13 @@ Backend Services
 
 | Technology | Version | Purpose |
 |-----------|---------|---------|
-| **Node.js** | 22.13.0 | Runtime |
+| **Node.js** | 26.11.1 | Runtime |
 | **Express** | 4.21.2 | Web server |
 | **TypeScript** | 5.9.3 | Type safety |
 | **tRPC Server** | 11.6.0 | Type-safe RPC |
 | **Drizzle ORM** | 0.44.5 | Database ORM |
-| **MySQL2** | 3.15.0 | MySQL driver |
+| **PostgreSQL (`pg`)** | 8.23.1 | Application database driver |
+| **MySQL2** | 3.24.4 | Legacy MySQL-to-PostgreSQL transfer tooling only |
 | **Socket.IO** | 4.8.1 | WebSocket |
 | **Jose** | 6.1.0 | JWT handling |
 | **AWS S3 SDK** | 3.693.0 | File storage |
@@ -1341,8 +1342,8 @@ socket.on('task:updated', (task) => {
 
 ### Prerequisites
 
-- Node.js 22+
-- MySQL 8.0+
+- Node.js 26.11.1
+- PostgreSQL database (18.6 is used by CI)
 - AWS S3 bucket
 - Trello API credentials
 - Manus OAuth credentials

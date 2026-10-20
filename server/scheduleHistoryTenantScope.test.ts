@@ -7,13 +7,15 @@ describe('schedule history tenant scope', () => {
   const migration = readFileSync(resolve(process.cwd(), 'drizzle/0044_schedule_history_tenant_scope.sql'), 'utf8');
 
   it('persists the assignment and founder on newly-created history rows', () => {
-    expect(scheduling).toContain('founderId, assignmentId');
+    expect(scheduling).toContain('founderId: assignment.founderId');
+    expect(scheduling).toContain('assignmentId: assignment.id');
     expect(scheduling).toContain('assignment.founderId');
     expect(scheduling).toContain('assignment.id');
   });
 
   it('reads and undoes history using the owned assignment instead of a task ID alone', () => {
-    expect(scheduling).toContain('WHERE taskId = ? AND assignmentId = ?');
+    expect(scheduling).toContain('eq(taskScheduleHistory.taskId, taskId), eq(taskScheduleHistory.assignmentId, assignmentId)');
+    expect(scheduling).toContain('eq(taskScheduleHistory.assignmentId, ownedTask.id)');
   });
 
   it('backfills only task IDs with one founder and leaves ambiguous legacy rows unscoped', () => {

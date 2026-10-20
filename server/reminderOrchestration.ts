@@ -12,7 +12,7 @@ import {
   vaProfiles,
   type ReminderPolicy,
   type User,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 import { createNonOverlappingRunner } from "./services/non-overlapping-runner";
 import { sendEmailWithOutcome } from "./services/email";
@@ -81,19 +81,19 @@ export type CreateReminderInput = {
   requireApproval: boolean;
 };
 
-function affectedRows(result: unknown) {
-  if (Array.isArray(result)) return Number((result[0] as { affectedRows?: unknown } | undefined)?.affectedRows ?? 0);
-  return Number((result as { affectedRows?: unknown } | undefined)?.affectedRows ?? 0);
+function affectedRows(result: { rowCount: number | null }): number {
+  return result.rowCount ?? 0;
 }
 
-function insertId(result: unknown) {
-  if (Array.isArray(result)) return Number((result[0] as { insertId?: unknown } | undefined)?.insertId ?? 0);
-  return Number((result as { insertId?: unknown } | undefined)?.insertId ?? 0);
-}
 
 function isDuplicateEntryError(error: unknown) {
-  return typeof error === "object" && error !== null
-    && (error as { code?: unknown }).code === "ER_DUP_ENTRY";
+  const seen = new Set<unknown>();
+  while (typeof error === "object" && error !== null && !seen.has(error)) {
+    seen.add(error);
+    if ((error as { code?: unknown }).code === "23505") return true;
+    error = (error as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 async function findReminderCreationByKey(database: ReminderReader, idempotencyKey: string) {
@@ -582,8 +582,8 @@ export async function createReminder(actor: ReminderActor, input: CreateReminder
         title,
         context,
         dueAt: input.dueAt,
-      });
-      const commitmentId = insertId(commitmentResult);
+      }).returning({ id: commitments.id });
+      const commitmentId = commitmentResult[0]?.id ?? 0;
       if (!commitmentId) throw new Error("Commitment could not be created");
 
       const ruleResult = await tx.insert(reminderRules).values({
@@ -596,8 +596,8 @@ export async function createReminder(actor: ReminderActor, input: CreateReminder
         requireApproval: approvalRequired,
         maxAttempts: 1,
         cooldownMinutes: 60,
-      });
-      const ruleId = insertId(ruleResult);
+      }).returning({ id: reminderRules.id });
+      const ruleId = ruleResult[0]?.id ?? 0;
       if (!ruleId) throw new Error("Reminder rule could not be created");
 
       const scheduleResult = await tx.insert(reminderSchedules).values({
@@ -607,8 +607,8 @@ export async function createReminder(actor: ReminderActor, input: CreateReminder
         scheduledFor,
         channel: input.channel,
         idempotencyKey,
-      });
-      const scheduleId = insertId(scheduleResult);
+      }).returning({ id: reminderSchedules.id });
+      const scheduleId = scheduleResult[0]?.id ?? 0;
       if (!scheduleId) throw new Error("Reminder occurrence could not be scheduled");
 
       await tx.insert(reminderAuditEvents).values([

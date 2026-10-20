@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { generateMySQLDrizzleJson } from "drizzle-kit/api";
+import { generateDrizzleJson } from "drizzle-kit/api";
 import { readMigrationFiles } from "drizzle-orm/migrator";
-import * as schema from "../drizzle/schema";
+import * as schema from "../drizzle/schema.postgres";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (file: string) => readFileSync(path.join(root, file), "utf8");
@@ -63,8 +63,8 @@ describe("APTLSS pilot additive migration contract", () => {
     expect(migrations[54]?.hash).toBe(hash(read("drizzle/0054_revoked_sessions.sql")));
   });
 
-  it("preserves all 117 main table definitions and adds only additive source tables", async () => {
-    const current = await generateMySQLDrizzleJson(schema);
+  it("preserves all 117 historical MySQL main table definitions in the frozen migration lineage", async () => {
+    const current = JSON.parse(read("drizzle/meta/0054_snapshot.json"));
     for (const [name, expected] of Object.entries(baseline.tables)) {
       const table = structuredClone(current.tables[name]);
       if (name === "trello_cached_cards") delete table.indexes.trello_cached_cards_user_card_cached_idx;
@@ -87,7 +87,7 @@ describe("APTLSS pilot additive migration contract", () => {
     expect(existsSync(path.join(root, "drizzle/meta/0045_snapshot.json"))).toBe(true);
     const snapshot = JSON.parse(read("drizzle/meta/0045_snapshot.json"));
     const previous = JSON.parse(read("drizzle/meta/0031_snapshot.json"));
-    const current = await generateMySQLDrizzleJson(schema);
+    const current = JSON.parse(read("drizzle/meta/0054_snapshot.json"));
     expect(snapshot.prevId).toBe(previous.id);
     const review = JSON.parse(read("drizzle/meta/0046_snapshot.json"));
     const queue = JSON.parse(read("drizzle/meta/0047_snapshot.json"));
@@ -225,3 +225,24 @@ describe("APTLSS pilot additive migration contract", () => {
     expect(statements.filter(s => /^DEALLOCATE PREPARE /.test(s))).toHaveLength(5);
   });
 });
+
+
+describe("active PostgreSQL feature migration metadata", () => {
+  it("exactly matches the generated runtime schema and preserves the snapshot chain", async () => {
+    const journal = JSON.parse(read("drizzle-postgres-v1/meta/_journal.json"));
+    const snapshots = journal.entries.map((entry: { idx: number }) => JSON.parse(read(`drizzle-postgres-v1/meta/${String(entry.idx).padStart(4, "0")}_snapshot.json`)));
+    for (let index = 1; index < snapshots.length; index++) expect(snapshots[index].prevId).toBe(snapshots[index - 1].id);
+    const generated = await generateDrizzleJson(schema);
+    expect(snapshots.at(-1).tables).toEqual(generated.tables);
+    expect(snapshots.at(-1).enums).toEqual(generated.enums);
+    expect(snapshots.at(-1).views).toEqual(generated.views);
+    expect(generated.tables["public.browser_tab_states"].columns.captureSequence.type).toBe("bigint");
+    const historical = JSON.parse(read("drizzle/meta/0054_snapshot.json"));
+    for (const [name, table] of Object.entries(historical.tables) as [string, { columns: Record<string, unknown> }][]) {
+      const runtime = generated.tables[`public.${name}`];
+      expect(runtime, name).toBeDefined();
+      expect(Object.keys(runtime.columns).sort(), name).toEqual(Object.keys(table.columns).sort());
+    }
+  }, 30000);
+});
+

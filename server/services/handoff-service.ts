@@ -1,5 +1,5 @@
 import { getDb } from '../db';
-import { dailyBriefings, taskAssignments, vaProfiles } from '../../drizzle/schema';
+import { dailyBriefings, taskAssignments, vaProfiles } from '../../drizzle/schema.postgres';
 import { eq, and } from 'drizzle-orm';
 import { didUpdateSingleTaskAssignment } from '../taskAssignmentMutation';
 

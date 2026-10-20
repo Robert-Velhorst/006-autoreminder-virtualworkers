@@ -3,7 +3,7 @@ import type { Server as HTTPServer } from "http";
 import { and, eq, or } from "drizzle-orm";
 import { Server as SocketIOServer, type Socket } from "socket.io";
 import { createAdapter } from "@socket.io/redis-adapter";
-import { atisAnalysisSessions, type User } from "../../drizzle/schema";
+import { atisAnalysisSessions, type User } from "../../drizzle/schema.postgres";
 import { sdk } from "../_core/sdk";
 import { getDb } from "../db";
 import { getRedisPubClient, getRedisSubClient, isRedisAvailable } from "./redis";
@@ -27,7 +27,7 @@ interface ConnectedClient {
 function configuredOrigins() {
   const directOrigins = [
     process.env.PUBLIC_URL,
-    process.env.WEBHOOK_BASE_URL,
+    process.env.TRELLO_WEBHOOK_CALLBACK_URL,
     process.env.APP_URL,
     process.env.VITE_FRONTEND_URL,
   ].filter((value): value is string => Boolean(value?.trim()));

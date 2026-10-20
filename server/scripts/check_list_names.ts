@@ -1,5 +1,5 @@
 import { getDb } from "../db";
-import { atisCards } from "../../drizzle/schema";
+import { atisCards } from "../../drizzle/schema.postgres";
 import { eq } from "drizzle-orm";
 import dotenv from "dotenv";
 

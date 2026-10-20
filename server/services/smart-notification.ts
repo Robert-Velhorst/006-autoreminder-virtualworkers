@@ -8,7 +8,7 @@
  */
 
 import { getDb } from '../db';
-import { userNotificationPreferences } from '../../drizzle/schema';
+import { userNotificationPreferences } from '../../drizzle/schema.postgres';
 import { eq } from 'drizzle-orm';
 import { notifyOwner, NotificationPayload } from '../_core/notification';
 import { sendEmail } from './email';

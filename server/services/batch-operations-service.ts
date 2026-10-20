@@ -5,7 +5,7 @@
 
 import { nanoid } from 'nanoid';
 import { getDb } from '../db';
-import { batchOperations } from '../../drizzle/schema';
+import { batchOperations } from '../../drizzle/schema.postgres';
 import { and, eq, inArray, ne } from 'drizzle-orm';
 import { websocketService } from './websocket';
 import { invalidateCache } from './trello-cache';
@@ -136,7 +136,7 @@ async function updateBatchProgress(
     .update(batchOperations)
     .set(updateData)
     .where(and(eq(batchOperations.id, operationId), ne(batchOperations.status, 'cancelled')));
-  const changed = Number((updateResult as any)[0]?.affectedRows ?? 1) > 0;
+  const changed = updateResult.rowCount === 1;
   if (!changed) return false;
 
   // Emit progress update via WebSocket
@@ -432,9 +432,10 @@ export async function cancelBatchOperation(operationId: string, ownerOpenId?: st
       status: 'cancelled',
       updatedAt: new Date(),
     })
-    .where(and(...filters));
+    .where(and(...filters))
+    .returning({ id: batchOperations.id });
 
-  const changed = Number((result as any)[0]?.affectedRows ?? 0) > 0;
+  const changed = result.length > 0;
   if (changed) log.info('Batch operation cancelled', { operationId, ownerOpenId });
   return changed;
 }

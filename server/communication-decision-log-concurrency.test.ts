@@ -1,7 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { taskAssignments } from "../drizzle/schema";
+import { taskAssignments } from "../drizzle/schema.postgres";
 
 const mocks = vi.hoisted(() => ({ getDb: vi.fn() }));
 
@@ -62,6 +62,7 @@ function makeDb() {
             set: vi.fn((next: typeof values) => { values = next; return query; }),
             where: vi.fn(async () => {
               if (values.decisionLog !== undefined) assignment.decisionLog = values.decisionLog;
+              return { rowCount: 1 };
             }),
           };
           return query;

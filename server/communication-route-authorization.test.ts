@@ -2,8 +2,8 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SQL } from "drizzle-orm";
-import { MySqlDialect } from "drizzle-orm/mysql-core";
-import { taskAssignments, userWorkingHours, users, vaProfiles } from "../drizzle/schema";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { taskAssignments, userWorkingHours, users, vaProfiles } from "../drizzle/schema.postgres";
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),
@@ -31,18 +31,18 @@ vi.mock("./services/chatbot-history", () => ({ storeConversation: mocks.storeCon
 
 import communicationRoutes from "./routes/communication";
 
-const mysqlDialect = new MySqlDialect();
+const pgDialect = new PgDialect();
 
 function assignmentRowsMatching(rows: Array<Record<string, unknown>>, condition: unknown) {
   if (!condition) return rows;
-  const { sql, params } = mysqlDialect.sqlToQuery(condition as SQL);
-  const comparisons = [...sql.matchAll(/`task_assignments`\.`([^`]+)` = \?/g)];
-  return rows.filter(row => comparisons.every((comparison, index) => row[comparison[1]] === params[index]));
+  const { sql, params } = pgDialect.sqlToQuery(condition as SQL);
+  const comparisons = [...sql.matchAll(/"task_assignments"\."([^"]+)" = \$(\d+)/g)];
+  return rows.filter(row => comparisons.every((comparison, index) => row[comparison[1]] === params[Number(comparison[2]) - 1]));
 }
 
 function mockDb(profiles: unknown[], assignments: Array<Record<string, unknown>> = []) {
   const assignmentConditions: unknown[] = [];
-  const transactionUpdate = vi.fn().mockReturnValue([{ affectedRows: 1 }]);
+  const transactionUpdate = vi.fn().mockReturnValue({ rowCount: 1 });
   const conversationInsert = vi.fn();
   const conversationUpdate = vi.fn();
   const rowsFor = (table: unknown, condition: unknown) => {
@@ -75,7 +75,7 @@ function mockDb(profiles: unknown[], assignments: Array<Record<string, unknown>>
     insert: vi.fn(() => ({
       values: vi.fn((value: unknown) => {
         conversationInsert(value);
-        return { $returningId: vi.fn(async () => [{ id: 10 }]) };
+        return { returning: vi.fn(async () => [{ id: 10 }]) };
       }),
     })),
     update: vi.fn(() => {
@@ -90,7 +90,7 @@ function mockDb(profiles: unknown[], assignments: Array<Record<string, unknown>>
       insert: vi.fn(() => ({
         values: vi.fn((value: unknown) => {
           conversationInsert(value);
-          return { $returningId: vi.fn(async () => [{ id: 10 }]) };
+          return { returning: vi.fn(async () => [{ id: 10 }]) };
         }),
       })),
       update: vi.fn(() => {
@@ -266,8 +266,8 @@ describe("communication decision-log authorization", () => {
       .expect(404, { error: "Task not found" });
 
     expect(assignmentConditions).toHaveLength(1);
-    const { sql, params } = mysqlDialect.sqlToQuery(assignmentConditions[0] as SQL);
-    expect(sql).toContain("`task_assignments`.`vaId` = ?");
+    const { sql, params } = pgDialect.sqlToQuery(assignmentConditions[0] as SQL);
+    expect(sql).toMatch(/"task_assignments"\."vaId" = \$\d+/);
     expect(params).toEqual([taskId, 7]);
   });
 
@@ -292,8 +292,8 @@ describe("communication decision-log authorization", () => {
       .expect(404, { error: "Task not found" });
 
     expect(assignmentConditions).toHaveLength(1);
-    const { sql, params } = mysqlDialect.sqlToQuery(assignmentConditions[0] as SQL);
-    expect(sql).toContain("`task_assignments`.`vaId` = ?");
+    const { sql, params } = pgDialect.sqlToQuery(assignmentConditions[0] as SQL);
+    expect(sql).toMatch(/"task_assignments"\."vaId" = \$\d+/);
     expect(params).toEqual([taskId, 7]);
     expect(transactionUpdate).not.toHaveBeenCalled();
   });

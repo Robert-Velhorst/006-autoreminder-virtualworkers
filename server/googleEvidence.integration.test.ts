@@ -1,49 +1,38 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { and, eq, inArray } from "drizzle-orm";
-import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
-import { createPool, type Pool, type PoolConnection, type RowDataPacket } from "mysql2/promise";
-import * as schema from "../drizzle/schema";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
+import { Pool, type PoolClient } from "pg";
+import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
+import * as schema from "../drizzle/schema.postgres";
 import { retainGoogleDriveEvidenceRecord, retainGmailEvidenceRecord } from "./googleEvidence";
 
 const databaseUrl = process.env.APTLSS_TEST_DATABASE_URL;
 
 describe.skipIf(!databaseUrl)(
-  "Gmail evidence MySQL ownership regressions",
-  { timeout: 30_000, hookTimeout: 30_000 },
+  "Gmail evidence PostgreSQL ownership regressions",
+  { timeout: 30_000 },
   () => {
     let pool: Pool | undefined;
-    let lock: PoolConnection | undefined;
+    let lock: PoolClient | undefined;
     let lockName: string | undefined;
-    let db: MySql2Database<typeof schema> | undefined;
+    let db: NodePgDatabase<typeof schema> | undefined;
     const messageIds: string[] = [];
     const evidenceSourceIds: string[] = [];
     const workerIds: number[] = [];
 
     beforeAll(async () => {
-      const target = new URL(databaseUrl!);
-      if (
-        target.protocol !== "mysql:" ||
-        !["127.0.0.1", "localhost", "[::1]"].includes(target.hostname) ||
-        !["/aptlss_test", "/recovery_test"].includes(target.pathname) ||
-        target.search ||
-        target.hash
-      ) {
-        throw new Error(
-          "Gmail evidence integration tests require a loopback MySQL URL naming aptlss_test or recovery_test."
-        );
-      }
-
-      pool = createPool({ uri: databaseUrl!, connectionLimit: 8, connectTimeout: 10_000, timezone: "Z" });
-      db = drizzle(pool, { schema, mode: "default" });
-      const [identity] = await pool.query<RowDataPacket[]>("SELECT DATABASE() AS name, VERSION() AS version");
+      const target = new URL(requireIsolatedPostgresTestDatabase(databaseUrl, process.env.NODE_ENV === "production"));
+      pool = new Pool({ connectionString: databaseUrl!, max: 8, connectionTimeoutMillis: 10_000, });
+      db = drizzle(pool, { schema });
+      const { rows: identity } = await pool.query("SELECT current_database() AS name, current_setting('server_version') AS version");
       expect(identity[0]?.name).toBe(target.pathname.slice(1));
-      expect(identity[0]?.version).toMatch(/^8\./);
+      expect(identity[0]?.version).toMatch(/^18\./);
 
-      lock = await pool.getConnection();
+      lock = await pool.connect();
       lockName = `google-evidence-${randomUUID().replaceAll("-", "")}`;
-      const [lockRows] = await lock.query<RowDataPacket[]>("SELECT GET_LOCK(?, 30) AS acquired", [lockName]);
-      expect(Number(lockRows[0]?.acquired)).toBe(1);
+      const { rows: lockRows } = await lock.query("SELECT pg_advisory_lock(hashtext($1))", [lockName]);
+
     });
 
     afterEach(async () => {
@@ -64,7 +53,7 @@ describe.skipIf(!databaseUrl)(
 
     afterAll(async () => {
       if (lock) {
-        if (lockName) await lock.query("SELECT RELEASE_LOCK(?)", [lockName]).catch(() => undefined);
+        if (lockName) await lock.query("SELECT pg_advisory_unlock(hashtext($1))", [lockName]).catch(() => undefined);
         lock.release();
       }
       if (pool) await pool.end();
@@ -126,7 +115,7 @@ describe.skipIf(!databaseUrl)(
 
     it("serializes concurrent Drive first imports and refuses to replace unversioned retained content", async () => {
       const openId = `google-evidence-drive-it-${randomUUID()}`;
-      const [createdWorker] = await db!.insert(schema.users).values({ openId, role: "worker" }).$returningId();
+      const [createdWorker] = await db!.insert(schema.users).values({ openId, role: "worker" }).returning();
       workerIds.push(createdWorker.id);
 
       const fileId = randomUUID();

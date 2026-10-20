@@ -24,7 +24,7 @@ import { analyzeCardBeforeInterview } from '../services/pre-interview-analysis';
 import { startInterview, processResponse } from '../services/conversational-interview';
 import { requireAdmin } from '../middleware/auth';
 import { fetchAuthorizedTrelloCardWithComments, TrelloAccessError } from '../trelloCardAccess';
-import type { User } from '../../drizzle/schema';
+import type { User } from '../../drizzle/schema.postgres';
 
 const router = Router();
 router.use(requireAdmin);

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { vaProfiles, users, timeEntries } from "../../drizzle/schema";
+import { vaProfiles, users, timeEntries } from "../../drizzle/schema.postgres";
 import { ScheduledJobLeaseLostError } from "../scheduledJobRuntime";
 
 const controls = vi.hoisted(() => ({ getDb: vi.fn(), settings: vi.fn(), ownership: vi.fn(),

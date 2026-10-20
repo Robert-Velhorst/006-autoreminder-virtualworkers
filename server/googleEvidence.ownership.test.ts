@@ -3,7 +3,7 @@ import nodemailer from "nodemailer";
 import {
   appSettings, aptlssEvidenceRevisions, aptlssPlans, emailTasks, users,
   workspaceEvidenceItems, workspaceEvidenceLinks,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import {
   defaultGoogleEvidenceSettings, encryptGoogleRefreshToken, listDriveFiles,
   listGmailMessages, sendGoogleMail, syncWorkerGoogleEvidence,
@@ -84,7 +84,7 @@ function database(hook: Hook = () => {}) {
         hook("write", table);
       };
       return {
-        onDuplicateKeyUpdate: write,
+        onConflictDoUpdate: write,
         then: (resolve: (value: void) => unknown, reject?: (error: unknown) => unknown) => write().then(resolve, reject),
       };
     } }),

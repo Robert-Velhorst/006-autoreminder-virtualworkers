@@ -11,7 +11,7 @@ import {
   emailTasks,
   workspaceEvidenceItems,
   workspaceEvidenceLinks,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { normalizeEvidenceDraft, resolveEvidenceConflict, type EvidenceDraft, type EvidenceTruth } from "./aptlssEvidenceGraph";
 import { getDb } from "./db";
 import { assertManagerPilotWorker } from "./aptlssManagerPilot";
@@ -22,6 +22,9 @@ import { projectWorkerCaseEvidence } from "./workerCaseEvidence";
 import { gmailContentScope } from "../shared/gmailContentScope";
 
 export class AptlssEvidenceGraphError extends Error {}
+
+type EvidenceDatabase = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+type EvidenceTransaction = Parameters<Parameters<EvidenceDatabase["transaction"]>[0]>[0];
 
 function sha256(value: string) {
   return createHash("sha256").update(value).digest("hex");
@@ -44,7 +47,7 @@ export async function recordAptlssEvidence({
   recordedBy?: string | null;
   matchReason?: string;
   linkMethod?: "automatic" | "manual" | "confirmed";
-  database?: NonNullable<Awaited<ReturnType<typeof getDb>>>;
+  database?: EvidenceDatabase | EvidenceTransaction;
 }) {
   assertManagerPilotWorker(vaId);
   const db = database ?? await getDb();
@@ -81,7 +84,7 @@ export async function recordAptlssEvidence({
         reviewedAt: cardId ? new Date() : null,
         reviewedBy: cardId ? recordedBy ?? null : null,
         active: true,
-      }).$returningId();
+      }).returning({ id: workspaceEvidenceItems.id });
       evidenceId = created?.id;
     }
     if (!evidenceId) throw new AptlssEvidenceGraphError("Evidence could not be stored");
@@ -170,7 +173,7 @@ export async function recordWorkerEvidenceAssertion({
   detail: string;
   recordedBy: string;
   observedAt?: Date;
-  database?: NonNullable<Awaited<ReturnType<typeof getDb>>>;
+  database?: EvidenceDatabase | EvidenceTransaction;
 }) {
   const normalizedTitle = title.trim();
   const normalizedDetail = detail.trim();
@@ -273,7 +276,7 @@ export async function createEvidenceConflict({
       sourceEvidenceId,
       assertedEvidenceId,
       status: conflict.status,
-    }).onDuplicateKeyUpdate({
+    }).onConflictDoUpdate({ target: [aptlssEvidenceConflicts.sourceEvidenceId, aptlssEvidenceConflicts.assertedEvidenceId],
       set: { status: sql`${aptlssEvidenceConflicts.status}` },
     });
     const [storedConflict] = await tx.select({
@@ -715,7 +718,7 @@ export async function resolveVerificationFollowup({
       const proofHash = sha256(JSON.stringify(proof));
       const decision = await recordAptlssEvidence({ vaId, cardId, recordedBy: resolvedBy,
         truthClass: "source_record", linkMethod: "confirmed", matchReason: "Verified conflict resolution backed by retained source quote",
-        database: tx as unknown as NonNullable<Awaited<ReturnType<typeof getDb>>>,
+        database: tx,
         draft: { source: "communication", sourceId: `verified-conflict-resolution:${vaId}:${conflict.id}:${proofHash}`,
           kind: "verified_conflict_resolution", title: "Verified source fact for conflicting work evidence",
           content: proof.sourceQuote, summary: proof.sourceQuote, sourceUrl: proof.sourceUrl,
@@ -725,13 +728,13 @@ export async function resolveVerificationFollowup({
             supersedesEvidenceIds: [`evidence:${conflict.sourceEvidenceId}:${cardId}`, `evidence:${conflict.assertedEvidenceId}:${cardId}`], proof }) } });
       decisionEvidenceId = decision.evidenceId;
       storedResolution = JSON.stringify({ version: 1, explanation, proof, decisionEvidenceId });
-      const [updated] = await tx.update(aptlssEvidenceConflicts).set({ status: "resolved", resolution: storedResolution, resolvedBy, resolvedAt })
+      const updated = await tx.update(aptlssEvidenceConflicts).set({ status: "resolved", resolution: storedResolution, resolvedBy, resolvedAt })
         .where(and(eq(aptlssEvidenceConflicts.id, conflict.id), eq(aptlssEvidenceConflicts.vaId, vaId), eq(aptlssEvidenceConflicts.status, "needs_verification")));
-      if (updated.affectedRows !== 1) throw new AptlssEvidenceGraphError("Canonical conflict changed during resolution");
+      if (updated.rowCount !== 1) throw new AptlssEvidenceGraphError("Canonical conflict changed during resolution");
     }
-    const [updated] = await tx.update(aptlssVerificationFollowups).set({ status: "resolved", resolution: storedResolution, resolvedBy, resolvedAt })
+    const updated = await tx.update(aptlssVerificationFollowups).set({ status: "resolved", resolution: storedResolution, resolvedBy, resolvedAt })
       .where(and(eq(aptlssVerificationFollowups.id, followupId), eq(aptlssVerificationFollowups.vaId, vaId), eq(aptlssVerificationFollowups.status, "open")));
-    if (updated.affectedRows !== 1) throw new AptlssEvidenceGraphError("Verification follow-up is no longer open");
+    if (updated.rowCount !== 1) throw new AptlssEvidenceGraphError("Verification follow-up is no longer open");
     await enqueueManagerTask(tx, { vaId, trigger: "conflict_resolved", urgent: true, eventKey: `followup-resolved:${followupId}` });
     return { followupId, resolvedAt, requiresEvidence: false as const, ...(decisionEvidenceId ? { decisionEvidenceId } : {}) };
   });

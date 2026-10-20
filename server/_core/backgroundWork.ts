@@ -1,3 +1,4 @@
+import { requireIsolatedPostgresTestDatabase } from "../../shared/isolatedPostgresTestDatabase.mjs";
 type Environment = Record<string, string | undefined>;
 
 export function getBackgroundWorkConfiguration(
@@ -11,20 +12,10 @@ export function getBackgroundWorkConfiguration(
 
   let isolatedBrowserTest = false;
   if (env.APTLSS_TEST_DISABLE_BACKGROUND_JOBS === "true") {
-    let database: URL;
     try {
-      database = new URL(env.APTLSS_TEST_DATABASE_URL?.trim() ?? "");
+      requireIsolatedPostgresTestDatabase(env.APTLSS_TEST_DATABASE_URL, env.NODE_ENV === "production");
     } catch {
-      throw new Error("APTLSS browser-test mode requires its explicit loopback test database URL.");
-    }
-    if (
-      env.NODE_ENV === "production" ||
-      database.protocol !== "mysql:" ||
-      database.search || database.hash ||
-      !["127.0.0.1", "localhost", "[::1]"].includes(database.hostname) ||
-      !/^\/(?:aptlss_test|recovery_test)$/.test(database.pathname)
-    ) {
-      throw new Error("APTLSS browser-test mode is restricted to non-production loopback test databases.");
+      throw new Error("APTLSS browser-test mode is restricted to non-production loopback test databases and requires its explicit loopback test database URL.");
     }
     isolatedBrowserTest = true;
   }

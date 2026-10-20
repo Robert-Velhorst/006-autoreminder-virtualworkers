@@ -1,12 +1,8 @@
 import { expect, test, type ConsoleMessage, type Page } from "@playwright/test";
 import { createHash, randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
-import {
-  createConnection,
-  type Connection,
-  type ResultSetHeader,
-  type RowDataPacket,
-} from "mysql2/promise";
+import { openFixtureDatabase, fixtureInsert, type FixtureDatabase } from "./isolated-postgres-fixtures";
+import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
 import superjson from "superjson";
 import type { ManagerSnapshot } from "../shared/aptlssManager";
 
@@ -47,15 +43,7 @@ function testDatabase() {
     throw new Error(
       "APTLSS_TEST_DATABASE_URL is required; operational DATABASE_URL fallback is forbidden."
     );
-  const url = new URL(raw);
-  if (
-    url.protocol !== "mysql:" || url.search || url.hash ||
-    !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) ||
-    !/^\/(?:aptlss_test|recovery_test)$/.test(url.pathname)
-  )
-    throw new Error(
-      "Only an explicit loopback MySQL URL naming aptlss_test or recovery_test is allowed."
-    );
+  requireIsolatedPostgresTestDatabase(raw, process.env.NODE_ENV === "production");
   return raw;
 }
 
@@ -63,15 +51,12 @@ for (const viewport of [
   { width: 1440, height: 1000 },
   { width: 390, height: 844 },
 ]) {
-  test(`founder review lifecycle through real API and MySQL at ${viewport.width}px`, async ({
+  test(`founder review lifecycle through real API and PostgreSQL at ${viewport.width}px`, async ({
     page,
   }, info) => {
     test.setTimeout(180_000);
     await page.setViewportSize(viewport);
-    const db: Connection = await createConnection({
-      uri: testDatabase(),
-      timezone: "Z",
-    });
+    const db: FixtureDatabase = await openFixtureDatabase(testDatabase());
     const prefix = `review-${randomUUID().slice(0, 20)}`,
       cardId = `${prefix}-card`;
     let workerId = 0,
@@ -83,9 +68,9 @@ for (const viewport of [
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
     const rows = async (query: string, values: unknown[] = []) =>
-      (await db.execute<RowDataPacket[]>(query, values))[0];
+      (await db.query(query, values)).rows;
     const insert = async (query: string, values: unknown[]) =>
-      (await db.execute<ResultSetHeader>(query, values))[0].insertId;
+      fixtureInsert(db, query, values);
     const mutate = async <T>(
       method: string,
       action: () => Promise<unknown>
@@ -164,25 +149,25 @@ for (const viewport of [
           : `Etc/GMT${offset > 0 ? "-" : "+"}${Math.abs(offset)}`;
       const hash = await bcrypt.hash(password, 10);
       workerId = await insert(
-        "INSERT INTO users (id,openId,name,role,loginMethod,passwordHash) VALUES (?,?,?,?,?,?)",
+        "INSERT INTO users (id,\"openId\",name,role,\"loginMethod\",\"passwordHash\") VALUES ($1,$2,$3,$4,$5,$6)",
         [Number(process.env.APTLSS_TEST_PILOT_WORKER_IDS!.split(",")[viewport.width === 1440 ? 3 : 4]), `${prefix}-worker`, `${prefix} Worker`, "worker", "local", hash]
       );
       adminId = await insert(
-        "INSERT INTO users (openId,name,role,loginMethod,passwordHash) VALUES (?,?,?,?,?)",
+        "INSERT INTO users (\"openId\",name,role,\"loginMethod\",\"passwordHash\") VALUES ($1,$2,$3,$4,$5)",
         [`${prefix}-admin`, `${prefix} Admin`, "admin", "local", hash]
       );
-      await db.execute(
-        "INSERT INTO user_working_hours (userId,userOpenId,timezone,workingDays,workStartHour,workEndHour,enableBreaks) VALUES (?,?,?,?,9,18,0)",
+      await db.query(
+        "INSERT INTO user_working_hours (\"userId\",\"userOpenId\",timezone,\"workingDays\",\"workStartHour\",\"workEndHour\",\"enableBreaks\") VALUES ($1,$2,$3,$4,9,18,FALSE)",
         [workerId, `${prefix}-worker`, timezone, "0,1,2,3,4,5,6"]
       );
-      await db.execute(
-        "INSERT INTO aptlss_manager_state (vaId,enabled,intervalMinutes,mode,shadowStartedAt) VALUES (?,1,5,'shadow',?)",
+      await db.query(
+        "INSERT INTO aptlss_manager_state (\"vaId\",enabled,\"intervalMinutes\",mode,\"shadowStartedAt\") VALUES ($1,TRUE,5,'shadow',$2)",
         [workerId, new Date(now.getTime() - 10 * 86400000)]
       );
       const sourceText =
         "The delivery report is ready for internal review. Check the retained delivery report before preparing a reply.";
-      await db.execute(
-        "INSERT INTO aptlss_plans (vaId,cardId,cardName,cardUrl,boardName,listName,planJson,contextSnapshot) VALUES (?,?,?,?,?,?,?,?)",
+      await db.query(
+        "INSERT INTO aptlss_plans (\"vaId\",\"cardId\",\"cardName\",\"cardUrl\",\"boardName\",\"listName\",\"planJson\",\"contextSnapshot\") VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         [
           workerId,
           cardId,
@@ -202,8 +187,8 @@ for (const viewport of [
           }),
         ]
       );
-      await db.execute(
-        "INSERT INTO card_states (vaId,cardId,cardName,state,listName,stateReason) VALUES (?,?,?,'DOING','Doing',?)",
+      await db.query(
+        "INSERT INTO card_states (\"vaId\",\"cardId\",\"cardName\",state,\"listName\",\"stateReason\") VALUES ($1,$2,$3,'DOING','Doing',$4)",
         [
           workerId,
           cardId,
@@ -211,12 +196,12 @@ for (const viewport of [
           "Internal source review is ready.",
         ]
       );
-      await db.execute(
-        "INSERT INTO aptlss_steps (vaId,cardId,stepNumber,title,estimatedMinutes,category,completionCriteria) VALUES (?,?,1,?,15,'internal_work',?)",
+      await db.query(
+        "INSERT INTO aptlss_steps (\"vaId\",\"cardId\",\"stepNumber\",title,\"estimatedMinutes\",category,\"completionCriteria\") VALUES ($1,$2,1,$3,15,'internal_work',$4)",
         [workerId, cardId, "Review delivery report", "Record report findings."]
       );
       evidenceId = await insert(
-        "INSERT INTO workspace_evidence_items (source,sourceId,title,content,observedAt,modifiedAt,contentHash,active) VALUES ('google_drive',?,?,?,?,?,?,1)",
+        "INSERT INTO workspace_evidence_items (source,\"sourceId\",title,content,\"observedAt\",\"modifiedAt\",\"contentHash\",active) VALUES ('google_drive',$1,$2,$3,$4,$5,$6,TRUE)",
         [
           `${prefix}-source`,
           "Delivery report",
@@ -226,12 +211,12 @@ for (const viewport of [
           createHash("sha256").update(sourceText).digest("hex"),
         ]
       );
-      await db.execute(
-        "INSERT INTO aptlss_evidence_subject_links (evidenceId,vaId,subjectType,subjectId,relevanceScore,linkMethod,matchReason) VALUES (?,?,'card',?,100,'confirmed','Explicit review fixture')",
+      await db.query(
+        "INSERT INTO aptlss_evidence_subject_links (\"evidenceId\",\"vaId\",\"subjectType\",\"subjectId\",\"relevanceScore\",\"linkMethod\",\"matchReason\") VALUES ($1,$2,'card',$3,100,'confirmed','Explicit review fixture')",
         [evidenceId, workerId, cardId]
       );
-      await db.execute(
-        "INSERT INTO workspace_evidence_links (evidenceId,cardId,relevanceScore,linkMethod,matchReason) VALUES (?,?,100,'manual','Explicit review fixture')",
+      await db.query(
+        "INSERT INTO workspace_evidence_links (\"evidenceId\",\"cardId\",\"relevanceScore\",\"linkMethod\",\"matchReason\") VALUES ($1,$2,100,'manual','Explicit review fixture')",
         [evidenceId, cardId]
       );
 
@@ -276,7 +261,7 @@ for (const viewport of [
 
       // Exercise the actual grouped SQL query with more than the removed 5,000-row cap.
       const [originalRun] = await rows(
-        "SELECT * FROM aptlss_manager_runs WHERE id = ? AND vaId = ?",
+        "SELECT * FROM aptlss_manager_runs WHERE id = $1 AND \"vaId\" = $2",
         [initial.runId, workerId]
       );
       for (let batch = 0; batch < 10; batch++) {
@@ -289,9 +274,12 @@ for (const viewport of [
           originalRun.snapshotJson,
           originalRun.createdAt,
         ]);
+        const placeholders = copies.map((copy, row) =>
+          `(${copy.map((_, column) => `$${row * copy.length + column + 1}`).join(",")})`
+        ).join(",");
         await db.query(
-          "INSERT INTO aptlss_manager_runs (vaId,`trigger`,mode,inputHash,proposalHash,snapshotJson,createdAt) VALUES ?",
-          [copies]
+          `INSERT INTO aptlss_manager_runs ("vaId","trigger",mode,"inputHash","proposalHash","snapshotJson","createdAt") VALUES ${placeholders}`,
+          copies.flat()
         );
       }
       await review.getByRole("button", { name: "Refresh reviews" }).click();
@@ -339,7 +327,7 @@ for (const viewport of [
       );
       expect(saved.correctionId).toBeGreaterThan(0);
       const [stored] = await rows(
-        "SELECT * FROM aptlss_manager_corrections WHERE id=? AND vaId=?",
+        "SELECT * FROM aptlss_manager_corrections WHERE id=$1 AND \"vaId\"=$2",
         [saved.correctionId, workerId]
       );
       expect(stored.correction).toBe(correctionText);
@@ -368,7 +356,7 @@ for (const viewport of [
         initial.actions.filter(a => a.kind === "verify").length
       );
       const [learningRun] = await rows(
-        "SELECT inputHash FROM aptlss_manager_runs WHERE id=?",
+        "SELECT \"inputHash\" FROM aptlss_manager_runs WHERE id=$1",
         [learned.runId]
       );
       const learnedSummary = review.locator("summary").filter({
@@ -402,17 +390,17 @@ for (const viewport of [
         []
       );
       const [afterRevoke] = await rows(
-        "SELECT inputHash FROM aptlss_manager_runs WHERE id=?",
+        "SELECT \"inputHash\" FROM aptlss_manager_runs WHERE id=$1",
         [without.runId]
       );
       expect(afterRevoke.inputHash).not.toBe(learningRun.inputHash);
 
       const [history] = await rows(
-        "SELECT COUNT(*) n FROM aptlss_manager_runs WHERE vaId=?",
+        "SELECT COUNT(*) n FROM aptlss_manager_runs WHERE \"vaId\"=$1",
         [workerId]
       );
       const [reviewHistory] = await rows(
-        "SELECT * FROM aptlss_manager_reviews WHERE id=?",
+        "SELECT * FROM aptlss_manager_reviews WHERE id=$1",
         [stored.reviewId]
       );
       await review
@@ -426,10 +414,10 @@ for (const viewport of [
         review.getByRole("button", { name: "Run shadow assessment" })
       ).toBeDisabled();
       const [closed] = await rows(
-        "SELECT enabled,mode FROM aptlss_manager_state WHERE vaId=?",
+        "SELECT enabled,mode FROM aptlss_manager_state WHERE \"vaId\"=$1",
         [workerId]
       );
-      expect(closed).toMatchObject({ enabled: 0, mode: "shadow" });
+      expect(closed).toMatchObject({ enabled: false, mode: "shadow" });
       await review
         .getByLabel("Trial change reason")
         .fill("Begin the revised procedure in a fresh shadow trial.");
@@ -446,20 +434,20 @@ for (const viewport of [
       expect(
         (
           await rows(
-            "SELECT COUNT(*) n FROM aptlss_manager_runs WHERE vaId=?",
+            "SELECT COUNT(*) n FROM aptlss_manager_runs WHERE \"vaId\"=$1",
             [workerId]
           )
         )[0].n
       ).toBe(history.n);
       expect(
         (
-          await rows("SELECT * FROM aptlss_manager_reviews WHERE id=?", [
+          await rows("SELECT * FROM aptlss_manager_reviews WHERE id=$1", [
             stored.reviewId,
           ])
         )[0]
       ).toEqual(reviewHistory);
       const events = await rows(
-        "SELECT event,afterRunId FROM aptlss_manager_trial_events WHERE vaId=? ORDER BY id",
+        "SELECT event,\"afterRunId\" FROM aptlss_manager_trial_events WHERE \"vaId\"=$1 ORDER BY id",
         [workerId]
       );
       expect(events.map(e => e.event)).toEqual(["closed", "started"]);
@@ -476,9 +464,9 @@ for (const viewport of [
     } finally {
       try {
         if (!uncertain) {
-          await db.beginTransaction();
+          await db.query("BEGIN");
           try {
-            await db.execute("UPDATE aptlss_manager_queue_slots SET vaId=NULL,token=NULL,leaseUntil=NULL WHERE vaId=?", [workerId]);
+            await db.query("UPDATE aptlss_manager_queue_slots SET \"vaId\"=NULL,token=NULL,\"leaseUntil\"=NULL WHERE \"vaId\"=$1", [workerId]);
             for (const table of [
               "aptlss_manager_corrections",
               "aptlss_manager_trial_events",
@@ -495,37 +483,37 @@ for (const viewport of [
               "daily_plans",
               "app_settings",
             ]) {
-              await db.execute(`DELETE FROM ${table} WHERE vaId=?`, [workerId]);
+              await db.query(`DELETE FROM ${table} WHERE "vaId"=$1`, [workerId]);
             }
             if (evidenceId) {
               const foreign = await rows(
-                "SELECT id FROM aptlss_evidence_subject_links WHERE evidenceId=? AND vaId<>?",
+                "SELECT id FROM aptlss_evidence_subject_links WHERE \"evidenceId\"=$1 AND \"vaId\"<>$2",
                 [evidenceId, workerId]
               );
               if (foreign.length)
                 throw new Error(
                   "Fixture evidence linked to a different worker; retaining evidence."
                 );
-              await db.execute("DELETE FROM aptlss_evidence_subject_links WHERE evidenceId=? AND vaId=?", [evidenceId, workerId]);
-              await db.execute(
-                "DELETE FROM workspace_evidence_links WHERE evidenceId=? AND cardId=?",
+              await db.query("DELETE FROM aptlss_evidence_subject_links WHERE \"evidenceId\"=$1 AND \"vaId\"=$2", [evidenceId, workerId]);
+              await db.query(
+                "DELETE FROM workspace_evidence_links WHERE \"evidenceId\"=$1 AND \"cardId\"=$2",
                 [evidenceId, cardId]
               );
-              await db.execute(
-                "DELETE FROM workspace_evidence_items WHERE id=? AND sourceId=?",
+              await db.query(
+                "DELETE FROM workspace_evidence_items WHERE id=$1 AND \"sourceId\"=$2",
                 [evidenceId, `${prefix}-source`]
               );
             }
-            await db.execute("DELETE FROM user_working_hours WHERE userId=?", [
+            await db.query("DELETE FROM user_working_hours WHERE \"userId\"=$1", [
               workerId,
             ]);
-            await db.execute(
-              "DELETE FROM users WHERE id IN (?,?) AND openId LIKE ?",
+            await db.query(
+              "DELETE FROM users WHERE id IN ($1,$2) AND \"openId\" LIKE $3",
               [workerId, adminId, `${prefix}-%`]
             );
-            await db.commit();
+            await db.query("COMMIT");
           } catch (error) {
-            await db.rollback();
+            await db.query("ROLLBACK");
             throw error;
           }
         }

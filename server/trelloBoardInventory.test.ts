@@ -22,7 +22,7 @@ describe('verified Trello inventory transport', () => {
       const parsed = new URL(url);
       expect(parsed.searchParams.get('key')).toBe('fixture&key=1');
       expect(parsed.searchParams.get('token')).toBe('fixture&token=2');
-      expect(init.redirect).toBe('error');
+      expect(init.redirect).toBe('manual');
     }
   });
   it.each([401, 403, 429, 500, 502])('does not retry provider HTTP %s during an interactive request', async status => {

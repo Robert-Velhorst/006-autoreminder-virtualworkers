@@ -281,21 +281,24 @@ describe('Request Queue Service', () => {
     });
 
     it('should report pending request age', async () => {
-      const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
-      let complete!: (value: string) => void;
-      const work = new Promise<string>(resolve => { complete = resolve; });
-      const promise = queue.execute('test-key', () => work);
+      vi.useFakeTimers();
+      const promise = queue.execute('test-key', async () => {
+        await new Promise(resolve => setTimeout(resolve, 200));
+        return 'result';
+      });
+      const handledPromise = promise.catch(() => undefined);
+
       try {
-        expect(queue.getPendingAge('test-key')).toBe(0);
-        clock.mockReturnValue(1100);
+        await vi.advanceTimersByTimeAsync(100);
         expect(queue.getPendingAge('test-key')).toBe(100);
-        complete('result');
-        await promise;
+
+        await vi.advanceTimersByTimeAsync(100);
+        await expect(promise).resolves.toBe('result');
         expect(queue.getPendingAge('test-key')).toBeNull();
       } finally {
-        complete('result');
-        await promise;
-        clock.mockRestore();
+        if (queue.isPending('test-key')) queue.clearAll();
+        await handledPromise;
+        vi.useRealTimers();
       }
     });
   });

@@ -14,19 +14,19 @@ import trelloWebhookRoutes, { normalizeConversationCountCardIds, verifyTrelloWeb
 
 describe('Trello webhook verification', () => {
   const originalSecret = process.env.TRELLO_WEBHOOK_SECRET;
-  const originalPublicUrl = process.env.PUBLIC_URL;
+  const originalPublicUrl = process.env.TRELLO_WEBHOOK_CALLBACK_URL;
 
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.TRELLO_WEBHOOK_SECRET = 'test-webhook-secret';
-    process.env.PUBLIC_URL = 'https://dashboard.example';
+    process.env.TRELLO_WEBHOOK_CALLBACK_URL = 'https://dashboard.example/api/trello-webhook';
   });
 
   afterEach(() => {
     if (originalSecret === undefined) delete process.env.TRELLO_WEBHOOK_SECRET;
     else process.env.TRELLO_WEBHOOK_SECRET = originalSecret;
-    if (originalPublicUrl === undefined) delete process.env.PUBLIC_URL;
-    else process.env.PUBLIC_URL = originalPublicUrl;
+    if (originalPublicUrl === undefined) delete process.env.TRELLO_WEBHOOK_CALLBACK_URL;
+    else process.env.TRELLO_WEBHOOK_CALLBACK_URL = originalPublicUrl;
   });
 
   it('accepts only a signature bound to the exact body and callback URL', () => {
@@ -66,7 +66,7 @@ describe('Trello webhook verification', () => {
     expect(registration).not.toContain("req.get('host')");
     expect(registration).toContain('signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS)');
     expect(registration).toContain("error: 'Failed to register webhook with Trello'");
-    expect(status).toContain('const configuredCallbackUrl = callbackUrl();');
+    expect(status).toContain('const callbackUrl = getConfiguredTrelloWebhookCallbackUrl();');
     expect(status).not.toContain("req.get('host')");
   });
 
@@ -150,7 +150,7 @@ describe('Trello webhook verification', () => {
       transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback({
         execute: vi.fn(async () => {
           statement += 1;
-          return statement <= 2 ? [[{ id: 'webhook-1' }], []] : [[], []];
+          return { rows: statement <= 2 ? [{ id: 'webhook-1' }] : [] };
         }),
         insert: vi.fn(() => ({ values: insertValues })),
       })),
@@ -190,9 +190,9 @@ describe('Trello webhook verification', () => {
         const tx = {
           execute: vi.fn(async () => {
             statement += 1;
-            if (statement <= 2) return [[{ id: 'webhook-1' }], []];
-            if (statement === 3) return [archived.length ? [{ id: 1 }] : [], []];
-            return [[], []];
+            if (statement <= 2) return { rows: [{ id: 'webhook-1' }] };
+            if (statement === 3) return { rows: archived.length ? [{ id: 1 }] : [] };
+            return { rows: [] };
           }),
           insert: vi.fn(() => ({ values: insertValues })),
         };
@@ -247,7 +247,7 @@ describe('Trello webhook verification', () => {
         return callback({
           execute: vi.fn(async () => {
             statement += 1;
-            return statement <= 2 ? [[{ id: 'webhook-1' }], []] : [[], []];
+            return { rows: statement <= 2 ? [{ id: 'webhook-1' }] : [] };
           }),
           insert: vi.fn(() => ({ values: insertValues })),
         });
@@ -295,7 +295,7 @@ describe('Trello webhook verification', () => {
     const insertValues = vi.fn();
     mocks.getDb.mockResolvedValue({
       transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback({
-        execute: vi.fn().mockResolvedValue([[], []]),
+        execute: vi.fn().mockResolvedValue({ rows: [] }),
         insert: vi.fn(() => ({ values: insertValues })),
       })),
     });
@@ -357,14 +357,14 @@ describe('Trello webhook verification', () => {
             const parameters = chunks.filter((chunk): chunk is string => typeof chunk === 'string');
 
             if (queryText.includes('FROM chatbot_webhooks')) {
-              const isModelScoped = queryText.includes('WHERE modelId =');
+              const isModelScoped = queryText.includes('WHERE "modelId" =');
               if (queryText.includes('FOR UPDATE')) {
                 const lockKey = isModelScoped ? `model:${parameters[0]}` : 'all-registered-models';
                 releases.push(await acquireLock(lockKey));
               }
 
-              if (!isModelScoped) return [[{ id: 1 }], []];
-              return registeredModels.has(parameters[0]) ? [[{ id: parameters[0] }], []] : [[], []];
+              if (!isModelScoped) return { rows: [{ id: 1 }] };
+              return { rows: registeredModels.has(parameters[0]) ? [{ id: parameters[0] }] : [] };
             }
 
             if (queryText.includes('FROM chatbot_conversations')) {
@@ -374,7 +374,7 @@ describe('Trello webhook verification', () => {
               );
               // Let concurrent transactions reach the replay check before either inserts.
               await new Promise((resolve) => setTimeout(resolve, 5));
-              return [alreadyArchived ? [{ id: 1 }] : [], []];
+              return { rows: alreadyArchived ? [{ id: 1 }] : [] };
             }
 
             throw new Error(`Unexpected webhook SQL: ${queryText}`);

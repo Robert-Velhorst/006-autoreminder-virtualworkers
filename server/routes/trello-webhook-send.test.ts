@@ -10,6 +10,10 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../middleware/auth', () => ({
+  requireAuthenticated: (req: any, _res: any, next: any) => {
+    req.user = { id: 1, role: 'admin', name: 'Admin' };
+    next();
+  },
   requireAdmin: (req: any, _res: any, next: any) => {
     req.user = { id: 1, role: 'admin', name: 'Admin' };
     next();

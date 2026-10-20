@@ -1,5 +1,5 @@
 import type { Request } from "express";
-import { vaProfiles, type User } from "../../drizzle/schema";
+import { vaProfiles, type User } from "../../drizzle/schema.postgres";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ getDb: vi.fn() }));

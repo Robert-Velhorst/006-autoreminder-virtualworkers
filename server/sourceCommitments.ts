@@ -6,7 +6,7 @@ import {
   reminderRules,
   reminderSchedules,
   type Commitment,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 import { ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader } from "./scheduledJobRuntime";
 import { getWorkerCards } from "./services/trello-manus";
@@ -25,10 +25,6 @@ export type SourceCommitmentInput = {
   reminderOffsetMinutes?: number;
 };
 
-function insertId(result: unknown) {
-  if (Array.isArray(result)) return Number((result[0] as { insertId?: unknown } | undefined)?.insertId ?? 0);
-  return Number((result as { insertId?: unknown } | undefined)?.insertId ?? 0);
-}
 
 function clean(value: string, maximum: number) {
   return value.trim().slice(0, maximum);
@@ -87,7 +83,8 @@ export async function upsertSourceCommitment(input: SourceCommitmentInput, conte
       title,
       context: input.context?.trim().slice(0, 8_000) || null,
       dueAt: input.dueAt,
-    }).onDuplicateKeyUpdate({
+    }).onConflictDoUpdate({
+      target: [commitments.workspaceOwnerId, commitments.sourceType, commitments.sourceId],
       set: {
         assignedUserId: input.assignedUserId,
         sourceUrl: input.sourceUrl?.trim().slice(0, 1_024) || null,
@@ -202,8 +199,8 @@ export async function upsertSourceCommitment(input: SourceCommitmentInput, conte
       requireApproval: false,
       maxAttempts: 1,
       cooldownMinutes: 60,
-    });
-    const ruleId = insertId(ruleResult);
+    }).returning({ id: reminderRules.id });
+    const ruleId = ruleResult[0]?.id ?? 0;
     await checkpoint(context, tx);
     if (!ruleId) throw new Error("Source reminder rule could not be created");
     const scheduleResult = await tx.insert(reminderSchedules).values({
@@ -214,8 +211,8 @@ export async function upsertSourceCommitment(input: SourceCommitmentInput, conte
       state: "scheduled",
       channel: "in_app",
       idempotencyKey,
-    });
-    const scheduleId = insertId(scheduleResult);
+    }).returning({ id: reminderSchedules.id });
+    const scheduleId = scheduleResult[0]?.id ?? 0;
     await checkpoint(context, tx);
     if (!scheduleId) throw new Error("Source reminder could not be scheduled");
     await tx.insert(reminderAuditEvents).values([

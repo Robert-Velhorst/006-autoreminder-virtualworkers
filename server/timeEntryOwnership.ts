@@ -5,7 +5,7 @@ import {
   type User,
   type VAProfile,
   type TimeEntry,
-} from '../drizzle/schema';
+} from '../drizzle/schema.postgres';
 import type { getDb } from './db';
 import { selectWorkerProfile } from './workerOperatorContext';
 

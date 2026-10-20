@@ -25,7 +25,7 @@ import {
   taskAssignments,
   trelloCachedCards,
   users,
-} from "../../drizzle/schema";
+} from "../../drizzle/schema.postgres";
 import { eq, and, desc, asc, gte, lte, sql, isNull, isNotNull, inArray } from "drizzle-orm";
 import { collectComplianceSnapshot } from "../services/manus-scheduler";
 import { parseDateKey } from "../utils/date-only";
@@ -92,8 +92,7 @@ export const paymentRouter = router({
           eq(paymentCycles.founderId, founderId),
           eq(paymentCycles.isPaid, false),
         ));
-      const updateHeader = Array.isArray(updateResult) ? updateResult[0] : updateResult;
-      if (Number((updateHeader as { affectedRows?: unknown }).affectedRows ?? 0) !== 1) {
+      if ((updateResult.rowCount ?? 0) !== 1) {
         throw new TRPCError({ code: "CONFLICT", message: "Payment cycle was already settled" });
       }
 
@@ -227,8 +226,9 @@ export const payLogRouter = router({
         await db.update(weeklyPayLog).set(values).where(eq(weeklyPayLog.id, existing[0].id));
         return { ...existing[0], ...values };
       } else {
-        const [result] = await db.insert(weeklyPayLog).values(values);
-        return { id: (result as any).insertId, ...values };
+        const [result] = await db.insert(weeklyPayLog).values(values)
+          .returning({ id: weeklyPayLog.id });
+        return { id: result?.id, ...values };
       }
     }),
 });
@@ -293,8 +293,9 @@ export const triageRouter = router({
         await db.update(dailyTriageState).set(values).where(eq(dailyTriageState.id, existing[0].id));
         return { ...existing[0], ...values };
       } else {
-        const [result] = await db.insert(dailyTriageState).values(values);
-        return { id: (result as any).insertId, ...values };
+        const [result] = await db.insert(dailyTriageState).values(values)
+          .returning({ id: dailyTriageState.id });
+        return { id: result?.id, ...values };
       }
     }),
 
@@ -493,8 +494,9 @@ export const sundayRouter = router({
         await db.update(sundayChecklist).set(values).where(eq(sundayChecklist.id, existing[0].id));
         return { ...existing[0], ...values };
       } else {
-        const [result] = await db.insert(sundayChecklist).values(values);
-        return { id: (result as any).insertId, ...values };
+        const [result] = await db.insert(sundayChecklist).values(values)
+          .returning({ id: sundayChecklist.id });
+        return { id: result?.id, ...values };
       }
     }),
 });
@@ -632,8 +634,8 @@ export const timerRouter = router({
           boardName: workerPlan?.boardName ?? input.boardName,
           listName: workerPlan?.listName ?? input.listName,
           startTime,
-        });
-        const id = (result as { insertId: number }).insertId;
+        }).returning({ id: timeEntries.id });
+        const id = result.id;
         if (managerPilot) {
           await enqueueManagerTask(tx, { vaId, trigger: "timer_changed", eventKey: `timer-start:${id}` });
         }
@@ -799,8 +801,7 @@ export const timerRouter = router({
         endTime: newStoppedAt,
       }).where(and(eq(timeEntries.id, input.id), eq(timeEntries.vaId, vaId)));
 
-      const updateHeader = Array.isArray(updateResult) ? updateResult[0] : updateResult;
-      const affectedRows = Number((updateHeader as { affectedRows?: unknown }).affectedRows);
+      const affectedRows = updateResult.rowCount ?? 0;
       if (affectedRows === 0) {
         const [stillOwned] = await db.select({
           durationSeconds: timeEntries.durationSeconds,
@@ -1066,8 +1067,9 @@ export const emailInboxRouter = router({
     const vaId = Number(ctx.user.id);
     const result = await db.update(emailTasks)
       .set({ status: "archived", archivedAt: new Date() })
-      .where(and(eq(emailTasks.vaId, vaId), eq(emailTasks.status, "pending")));
-    return { success: true, archived: (result as any).affectedRows || 0 };
+      .where(and(eq(emailTasks.vaId, vaId), eq(emailTasks.status, "pending")))
+      .returning({ id: emailTasks.id });
+    return { success: true, archived: result.length };
   }),
 
   upsertBatch: operatorAccountProcedure
@@ -1105,16 +1107,12 @@ export const emailInboxRouter = router({
           if (existing && existing.vaId !== vaId) throw emailTaskOwnershipConflict();
 
           if (!existing) {
-            try {
-              await tx.insert(emailTasks).values({ vaId, ...task });
-              upserted++;
-              continue;
-            } catch (error) {
-              if (!isDuplicateEmailMessageError(error)) throw error;
-              [existing] = await findExisting();
-              if (!existing) throw error;
-              if (existing.vaId !== vaId) throw emailTaskOwnershipConflict();
-            }
+            const inserted = await tx.insert(emailTasks).values({ vaId, ...task })
+              .onConflictDoNothing({ target: emailTasks.gmailMessageId }).returning({ id: emailTasks.id });
+            if (inserted.length) { upserted++; continue; }
+            [existing] = await findExisting();
+            if (!existing) throw new TRPCError({ code: "CONFLICT", message: "Email task reservation changed; reload before retrying" });
+            if (existing.vaId !== vaId) throw emailTaskOwnershipConflict();
           }
 
           await tx.update(emailTasks).set(task).where(and(

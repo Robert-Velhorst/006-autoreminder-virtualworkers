@@ -9,7 +9,7 @@ describe("APTLSS current-state persistence", () => {
     const plans = fs.readFileSync(path.join(workspaceRoot, "server/aptlssDb.ts"), "utf8");
     const states = fs.readFileSync(path.join(workspaceRoot, "server/aptlssStepsDb.ts"), "utf8");
 
-    expect(plans).toContain(".onDuplicateKeyUpdate");
+    expect(plans).toContain(".onConflictDoUpdate");
     expect(plans).not.toContain("db.delete(aptlssPlans)");
     expect(states).toContain(".insert(cardStates)");
     expect(states).toContain(".insert(priorityScores)");

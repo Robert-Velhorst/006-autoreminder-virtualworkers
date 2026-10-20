@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
-import { taskAssignments } from '../../../drizzle/schema';
+import { taskAssignments } from '../../../drizzle/schema.postgres';
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),

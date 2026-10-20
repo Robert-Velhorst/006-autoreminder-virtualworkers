@@ -1,11 +1,6 @@
+// Legacy MySQL source schema. Application runtime and migrations use schema.postgres.ts.
 import { int, mysqlEnum, mysqlTable, text, longtext, mediumtext, timestamp, varchar, decimal, boolean, date, uniqueIndex, index, foreignKey } from "drizzle-orm/mysql-core";
 import { sql } from "drizzle-orm";
-
-/**
- * Core user table backing auth flow.
- * Extend this file with additional tables as your product grows.
- * Columns use camelCase to match both database fields and generated types.
- */
 export const users = mysqlTable("users", {
   /**
    * Surrogate primary key. Auto-incremented numeric value managed by the database.
@@ -25,18 +20,6 @@ export const users = mysqlTable("users", {
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
 });
 
-export type User = typeof users.$inferSelect;
-export type InsertUser = typeof users.$inferInsert;
-
-export const revokedSessions = mysqlTable("revoked_sessions", {
-  sessionHash: varchar("sessionHash", { length: 64 }).primaryKey(),
-  revokedAt: timestamp("revokedAt").defaultNow().notNull(),
-  expiresAt: timestamp("expiresAt").notNull(),
-}, (table) => ({
-  expiresAtIdx: index("revoked_sessions_expires_at_idx").on(table.expiresAt),
-}));
-
-// Generation history tables
 export const generationJobs = mysqlTable('generation_jobs', {
   id: varchar('id', { length: 64 }).primaryKey(),
   totalCards: int('totalCards').notNull(),
@@ -64,12 +47,6 @@ export const generationItems = mysqlTable('generation_items', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-export type GenerationJob = typeof generationJobs.$inferSelect;
-export type InsertGenerationJob = typeof generationJobs.$inferInsert;
-export type GenerationItem = typeof generationItems.$inferSelect;
-export type InsertGenerationItem = typeof generationItems.$inferInsert;
-
-// Scheduled jobs table
 export const scheduledJobs = mysqlTable('scheduled_jobs', {
   id: varchar('id', { length: 64 }).primaryKey(),
   cardIds: text('cardIds').notNull(), // JSON string array
@@ -82,10 +59,6 @@ export const scheduledJobs = mysqlTable('scheduled_jobs', {
   createdBy: varchar('createdBy', { length: 64 }).notNull(),
 });
 
-export type ScheduledJob = typeof scheduledJobs.$inferSelect;
-export type InsertScheduledJob = typeof scheduledJobs.$inferInsert;
-
-// User working hours settings table
 export const userWorkingHours = mysqlTable('user_working_hours', {
   id: int('id').autoincrement().primaryKey(),
   userId: int('userId').notNull(), // References users.id
@@ -121,10 +94,6 @@ export const userWorkingHours = mysqlTable('user_working_hours', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-export type UserWorkingHours = typeof userWorkingHours.$inferSelect;
-export type InsertUserWorkingHours = typeof userWorkingHours.$inferInsert;
-
-// Holidays table for country-specific holidays
 export const holidays = mysqlTable('holidays', {
   id: int('id').primaryKey().autoincrement(),
   userId: int('userId').notNull(),
@@ -136,10 +105,6 @@ export const holidays = mysqlTable('holidays', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-export type Holiday = typeof holidays.$inferSelect;
-export type InsertHoliday = typeof holidays.$inferInsert;
-
-// Trello data cache tables
 export const trelloCacheMetadata = mysqlTable('trello_cache_metadata', {
   id: int('id').primaryKey().autoincrement(),
   userId: int('userId').notNull(),
@@ -184,20 +149,6 @@ export const trelloCachedCards = mysqlTable('trello_cached_cards', {
   expiresAt: timestamp('expiresAt').notNull(),
 }, (table) => [index('trello_cached_cards_user_card_cached_idx').on(table.userId, table.cardId, table.cachedAt)]);
 
-export type TrelloCacheMetadata = typeof trelloCacheMetadata.$inferSelect;
-export type InsertTrelloCacheMetadata = typeof trelloCacheMetadata.$inferInsert;
-export type TrelloCachedTask = typeof trelloCachedTasks.$inferSelect;
-export type InsertTrelloCachedTask = typeof trelloCachedTasks.$inferInsert;
-export type TrelloCachedBoard = typeof trelloCachedBoards.$inferSelect;
-export type InsertTrelloCachedBoard = typeof trelloCachedBoards.$inferInsert;
-export type TrelloCachedCard = typeof trelloCachedCards.$inferSelect;
-export type InsertTrelloCachedCard = typeof trelloCachedCards.$inferInsert;
-
-// ============================================
-// VA MANAGEMENT TABLES
-// ============================================
-
-// Virtual Worker profiles (formerly Virtual Assistant)
 export const vaProfiles = mysqlTable('va_profiles', {
   id: int('id').primaryKey().autoincrement(),
   userId: int('userId').notNull(), // References users.id (the VA's user account)
@@ -224,29 +175,6 @@ export const vaProfiles = mysqlTable('va_profiles', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-export const workerInvitations = mysqlTable('worker_invitations', {
-  id: int('id').primaryKey().autoincrement(),
-  userId: int('userId').notNull(),
-  vaId: int('vaId').notNull(),
-  founderId: int('founderId').notNull(),
-  email: varchar('email', { length: 320 }).notNull(),
-  tokenHash: varchar('tokenHash', { length: 64 }).notNull(),
-  expiresAt: timestamp('expiresAt').notNull(),
-  sentAt: timestamp('sentAt'),
-  acceptedAt: timestamp('acceptedAt'),
-  revokedAt: timestamp('revokedAt'),
-  createdAt: timestamp('createdAt').defaultNow().notNull(),
-  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
-}, (table) => ({
-  tokenHashUnique: uniqueIndex('worker_invitations_token_hash_unique').on(table.tokenHash),
-  userStatusIdx: index('worker_invitations_user_status_idx').on(table.userId, table.acceptedAt, table.revokedAt),
-  founderCreatedIdx: index('worker_invitations_founder_created_idx').on(table.founderId, table.createdAt),
-}));
-
-export type WorkerInvitation = typeof workerInvitations.$inferSelect;
-export type InsertWorkerInvitation = typeof workerInvitations.$inferInsert;
-
-// Task assignments linking tasks to VAs
 export const taskAssignments = mysqlTable('task_assignments', {
   id: int('id').primaryKey().autoincrement(),
   taskId: varchar('taskId', { length: 128 }).notNull(), // Composite: cardId:checklistId:checkItemId
@@ -266,7 +194,6 @@ export const taskAssignments = mysqlTable('task_assignments', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Shift schedules for handoffs
 export const shiftSchedules = mysqlTable('shift_schedules', {
   id: int('id').primaryKey().autoincrement(),
   vaId: int('vaId').notNull(),
@@ -278,7 +205,6 @@ export const shiftSchedules = mysqlTable('shift_schedules', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Task dependencies
 export const taskDependencies = mysqlTable('task_dependencies', {
   id: int('id').primaryKey().autoincrement(),
   taskId: varchar('taskId', { length: 128 }).notNull(), // The task that is blocked
@@ -288,7 +214,6 @@ export const taskDependencies = mysqlTable('task_dependencies', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// Founder priority overrides
 export const founderPriorityOverrides = mysqlTable('founder_priority_overrides', {
   id: int('id').primaryKey().autoincrement(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -300,7 +225,6 @@ export const founderPriorityOverrides = mysqlTable('founder_priority_overrides',
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Client/Project context
 export const clients = mysqlTable('clients', {
   id: int('id').primaryKey().autoincrement(),
   founderId: int('founderId').notNull(),
@@ -313,7 +237,6 @@ export const clients = mysqlTable('clients', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Communication/Decision log
 export const communicationLog = mysqlTable('communication_log', {
   id: int('id').primaryKey().autoincrement(),
   taskId: varchar('taskId', { length: 128 }),
@@ -326,7 +249,6 @@ export const communicationLog = mysqlTable('communication_log', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// Daily briefings
 export const dailyBriefings = mysqlTable('daily_briefings', {
   id: int('id').primaryKey().autoincrement(),
   vaId: int('vaId').notNull(),
@@ -339,7 +261,6 @@ export const dailyBriefings = mysqlTable('daily_briefings', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// Quality checkpoints / Review queue
 export const reviewQueue = mysqlTable('review_queue', {
   id: int('id').primaryKey().autoincrement(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -354,7 +275,6 @@ export const reviewQueue = mysqlTable('review_queue', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Time tracking entries
 export const timeEntries = mysqlTable('time_entries', {
   id: int('id').primaryKey().autoincrement(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -387,7 +307,6 @@ export const timeEntries = mysqlTable('time_entries', {
   index('time_entries_step_idx').on(table.aptlssStepId),
 ]);
 
-// Payment cycles — each 2-week pay period per founder
 export const paymentCycles = mysqlTable("payment_cycles", {
   id: int("id").autoincrement().primaryKey(),
   founderId: int("founderId").notNull(),
@@ -401,7 +320,6 @@ export const paymentCycles = mysqlTable("payment_cycles", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
-// Weekly merit/demerit log per worker
 export const weeklyPayLog = mysqlTable("weekly_pay_log", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -433,7 +351,6 @@ export const weeklyPayLog = mysqlTable("weekly_pay_log", {
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
 
-// Daily triage state per worker
 export const dailyTriageState = mysqlTable("daily_triage_state", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -456,7 +373,6 @@ export const dailyTriageState = mysqlTable("daily_triage_state", {
   uniqueIndex('va_triage_date_idx').on(table.vaId, table.triageDate)
 ]);
 
-// Sunday checklist state per worker
 export const sundayChecklist = mysqlTable("sunday_checklist", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -479,7 +395,6 @@ export const sundayChecklist = mysqlTable("sunday_checklist", {
   uniqueIndex('va_sunday_date_idx').on(table.vaId, table.sundayDate)
 ]);
 
-// Tracks daily due date assignment per worker
 export const dailyDueDateAssignments = mysqlTable("daily_due_date_assignments", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -494,7 +409,6 @@ export const dailyDueDateAssignments = mysqlTable("daily_due_date_assignments", 
   uniqueIndex('va_due_date_assign_idx').on(table.vaId, table.cardId, table.date)
 ]);
 
-// Tracks daily Trello card update per worker
 export const dailyCardUpdates = mysqlTable("daily_card_updates", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -509,7 +423,6 @@ export const dailyCardUpdates = mysqlTable("daily_card_updates", {
   uniqueIndex('va_card_update_idx').on(table.vaId, table.cardId, table.date)
 ]);
 
-// Tracks ON-HOLD checks per worker
 export const onHoldDailyChecks = mysqlTable("on_hold_daily_checks", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -524,7 +437,6 @@ export const onHoldDailyChecks = mysqlTable("on_hold_daily_checks", {
   uniqueIndex('va_on_hold_check_idx').on(table.vaId, table.cardId, table.date)
 ]);
 
-// Tracks update streaks per worker
 export const dailyUpdateStreak = mysqlTable("daily_update_streak", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -537,7 +449,6 @@ export const dailyUpdateStreak = mysqlTable("daily_update_streak", {
   uniqueIndex('va_streak_date_idx').on(table.vaId, table.streakDate)
 ]);
 
-// App settings per worker (or global if vaId is null)
 export const appSettings = mysqlTable("app_settings", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId"),
@@ -546,7 +457,6 @@ export const appSettings = mysqlTable("app_settings", {
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
 
-// Daily compliance snapshot per worker
 export const dailyComplianceSnapshots = mysqlTable("daily_compliance_snapshots", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -587,7 +497,6 @@ export const dailyComplianceSnapshots = mysqlTable("daily_compliance_snapshots",
   uniqueIndex('va_compliance_snapshot_idx').on(table.vaId, table.snapshotDate)
 ]);
 
-// Tracks Trello comment threads per worker
 export const replyThreads = mysqlTable("reply_threads", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -609,7 +518,6 @@ export const replyThreads = mysqlTable("reply_threads", {
   uniqueIndex('va_reply_thread_idx').on(table.vaId, table.cardId, table.source)
 ]);
 
-// Tracks vague replies per worker
 export const vagueReplyFlags = mysqlTable("vague_reply_flags", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -628,7 +536,6 @@ export const vagueReplyFlags = mysqlTable("vague_reply_flags", {
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
 
-// Tracks unsigned messages per worker
 export const unsignedMessageFlags = mysqlTable("unsigned_message_flags", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -648,7 +555,6 @@ export const unsignedMessageFlags = mysqlTable("unsigned_message_flags", {
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
 
-// Gmail email tasks per worker
 export const emailTasks = mysqlTable("email_tasks", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -676,7 +582,6 @@ export const emailTasks = mysqlTable("email_tasks", {
   index("email_tasks_va_trello_card_idx").on(table.vaId, table.trelloCardId),
 ]);
 
-// Card snoozes per worker
 export const cardSnoozes = mysqlTable("card_snoozes", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -690,7 +595,6 @@ export const cardSnoozes = mysqlTable("card_snoozes", {
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
 
-// Handoff notes
 export const handoffNotes = mysqlTable('handoff_notes', {
   id: int('id').primaryKey().autoincrement(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -703,52 +607,6 @@ export const handoffNotes = mysqlTable('handoff_notes', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// Export types
-export type VAProfile = typeof vaProfiles.$inferSelect;
-export type InsertVAProfile = typeof vaProfiles.$inferInsert;
-export type TaskAssignment = typeof taskAssignments.$inferSelect;
-export type InsertTaskAssignment = typeof taskAssignments.$inferInsert;
-export type TaskDependency = typeof taskDependencies.$inferSelect;
-export type InsertTaskDependency = typeof taskDependencies.$inferInsert;
-export type FounderPriorityOverride = typeof founderPriorityOverrides.$inferSelect;
-export type InsertFounderPriorityOverride = typeof founderPriorityOverrides.$inferInsert;
-export type Client = typeof clients.$inferSelect;
-export type InsertClient = typeof clients.$inferInsert;
-export type CommunicationLogEntry = typeof communicationLog.$inferSelect;
-export type InsertCommunicationLogEntry = typeof communicationLog.$inferInsert;
-export type DailyBriefing = typeof dailyBriefings.$inferSelect;
-export type InsertDailyBriefing = typeof dailyBriefings.$inferInsert;
-export type ReviewQueueItem = typeof reviewQueue.$inferSelect;
-export type InsertReviewQueueItem = typeof reviewQueue.$inferInsert;
-export type TimeEntry = typeof timeEntries.$inferSelect;
-export type InsertTimeEntry = typeof timeEntries.$inferInsert;
-export type HandoffNote = typeof handoffNotes.$inferSelect;
-export type InsertHandoffNote = typeof handoffNotes.$inferInsert;
-export type PaymentCycle = typeof paymentCycles.$inferSelect;
-export type WeeklyPayLog = typeof weeklyPayLog.$inferSelect;
-export type DailyTriageState = typeof dailyTriageState.$inferSelect;
-export type SundayChecklist = typeof sundayChecklist.$inferSelect;
-export type DailyDueDateAssignment = typeof dailyDueDateAssignments.$inferSelect;
-export type DailyCardUpdate = typeof dailyCardUpdates.$inferSelect;
-export type OnHoldDailyCheck = typeof onHoldDailyChecks.$inferSelect;
-export type DailyUpdateStreak = typeof dailyUpdateStreak.$inferSelect;
-export type AppSetting = typeof appSettings.$inferSelect;
-export type DailyComplianceSnapshot = typeof dailyComplianceSnapshots.$inferSelect;
-export type ReplyThread = typeof replyThreads.$inferSelect;
-export type InsertReplyThread = typeof replyThreads.$inferInsert;
-export type VagueReplyFlag = typeof vagueReplyFlags.$inferSelect;
-export type InsertVagueReplyFlag = typeof vagueReplyFlags.$inferInsert;
-export type EmailTask = typeof emailTasks.$inferSelect;
-export type InsertEmailTask = typeof emailTasks.$inferInsert;
-export type CardSnooze = typeof cardSnoozes.$inferSelect;
-
-
-// ============================================
-// ATIS (Adaptive Task Intelligence System) TABLES
-// Knowledge-first design for accurate task breakdowns
-// ============================================
-
-// Trello workspaces (organizations)
 export const atisWorkspaces = mysqlTable('atis_workspaces', {
   id: int('id').primaryKey().autoincrement(),
   trelloId: varchar('trelloId', { length: 64 }).notNull().unique(),
@@ -761,7 +619,6 @@ export const atisWorkspaces = mysqlTable('atis_workspaces', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Trello boards
 export const atisBoards = mysqlTable('atis_boards', {
   id: int('id').primaryKey().autoincrement(),
   trelloId: varchar('trelloId', { length: 64 }).notNull().unique(),
@@ -776,7 +633,6 @@ export const atisBoards = mysqlTable('atis_boards', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Trello cards with full data
 export const atisCards = mysqlTable('atis_cards', {
   id: int('id').primaryKey().autoincrement(),
   trelloId: varchar('trelloId', { length: 64 }).notNull().unique(),
@@ -802,18 +658,6 @@ export const atisCards = mysqlTable('atis_cards', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-export const atisChecklistCompletion = mysqlTable('atis_checklist_completion', {
-  id: int('id').primaryKey().autoincrement(),
-  cardId: int('card_id').notNull(),
-  stepIndex: int('step_index').notNull(),
-  userId: int('user_id').notNull(),
-  completedAt: timestamp('completed_at').defaultNow().notNull(),
-}, (table) => [
-  uniqueIndex('card_step_user_unique').on(table.cardId, table.stepIndex, table.userId),
-  index('atis_checklist_user_completed_idx').on(table.userId, table.completedAt),
-]);
-
-// Attachments with extracted content
 export const atisAttachments = mysqlTable('atis_attachments', {
   id: int('id').primaryKey().autoincrement(),
   trelloId: varchar('trelloId', { length: 64 }).notNull(),
@@ -833,7 +677,6 @@ export const atisAttachments = mysqlTable('atis_attachments', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Comments from Trello cards
 export const atisComments = mysqlTable('atis_comments', {
   id: int('id').primaryKey().autoincrement(),
   trelloId: varchar('trelloId', { length: 64 }).notNull(),
@@ -846,7 +689,6 @@ export const atisComments = mysqlTable('atis_comments', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// AI-generated understanding of each card
 export const atisCardUnderstanding = mysqlTable('atis_card_understanding', {
   id: int('id').primaryKey().autoincrement(),
   cardId: int('cardId').notNull().unique(), // References atisCards.id
@@ -879,7 +721,6 @@ export const atisCardUnderstanding = mysqlTable('atis_card_understanding', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Ingestion job tracking
 export const atisIngestionJobs = mysqlTable('atis_ingestion_jobs', {
   id: int('id').primaryKey().autoincrement(),
   jobType: mysqlEnum('jobType', ['full_sync', 'incremental', 'workspace', 'board', 'card']).notNull(),
@@ -894,24 +735,6 @@ export const atisIngestionJobs = mysqlTable('atis_ingestion_jobs', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// Export ATIS types
-export type ATISWorkspace = typeof atisWorkspaces.$inferSelect;
-export type InsertATISWorkspace = typeof atisWorkspaces.$inferInsert;
-export type ATISBoard = typeof atisBoards.$inferSelect;
-export type InsertATISBoard = typeof atisBoards.$inferInsert;
-export type ATISCard = typeof atisCards.$inferSelect;
-export type InsertATISCard = typeof atisCards.$inferInsert;
-export type ATISAttachment = typeof atisAttachments.$inferSelect;
-export type InsertATISAttachment = typeof atisAttachments.$inferInsert;
-export type ATISComment = typeof atisComments.$inferSelect;
-export type InsertATISComment = typeof atisComments.$inferInsert;
-export type ATISCardUnderstanding = typeof atisCardUnderstanding.$inferSelect;
-export type InsertATISCardUnderstanding = typeof atisCardUnderstanding.$inferInsert;
-export type ATISIngestionJob = typeof atisIngestionJobs.$inferSelect;
-export type InsertATISIngestionJob = typeof atisIngestionJobs.$inferInsert;
-
-
-// User notification preferences
 export const userNotificationPreferences = mysqlTable('user_notification_preferences', {
   id: int('id').primaryKey().autoincrement(),
   userId: int('userId').notNull(),
@@ -941,11 +764,6 @@ export const userNotificationPreferences = mysqlTable('user_notification_prefere
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-export type UserNotificationPreferences = typeof userNotificationPreferences.$inferSelect;
-export type InsertUserNotificationPreferences = typeof userNotificationPreferences.$inferInsert;
-
-
-// Notification history for tracking sent notifications
 export const notificationHistory = mysqlTable('notification_history', {
   id: int('id').primaryKey().autoincrement(),
   userId: int('userId').notNull(),
@@ -980,10 +798,6 @@ export const notificationHistory = mysqlTable('notification_history', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-export type NotificationHistory = typeof notificationHistory.$inferSelect;
-export type InsertNotificationHistory = typeof notificationHistory.$inferInsert;
-
-// Digest job tracking
 export const digestJobs = mysqlTable('digest_jobs', {
   id: int('id').primaryKey().autoincrement(),
   userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
@@ -995,162 +809,6 @@ export const digestJobs = mysqlTable('digest_jobs', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-export type DigestJob = typeof digestJobs.$inferSelect;
-export type InsertDigestJob = typeof digestJobs.$inferInsert;
-
-// Durable reminder orchestration. These tables form one auditable path from a
-// source commitment through policy review, delivery, escalation, and closure.
-export const commitments = mysqlTable('commitments', {
-  id: int('id').primaryKey().autoincrement(),
-  workspaceOwnerId: int('workspaceOwnerId').notNull(),
-  assignedUserId: int('assignedUserId'),
-  createdByUserId: int('createdByUserId').notNull(),
-  sourceType: mysqlEnum('sourceType', ['manual', 'trello', 'gmail', 'google_drive', 'system']).notNull(),
-  sourceId: varchar('sourceId', { length: 255 }),
-  sourceUrl: varchar('sourceUrl', { length: 1024 }),
-  title: varchar('title', { length: 500 }).notNull(),
-  context: text('context'),
-  dueAt: timestamp('dueAt').notNull(),
-  status: mysqlEnum('status', ['open', 'completed', 'cancelled']).default('open').notNull(),
-  completedAt: timestamp('completedAt'),
-  cancelledAt: timestamp('cancelledAt'),
-  createdAt: timestamp('createdAt').defaultNow().notNull(),
-  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
-}, (table) => [
-  uniqueIndex('commitments_workspace_source_unique').on(table.workspaceOwnerId, table.sourceType, table.sourceId),
-  index('commitments_workspace_status_due_idx').on(table.workspaceOwnerId, table.status, table.dueAt),
-  index('commitments_assignee_status_due_idx').on(table.assignedUserId, table.status, table.dueAt),
-]);
-
-export const reminderRules = mysqlTable('reminder_rules', {
-  id: int('id').primaryKey().autoincrement(),
-  workspaceOwnerId: int('workspaceOwnerId').notNull(),
-  createdByUserId: int('createdByUserId').notNull(),
-  name: varchar('name', { length: 255 }).notNull(),
-  triggerType: mysqlEnum('triggerType', ['before_due', 'at_due', 'after_due', 'no_update', 'manual']).default('before_due').notNull(),
-  offsetMinutes: int('offsetMinutes').default(60).notNull(),
-  channel: mysqlEnum('channel', ['in_app', 'email']).default('in_app').notNull(),
-  requireApproval: boolean('requireApproval').default(true).notNull(),
-  maxAttempts: int('maxAttempts').default(1).notNull(),
-  cooldownMinutes: int('cooldownMinutes').default(60).notNull(),
-  active: boolean('active').default(true).notNull(),
-  createdAt: timestamp('createdAt').defaultNow().notNull(),
-  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
-}, (table) => [
-  index('reminder_rules_workspace_active_idx').on(table.workspaceOwnerId, table.active),
-]);
-
-export const reminderPolicies = mysqlTable('reminder_policies', {
-  id: int('id').primaryKey().autoincrement(),
-  userId: int('userId').notNull(),
-  enabled: boolean('enabled').default(true).notNull(),
-  inAppEnabled: boolean('inAppEnabled').default(true).notNull(),
-  emailEnabled: boolean('emailEnabled').default(false).notNull(),
-  maxPerDay: int('maxPerDay').default(3).notNull(),
-  minIntervalMinutes: int('minIntervalMinutes').default(60).notNull(),
-  quietHoursStart: varchar('quietHoursStart', { length: 5 }).default('22:00').notNull(),
-  quietHoursEnd: varchar('quietHoursEnd', { length: 5 }).default('08:00').notNull(),
-  timezone: varchar('timezone', { length: 64 }).default('UTC').notNull(),
-  allowWeekends: boolean('allowWeekends').default(false).notNull(),
-  createdAt: timestamp('createdAt').defaultNow().notNull(),
-  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
-}, (table) => [
-  uniqueIndex('reminder_policies_user_unique').on(table.userId),
-]);
-
-export const reminderSchedules = mysqlTable('reminder_schedules', {
-  id: int('id').primaryKey().autoincrement(),
-  commitmentId: int('commitmentId').notNull(),
-  ruleId: int('ruleId').notNull(),
-  recipientUserId: int('recipientUserId').notNull(),
-  scheduledFor: timestamp('scheduledFor').notNull(),
-  state: mysqlEnum('state', [
-    'scheduled',
-    'preparing',
-    'draft_ready',
-    'sending',
-    'sent',
-    'failed',
-    'needs_review',
-    'escalated',
-    'skipped',
-    'cancelled',
-  ]).default('scheduled').notNull(),
-  channel: mysqlEnum('channel', ['in_app', 'email']).notNull(),
-  idempotencyKey: varchar('idempotencyKey', { length: 64 }).notNull(),
-  draftTitle: varchar('draftTitle', { length: 500 }),
-  draftContent: text('draftContent'),
-  policyReason: text('policyReason'),
-  attemptCount: int('attemptCount').default(0).notNull(),
-  lastAttemptAt: timestamp('lastAttemptAt'),
-  approvedAt: timestamp('approvedAt'),
-  approvedByUserId: int('approvedByUserId'),
-  sentAt: timestamp('sentAt'),
-  escalatedAt: timestamp('escalatedAt'),
-  error: text('error'),
-  createdAt: timestamp('createdAt').defaultNow().notNull(),
-  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
-}, (table) => [
-  uniqueIndex('reminder_schedules_idempotency_unique').on(table.idempotencyKey),
-  index('reminder_schedules_due_state_idx').on(table.state, table.scheduledFor),
-  index('reminder_schedules_recipient_state_idx').on(table.recipientUserId, table.state, table.scheduledFor),
-  index('reminder_schedules_commitment_idx').on(table.commitmentId),
-]);
-
-export const reminderAuditEvents = mysqlTable('reminder_audit_events', {
-  id: int('id').primaryKey().autoincrement(),
-  workspaceOwnerId: int('workspaceOwnerId').notNull(),
-  commitmentId: int('commitmentId'),
-  scheduleId: int('scheduleId'),
-  actorUserId: int('actorUserId'),
-  eventType: varchar('eventType', { length: 64 }).notNull(),
-  detailsJson: longtext('detailsJson'),
-  createdAt: timestamp('createdAt').defaultNow().notNull(),
-}, (table) => [
-  index('reminder_audit_workspace_created_idx').on(table.workspaceOwnerId, table.createdAt),
-  index('reminder_audit_commitment_created_idx').on(table.commitmentId, table.createdAt),
-  index('reminder_audit_schedule_created_idx').on(table.scheduleId, table.createdAt),
-]);
-
-// Revocable, read-only credentials for HAI to consume the owner-scoped worker
-// control feed. Only a SHA-256 digest and a display prefix are persisted.
-export const haiConnectorTokens = mysqlTable('hai_connector_tokens', {
-  id: int('id').primaryKey().autoincrement(),
-  workspaceOwnerId: int('workspaceOwnerId').notNull(),
-  createdByUserId: int('createdByUserId').notNull(),
-  label: varchar('label', { length: 128 }).default('HAI Worker Control').notNull(),
-  tokenPrefix: varchar('tokenPrefix', { length: 24 }).notNull(),
-  tokenHash: varchar('tokenHash', { length: 64 }).notNull(),
-  scopes: varchar('scopes', { length: 255 }).default('worker_control:read').notNull(),
-  lastUsedAt: timestamp('lastUsedAt'),
-  expiresAt: timestamp('expiresAt'),
-  revokedAt: timestamp('revokedAt'),
-  createdAt: timestamp('createdAt').defaultNow().notNull(),
-  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
-}, (table) => [
-  uniqueIndex('hai_connector_tokens_hash_unique').on(table.tokenHash),
-  index('hai_connector_tokens_owner_active_idx').on(table.workspaceOwnerId, table.revokedAt, table.createdAt),
-]);
-
-export type Commitment = typeof commitments.$inferSelect;
-export type InsertCommitment = typeof commitments.$inferInsert;
-export type ReminderRule = typeof reminderRules.$inferSelect;
-export type InsertReminderRule = typeof reminderRules.$inferInsert;
-export type ReminderPolicy = typeof reminderPolicies.$inferSelect;
-export type InsertReminderPolicy = typeof reminderPolicies.$inferInsert;
-export type ReminderSchedule = typeof reminderSchedules.$inferSelect;
-export type InsertReminderSchedule = typeof reminderSchedules.$inferInsert;
-export type ReminderAuditEvent = typeof reminderAuditEvents.$inferSelect;
-export type InsertReminderAuditEvent = typeof reminderAuditEvents.$inferInsert;
-export type HaiConnectorToken = typeof haiConnectorTokens.$inferSelect;
-export type InsertHaiConnectorToken = typeof haiConnectorTokens.$inferInsert;
-
-
-// ============================================
-// TRELLO CHATBOT TABLES
-// ============================================
-
-// Registered webhooks for chatbot
 export const chatbotWebhooks = mysqlTable('chatbot_webhooks', {
   id: int('id').primaryKey().autoincrement(),
   trelloWebhookId: varchar('trelloWebhookId', { length: 64 }).notNull().unique(),
@@ -1164,7 +822,6 @@ export const chatbotWebhooks = mysqlTable('chatbot_webhooks', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Chatbot conversation history
 export const chatbotConversations = mysqlTable('chatbot_conversations', {
   id: int('id').primaryKey().autoincrement(),
   cardTrelloId: varchar('cardTrelloId', { length: 64 }).notNull(),
@@ -1196,7 +853,6 @@ export const chatbotConversations = mysqlTable('chatbot_conversations', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// Worker check-in responses (when workers reply to bot check-ins)
 export const chatbotCheckinResponses = mysqlTable('chatbot_checkin_responses', {
   id: int('id').primaryKey().autoincrement(),
   conversationId: int('conversationId').notNull(), // References chatbotConversations.id
@@ -1224,7 +880,6 @@ export const chatbotCheckinResponses = mysqlTable('chatbot_checkin_responses', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// Chatbot analytics aggregates (daily rollups)
 export const chatbotAnalytics = mysqlTable('chatbot_analytics', {
   id: int('id').primaryKey().autoincrement(),
   date: timestamp('date').notNull(),
@@ -1257,16 +912,6 @@ export const chatbotAnalytics = mysqlTable('chatbot_analytics', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-export type ChatbotWebhook = typeof chatbotWebhooks.$inferSelect;
-export type InsertChatbotWebhook = typeof chatbotWebhooks.$inferInsert;
-export type ChatbotConversation = typeof chatbotConversations.$inferSelect;
-export type InsertChatbotConversation = typeof chatbotConversations.$inferInsert;
-export type ChatbotCheckinResponse = typeof chatbotCheckinResponses.$inferSelect;
-export type InsertChatbotCheckinResponse = typeof chatbotCheckinResponses.$inferInsert;
-export type ChatbotAnalytics = typeof chatbotAnalytics.$inferSelect;
-export type InsertChatbotAnalytics = typeof chatbotAnalytics.$inferInsert;
-
-// Interview System Tables (ATIS Phases 1-10)
 export const interviewSessions = mysqlTable('interview_sessions', {
   id: varchar('id', { length: 64 }).primaryKey(),
   cardId: varchar('cardId', { length: 64 }).notNull(),
@@ -1349,18 +994,6 @@ export const interviewResults = mysqlTable('interview_results', {
   completedAt: timestamp('completedAt'),
 });
 
-export type InterviewSession = typeof interviewSessions.$inferSelect;
-export type InsertInterviewSession = typeof interviewSessions.$inferInsert;
-export type InterviewHistory = typeof interviewHistory.$inferSelect;
-export type InsertInterviewHistory = typeof interviewHistory.$inferInsert;
-export type InterviewResult = typeof interviewResults.$inferSelect;
-export type InsertInterviewResult = typeof interviewResults.$inferInsert;
-
-// ============================================
-// ADVANCED SCHEDULING TABLES
-// ============================================
-
-// Task schedule history - track all rescheduling events
 export const taskScheduleHistory = mysqlTable('task_schedule_history', {
   id: varchar('id', { length: 64 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -1386,9 +1019,8 @@ export const taskScheduleHistory = mysqlTable('task_schedule_history', {
   conflictDetails: text('conflictDetails'), // JSON array of conflicts
   
   createdAt: timestamp('createdAt').defaultNow().notNull(),
-});
+}, table => [index("task_schedule_history_assignment_created_idx").on(table.assignmentId, table.createdAt)]);
 
-// Batch operations tracking
 export const batchOperations = mysqlTable('batch_operations', {
   id: varchar('id', { length: 64 }).primaryKey(),
   userId: varchar('userId', { length: 64 }).notNull(), // User openId
@@ -1425,7 +1057,6 @@ export const batchOperations = mysqlTable('batch_operations', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Keyboard shortcuts configuration
 export const keyboardShortcuts = mysqlTable('keyboard_shortcuts', {
   id: int('id').primaryKey().autoincrement(),
   userId: varchar('userId', { length: 64 }).notNull(), // User openId
@@ -1443,19 +1074,6 @@ export const keyboardShortcuts = mysqlTable('keyboard_shortcuts', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-export type TaskScheduleHistory = typeof taskScheduleHistory.$inferSelect;
-export type InsertTaskScheduleHistory = typeof taskScheduleHistory.$inferInsert;
-export type BatchOperation = typeof batchOperations.$inferSelect;
-export type InsertBatchOperation = typeof batchOperations.$inferInsert;
-export type KeyboardShortcut = typeof keyboardShortcuts.$inferSelect;
-export type InsertKeyboardShortcut = typeof keyboardShortcuts.$inferInsert;
-
-
-// ============================================
-// ATIS PHASES 3-10 TABLES
-// ============================================
-
-// Phase 3: Task Decomposition - Subtasks
 export const taskSubtasks = mysqlTable('task_subtasks', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(), // References tasks/cards
@@ -1475,7 +1093,6 @@ export const taskSubtasks = mysqlTable('task_subtasks', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Phase 3: Subtask Dependencies
 export const subtaskDependencies = mysqlTable('subtask_dependencies', {
   id: varchar('id', { length: 36 }).primaryKey(),
   subtaskId: varchar('subtaskId', { length: 36 }).notNull(), // References taskSubtasks.id
@@ -1487,7 +1104,6 @@ export const subtaskDependencies = mysqlTable('subtask_dependencies', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// Phase 3: Critical Path Analysis
 export const criticalPathAnalysis = mysqlTable('critical_path_analysis', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -1505,7 +1121,6 @@ export const criticalPathAnalysis = mysqlTable('critical_path_analysis', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Phase 4: Risk Assessment
 export const taskRisks = mysqlTable('task_risks', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -1528,7 +1143,6 @@ export const taskRisks = mysqlTable('task_risks', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Phase 4: Risk Mitigations
 export const riskMitigations = mysqlTable('risk_mitigations', {
   id: varchar('id', { length: 36 }).primaryKey(),
   riskId: varchar('riskId', { length: 36 }).notNull(), // References taskRisks.id
@@ -1541,7 +1155,6 @@ export const riskMitigations = mysqlTable('risk_mitigations', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// Phase 5: Resource Requirements
 export const taskResourceRequirements = mysqlTable('task_resource_requirements', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -1560,7 +1173,6 @@ export const taskResourceRequirements = mysqlTable('task_resource_requirements',
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// Phase 6: Timeline Optimization
 export const taskTimeline = mysqlTable('task_timeline', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -1579,7 +1191,6 @@ export const taskTimeline = mysqlTable('task_timeline', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Phase 6: Task Milestones
 export const taskMilestones = mysqlTable('task_milestones', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -1595,7 +1206,6 @@ export const taskMilestones = mysqlTable('task_milestones', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// Phase 7: QA Strategy
 export const taskQAStrategy = mysqlTable('task_qa_strategy', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -1611,7 +1221,6 @@ export const taskQAStrategy = mysqlTable('task_qa_strategy', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Phase 8: Documentation Requirements
 export const taskDocumentationRequirements = mysqlTable('task_documentation_requirements', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -1628,7 +1237,6 @@ export const taskDocumentationRequirements = mysqlTable('task_documentation_requ
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-// Phase 9: External Dependencies
 export const taskExternalDependencies = mysqlTable('task_external_dependencies', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -1647,7 +1255,6 @@ export const taskExternalDependencies = mysqlTable('task_external_dependencies',
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Phase 10: Execution Plan
 export const taskExecutionPlan = mysqlTable('task_execution_plan', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -1668,7 +1275,6 @@ export const taskExecutionPlan = mysqlTable('task_execution_plan', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// ATIS Analysis Session - tracks the overall analysis process
 export const atisAnalysisSessions = mysqlTable('atis_analysis_sessions', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
@@ -1690,40 +1296,6 @@ export const atisAnalysisSessions = mysqlTable('atis_analysis_sessions', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Type exports
-export type TaskSubtask = typeof taskSubtasks.$inferSelect;
-export type InsertTaskSubtask = typeof taskSubtasks.$inferInsert;
-export type SubtaskDependency = typeof subtaskDependencies.$inferSelect;
-export type InsertSubtaskDependency = typeof subtaskDependencies.$inferInsert;
-export type CriticalPathAnalysis = typeof criticalPathAnalysis.$inferSelect;
-export type InsertCriticalPathAnalysis = typeof criticalPathAnalysis.$inferInsert;
-export type TaskRisk = typeof taskRisks.$inferSelect;
-export type InsertTaskRisk = typeof taskRisks.$inferInsert;
-export type RiskMitigation = typeof riskMitigations.$inferSelect;
-export type InsertRiskMitigation = typeof riskMitigations.$inferInsert;
-export type TaskResourceRequirement = typeof taskResourceRequirements.$inferSelect;
-export type InsertTaskResourceRequirement = typeof taskResourceRequirements.$inferInsert;
-export type TaskTimeline = typeof taskTimeline.$inferSelect;
-export type InsertTaskTimeline = typeof taskTimeline.$inferInsert;
-export type TaskMilestone = typeof taskMilestones.$inferSelect;
-export type InsertTaskMilestone = typeof taskMilestones.$inferInsert;
-export type TaskQAStrategy = typeof taskQAStrategy.$inferSelect;
-export type InsertTaskQAStrategy = typeof taskQAStrategy.$inferInsert;
-export type TaskDocumentationRequirement = typeof taskDocumentationRequirements.$inferSelect;
-export type InsertTaskDocumentationRequirement = typeof taskDocumentationRequirements.$inferInsert;
-export type TaskExternalDependency = typeof taskExternalDependencies.$inferSelect;
-export type InsertTaskExternalDependency = typeof taskExternalDependencies.$inferInsert;
-export type TaskExecutionPlan = typeof taskExecutionPlan.$inferSelect;
-export type InsertTaskExecutionPlan = typeof taskExecutionPlan.$inferInsert;
-export type AtisAnalysisSession = typeof atisAnalysisSessions.$inferSelect;
-export type InsertAtisAnalysisSession = typeof atisAnalysisSessions.$inferInsert;
-
-
-// ============================================
-// SCHEDULING SETTINGS TABLES
-// ============================================
-
-// Conflict detection settings per user
 export const conflictDetectionSettings = mysqlTable('conflict_detection_settings', {
   id: int('id').autoincrement().primaryKey(),
   userId: int('userId').notNull(),
@@ -1746,7 +1318,6 @@ export const conflictDetectionSettings = mysqlTable('conflict_detection_settings
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Batch operation defaults per user
 export const batchOperationSettings = mysqlTable('batch_operation_settings', {
   id: int('id').autoincrement().primaryKey(),
   userId: int('userId').notNull(),
@@ -1774,7 +1345,6 @@ export const batchOperationSettings = mysqlTable('batch_operation_settings', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Keyboard shortcuts per user
 export const keyboardShortcutsSettings = mysqlTable('keyboard_shortcuts_settings', {
   id: int('id').autoincrement().primaryKey(),
   userId: int('userId').notNull(),
@@ -1791,7 +1361,6 @@ export const keyboardShortcutsSettings = mysqlTable('keyboard_shortcuts_settings
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Performance metrics per user
 export const performanceMetricsSettings = mysqlTable('performance_metrics_settings', {
   id: int('id').autoincrement().primaryKey(),
   userId: int('userId').notNull(),
@@ -1817,7 +1386,6 @@ export const performanceMetricsSettings = mysqlTable('performance_metrics_settin
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// Settings sync log for tracking changes
 export const settingsSyncLog = mysqlTable('settings_sync_log', {
   id: int('id').autoincrement().primaryKey(),
   userId: int('userId').notNull(),
@@ -1840,19 +1408,6 @@ export const settingsSyncLog = mysqlTable('settings_sync_log', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
-export type ConflictDetectionSettings = typeof conflictDetectionSettings.$inferSelect;
-export type InsertConflictDetectionSettings = typeof conflictDetectionSettings.$inferInsert;
-export type BatchOperationSettings = typeof batchOperationSettings.$inferSelect;
-export type InsertBatchOperationSettings = typeof batchOperationSettings.$inferInsert;
-export type KeyboardShortcutsSettings = typeof keyboardShortcutsSettings.$inferSelect;
-export type InsertKeyboardShortcutsSettings = typeof keyboardShortcutsSettings.$inferInsert;
-export type PerformanceMetricsSettings = typeof performanceMetricsSettings.$inferSelect;
-export type InsertPerformanceMetricsSettings = typeof performanceMetricsSettings.$inferInsert;
-export type SettingsSyncLog = typeof settingsSyncLog.$inferSelect;
-export type InsertSettingsSyncLog = typeof settingsSyncLog.$inferInsert;
-
-
-// ExecutionPlans table - stores execution plan metadata
 export const executionPlans = mysqlTable('execution_plans', {
   id: varchar('id', { length: 255 }).primaryKey(),
   cardId: varchar('cardId', { length: 255 }).notNull(),
@@ -1872,7 +1427,6 @@ export const executionPlans = mysqlTable('execution_plans', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// ExecutionPlanSteps table - stores individual step statuses
 export const executionPlanSteps = mysqlTable('execution_plan_steps', {
   id: varchar('id', { length: 255 }).primaryKey(),
   executionPlanId: varchar('executionPlanId', { length: 255 }).notNull(),
@@ -1892,7 +1446,6 @@ export const executionPlanSteps = mysqlTable('execution_plan_steps', {
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
 
-// ExecutionPlanStatusHistory table - audit trail for status changes
 export const executionPlanStatusHistory = mysqlTable('execution_plan_status_history', {
   id: varchar('id', { length: 255 }).primaryKey(),
   stepId: varchar('stepId', { length: 255 }).notNull(),
@@ -1903,18 +1456,6 @@ export const executionPlanStatusHistory = mysqlTable('execution_plan_status_hist
   reason: text('reason'),
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
-
-export type ExecutionPlan = typeof executionPlans.$inferSelect;
-export type InsertExecutionPlan = typeof executionPlans.$inferInsert;
-export type ExecutionPlanStep = typeof executionPlanSteps.$inferSelect;
-export type InsertExecutionPlanStep = typeof executionPlanSteps.$inferInsert;
-export type ExecutionPlanStatusHistoryRecord = typeof executionPlanStatusHistory.$inferSelect;
-export type InsertExecutionPlanStatusHistory = typeof executionPlanStatusHistory.$inferInsert;
-
-
-// ─── ARES Configuration Tables ────────────────────────────────────────────────
-// ARES = Automated Requirement Evaluation System
-// Manages validation rules, thresholds, and strictness levels for goal validation
 
 export const aresConfigurations = mysqlTable('ares_configurations', {
   id: varchar('id', { length: 64 }).primaryKey(),
@@ -1970,15 +1511,6 @@ export const aresValidationHistory = mysqlTable('ares_validation_history', {
   validatedAt: timestamp('validatedAt').defaultNow().notNull(),
   validatedBy: int('validatedBy').notNull(),
 });
-
-export type AresConfiguration = typeof aresConfigurations.$inferSelect;
-export type InsertAresConfiguration = typeof aresConfigurations.$inferInsert;
-export type AresValidationRule = typeof aresValidationRules.$inferSelect;
-export type InsertAresValidationRule = typeof aresValidationRules.$inferInsert;
-export type AresValidationHistoryRecord = typeof aresValidationHistory.$inferSelect;
-export type InsertAresValidationHistory = typeof aresValidationHistory.$inferInsert;
-
-// ─── APTLSS PLANS & STEPS (Merged from Manus Dashboard) ───
 
 export const aptlssPlans = mysqlTable("aptlss_plans", {
   id: int("id").autoincrement().primaryKey(),
@@ -2171,8 +1703,6 @@ export const adminSyncLog = mysqlTable("admin_sync_log", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
-// Additive operator intelligence and evidence tables. These extend the
-// developer platform without replacing its identity, scheduling, or APTLSS data.
 export const aptlssAssessments = mysqlTable("aptlss_assessments", {
   id: int("id").autoincrement().primaryKey(),
   cardId: varchar("cardId", { length: 64 }).notNull(),
@@ -2281,18 +1811,6 @@ export const decisionOutcomes = mysqlTable("decision_outcomes", {
   index("decision_outcomes_va_resolved_idx").on(table.vaId, table.resolvedAt),
 ]);
 
-export const founderDecisionDeadlines = mysqlTable("founder_decision_deadlines", {
-  id: int("id").autoincrement().primaryKey(),
-  vaId: int("vaId").notNull(),
-  stepId: int("stepId").notNull(),
-  dueAt: timestamp("dueAt"),
-  source: varchar("source", { length: 1024 }).notNull(),
-  recordedBy: varchar("recordedBy", { length: 64 }).notNull(),
-  recordedAt: timestamp("recordedAt").defaultNow().notNull(),
-}, (table) => [
-  index("founder_decision_deadlines_step_idx").on(table.stepId, table.id),
-]);
-
 export const workspaceEvidenceItems = mysqlTable("workspace_evidence_items", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId"),
@@ -2339,6 +1857,98 @@ export const workspaceEvidenceLinks = mysqlTable("workspace_evidence_links", {
   }).onDelete("cascade").onUpdate("cascade"),
   uniqueIndex("workspace_evidence_link_unique").on(table.evidenceId, table.cardId),
   index("workspace_evidence_card_relevance_idx").on(table.cardId, table.relevanceScore),
+]);
+
+export const aptlssEvidenceRevisions = mysqlTable("aptlss_evidence_revisions", {
+id: int("id").autoincrement().primaryKey(),
+evidenceId: int("evidenceId").notNull(),
+contentHash: varchar("contentHash", { length: 64 }).notNull(),
+truthClass: mysqlEnum("truthClass", ["source_record", "worker_assertion", "system_inference"]).notNull(),
+summary: text("summary"),
+content: text("content"),
+metadataJson: text("metadataJson"),
+observedAt: timestamp("observedAt").notNull(),
+recordedBy: varchar("recordedBy", { length: 128 }),
+createdAt: timestamp("createdAt").defaultNow().notNull()
+}, (table) => [
+  foreignKey({
+    columns: [table.evidenceId],
+    foreignColumns: [workspaceEvidenceItems.id],
+    name: "aptlss_evidence_revision_item_fk",
+  }).onDelete("cascade").onUpdate("cascade"),
+  uniqueIndex("aptlss_evidence_revision_hash_unique").on(table.evidenceId, table.contentHash),
+  index("aptlss_evidence_revision_observed_idx").on(table.evidenceId, table.observedAt),
+]);
+
+export const aptlssEvidenceSubjectLinks = mysqlTable("aptlss_evidence_subject_links", {
+id: int("id").autoincrement().primaryKey(),
+evidenceId: int("evidenceId").notNull(),
+vaId: int("vaId").notNull(),
+subjectType: mysqlEnum("subjectType", ["card", "worker", "decision", "plan_block"]).notNull(),
+subjectId: varchar("subjectId", { length: 256 }).notNull(),
+relevanceScore: int("relevanceScore").notNull(),
+linkMethod: mysqlEnum("linkMethod", ["automatic", "manual", "confirmed"]).notNull().default("automatic"),
+matchReason: varchar("matchReason", { length: 512 }).notNull(),
+createdAt: timestamp("createdAt").defaultNow().notNull(),
+updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull()
+}, (table) => [
+  foreignKey({
+    columns: [table.evidenceId],
+    foreignColumns: [workspaceEvidenceItems.id],
+    name: "aptlss_evidence_subject_item_fk",
+  }).onDelete("cascade").onUpdate("cascade"),
+  uniqueIndex("aptlss_evidence_subject_unique").on(table.evidenceId, table.vaId, table.subjectType, table.subjectId),
+  index("aptlss_evidence_subject_lookup_idx").on(table.vaId, table.subjectType, table.subjectId, table.relevanceScore),
+]);
+
+export const aptlssEvidenceConflicts = mysqlTable("aptlss_evidence_conflicts", {
+id: int("id").autoincrement().primaryKey(),
+vaId: int("vaId").notNull(),
+sourceEvidenceId: int("sourceEvidenceId").notNull(),
+assertedEvidenceId: int("assertedEvidenceId").notNull(),
+status: mysqlEnum("status", ["needs_verification", "consistent", "resolved", "dismissed"]).notNull().default("needs_verification"),
+resolution: text("resolution"),
+resolvedBy: varchar("resolvedBy", { length: 128 }),
+resolvedAt: timestamp("resolvedAt"),
+createdAt: timestamp("createdAt").defaultNow().notNull(),
+updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull()
+}, (table) => [
+  foreignKey({
+    columns: [table.sourceEvidenceId],
+    foreignColumns: [workspaceEvidenceItems.id],
+    name: "aptlss_evidence_conflict_source_fk",
+  }).onDelete("cascade").onUpdate("cascade"),
+  foreignKey({
+    columns: [table.assertedEvidenceId],
+    foreignColumns: [workspaceEvidenceItems.id],
+    name: "aptlss_evidence_conflict_asserted_fk",
+  }).onDelete("cascade").onUpdate("cascade"),
+  uniqueIndex("aptlss_evidence_conflict_pair_unique").on(table.sourceEvidenceId, table.assertedEvidenceId),
+  index("aptlss_evidence_conflict_va_status_idx").on(table.vaId, table.status, table.createdAt),
+]);
+
+export const aptlssVerificationFollowups = mysqlTable("aptlss_verification_followups", {
+id: int("id").autoincrement().primaryKey(),
+vaId: int("vaId").notNull(),
+cardId: varchar("cardId", { length: 64 }),
+conflictId: int("conflictId"),
+title: varchar("title", { length: 512 }).notNull(),
+question: text("question").notNull(),
+status: mysqlEnum("status", ["open", "resolved", "superseded"]).notNull().default("open"),
+dueAt: timestamp("dueAt"),
+resolution: text("resolution"),
+resolvedBy: varchar("resolvedBy", { length: 128 }),
+resolvedAt: timestamp("resolvedAt"),
+createdAt: timestamp("createdAt").defaultNow().notNull(),
+updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull()
+}, (table) => [
+  foreignKey({
+    columns: [table.conflictId],
+    foreignColumns: [aptlssEvidenceConflicts.id],
+    name: "aptlss_verification_followup_conflict_fk",
+  }).onDelete("set null").onUpdate("cascade"),
+  index("aptlss_verification_followup_va_status_idx").on(table.vaId, table.status, table.dueAt),
+  index("aptlss_verification_followup_card_idx").on(table.cardId, table.status),
 ]);
 
 export const communicationEvidence = mysqlTable("communication_evidence", {
@@ -2521,15 +2131,6 @@ export const scheduledJobLeases = mysqlTable("scheduled_job_leases", {
   index("scheduled_job_leases_expiry_idx").on(table.leaseExpiresAt),
 ]);
 
-export const maintenanceJobSettings = mysqlTable("maintenance_job_settings", {
-  jobKey: varchar("jobKey", { length: 96 }).primaryKey(),
-  enabled: boolean("enabled").notNull().default(true),
-  intervalMinutes: int("intervalMinutes").notNull(),
-  lastScheduledAt: timestamp("lastScheduledAt"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
-});
-
 export const browserTabStates = mysqlTable("browser_tab_states", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -2569,68 +2170,194 @@ export const browserTabDailyEvidence = mysqlTable("browser_tab_daily_evidence", 
   index("browser_tab_daily_status_date_idx").on(table.status, table.snapshotDate),
 ]);
 
-export type AptlssPlan = typeof aptlssPlans.$inferSelect;
-export type InsertAptlssPlan = typeof aptlssPlans.$inferInsert;
-export type AptlssStep = typeof aptlssSteps.$inferSelect;
-export type InsertAptlssStep = typeof aptlssSteps.$inferInsert;
-export type CardState = typeof cardStates.$inferSelect;
-export type InsertCardState = typeof cardStates.$inferInsert;
-export type PriorityScore = typeof priorityScores.$inferSelect;
-export type InsertPriorityScore = typeof priorityScores.$inferInsert;
-export type AptlssOperationalPolicy = typeof aptlssOperationalPolicies.$inferSelect;
-export type InsertAptlssOperationalPolicy = typeof aptlssOperationalPolicies.$inferInsert;
-export type WorkerPerformanceSignal = typeof workerPerformanceSignals.$inferSelect;
-export type InsertWorkerPerformanceSignal = typeof workerPerformanceSignals.$inferInsert;
-export type WeeklyAnalysisSnapshot = typeof weeklyAnalysisSnapshots.$inferSelect;
-export type InsertWeeklyAnalysisSnapshot = typeof weeklyAnalysisSnapshots.$inferInsert;
-export type AutoFollowUpDraft = typeof autoFollowUpDrafts.$inferSelect;
-export type InsertAutoFollowUpDraft = typeof autoFollowUpDrafts.$inferInsert;
-export type DailyPlan = typeof dailyPlans.$inferSelect;
-export type InsertDailyPlan = typeof dailyPlans.$inferInsert;
-export type AptlssAuditLog = typeof aptlssAuditLog.$inferSelect;
-export type InsertAptlssAuditLog = typeof aptlssAuditLog.$inferInsert;
-export type AdminSyncLog = typeof adminSyncLog.$inferSelect;
-export type InsertAdminSyncLog = typeof adminSyncLog.$inferInsert;
-export type AptlssAssessment = typeof aptlssAssessments.$inferSelect;
-export type InsertAptlssAssessment = typeof aptlssAssessments.$inferInsert;
-export type AptlssAssessmentFeedback = typeof aptlssAssessmentFeedback.$inferSelect;
-export type InsertAptlssAssessmentFeedback = typeof aptlssAssessmentFeedback.$inferInsert;
-export type AptlssWaitingReason = typeof aptlssWaitingReasons.$inferSelect;
-export type InsertAptlssWaitingReason = typeof aptlssWaitingReasons.$inferInsert;
-export type DecisionOutcome = typeof decisionOutcomes.$inferSelect;
-export type InsertDecisionOutcome = typeof decisionOutcomes.$inferInsert;
-export type WorkspaceEvidenceItem = typeof workspaceEvidenceItems.$inferSelect;
-export type InsertWorkspaceEvidenceItem = typeof workspaceEvidenceItems.$inferInsert;
-export type WorkspaceEvidenceLink = typeof workspaceEvidenceLinks.$inferSelect;
-export type InsertWorkspaceEvidenceLink = typeof workspaceEvidenceLinks.$inferInsert;
-export type CommunicationEvidence = typeof communicationEvidence.$inferSelect;
-export type InsertCommunicationEvidence = typeof communicationEvidence.$inferInsert;
-export type ComplianceCardEvidence = typeof complianceCardEvidence.$inferSelect;
-export type InsertComplianceCardEvidence = typeof complianceCardEvidence.$inferInsert;
-export type ComplianceCommunicationEvidence = typeof complianceCommunicationEvidence.$inferSelect;
-export type InsertComplianceCommunicationEvidence = typeof complianceCommunicationEvidence.$inferInsert;
-export type ComplianceClarificationRequest = typeof complianceClarificationRequests.$inferSelect;
-export type InsertComplianceClarificationRequest = typeof complianceClarificationRequests.$inferInsert;
-export type TimeEntryEvent = typeof timeEntryEvents.$inferSelect;
-export type InsertTimeEntryEvent = typeof timeEntryEvents.$inferInsert;
-export type TimeDayReview = typeof timeDayReviews.$inferSelect;
-export type InsertTimeDayReview = typeof timeDayReviews.$inferInsert;
-export type TimeReconciliationItem = typeof timeReconciliationItems.$inferSelect;
-export type InsertTimeReconciliationItem = typeof timeReconciliationItems.$inferInsert;
-export type ScheduledJobRun = typeof scheduledJobRuns.$inferSelect;
-export type InsertScheduledJobRun = typeof scheduledJobRuns.$inferInsert;
-export type MaintenanceJobSetting = typeof maintenanceJobSettings.$inferSelect;
-export type InsertMaintenanceJobSetting = typeof maintenanceJobSettings.$inferInsert;
-export type ScheduledJobLease = typeof scheduledJobLeases.$inferSelect;
-export type InsertScheduledJobLease = typeof scheduledJobLeases.$inferInsert;
-export type BrowserTabState = typeof browserTabStates.$inferSelect;
-export type InsertBrowserTabState = typeof browserTabStates.$inferInsert;
-export type BrowserTabDailyEvidence = typeof browserTabDailyEvidence.$inferSelect;
-export type InsertBrowserTabDailyEvidence = typeof browserTabDailyEvidence.$inferInsert;
-export type UnsignedMessageFlag = typeof unsignedMessageFlags.$inferSelect;
-export type InsertUnsignedMessageFlag = typeof unsignedMessageFlags.$inferInsert;
+export const revokedSessions = mysqlTable("revoked_sessions", {
+  sessionHash: varchar("sessionHash", { length: 64 }).primaryKey(),
+  revokedAt: timestamp("revokedAt").defaultNow().notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+}, (table) => ({
+  expiresAtIdx: index("revoked_sessions_expires_at_idx").on(table.expiresAt),
+}));
 
-// ─── APTLSS PLANS & STEPS (Merged from Manus Dashboard) ───
+export const workerInvitations = mysqlTable('worker_invitations', {
+  id: int('id').primaryKey().autoincrement(),
+  userId: int('userId').notNull(),
+  vaId: int('vaId').notNull(),
+  founderId: int('founderId').notNull(),
+  email: varchar('email', { length: 320 }).notNull(),
+  tokenHash: varchar('tokenHash', { length: 64 }).notNull(),
+  expiresAt: timestamp('expiresAt').notNull(),
+  sentAt: timestamp('sentAt'),
+  acceptedAt: timestamp('acceptedAt'),
+  revokedAt: timestamp('revokedAt'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
+}, (table) => ({
+  tokenHashUnique: uniqueIndex('worker_invitations_token_hash_unique').on(table.tokenHash),
+  userStatusIdx: index('worker_invitations_user_status_idx').on(table.userId, table.acceptedAt, table.revokedAt),
+  founderCreatedIdx: index('worker_invitations_founder_created_idx').on(table.founderId, table.createdAt),
+}));
+
+export const atisChecklistCompletion = mysqlTable('atis_checklist_completion', {
+  id: int('id').primaryKey().autoincrement(),
+  cardId: int('card_id').notNull(),
+  stepIndex: int('step_index').notNull(),
+  userId: int('user_id').notNull(),
+  completedAt: timestamp('completed_at').defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex('card_step_user_unique').on(table.cardId, table.stepIndex, table.userId),
+  index('atis_checklist_user_completed_idx').on(table.userId, table.completedAt),
+]);
+
+export const commitments = mysqlTable('commitments', {
+  id: int('id').primaryKey().autoincrement(),
+  workspaceOwnerId: int('workspaceOwnerId').notNull(),
+  assignedUserId: int('assignedUserId'),
+  createdByUserId: int('createdByUserId').notNull(),
+  sourceType: mysqlEnum('sourceType', ['manual', 'trello', 'gmail', 'google_drive', 'system']).notNull(),
+  sourceId: varchar('sourceId', { length: 255 }),
+  sourceUrl: varchar('sourceUrl', { length: 1024 }),
+  title: varchar('title', { length: 500 }).notNull(),
+  context: text('context'),
+  dueAt: timestamp('dueAt').notNull(),
+  status: mysqlEnum('status', ['open', 'completed', 'cancelled']).default('open').notNull(),
+  completedAt: timestamp('completedAt'),
+  cancelledAt: timestamp('cancelledAt'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex('commitments_workspace_source_unique').on(table.workspaceOwnerId, table.sourceType, table.sourceId),
+  index('commitments_workspace_status_due_idx').on(table.workspaceOwnerId, table.status, table.dueAt),
+  index('commitments_assignee_status_due_idx').on(table.assignedUserId, table.status, table.dueAt),
+]);
+
+export const reminderRules = mysqlTable('reminder_rules', {
+  id: int('id').primaryKey().autoincrement(),
+  workspaceOwnerId: int('workspaceOwnerId').notNull(),
+  createdByUserId: int('createdByUserId').notNull(),
+  name: varchar('name', { length: 255 }).notNull(),
+  triggerType: mysqlEnum('triggerType', ['before_due', 'at_due', 'after_due', 'no_update', 'manual']).default('before_due').notNull(),
+  offsetMinutes: int('offsetMinutes').default(60).notNull(),
+  channel: mysqlEnum('channel', ['in_app', 'email']).default('in_app').notNull(),
+  requireApproval: boolean('requireApproval').default(true).notNull(),
+  maxAttempts: int('maxAttempts').default(1).notNull(),
+  cooldownMinutes: int('cooldownMinutes').default(60).notNull(),
+  active: boolean('active').default(true).notNull(),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index('reminder_rules_workspace_active_idx').on(table.workspaceOwnerId, table.active),
+]);
+
+export const reminderPolicies = mysqlTable('reminder_policies', {
+  id: int('id').primaryKey().autoincrement(),
+  userId: int('userId').notNull(),
+  enabled: boolean('enabled').default(true).notNull(),
+  inAppEnabled: boolean('inAppEnabled').default(true).notNull(),
+  emailEnabled: boolean('emailEnabled').default(false).notNull(),
+  maxPerDay: int('maxPerDay').default(3).notNull(),
+  minIntervalMinutes: int('minIntervalMinutes').default(60).notNull(),
+  quietHoursStart: varchar('quietHoursStart', { length: 5 }).default('22:00').notNull(),
+  quietHoursEnd: varchar('quietHoursEnd', { length: 5 }).default('08:00').notNull(),
+  timezone: varchar('timezone', { length: 64 }).default('UTC').notNull(),
+  allowWeekends: boolean('allowWeekends').default(false).notNull(),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex('reminder_policies_user_unique').on(table.userId),
+]);
+
+export const reminderSchedules = mysqlTable('reminder_schedules', {
+  id: int('id').primaryKey().autoincrement(),
+  commitmentId: int('commitmentId').notNull(),
+  ruleId: int('ruleId').notNull(),
+  recipientUserId: int('recipientUserId').notNull(),
+  scheduledFor: timestamp('scheduledFor').notNull(),
+  state: mysqlEnum('state', [
+    'scheduled',
+    'preparing',
+    'draft_ready',
+    'sending',
+    'sent',
+    'failed',
+    'needs_review',
+    'escalated',
+    'skipped',
+    'cancelled',
+  ]).default('scheduled').notNull(),
+  channel: mysqlEnum('channel', ['in_app', 'email']).notNull(),
+  idempotencyKey: varchar('idempotencyKey', { length: 64 }).notNull(),
+  draftTitle: varchar('draftTitle', { length: 500 }),
+  draftContent: text('draftContent'),
+  policyReason: text('policyReason'),
+  attemptCount: int('attemptCount').default(0).notNull(),
+  lastAttemptAt: timestamp('lastAttemptAt'),
+  approvedAt: timestamp('approvedAt'),
+  approvedByUserId: int('approvedByUserId'),
+  sentAt: timestamp('sentAt'),
+  escalatedAt: timestamp('escalatedAt'),
+  error: text('error'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex('reminder_schedules_idempotency_unique').on(table.idempotencyKey),
+  index('reminder_schedules_due_state_idx').on(table.state, table.scheduledFor),
+  index('reminder_schedules_recipient_state_idx').on(table.recipientUserId, table.state, table.scheduledFor),
+  index('reminder_schedules_commitment_idx').on(table.commitmentId),
+]);
+
+export const reminderAuditEvents = mysqlTable('reminder_audit_events', {
+  id: int('id').primaryKey().autoincrement(),
+  workspaceOwnerId: int('workspaceOwnerId').notNull(),
+  commitmentId: int('commitmentId'),
+  scheduleId: int('scheduleId'),
+  actorUserId: int('actorUserId'),
+  eventType: varchar('eventType', { length: 64 }).notNull(),
+  detailsJson: longtext('detailsJson'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+}, (table) => [
+  index('reminder_audit_workspace_created_idx').on(table.workspaceOwnerId, table.createdAt),
+  index('reminder_audit_commitment_created_idx').on(table.commitmentId, table.createdAt),
+  index('reminder_audit_schedule_created_idx').on(table.scheduleId, table.createdAt),
+]);
+
+export const haiConnectorTokens = mysqlTable('hai_connector_tokens', {
+  id: int('id').primaryKey().autoincrement(),
+  workspaceOwnerId: int('workspaceOwnerId').notNull(),
+  createdByUserId: int('createdByUserId').notNull(),
+  label: varchar('label', { length: 128 }).default('HAI Worker Control').notNull(),
+  tokenPrefix: varchar('tokenPrefix', { length: 24 }).notNull(),
+  tokenHash: varchar('tokenHash', { length: 64 }).notNull(),
+  scopes: varchar('scopes', { length: 255 }).default('worker_control:read').notNull(),
+  lastUsedAt: timestamp('lastUsedAt'),
+  expiresAt: timestamp('expiresAt'),
+  revokedAt: timestamp('revokedAt'),
+  createdAt: timestamp('createdAt').defaultNow().notNull(),
+  updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex('hai_connector_tokens_hash_unique').on(table.tokenHash),
+  index('hai_connector_tokens_owner_active_idx').on(table.workspaceOwnerId, table.revokedAt, table.createdAt),
+]);
+
+export const founderDecisionDeadlines = mysqlTable("founder_decision_deadlines", {
+  id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId").notNull(),
+  stepId: int("stepId").notNull(),
+  dueAt: timestamp("dueAt"),
+  source: varchar("source", { length: 1024 }).notNull(),
+  recordedBy: varchar("recordedBy", { length: 64 }).notNull(),
+  recordedAt: timestamp("recordedAt").defaultNow().notNull(),
+}, (table) => [
+  index("founder_decision_deadlines_step_idx").on(table.stepId, table.id),
+]);
+
+export const maintenanceJobSettings = mysqlTable("maintenance_job_settings", {
+  jobKey: varchar("jobKey", { length: 96 }).primaryKey(),
+  enabled: boolean("enabled").notNull().default(true),
+  intervalMinutes: int("intervalMinutes").notNull(),
+  lastScheduledAt: timestamp("lastScheduledAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
 
 export const aptlssManagerState = mysqlTable("aptlss_manager_state", {
   vaId: int("vaId").primaryKey(),
@@ -2722,14 +2449,12 @@ export const aptlssManagerReviews = mysqlTable("aptlss_manager_reviews", {
   foreignKey({ columns: [table.runId], foreignColumns: [aptlssManagerRuns.id], name: "manager_review_run_fk" }),
 ]);
 
-// One deployment-wide pilot lease serializes activation across application processes.
 export const aptlssManagerControl = mysqlTable("aptlss_manager_control", {
   id: int("id").primaryKey(),
   activeVaId: int("activeVaId"),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
 
-// Trial lifecycle events are appended; historical runs and reviews are never reset.
 export const aptlssManagerTrialEvents = mysqlTable("aptlss_manager_trial_events", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -2768,113 +2493,231 @@ export const aptlssManagerCorrections = mysqlTable("aptlss_manager_corrections",
   foreignKey({ columns: [table.reviewId], foreignColumns: [aptlssManagerReviews.id], name: "manager_correction_review_fk" }),
 ]);
 
-// The graph is additive: workspaceEvidenceItems remains the canonical retained source record.
-export const aptlssEvidenceRevisions = mysqlTable("aptlss_evidence_revisions", {
-  id: int("id").autoincrement().primaryKey(),
-  evidenceId: int("evidenceId").notNull(),
-  contentHash: varchar("contentHash", { length: 64 }).notNull(),
-  truthClass: mysqlEnum("truthClass", ["source_record", "worker_assertion", "system_inference"]).notNull(),
-  summary: text("summary"),
-  content: text("content"),
-  metadataJson: text("metadataJson"),
-  observedAt: timestamp("observedAt").notNull(),
-  recordedBy: varchar("recordedBy", { length: 128 }),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-}, (table) => [
-  foreignKey({
-    columns: [table.evidenceId],
-    foreignColumns: [workspaceEvidenceItems.id],
-    name: "aptlss_evidence_revision_item_fk",
-  }).onDelete("cascade").onUpdate("cascade"),
-  uniqueIndex("aptlss_evidence_revision_hash_unique").on(table.evidenceId, table.contentHash),
-  index("aptlss_evidence_revision_observed_idx").on(table.evidenceId, table.observedAt),
-]);
-
-export const aptlssEvidenceSubjectLinks = mysqlTable("aptlss_evidence_subject_links", {
-  id: int("id").autoincrement().primaryKey(),
-  evidenceId: int("evidenceId").notNull(),
-  vaId: int("vaId").notNull(),
-  subjectType: mysqlEnum("subjectType", ["card", "worker", "decision", "plan_block"]).notNull(),
-  subjectId: varchar("subjectId", { length: 256 }).notNull(),
-  relevanceScore: int("relevanceScore").notNull(),
-  linkMethod: mysqlEnum("linkMethod", ["automatic", "manual", "confirmed"]).notNull().default("automatic"),
-  matchReason: varchar("matchReason", { length: 512 }).notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
-}, (table) => [
-  foreignKey({
-    columns: [table.evidenceId],
-    foreignColumns: [workspaceEvidenceItems.id],
-    name: "aptlss_evidence_subject_item_fk",
-  }).onDelete("cascade").onUpdate("cascade"),
-  uniqueIndex("aptlss_evidence_subject_unique").on(table.evidenceId, table.vaId, table.subjectType, table.subjectId),
-  index("aptlss_evidence_subject_lookup_idx").on(table.vaId, table.subjectType, table.subjectId, table.relevanceScore),
-]);
-
-export const aptlssEvidenceConflicts = mysqlTable("aptlss_evidence_conflicts", {
-  id: int("id").autoincrement().primaryKey(),
-  vaId: int("vaId").notNull(),
-  sourceEvidenceId: int("sourceEvidenceId").notNull(),
-  assertedEvidenceId: int("assertedEvidenceId").notNull(),
-  status: mysqlEnum("status", ["needs_verification", "consistent", "resolved", "dismissed"]).notNull().default("needs_verification"),
-  resolution: text("resolution"),
-  resolvedBy: varchar("resolvedBy", { length: 128 }),
-  resolvedAt: timestamp("resolvedAt"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
-}, (table) => [
-  foreignKey({
-    columns: [table.sourceEvidenceId],
-    foreignColumns: [workspaceEvidenceItems.id],
-    name: "aptlss_evidence_conflict_source_fk",
-  }).onDelete("cascade").onUpdate("cascade"),
-  foreignKey({
-    columns: [table.assertedEvidenceId],
-    foreignColumns: [workspaceEvidenceItems.id],
-    name: "aptlss_evidence_conflict_asserted_fk",
-  }).onDelete("cascade").onUpdate("cascade"),
-  uniqueIndex("aptlss_evidence_conflict_pair_unique").on(table.sourceEvidenceId, table.assertedEvidenceId),
-  index("aptlss_evidence_conflict_va_status_idx").on(table.vaId, table.status, table.createdAt),
-]);
-
-export const aptlssVerificationFollowups = mysqlTable("aptlss_verification_followups", {
-  id: int("id").autoincrement().primaryKey(),
-  vaId: int("vaId").notNull(),
-  cardId: varchar("cardId", { length: 64 }),
-  conflictId: int("conflictId"),
-  title: varchar("title", { length: 512 }).notNull(),
-  question: text("question").notNull(),
-  status: mysqlEnum("status", ["open", "resolved", "superseded"]).notNull().default("open"),
-  dueAt: timestamp("dueAt"),
-  resolution: text("resolution"),
-  resolvedBy: varchar("resolvedBy", { length: 128 }),
-  resolvedAt: timestamp("resolvedAt"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
-}, (table) => [
-  foreignKey({
-    columns: [table.conflictId],
-    foreignColumns: [aptlssEvidenceConflicts.id],
-    name: "aptlss_verification_followup_conflict_fk",
-  }).onDelete("set null").onUpdate("cascade"),
-  index("aptlss_verification_followup_va_status_idx").on(table.vaId, table.status, table.dueAt),
-  index("aptlss_verification_followup_card_idx").on(table.cardId, table.status),
-]);
-
+export type User = typeof users.$inferSelect;
+export type InsertUser = typeof users.$inferInsert;
+export type GenerationJob = typeof generationJobs.$inferSelect;
+export type InsertGenerationJob = typeof generationJobs.$inferInsert;
+export type GenerationItem = typeof generationItems.$inferSelect;
+export type InsertGenerationItem = typeof generationItems.$inferInsert;
+export type ScheduledJob = typeof scheduledJobs.$inferSelect;
+export type InsertScheduledJob = typeof scheduledJobs.$inferInsert;
+export type UserWorkingHours = typeof userWorkingHours.$inferSelect;
+export type InsertUserWorkingHours = typeof userWorkingHours.$inferInsert;
+export type Holiday = typeof holidays.$inferSelect;
+export type InsertHoliday = typeof holidays.$inferInsert;
+export type TrelloCacheMetadata = typeof trelloCacheMetadata.$inferSelect;
+export type InsertTrelloCacheMetadata = typeof trelloCacheMetadata.$inferInsert;
+export type TrelloCachedTask = typeof trelloCachedTasks.$inferSelect;
+export type InsertTrelloCachedTask = typeof trelloCachedTasks.$inferInsert;
+export type TrelloCachedBoard = typeof trelloCachedBoards.$inferSelect;
+export type InsertTrelloCachedBoard = typeof trelloCachedBoards.$inferInsert;
+export type TrelloCachedCard = typeof trelloCachedCards.$inferSelect;
+export type InsertTrelloCachedCard = typeof trelloCachedCards.$inferInsert;
+export type VAProfile = typeof vaProfiles.$inferSelect;
+export type InsertVAProfile = typeof vaProfiles.$inferInsert;
+export type TaskAssignment = typeof taskAssignments.$inferSelect;
+export type InsertTaskAssignment = typeof taskAssignments.$inferInsert;
+export type TaskDependency = typeof taskDependencies.$inferSelect;
+export type InsertTaskDependency = typeof taskDependencies.$inferInsert;
+export type FounderPriorityOverride = typeof founderPriorityOverrides.$inferSelect;
+export type InsertFounderPriorityOverride = typeof founderPriorityOverrides.$inferInsert;
+export type Client = typeof clients.$inferSelect;
+export type InsertClient = typeof clients.$inferInsert;
+export type CommunicationLogEntry = typeof communicationLog.$inferSelect;
+export type InsertCommunicationLogEntry = typeof communicationLog.$inferInsert;
+export type DailyBriefing = typeof dailyBriefings.$inferSelect;
+export type InsertDailyBriefing = typeof dailyBriefings.$inferInsert;
+export type ReviewQueueItem = typeof reviewQueue.$inferSelect;
+export type InsertReviewQueueItem = typeof reviewQueue.$inferInsert;
+export type TimeEntry = typeof timeEntries.$inferSelect;
+export type InsertTimeEntry = typeof timeEntries.$inferInsert;
+export type HandoffNote = typeof handoffNotes.$inferSelect;
+export type InsertHandoffNote = typeof handoffNotes.$inferInsert;
+export type PaymentCycle = typeof paymentCycles.$inferSelect;
+export type WeeklyPayLog = typeof weeklyPayLog.$inferSelect;
+export type DailyTriageState = typeof dailyTriageState.$inferSelect;
+export type SundayChecklist = typeof sundayChecklist.$inferSelect;
+export type DailyDueDateAssignment = typeof dailyDueDateAssignments.$inferSelect;
+export type DailyCardUpdate = typeof dailyCardUpdates.$inferSelect;
+export type OnHoldDailyCheck = typeof onHoldDailyChecks.$inferSelect;
+export type DailyUpdateStreak = typeof dailyUpdateStreak.$inferSelect;
+export type AppSetting = typeof appSettings.$inferSelect;
+export type DailyComplianceSnapshot = typeof dailyComplianceSnapshots.$inferSelect;
+export type ReplyThread = typeof replyThreads.$inferSelect;
+export type InsertReplyThread = typeof replyThreads.$inferInsert;
+export type VagueReplyFlag = typeof vagueReplyFlags.$inferSelect;
+export type InsertVagueReplyFlag = typeof vagueReplyFlags.$inferInsert;
+export type EmailTask = typeof emailTasks.$inferSelect;
+export type InsertEmailTask = typeof emailTasks.$inferInsert;
+export type CardSnooze = typeof cardSnoozes.$inferSelect;
+export type ATISWorkspace = typeof atisWorkspaces.$inferSelect;
+export type InsertATISWorkspace = typeof atisWorkspaces.$inferInsert;
+export type ATISBoard = typeof atisBoards.$inferSelect;
+export type InsertATISBoard = typeof atisBoards.$inferInsert;
+export type ATISCard = typeof atisCards.$inferSelect;
+export type InsertATISCard = typeof atisCards.$inferInsert;
+export type ATISAttachment = typeof atisAttachments.$inferSelect;
+export type InsertATISAttachment = typeof atisAttachments.$inferInsert;
+export type ATISComment = typeof atisComments.$inferSelect;
+export type InsertATISComment = typeof atisComments.$inferInsert;
+export type ATISCardUnderstanding = typeof atisCardUnderstanding.$inferSelect;
+export type InsertATISCardUnderstanding = typeof atisCardUnderstanding.$inferInsert;
+export type ATISIngestionJob = typeof atisIngestionJobs.$inferSelect;
+export type InsertATISIngestionJob = typeof atisIngestionJobs.$inferInsert;
+export type UserNotificationPreferences = typeof userNotificationPreferences.$inferSelect;
+export type InsertUserNotificationPreferences = typeof userNotificationPreferences.$inferInsert;
+export type NotificationHistory = typeof notificationHistory.$inferSelect;
+export type InsertNotificationHistory = typeof notificationHistory.$inferInsert;
+export type DigestJob = typeof digestJobs.$inferSelect;
+export type InsertDigestJob = typeof digestJobs.$inferInsert;
+export type ChatbotWebhook = typeof chatbotWebhooks.$inferSelect;
+export type InsertChatbotWebhook = typeof chatbotWebhooks.$inferInsert;
+export type ChatbotConversation = typeof chatbotConversations.$inferSelect;
+export type InsertChatbotConversation = typeof chatbotConversations.$inferInsert;
+export type ChatbotCheckinResponse = typeof chatbotCheckinResponses.$inferSelect;
+export type InsertChatbotCheckinResponse = typeof chatbotCheckinResponses.$inferInsert;
+export type ChatbotAnalytics = typeof chatbotAnalytics.$inferSelect;
+export type InsertChatbotAnalytics = typeof chatbotAnalytics.$inferInsert;
+export type InterviewSession = typeof interviewSessions.$inferSelect;
+export type InsertInterviewSession = typeof interviewSessions.$inferInsert;
+export type InterviewHistory = typeof interviewHistory.$inferSelect;
+export type InsertInterviewHistory = typeof interviewHistory.$inferInsert;
+export type InterviewResult = typeof interviewResults.$inferSelect;
+export type InsertInterviewResult = typeof interviewResults.$inferInsert;
+export type TaskScheduleHistory = typeof taskScheduleHistory.$inferSelect;
+export type InsertTaskScheduleHistory = typeof taskScheduleHistory.$inferInsert;
+export type BatchOperation = typeof batchOperations.$inferSelect;
+export type InsertBatchOperation = typeof batchOperations.$inferInsert;
+export type KeyboardShortcut = typeof keyboardShortcuts.$inferSelect;
+export type InsertKeyboardShortcut = typeof keyboardShortcuts.$inferInsert;
+export type TaskSubtask = typeof taskSubtasks.$inferSelect;
+export type InsertTaskSubtask = typeof taskSubtasks.$inferInsert;
+export type SubtaskDependency = typeof subtaskDependencies.$inferSelect;
+export type InsertSubtaskDependency = typeof subtaskDependencies.$inferInsert;
+export type CriticalPathAnalysis = typeof criticalPathAnalysis.$inferSelect;
+export type InsertCriticalPathAnalysis = typeof criticalPathAnalysis.$inferInsert;
+export type TaskRisk = typeof taskRisks.$inferSelect;
+export type InsertTaskRisk = typeof taskRisks.$inferInsert;
+export type RiskMitigation = typeof riskMitigations.$inferSelect;
+export type InsertRiskMitigation = typeof riskMitigations.$inferInsert;
+export type TaskResourceRequirement = typeof taskResourceRequirements.$inferSelect;
+export type InsertTaskResourceRequirement = typeof taskResourceRequirements.$inferInsert;
+export type TaskTimeline = typeof taskTimeline.$inferSelect;
+export type InsertTaskTimeline = typeof taskTimeline.$inferInsert;
+export type TaskMilestone = typeof taskMilestones.$inferSelect;
+export type InsertTaskMilestone = typeof taskMilestones.$inferInsert;
+export type TaskQAStrategy = typeof taskQAStrategy.$inferSelect;
+export type InsertTaskQAStrategy = typeof taskQAStrategy.$inferInsert;
+export type TaskDocumentationRequirement = typeof taskDocumentationRequirements.$inferSelect;
+export type InsertTaskDocumentationRequirement = typeof taskDocumentationRequirements.$inferInsert;
+export type TaskExternalDependency = typeof taskExternalDependencies.$inferSelect;
+export type InsertTaskExternalDependency = typeof taskExternalDependencies.$inferInsert;
+export type TaskExecutionPlan = typeof taskExecutionPlan.$inferSelect;
+export type InsertTaskExecutionPlan = typeof taskExecutionPlan.$inferInsert;
+export type AtisAnalysisSession = typeof atisAnalysisSessions.$inferSelect;
+export type InsertAtisAnalysisSession = typeof atisAnalysisSessions.$inferInsert;
+export type ConflictDetectionSettings = typeof conflictDetectionSettings.$inferSelect;
+export type InsertConflictDetectionSettings = typeof conflictDetectionSettings.$inferInsert;
+export type BatchOperationSettings = typeof batchOperationSettings.$inferSelect;
+export type InsertBatchOperationSettings = typeof batchOperationSettings.$inferInsert;
+export type KeyboardShortcutsSettings = typeof keyboardShortcutsSettings.$inferSelect;
+export type InsertKeyboardShortcutsSettings = typeof keyboardShortcutsSettings.$inferInsert;
+export type PerformanceMetricsSettings = typeof performanceMetricsSettings.$inferSelect;
+export type InsertPerformanceMetricsSettings = typeof performanceMetricsSettings.$inferInsert;
+export type SettingsSyncLog = typeof settingsSyncLog.$inferSelect;
+export type InsertSettingsSyncLog = typeof settingsSyncLog.$inferInsert;
+export type ExecutionPlan = typeof executionPlans.$inferSelect;
+export type InsertExecutionPlan = typeof executionPlans.$inferInsert;
+export type ExecutionPlanStep = typeof executionPlanSteps.$inferSelect;
+export type InsertExecutionPlanStep = typeof executionPlanSteps.$inferInsert;
+export type ExecutionPlanStatusHistoryRecord = typeof executionPlanStatusHistory.$inferSelect;
+export type InsertExecutionPlanStatusHistory = typeof executionPlanStatusHistory.$inferInsert;
+export type AresConfiguration = typeof aresConfigurations.$inferSelect;
+export type InsertAresConfiguration = typeof aresConfigurations.$inferInsert;
+export type AresValidationRule = typeof aresValidationRules.$inferSelect;
+export type InsertAresValidationRule = typeof aresValidationRules.$inferInsert;
+export type AresValidationHistoryRecord = typeof aresValidationHistory.$inferSelect;
+export type InsertAresValidationHistory = typeof aresValidationHistory.$inferInsert;
+export type AptlssPlan = typeof aptlssPlans.$inferSelect;
+export type InsertAptlssPlan = typeof aptlssPlans.$inferInsert;
+export type AptlssStep = typeof aptlssSteps.$inferSelect;
+export type InsertAptlssStep = typeof aptlssSteps.$inferInsert;
+export type CardState = typeof cardStates.$inferSelect;
+export type InsertCardState = typeof cardStates.$inferInsert;
+export type PriorityScore = typeof priorityScores.$inferSelect;
+export type InsertPriorityScore = typeof priorityScores.$inferInsert;
+export type AptlssOperationalPolicy = typeof aptlssOperationalPolicies.$inferSelect;
+export type InsertAptlssOperationalPolicy = typeof aptlssOperationalPolicies.$inferInsert;
+export type WorkerPerformanceSignal = typeof workerPerformanceSignals.$inferSelect;
+export type InsertWorkerPerformanceSignal = typeof workerPerformanceSignals.$inferInsert;
+export type WeeklyAnalysisSnapshot = typeof weeklyAnalysisSnapshots.$inferSelect;
+export type InsertWeeklyAnalysisSnapshot = typeof weeklyAnalysisSnapshots.$inferInsert;
+export type AutoFollowUpDraft = typeof autoFollowUpDrafts.$inferSelect;
+export type InsertAutoFollowUpDraft = typeof autoFollowUpDrafts.$inferInsert;
+export type DailyPlan = typeof dailyPlans.$inferSelect;
+export type InsertDailyPlan = typeof dailyPlans.$inferInsert;
+export type AptlssAuditLog = typeof aptlssAuditLog.$inferSelect;
+export type InsertAptlssAuditLog = typeof aptlssAuditLog.$inferInsert;
+export type AdminSyncLog = typeof adminSyncLog.$inferSelect;
+export type InsertAdminSyncLog = typeof adminSyncLog.$inferInsert;
+export type AptlssAssessment = typeof aptlssAssessments.$inferSelect;
+export type InsertAptlssAssessment = typeof aptlssAssessments.$inferInsert;
+export type AptlssAssessmentFeedback = typeof aptlssAssessmentFeedback.$inferSelect;
+export type InsertAptlssAssessmentFeedback = typeof aptlssAssessmentFeedback.$inferInsert;
+export type AptlssWaitingReason = typeof aptlssWaitingReasons.$inferSelect;
+export type InsertAptlssWaitingReason = typeof aptlssWaitingReasons.$inferInsert;
+export type DecisionOutcome = typeof decisionOutcomes.$inferSelect;
+export type InsertDecisionOutcome = typeof decisionOutcomes.$inferInsert;
+export type WorkspaceEvidenceItem = typeof workspaceEvidenceItems.$inferSelect;
+export type InsertWorkspaceEvidenceItem = typeof workspaceEvidenceItems.$inferInsert;
+export type WorkspaceEvidenceLink = typeof workspaceEvidenceLinks.$inferSelect;
+export type InsertWorkspaceEvidenceLink = typeof workspaceEvidenceLinks.$inferInsert;
 export type AptlssEvidenceRevision = typeof aptlssEvidenceRevisions.$inferSelect;
-
 export type InsertAptlssEvidenceRevision = typeof aptlssEvidenceRevisions.$inferInsert;
-
 export type AptlssEvidenceSubjectLink = typeof aptlssEvidenceSubjectLinks.$inferSelect;
-
 export type InsertAptlssEvidenceSubjectLink = typeof aptlssEvidenceSubjectLinks.$inferInsert;
-
 export type AptlssEvidenceConflict = typeof aptlssEvidenceConflicts.$inferSelect;
-
 export type InsertAptlssEvidenceConflict = typeof aptlssEvidenceConflicts.$inferInsert;
-
 export type AptlssVerificationFollowup = typeof aptlssVerificationFollowups.$inferSelect;
-
 export type InsertAptlssVerificationFollowup = typeof aptlssVerificationFollowups.$inferInsert;
-
+export type CommunicationEvidence = typeof communicationEvidence.$inferSelect;
+export type InsertCommunicationEvidence = typeof communicationEvidence.$inferInsert;
+export type ComplianceCardEvidence = typeof complianceCardEvidence.$inferSelect;
+export type InsertComplianceCardEvidence = typeof complianceCardEvidence.$inferInsert;
+export type ComplianceCommunicationEvidence = typeof complianceCommunicationEvidence.$inferSelect;
+export type InsertComplianceCommunicationEvidence = typeof complianceCommunicationEvidence.$inferInsert;
+export type ComplianceClarificationRequest = typeof complianceClarificationRequests.$inferSelect;
+export type InsertComplianceClarificationRequest = typeof complianceClarificationRequests.$inferInsert;
+export type TimeEntryEvent = typeof timeEntryEvents.$inferSelect;
+export type InsertTimeEntryEvent = typeof timeEntryEvents.$inferInsert;
+export type TimeDayReview = typeof timeDayReviews.$inferSelect;
+export type InsertTimeDayReview = typeof timeDayReviews.$inferInsert;
+export type TimeReconciliationItem = typeof timeReconciliationItems.$inferSelect;
+export type InsertTimeReconciliationItem = typeof timeReconciliationItems.$inferInsert;
+export type ScheduledJobRun = typeof scheduledJobRuns.$inferSelect;
+export type InsertScheduledJobRun = typeof scheduledJobRuns.$inferInsert;
+export type ScheduledJobLease = typeof scheduledJobLeases.$inferSelect;
+export type InsertScheduledJobLease = typeof scheduledJobLeases.$inferInsert;
+export type BrowserTabState = typeof browserTabStates.$inferSelect;
+export type InsertBrowserTabState = typeof browserTabStates.$inferInsert;
+export type BrowserTabDailyEvidence = typeof browserTabDailyEvidence.$inferSelect;
+export type InsertBrowserTabDailyEvidence = typeof browserTabDailyEvidence.$inferInsert;
+export type UnsignedMessageFlag = typeof unsignedMessageFlags.$inferSelect;
+export type InsertUnsignedMessageFlag = typeof unsignedMessageFlags.$inferInsert;
+export type WorkerInvitation = typeof workerInvitations.$inferSelect;
+export type InsertWorkerInvitation = typeof workerInvitations.$inferInsert;
+export type Commitment = typeof commitments.$inferSelect;
+export type InsertCommitment = typeof commitments.$inferInsert;
+export type ReminderRule = typeof reminderRules.$inferSelect;
+export type InsertReminderRule = typeof reminderRules.$inferInsert;
+export type ReminderPolicy = typeof reminderPolicies.$inferSelect;
+export type InsertReminderPolicy = typeof reminderPolicies.$inferInsert;
+export type ReminderSchedule = typeof reminderSchedules.$inferSelect;
+export type InsertReminderSchedule = typeof reminderSchedules.$inferInsert;
+export type ReminderAuditEvent = typeof reminderAuditEvents.$inferSelect;
+export type InsertReminderAuditEvent = typeof reminderAuditEvents.$inferInsert;
+export type HaiConnectorToken = typeof haiConnectorTokens.$inferSelect;
+export type InsertHaiConnectorToken = typeof haiConnectorTokens.$inferInsert;
+export type MaintenanceJobSetting = typeof maintenanceJobSettings.$inferSelect;
+export type InsertMaintenanceJobSetting = typeof maintenanceJobSettings.$inferInsert;
 export { aptlssManagerQueue, aptlssManagerQueueEvents, aptlssManagerQueueSlots } from "./aptlssManagerQueueSchema";

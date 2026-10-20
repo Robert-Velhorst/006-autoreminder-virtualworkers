@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { taskAssignments } from "../drizzle/schema";
+import { taskAssignments } from "../drizzle/schema.postgres";
 
 const database = vi.hoisted(() => ({
   getManualStepsForCard: vi.fn(),

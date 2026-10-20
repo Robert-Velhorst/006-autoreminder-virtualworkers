@@ -33,7 +33,7 @@ describe("manager queue loop observations", () => {
       select: () => { if (failures.fallback) throw new Error("private fallback failure"); return select(); },
       transaction: async (work: any) => {
         if (failures.poll) throw new Error("private poll failure");
-        return work({ select, execute: async () => [[{ nowMs: Date.now() }]] });
+        return work({ select, execute: async () => ({ rows: [{ nowMs: Date.now() }] }) });
       },
     } as unknown as ManagerQueueDatabase;
     runner = createManagerQueueRunner({ db, execute: vi.fn(), concurrency: 1 });
@@ -97,21 +97,21 @@ const state = (patch: Partial<QueueState> = {}): QueueState => ({
 });
 
 describe("durable manager queue transitions", () => {
-  it.each([1213, 1205])(
-    "retries rolled-back queue transactions for MySQL %s",
-    async errno => {
+  it.each(["40P01", "40001", "55P03"])(
+    "retries rolled-back queue transactions for PostgreSQL %s",
+    async code => {
       const operation = vi
         .fn()
-        .mockRejectedValueOnce({ cause: { errno } })
+        .mockRejectedValueOnce({ cause: { code } })
         .mockResolvedValue("committed");
       expect(await retryQueueTransaction(operation)).toBe("committed");
       expect(operation).toHaveBeenCalledTimes(2);
     }
   );
   it("bounds transaction retries and never retries ambiguous connection failures", async () => {
-    const deadlock = vi.fn().mockRejectedValue({ code: "ER_LOCK_DEADLOCK" });
+    const deadlock = vi.fn().mockRejectedValue({ code: "40P01" });
     await expect(retryQueueTransaction(deadlock)).rejects.toEqual({
-      code: "ER_LOCK_DEADLOCK",
+      code: "40P01",
     });
     expect(deadlock).toHaveBeenCalledTimes(3);
     const disconnected = vi.fn().mockRejectedValue({ code: "ECONNRESET" });

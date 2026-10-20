@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TrpcContext } from "../_core/context";
-import { cardSnoozes, timeEntries, users, weeklyPayLog } from "../../drizzle/schema";
+import { cardSnoozes, timeEntries, users, weeklyPayLog } from "../../drizzle/schema.postgres";
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),

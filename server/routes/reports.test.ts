@@ -3,7 +3,7 @@ import express from 'express';
 import request from 'supertest';
 import { MySqlDialect } from 'drizzle-orm/mysql-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { taskAssignments, timeEntries, vaProfiles, type User } from '../../drizzle/schema';
+import { taskAssignments, timeEntries, vaProfiles, type User } from '../../drizzle/schema.postgres';
 
 const mocks = vi.hoisted(() => ({ getDb: vi.fn() }));
 vi.mock('../db', () => ({ getDb: mocks.getDb }));

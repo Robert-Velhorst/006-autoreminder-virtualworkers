@@ -18,7 +18,7 @@ vi.mock('./utils/retry', () => ({
 }));
 
 import { cardBelongsToMember, fetchAuthorizedTrelloCard, TrelloAccessError } from './trelloCardAccess';
-import type { User } from '../drizzle/schema';
+import type { User } from '../drizzle/schema.postgres';
 
 const worker = { id: 9, role: 'worker' } as User;
 

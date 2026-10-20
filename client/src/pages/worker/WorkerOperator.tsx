@@ -214,6 +214,10 @@ function describeBrowserConnection(status?: BrowserConnectionSnapshot) {
   };
 }
 
+function MetricCell({ label, value }: { label: string; value: string }) {
+  return <div className="min-w-0 p-3 text-center"><div className="text-[11px] font-semibold uppercase text-muted-foreground">{label}</div><div className="mt-1 truncate text-sm font-semibold">{value}</div></div>;
+}
+
 function formatDuration(minutes: number | null) {
   if (minutes === null) return "Unknown";
   if (minutes < 60) return `${minutes} min`;
@@ -747,8 +751,28 @@ function CardInspector({
   onRefresh: () => Promise<void>;
   refreshing: boolean;
 }) {
+  const utils = trpc.useUtils();
   const [preferredWidth, setPreferredWidth] = useState(INSPECTOR_DEFAULT_WIDTH);
   const [viewportWidth, setViewportWidth] = useState(() => typeof window === "undefined" ? 1_280 : window.innerWidth);
+  const [rawEvidenceOpen, setRawEvidenceOpen] = useState(false);
+  const [assertion, setAssertion] = useState("");
+  const cardEvidence = trpc.operator.getCardEvidence.useQuery(
+    { cardId: card?.cardId ?? "", limit: 30 },
+    { enabled: Boolean(card), staleTime: 60_000 },
+  );
+  const verification = trpc.operator.getVerificationFollowups.useQuery(
+    card ? { cardId: card.cardId } : undefined,
+    { enabled: Boolean(card), staleTime: 30_000 },
+  );
+  const recordAssertion = trpc.operator.recordEvidenceAssertion.useMutation({
+    onSuccess: () => {
+      setAssertion("");
+      void utils.operator.getCardEvidence.invalidate();
+      void utils.operator.getWorkQueueContext.invalidate();
+      toast.success("Evidence note recorded for verification");
+    },
+    onError: (error) => toast.error(error.message),
+  });
   const resizeState = useRef<{ startX: number; startWidth: number; nextWidth: number } | null>(null);
 
   useEffect(() => {
@@ -912,7 +936,31 @@ function CardInspector({
                 <p className="mt-2 text-xs text-muted-foreground">Reloading status does not sync external accounts.</p>
               </section>
 
-              <ManagerVerificationFollowups key={card.cardId} cardId={card.cardId} />
+                            <ManagerVerificationFollowups key={card.cardId} cardId={card.cardId} />
+
+
+              <section>
+                <Collapsible open={rawEvidenceOpen} onOpenChange={setRawEvidenceOpen}>
+                  <CollapsibleTrigger className="flex w-full items-center justify-between rounded-md border p-3 text-left hover:bg-accent/30">
+                    <span><span className="block text-sm font-semibold">Raw linked evidence</span><span className="block text-xs text-muted-foreground">Exact retained detail, shown only when needed.</span></span>{rawEvidenceOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="space-y-3 border-x border-b p-3">
+                    {cardEvidence.isLoading ? <QueueSkeleton /> : cardEvidence.data?.length ? cardEvidence.data.map((item) => <div key={item.id} className="rounded-md border p-3"><div className="flex items-start justify-between gap-3"><span className="text-sm font-medium">{item.title}</span><Badge variant="outline">{item.source}</Badge></div>{item.content && <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-muted/40 p-3 text-xs leading-relaxed">{item.content}</pre>}{item.sourceUrl && <a className="mt-2 inline-flex items-center gap-1 text-xs text-blue-600 hover:underline dark:text-blue-300" href={item.sourceUrl} target="_blank" rel="noreferrer">Open source <ExternalLink className="size-3" /></a>}</div>) : <p className="text-sm text-muted-foreground">No graph-linked evidence has been retained for this card yet.</p>}
+                    <div className="border-t pt-3"><Label htmlFor="evidence-assertion">Add a worker evidence note</Label><Textarea id="evidence-assertion" className="mt-2 min-h-24" value={assertion} onChange={(event) => setAssertion(event.target.value)} placeholder="Record what happened, including the exact source or reason. This does not change Trello." /><Button className="mt-2" size="sm" variant="outline" disabled={assertion.trim().length < 3 || recordAssertion.isPending} onClick={() => card && recordAssertion.mutate({ cardId: card.cardId, title: `Worker update: ${card.cardName}`, detail: assertion })}>{recordAssertion.isPending ? <Loader2 className="size-4 animate-spin" /> : <FileCheck2 className="size-4" />}Record evidence note</Button></div>
+                  </CollapsibleContent>
+                </Collapsible>
+              </section>
+
+              {evidenceSummary.forecast && (
+                <section>
+                  <InspectorLabel>Remaining-time range</InspectorLabel>
+                  <div className="mt-2 grid grid-cols-2 divide-x rounded-md border">
+                    <MetricCell label="P50" value={formatDuration(evidenceSummary.forecast.p50Minutes)} />
+                    <MetricCell label="P90" value={formatDuration(evidenceSummary.forecast.p90Minutes)} />
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">Use P90 for commitments while uncertainty is medium or high.</p>
+                </section>
+              )}
 
               <section>
                 <InspectorLabel>Task steps</InspectorLabel>

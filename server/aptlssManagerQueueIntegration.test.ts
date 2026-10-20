@@ -10,14 +10,15 @@ import {
   vi,
 } from "vitest";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/mysql2";
-import { createPool, type Pool, type PoolConnection } from "mysql2/promise";
-import * as schema from "../drizzle/schema";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool, type PoolClient } from "pg";
+import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
+import * as schema from "../drizzle/schema.postgres";
 import {
   aptlssManagerQueue as jobs,
   aptlssManagerQueueEvents as events,
   aptlssManagerQueueSlots as slots,
-} from "../drizzle/aptlssManagerQueueSchema";
+} from "../drizzle/schema.postgres";
 import {
   enqueueManagerTask,
   claimManagerTask,
@@ -32,37 +33,26 @@ import {
 
 const url = process.env.APTLSS_TEST_DATABASE_URL;
 describe.skipIf(!url)(
-  "manager queue real MySQL",
-  { timeout: 30000, hookTimeout: 125000 },
+  "manager queue real PostgreSQL",
+  { timeout: 30000 },
   () => {
     let pool: Pool;
     let db: ReturnType<typeof drizzle<typeof schema>>;
-    let lock: PoolConnection;
+    let lock: PoolClient;
     let owned: number[] = [];
     beforeAll(async () => {
-      const parsed = new URL(url!);
-      if (
-        parsed.protocol !== "mysql:" ||
-        !["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname) ||
-        !["/aptlss_test", "/recovery_test"].includes(parsed.pathname) ||
-        parsed.search ||
-        parsed.hash
-      )
-        throw new Error(
-          "Queue tests require the explicit loopback aptlss_test or recovery_test database."
-        );
-      pool = createPool({
-        uri: url!,
-        connectionLimit: 12,
-        timezone: "Z",
-        connectTimeout: 10000,
+      requireIsolatedPostgresTestDatabase(url, process.env.NODE_ENV === "production");
+      pool = new Pool({
+        connectionString: url!,
+        max: 12,
+        connectionTimeoutMillis: 10000,
       });
-      db = drizzle(pool, { schema, mode: "default" });
-      lock = await pool.getConnection();
-      const [rows] = await lock.query<any[]>(
-        "SELECT GET_LOCK('aptlss-manager-integration-fixtures',120) AS acquired"
+      db = drizzle(pool, { schema });
+      lock = await pool.connect();
+      await lock.query(
+        "SELECT pg_advisory_lock(hashtext('aptlss-manager-integration-fixtures'))"
       );
-      expect(rows[0].acquired).toBe(1);
+
       const occupied = await db
         .select()
         .from(jobs)
@@ -99,7 +89,7 @@ describe.skipIf(!url)(
           name: "Queue test",
           role: "worker",
         })
-        .$returningId();
+        .returning();
       owned.push(row.id);
       vi.stubEnv("APTLSS_MANAGER_PILOT_WORKER_IDS", owned.join(","));
       await db
@@ -136,7 +126,7 @@ describe.skipIf(!url)(
     afterAll(async () => {
       if (lock) {
         await lock.query(
-          "SELECT RELEASE_LOCK('aptlss-manager-integration-fixtures')"
+          "SELECT pg_advisory_unlock(hashtext('aptlss-manager-integration-fixtures'))"
         );
         lock.release();
       }

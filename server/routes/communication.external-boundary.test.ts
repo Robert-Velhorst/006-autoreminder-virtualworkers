@@ -2,8 +2,8 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SQL } from "drizzle-orm";
-import { MySqlDialect } from "drizzle-orm/mysql-core";
-import { chatbotConversations, taskAssignments, vaProfiles } from "../../drizzle/schema";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { chatbotConversations, taskAssignments, vaProfiles } from "../../drizzle/schema.postgres";
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),
@@ -31,13 +31,13 @@ vi.mock("../services/chatbot-history", () => ({ storeConversation: mocks.storeCo
 
 import communicationRoutes from "./communication";
 
-const mysqlDialect = new MySqlDialect();
+const pgDialect = new PgDialect();
 
 function matches(row: Record<string, unknown>, condition: unknown) {
   if (!condition) return true;
-  const { sql, params } = mysqlDialect.sqlToQuery(condition as SQL);
-  const columns = [...sql.matchAll(/`(?:\w+)`\.`([^`]+)` = \?/g)].map(match => match[1]);
-  return columns.every((column, index) => row[column] === params[index]);
+  const { sql, params } = pgDialect.sqlToQuery(condition as SQL);
+  const comparisons = [...sql.matchAll(/"(?:\w+)"\."([^"]+)" = \$(\d+)/g)];
+  return comparisons.every(match => row[match[1]] === params[Number(match[2]) - 1]);
 }
 
 function createDb(
@@ -79,10 +79,10 @@ function createDb(
         if (failOutcomePersistence === "throw" && values.responseStatus === "success") {
           throw new Error("delivery result storage unavailable");
         }
-        if (failOutcomePersistence === "zero" && values.responseStatus === "success") return [{ affectedRows: 0 }];
+        if (failOutcomePersistence === "zero" && values.responseStatus === "success") return { rowCount: 0 };
         const row = conversations.find(candidate => matches(candidate, condition));
         if (row) Object.assign(row, values);
-        return [{ affectedRows: row ? 1 : 0 }];
+        return { rowCount: row ? 1 : 0 };
       }),
     };
     return query;
@@ -92,7 +92,7 @@ function createDb(
     select,
     insert: vi.fn(() => ({
       values: vi.fn((row: Record<string, any>) => ({
-        $returningId: vi.fn(async () => {
+        returning: vi.fn(async () => {
           if (failReservation) throw new Error("reservation storage unavailable");
           const created = { id: nextConversationId++, ...row };
           conversations.push(created);

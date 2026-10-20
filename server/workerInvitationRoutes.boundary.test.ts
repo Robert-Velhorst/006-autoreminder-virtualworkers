@@ -2,7 +2,7 @@ import type { Request } from "express";
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { User } from "../drizzle/schema";
+import type { User } from "../drizzle/schema.postgres";
 
 const mocks = vi.hoisted(() => ({
   getInvitation: vi.fn(),

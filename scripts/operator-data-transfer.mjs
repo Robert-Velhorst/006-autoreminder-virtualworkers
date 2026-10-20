@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import mysql from "mysql2/promise";
-import { classifyBrowserCollectorImport } from "./operator-data-transfer-ownership.mjs";
+import { redactSensitiveSettings } from "./operator-data-transfer-utils.mjs";
 
 const TABLES = [
   { name: "app_settings", keys: ["key"] },
@@ -62,7 +62,7 @@ async function tableExists(connection, table) {
 }
 
 async function exportData() {
-  const sourceUrl = option("--source", process.env.DATABASE_URL);
+  const sourceUrl = option("--source", process.env.LEGACY_MYSQL_DATABASE_URL);
   const output = path.resolve(option("--out", ".local/operator-export.json"));
   const connection = await connect(sourceUrl);
   try {
@@ -74,7 +74,7 @@ async function exportData() {
         continue;
       }
       const [rows] = await connection.query(`SELECT * FROM ${quote(table.name)}`);
-      datasets[table.name] = rows;
+      datasets[table.name] = table.name === "app_settings" ? redactSensitiveSettings(rows) : rows;
     }
     const payload = {
       format: "joyce-operator-export-v1",

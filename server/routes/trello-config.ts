@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { eq } from 'drizzle-orm';
-import { appSettings, vaProfiles } from '../../drizzle/schema';
+import { appSettings, vaProfiles } from '../../drizzle/schema.postgres';
 import { getDb } from '../db';
 import { requestUser, requireAdmin, requireAuthenticated } from '../middleware/auth';
 import { fetchWithRetry } from '../utils/retry';
@@ -72,7 +72,7 @@ async function saveCompletionLabels(userId: number, labels: string[]) {
   if (!db) throw new Error('Database not available');
   const key = completionLabelsKey(userId);
   await db.insert(appSettings).values({ vaId: userId, key, value: JSON.stringify(labels) })
-    .onDuplicateKeyUpdate({ set: { vaId: userId, value: JSON.stringify(labels) } });
+    .onConflictDoUpdate({ target: appSettings.key, set: { vaId: userId, value: JSON.stringify(labels) } });
 }
 
 type ChecklistItemReference = { checklistId: string; checkItemId: string };

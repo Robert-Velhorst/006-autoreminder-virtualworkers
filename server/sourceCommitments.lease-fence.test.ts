@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { commitments } from "../drizzle/schema";
+import { commitments } from "../drizzle/schema.postgres";
 import { ScheduledJobLeaseLostError, type ScheduledJobOwnershipReader } from "./scheduledJobRuntime";
 import { syncWorkerTrelloCommitments, upsertSourceCommitment } from "./sourceCommitments";
 
@@ -38,7 +38,7 @@ function harness(latestState?: string, loseAfter?: string, checkWrites = true) {
     if (checkWrites) expect(trace.at(-1)).toBe("checkpoint");
     staged.push(event);
     touch(event);
-    return [{ insertId: 100 + writes }];
+    return [{ id: 100 + writes }];
   };
   const tx = {
     select: () => {
@@ -52,8 +52,8 @@ function harness(latestState?: string, loseAfter?: string, checkWrites = true) {
       return query;
     },
     insert: (table: unknown) => ({ values: () => table === commitments
-      ? { onDuplicateKeyUpdate: write }
-      : { then: (resolve: (result: unknown) => unknown, reject: (error: unknown) => unknown) => write().then(resolve, reject) } }),
+      ? { onConflictDoUpdate: write }
+      : { returning: write, then: (resolve: (result: unknown) => unknown, reject: (error: unknown) => unknown) => write().then(resolve, reject) } }),
     update: () => ({ set: () => ({ where: write }) }),
   };
   mocks.getDb.mockResolvedValue({ transaction: async (work: (tx: unknown) => Promise<unknown>) => {

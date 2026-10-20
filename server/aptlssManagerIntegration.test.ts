@@ -5,14 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq, inArray, like, or, sql } from "drizzle-orm";
-import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
-import { createPool, type Pool, type PoolConnection, type RowDataPacket } from "mysql2/promise";
-import * as schema from "../drizzle/schema";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
+import { Pool, type PoolClient } from "pg";
+import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
+import * as schema from "../drizzle/schema.postgres";
 import type { ManagerInput, ManagerResult, ManagerSnapshot } from "../shared/aptlssManager";
 import type { CodexManagerAttempt } from "./aptlssManagerCodex";
 import type { OperatorDailyPlanPayload } from "./operatorDailyPlan";
 import type { TrpcContext } from "./_core/context";
-import { aptlssManagerQueue as queueJobs, aptlssManagerQueueEvents as queueEvents, aptlssManagerQueueSlots as queueSlots } from "../drizzle/aptlssManagerQueueSchema";
+import { aptlssManagerQueue as queueJobs, aptlssManagerQueueEvents as queueEvents, aptlssManagerQueueSlots as queueSlots } from "../drizzle/schema.postgres";
 import { claimManagerTask, enqueueManagerTask, type ManagerQueueLease } from "./aptlssManagerQueue";
 import { assessManagerContext } from "./aptlssManagerEngine";
 import { readManagerAssignmentState } from "./aptlssManagerAssignments";
@@ -20,10 +21,10 @@ import { readManagerAssignmentState } from "./aptlssManagerAssignments";
 // Opt-in only. Never import db.ts (it may read .env) or fall back to DATABASE_URL.
 const controls = vi.hoisted(() => ({
   url: process.env.APTLSS_TEST_DATABASE_URL,
-  db: undefined as MySql2Database<typeof schema> | undefined,
+  db: undefined as NodePgDatabase<typeof schema> | undefined,
   safety: true,
   allowPlanMutation: false,
-  digest: "aptlss-mysql-integration-controlled-digest",
+  digest: "aptlss-postgres-integration-controlled-digest",
   failQueueEnqueue: false,
   model: vi.fn<(input: ManagerInput, base: ManagerResult, outcome?: (success: boolean, failureKind?: "quota", attempts?: CodexManagerAttempt[]) => void) => Promise<ManagerResult>>(),
   emit: vi.fn(),
@@ -70,10 +71,10 @@ type Worker = { id: number; openId: string; cardId: string; stepId: number; prof
 type Service = typeof import("./aptlssManagerService");
 type Reviews = typeof import("./aptlssManagerReviewService");
 
-describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeout: 30_000, hookTimeout: 125_000 }, () => {
+describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { timeout: 30_000 }, () => {
   let pool: Pool;
-  let lockConnection: PoolConnection | undefined;
-  let db: MySql2Database<typeof schema>;
+  let lockConnection: PoolClient | undefined;
+  let db: NodePgDatabase<typeof schema>;
   let service: Service;
   let reviews: Reviews;
   let adminId: number;
@@ -84,34 +85,30 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
   let createdControl = false;
 
   beforeAll(async () => {
-    const url = new URL(controls.url!);
-    if (url.protocol !== "mysql:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
-      || !["/aptlss_test", "/recovery_test"].includes(url.pathname) || url.search || url.hash) {
-      throw new Error("Integration tests require an explicit loopback MySQL URL naming aptlss_test or recovery_test.");
-    }
+    const url = new URL(requireIsolatedPostgresTestDatabase(controls.url, process.env.NODE_ENV === "production"));
     vi.stubEnv("DATABASE_URL", controls.url!);
     vi.stubEnv("APTLSS_MANAGER_SCHEDULER", "false");
-    pool = createPool({ uri: controls.url!, connectionLimit: 8, connectTimeout: 10_000, timezone: "Z" });
-    db = drizzle(pool, { schema, mode: "default" });
+    pool = new Pool({ connectionString: controls.url!, max: 8, connectionTimeoutMillis: 10_000, });
+    db = drizzle(pool, { schema });
     controls.db = db;
-    let identity: RowDataPacket[] = [];
-    // Docker Desktop can transiently accept TCP without completing a MySQL handshake.
+    let identity: any[] = [];
+    // Docker Desktop can transiently accept TCP without completing a PostgreSQL handshake.
     // Retry readiness only; never retry a test, transaction or assertion.
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        [identity] = await pool.query<RowDataPacket[]>("SELECT DATABASE() AS name, VERSION() AS version");
+        ({ rows: identity } = await pool.query("SELECT current_database() AS name, current_setting('server_version') AS version"));
         break;
       } catch (error) {
         const code = (error as { code?: string }).code;
         if (attempt === 3 || !["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "PROTOCOL_CONNECTION_LOST"].includes(code ?? "")) throw error;
-        console.warn(`[APTLSS integration] MySQL readiness attempt ${attempt}/3 failed (${code}); retrying connection only.`);
+        console.warn(`[APTLSS integration] PostgreSQL readiness attempt ${attempt}/3 failed (${code}); retrying connection only.`);
       }
     }
     expect(identity[0].name).toBe(url.pathname.slice(1));
-    expect(identity[0].version).toMatch(/^8\./);
-    lockConnection = await pool.getConnection();
-    const [lock] = await lockConnection.query<RowDataPacket[]>("SELECT GET_LOCK('aptlss-manager-integration-fixtures', 120) AS acquired");
-    expect(lock[0].acquired).toBe(1);
+    expect(identity[0].version).toMatch(/^18\./);
+    lockConnection = await pool.connect();
+    const { rows: lock } = await lockConnection.query("SELECT pg_advisory_lock(hashtext('aptlss-manager-integration-fixtures'))");
+
     if ((await db.select().from(queueJobs).where(inArray(queueJobs.state,["pending","leased"])).limit(1)).length
       || (await db.select().from(queueSlots).where(sql`${queueSlots.vaId} IS NOT NULL`).limit(1)).length) {
       throw new Error("Unowned queue work exists; refusing to alter integration fixtures.");
@@ -128,7 +125,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
 
   async function insertUser(role: "worker" | "admin" | "user") {
     const openId = `manager-it-${randomUUID()}`;
-    const [row] = await db.insert(schema.users).values({ openId, name: `Integration ${role}`, role }).$returningId();
+    const [row] = await db.insert(schema.users).values({ openId, name: `Integration ${role}`, role }).returning();
     ownedUsers.push(row.id);
     return { id: row.id, openId };
   }
@@ -138,13 +135,13 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     pilotWorkers.push(user.id);
     vi.stubEnv("APTLSS_MANAGER_PILOT_WORKER_IDS", pilotWorkers.join(","));
     const cardId = `manager-it-${randomUUID()}`;
-    const [profile] = await db.insert(schema.vaProfiles).values({ userId: user.id, founderId: adminId, name: "Integration worker" }).$returningId();
+    const [profile] = await db.insert(schema.vaProfiles).values({ userId: user.id, founderId: adminId, name: "Integration worker" }).returning();
     await db.insert(schema.userWorkingHours).values({ userId: user.id, userOpenId: user.openId,
       timezone: "UTC", workStartHour: 9, workEndHour: 18, enableBreaks: 0, workingDays: "1,2,3,4,5" });
     await db.insert(schema.aptlssPlans).values({ vaId: user.id, cardId, cardName: "Review local requirements",
       cardUrl: `https://trello.com/c/${cardId}`, boardName: "Integration fixture", listName: "TO DO", planJson: "{}", generatedAt: NOW });
     const [step] = await db.insert(schema.aptlssSteps).values({ vaId: user.id, cardId, stepNumber: 1,
-      title: "Compare local requirements", estimatedMinutes: 20, completionCriteria: "Comparison is recorded locally" }).$returningId();
+      title: "Compare local requirements", estimatedMinutes: 20, completionCriteria: "Comparison is recorded locally" }).returning();
     await db.insert(schema.trelloCachedCards).values({ userId: user.id, userOpenId: user.openId, boardId: "integration",
       cardId, cardData: JSON.stringify({ id: cardId, name: "Review local requirements", desc: "Compare the local requirements document.",
         dateLastActivity: NOW.toISOString(), due: null }), cachedAt: NOW, expiresAt: new Date("2026-09-05T10:00:00Z") });
@@ -205,7 +202,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const [dependent] = await db.insert(schema.aptlssSteps).values({
       vaId: worker.id, cardId: worker.cardId, stepNumber: 2,
       title: "Prepare local implementation", ...dependency,
-    }).$returningId();
+    }).returning();
     const input = await service.collectManagerInput(db, worker.id, NOW);
     const refs = input.cards[0].steps.find(s => s.id === dependent.id)!.dependsOn;
     expect(refs).toEqual([`${worker.cardId}:${worker.stepId}`]);
@@ -236,7 +233,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
   it("maps checklist assignment blockers to their exact APTLSS step", async () => {
     const [blockedStep] = await db.insert(schema.aptlssSteps).values({ vaId: worker.id, cardId: worker.cardId,
       trelloChecklistId: "checklist-manager-it", trelloCheckItemId: "item-manager-it", stepNumber: 2,
-      title: "Prepare dependent local work", estimatedMinutes: 20 }).$returningId();
+      title: "Prepare dependent local work", estimatedMinutes: 20 }).returning();
     await db.insert(schema.taskAssignments).values({ taskId: `${worker.cardId}:checklist-manager-it:item-manager-it`,
       vaId: worker.profileId, founderId: adminId, assignedBy: adminId, status: "blocked" });
     const input = await service.collectManagerInput(db, worker.id, NOW);
@@ -260,11 +257,11 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     controls.db = db;
     controls.safety = true;
     controls.allowPlanMutation = false;
-    controls.digest = "aptlss-mysql-integration-controlled-digest";
+    controls.digest = "aptlss-postgres-integration-controlled-digest";
     controls.failQueueEnqueue = false;
     controls.model.mockReset().mockImplementation(async (_input, base, outcome) => { outcome?.(true); return base; });
     controls.emit.mockReset();
-    // Only Date is faked: MySQL connection timers and interleavings remain real.
+    // Only Date is faked: PostgreSQL connection timers and interleavings remain real.
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(NOW);
     adminId = (await insertUser("admin")).id;
@@ -352,7 +349,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     try {
       if (createdControl) await db.delete(schema.aptlssManagerControl).where(and(eq(schema.aptlssManagerControl.id, 1), sql`${schema.aptlssManagerControl.activeVaId} IS NULL`));
       if (lockConnection) {
-        await lockConnection.query("SELECT RELEASE_LOCK('aptlss-manager-integration-fixtures')");
+        await lockConnection.query("SELECT pg_advisory_unlock(hashtext('aptlss-manager-integration-fixtures'))");
         lockConnection.release();
       }
     } finally {
@@ -472,11 +469,11 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const [secondStep] = await db.insert(schema.aptlssSteps).values({
       vaId: worker.id, cardId: worker.cardId, stepNumber: 2, title: "Record findings",
       category: "research", status: "complete", estimatedMinutes: 15,
-    }).$returningId();
+    }).returning();
     const [openStep] = await db.insert(schema.aptlssSteps).values({
       vaId: worker.id, cardId: worker.cardId, stepNumber: 3, title: "Prepare next action",
       category: "research", status: "open", estimatedMinutes: 30,
-    }).$returningId();
+    }).returning();
     await db.update(schema.aptlssSteps).set({ category: "research", status: "complete" })
       .where(eq(schema.aptlssSteps.id, worker.stepId));
     await db.update(schema.aptlssSteps).set({ status: "complete" })
@@ -488,8 +485,8 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
         vaId, founderId: adminId, taskId: cardId, cardId, aptlssStepId: stepId,
         category, startTime: new Date(endTime.getTime() - minutes * 60_000), endTime,
         durationMinutes: minutes, durationSeconds: minutes * 60,
-      });
-      return Number(result.insertId);
+      }).returning({ id: schema.timeEntries.id });
+      return result.id;
     };
     const interruptedEntryId = await addEntry(worker.id, worker.cardId, worker.stepId, 15, "client_work", 25);
     await addEntry(worker.id, worker.cardId, worker.stepId, 25);
@@ -767,7 +764,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       receivedAt: NOW,
       deadlineAt: new Date("2026-09-09T12:00:00.000Z"),
       suggestedNextAction: "Reply by September 9",
-    }).$returningId();
+    }).returning();
     const cardId = `email:${mail.id}`;
     const input = await service.collectManagerInput(db, worker.id, NOW);
     const card = input.cards.find(item => item.id === cardId);
@@ -797,15 +794,15 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       workspaceOwnerId: adminId, assignedUserId: worker.id, createdByUserId: worker.id,
       sourceType: "gmail", sourceId: threadId, title: "Portal notice with legacy deadline",
       dueAt: new Date("2026-09-09T12:00:00.000Z"),
-    }).$returningId();
+    }).returning();
     const [rule] = await db.insert(schema.reminderRules).values({
       workspaceOwnerId: adminId, createdByUserId: worker.id, name: "Legacy Gmail deadline",
       channel: "in_app", requireApproval: false,
-    }).$returningId();
+    }).returning();
     const [schedule] = await db.insert(schema.reminderSchedules).values({
       commitmentId: commitment.id, ruleId: rule.id, recipientUserId: worker.id,
       scheduledFor: NOW, channel: "in_app", idempotencyKey: randomUUID(),
-    }).$returningId();
+    }).returning();
 
     const { processDueReminders, approveAndSendReminder } = await import("./reminderOrchestration");
     const outcome = await processDueReminders(NOW);
@@ -840,15 +837,15 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       workspaceOwnerId: adminId, assignedUserId: worker.id, createdByUserId: worker.id,
       sourceType: "gmail", sourceId: threadId, title: "Direct email deadline",
       dueAt: new Date("2026-09-09T12:00:00.000Z"),
-    }).$returningId();
+    }).returning();
     const [rule] = await db.insert(schema.reminderRules).values({
       workspaceOwnerId: adminId, createdByUserId: worker.id, name: "Direct email reminder",
       channel: "in_app", requireApproval: false,
-    }).$returningId();
+    }).returning();
     const [schedule] = await db.insert(schema.reminderSchedules).values({
       commitmentId: commitment.id, ruleId: rule.id, recipientUserId: worker.id,
       scheduledFor: NOW, channel: "in_app", idempotencyKey: randomUUID(),
-    }).$returningId();
+    }).returning();
 
     const { processDueReminders } = await import("./reminderOrchestration");
     const outcome = await processDueReminders(NOW);
@@ -1060,7 +1057,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       appliedPlanHash: reviews.managerPlanVersion(JSON.stringify(appliedPlan)),
       snapshotJson: JSON.stringify({ implementationDigest: controls.digest }),
       createdAt: NOW,
-    }).$returningId();
+    }).returning();
     return run.id;
   }
 
@@ -1232,10 +1229,10 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       const [item] = await db.insert(schema.workspaceEvidenceItems).values({ vaId: target.id, source: "trello",
         sourceId: `manager-it-source:${randomUUID()}`, sourceUrl: "https://example.test/retained-invoice",
         kind: truthClass === "worker_assertion" ? "worker_assertion" : "record", title: "Retained invoice status",
-        content, contentHash: hash(content), observedAt, modifiedAt: observedAt, createdAt: observedAt, metadataJson }).$returningId();
+        content, contentHash: hash(content), observedAt, modifiedAt: observedAt, createdAt: observedAt, metadataJson }).returning();
       ownedEvidenceIds.push(item.id);
       const [revision] = await db.insert(schema.aptlssEvidenceRevisions).values({ evidenceId: item.id, truthClass,
-        content, contentHash: hash(content), observedAt, createdAt: observedAt, metadataJson }).$returningId();
+        content, contentHash: hash(content), observedAt, createdAt: observedAt, metadataJson }).returning();
       await db.insert(schema.aptlssEvidenceSubjectLinks).values({ evidenceId: item.id, vaId: target.id,
         subjectType: "card", subjectId: target.cardId, relevanceScore: 100, linkMethod: "confirmed", matchReason: "Explicit fixture source" });
       await db.insert(schema.workspaceEvidenceLinks).values({ evidenceId: item.id, cardId: target.cardId,
@@ -1244,10 +1241,10 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     }
     const [conflict] = await db.insert(schema.aptlssEvidenceConflicts).values({ vaId: target.id,
       sourceEvidenceId: retained[0].evidenceId, assertedEvidenceId: retained[1].evidenceId,
-      status: "needs_verification", createdAt: conflictAt }).$returningId();
+      status: "needs_verification", createdAt: conflictAt }).returning();
     const [followup] = await db.insert(schema.aptlssVerificationFollowups).values({ vaId: target.id, cardId: target.cardId,
       conflictId: conflict.id, title: "Verify invoice status", question: "Which retained source establishes the invoice status?",
-      status: "open", createdAt: conflictAt }).$returningId();
+      status: "open", createdAt: conflictAt }).returning();
     return { conflictId: conflict.id, sourceRevisionId: retained[0].revisionId, assertedEvidenceId: retained[1].evidenceId,
       input: { vaId: target.id, followupId: followup.id, resolution: "Verified against the retained invoice source.",
         resolvedBy: String(adminId), sourceEvidenceId: retained[0].evidenceId, sourceQuote } };
@@ -1287,7 +1284,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       const content = `Reference material for comparison ${i}: ${"x".repeat(5800)}`;
       const [item] = await db.insert(schema.workspaceEvidenceItems).values({ vaId: worker.id, source: "trello",
         sourceId: `manager-it-history-${randomUUID()}`, kind: "document", title: `Requirements reference ${i}`,
-        content, observedAt: NOW, contentHash: hash(content), reviewStatus: "linked" }).$returningId();
+        content, observedAt: NOW, contentHash: hash(content), reviewStatus: "linked" }).returning();
       ownedEvidenceIds.push(item.id);
       await db.insert(schema.workspaceEvidenceLinks).values({ evidenceId: item.id, cardId: worker.cardId,
         relevanceScore: 100, linkMethod: "manual", matchReason: "Synthetic history preservation fixture" });
@@ -1423,7 +1420,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
         })), config);
       },
     }) as typeof db;
-    await db.transaction(tx => enqueueManagerTask(tx, { vaId: worker.id, trigger: "scheduled", eventKey: randomUUID() }));
+    await db.transaction(tx => enqueueManagerTask(tx, { vaId: worker.id, trigger: "periodic", eventKey: randomUUID() }));
     const lease = (await claimManagerTask(db, { leaseMs: 60_000 }))!;
     expect(lease.vaId).toBe(worker.id);
     try { await expect(service.runManager(worker.id, "scheduled", lease)).rejects.toThrow(/Controlled full history/); }
@@ -1465,7 +1462,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       },
     }) as typeof db;
     // A leased failure belongs to queue handling, not the unleased error-state writer.
-    await db.transaction(tx => enqueueManagerTask(tx, { vaId: worker.id, trigger: "scheduled", eventKey: randomUUID() }));
+    await db.transaction(tx => enqueueManagerTask(tx, { vaId: worker.id, trigger: "periodic", eventKey: randomUUID() }));
     const claimed = (await claimManagerTask(db, { leaseMs: 60_000 }))!;
     expect(claimed.vaId).toBe(worker.id);
     try { await expect(service.runManager(worker.id, "scheduled", claimed)).rejects.toThrow(/Controlled history pointer/); }
@@ -1482,7 +1479,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const pointer = (await state()).currentCheckId;
     const legacy = { ...first, assessedAt: new Date().toISOString(), changes: ["A newer legacy full assessment"] };
     const [created] = await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash("legacy-write"),
-      trigger: "scheduled", snapshotJson: JSON.stringify(legacy), proposalHash: legacy.proposalHash }).$returningId();
+      trigger: "periodic", snapshotJson: JSON.stringify(legacy), proposalHash: legacy.proposalHash }).returning();
     await db.update(schema.aptlssManagerState).set({ inputHash: hash("legacy-write"), checkedAt: new Date() }).where(eq(schema.aptlssManagerState.vaId, worker.id));
     expect((await state()).currentCheckId).toBe(pointer);
     expect((await service.getManagerStatus(worker.id)).snapshot).toMatchObject({ runId: created.id, changes: legacy.changes });
@@ -1689,8 +1686,8 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       writesSeen = rows.length > beforeRuns.length;
       const plansInTransaction = await tx.select().from(schema.dailyPlans).where(eq(schema.dailyPlans.vaId, worker.id));
       expect(plansInTransaction).toEqual(beforePlans);
-      // MySQL raises the error inside the real transaction, after the service's SQL.
-      await tx.execute(sql`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'integration forced rollback'`);
+      // PostgreSQL raises the error inside the real transaction, after the service's SQL.
+      await tx.execute(sql`DO $$ BEGIN RAISE EXCEPTION 'integration forced rollback'; END $$`);
       return result;
     }));
     await expect(service.runManager(worker.id)).rejects.toThrow(/assessment failed/i);
@@ -1710,7 +1707,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     vi.spyOn(db, "transaction").mockImplementationOnce(callback => transaction(async tx => {
       const result = await callback(tx);
       evidenceWritten = (await tx.select().from(schema.aptlssEvidenceSubjectLinks).where(eq(schema.aptlssEvidenceSubjectLinks.vaId, worker.id))).length === 1;
-      await tx.execute(sql`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'integration update rollback'`);
+      await tx.execute(sql`DO $$ BEGIN RAISE EXCEPTION 'integration update rollback'; END $$`);
       return result;
     }));
     await expect(service.submitManagerUpdate(worker.id, worker.cardId, "Verified local requirements.", undefined, { expectedRunId: previous.runId })).rejects.toThrow();
@@ -2056,9 +2053,9 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
   });
 
   it("reports database unavailability without falling back to another database", async () => {
-    const disconnectedPool = createPool({ uri: controls.url!, connectionLimit: 1, timezone: "Z" });
+    const disconnectedPool = new Pool({ connectionString: controls.url!, max: 1, });
     await disconnectedPool.query("SELECT 1");
-    const disconnected = drizzle(disconnectedPool, { schema, mode: "default" });
+    const disconnected = drizzle(disconnectedPool, { schema });
     await disconnectedPool.end();
     controls.db = disconnected;
     try {
@@ -2116,7 +2113,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(initial.interventions).toEqual(expect.arrayContaining([
       expect.objectContaining({ cardId: worker.cardId, severity: "urgent" }),
     ]));
-    expect(initial.assessments.find(item => item.cardId === worker.cardId)?.reliability.conflicts).toBe("unresolved");
+    expect(initial.assessments.find(item => item.cardId === worker.cardId)?.reliability?.conflicts).toBe("unresolved");
 
     const { sourceEvidenceId, sourceQuote, ...unsupported } = fixture.input;
     expect(await resolveVerificationFollowup({ ...unsupported, resolution: "I believe the invoice was paid." }))
@@ -2126,7 +2123,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(noted.followups[0].status).toBe("open");
     expect(noted.decisions).toHaveLength(0);
     const stillOpen = await service.runManager(worker.id);
-    expect(stillOpen.assessments.find(item => item.cardId === worker.cardId)?.reliability.conflicts).toBe("unresolved");
+    expect(stillOpen.assessments.find(item => item.cardId === worker.cardId)?.reliability?.conflicts).toBe("unresolved");
     expect(await plans()).toEqual(baseline);
 
     expect(await resolveVerificationFollowup({ ...unsupported, sourceEvidenceId, sourceQuote }))
@@ -2137,7 +2134,8 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     expect(reassessed.applied).toBe(false);
     expect((await graphRows()).conflicts[0].status).toBe("resolved");
     const collected = await service.collectManagerInput(db, worker.id, NOW);
-    expect(collected.graphConflicts.some(item => item.id === `graph:${fixture.conflictId}` && item.status !== "resolved")).toBe(false);
+    expect(collected.graphConflicts).toBeDefined();
+    expect(collected.graphConflicts!.some(item => item.id === `graph:${fixture.conflictId}` && item.status !== "resolved")).toBe(false);
     expect(await plans()).toEqual(baseline);
   });
 
@@ -2154,7 +2152,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       const decisions = await tx.select().from(schema.workspaceEvidenceItems)
         .where(like(schema.workspaceEvidenceItems.sourceId, `verified-conflict-resolution:${worker.id}:%`));
       allWritesSeen = conflict.status === "resolved" && followup.status === "resolved" && decisions.length === 1;
-      await tx.execute(sql`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'integration proof rollback'`);
+      await tx.execute(sql`DO $$ BEGIN RAISE EXCEPTION 'integration proof rollback'; END $$`);
       return result;
     }));
     await expect(resolveVerificationFollowup(fixture.input)).rejects.toThrow();
@@ -2320,7 +2318,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       kind: "file", title: "Legacy linked source", content: "Supplier terms saved for this task.",
       summary: "PRIVATE_AI_SUMMARY_SENTINEL", sourceUrl: "https://drive.google.com/file/d/legacy",
       observedAt: NOW, contentHash: hash("legacy-linked-source"), reviewStatus: "linked",
-    }).$returningId();
+    }).returning();
     ownedEvidenceIds.push(legacyEvidence.id);
     await db.insert(schema.workspaceEvidenceLinks).values({
       evidenceId: legacyEvidence.id, cardId: worker.cardId, relevanceScore: 100,
@@ -2383,7 +2381,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const requests = [
       caller.getManagerStatus(),
       caller.runManager(),
-      caller.updateManagerPolicy({ enabled: true, intervalMinutes: 5 }),
+      caller.updateManagerPolicy({ vaId: worker.id, enabled: true, intervalMinutes: 5 }),
       caller.getContext(),
       caller.getWorkQueueContext(),
       caller.getCardEvidence({ cardId: worker.cardId }),
@@ -2524,7 +2522,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
         const value = Reflect.get(target, property, target);
         return typeof value === "function" ? value.bind(target) : value;
       },
-    }) as MySql2Database<typeof schema>;
+    }) as NodePgDatabase<typeof schema>;
 
     try {
       await expect(caller.recordWaitingReason({
@@ -2565,7 +2563,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
         const value = Reflect.get(target, property, target);
         return typeof value === "function" ? value.bind(target) : value;
       },
-    }) as MySql2Database<typeof schema>;
+    }) as NodePgDatabase<typeof schema>;
 
     try {
       await expect(caller.recordWaitingReason({
@@ -2636,7 +2634,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       title: "Prepare the approved follow-up", estimatedMinutes: 15,
       completionCriteria: "The approved follow-up is prepared for worker review",
       blockedBy: "Step 1",
-    }).$returningId();
+    }).returning();
     await db.update(schema.aptlssSteps).set({ requiresRobert: true, recommendedDecision: "Approve the follow-up" })
       .where(eq(schema.aptlssSteps.id, worker.stepId));
     const user = (await db.select().from(schema.users).where(eq(schema.users.id, worker.id)))[0];
@@ -2679,7 +2677,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const [followUp] = await db.insert(schema.aptlssSteps).values({
       vaId: worker.id, cardId: worker.cardId, stepNumber: 2,
       title: "Prepare the approved follow-up", blockedBy: "Step 1",
-    }).$returningId();
+    }).returning();
     await db.update(schema.aptlssSteps).set({ requiresRobert: true })
       .where(eq(schema.aptlssSteps.id, worker.stepId));
     const admin = (await db.select().from(schema.users).where(eq(schema.users.id, adminId)))[0];
@@ -3128,7 +3126,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
     const nextFounder = await insertUser("admin");
     await db.update(schema.vaProfiles).set({ status: "inactive" }).where(eq(schema.vaProfiles.id, worker.profileId));
     const [currentProfile] = await db.insert(schema.vaProfiles).values({ userId: worker.id, founderId: nextFounder.id,
-      name: "Current integration profile", status: "active" }).$returningId();
+      name: "Current integration profile", status: "active" }).returning();
     await db.insert(schema.taskAssignments).values({ taskId: worker.cardId, vaId: currentProfile.id,
       founderId: nextFounder.id, assignedBy: nextFounder.id, status: "assigned" });
     await db.insert(schema.cardStates).values({ vaId: worker.id, cardId: worker.cardId,
@@ -3433,11 +3431,11 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
 
     const started = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
     expect(started.status).toBe(200);
-    await lockConnection!.beginTransaction();
+    await lockConnection!.query("BEGIN");
     let finishRequest!: Promise<{ status: number; body: { entry?: { id: number; endTime: string | null; durationMinutes: number | null; notes: string | null } } }>;
     let completedWhileAccountLocked = false;
     try {
-      const [lockedUsers] = await lockConnection!.query<RowDataPacket[]>("SELECT id FROM users WHERE id = ? FOR UPDATE", [worker.id]);
+      const { rows: lockedUsers } = await lockConnection!.query("SELECT id FROM users WHERE id = $1 FOR UPDATE", [worker.id]);
       expect(lockedUsers).toHaveLength(1);
       finishRequest = request(app).post(`/api/time-tracking/${transition}`).send({ notes: "Completed timer safely" })
         .then(response => {
@@ -3448,7 +3446,7 @@ describe.skipIf(!controls.url)("APTLSS manager real MySQL reliability", { timeou
       await new Promise(resolve => setTimeout(resolve, 100));
       expect(completedWhileAccountLocked).toBe(false);
     } finally {
-      await lockConnection!.rollback();
+      await lockConnection!.query("ROLLBACK");
     }
 
     const finished = await finishRequest!;

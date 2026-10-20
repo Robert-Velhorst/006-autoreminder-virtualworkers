@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { users, userWorkingHours, vaProfiles, type User } from "../drizzle/schema";
+import { users, userWorkingHours, vaProfiles, type User } from "../drizzle/schema.postgres";
 import { getActiveWorkerProfileId, getActiveWorkerProfileResolution, resolveWorkerOperatorContext, selectWorkerProfile } from "./workerOperatorContext";
 
 function database(profiles: unknown[], hours: unknown[] = []) {

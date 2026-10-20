@@ -6,7 +6,7 @@ import {
   emailTasks,
   users,
   workspaceEvidenceItems,
-} from "../drizzle/schema";
+} from "../drizzle/schema.postgres";
 import {
   classifyGoogleEmail,
   candidateGmailDeadline,
@@ -75,7 +75,7 @@ function createMockGmailRetentionTx(existing: typeof emailTasks.$inferSelect) {
     }),
     insert: (_table: unknown) => ({
       values: (_values: typeof emailTasks.$inferInsert) => ({
-        onDuplicateKeyUpdate: async (_config: unknown) => { upsertCount += 1; },
+        onConflictDoUpdate: async (_config: unknown) => { upsertCount += 1; },
       }),
     }),
   } as never;
@@ -139,7 +139,7 @@ function createMockGoogleEvidenceDb(settings: Map<string, string>) {
     }),
     insert: (_table: unknown) => ({
       values: (row: { key: string; value: string }) => ({
-        onDuplicateKeyUpdate: async (_config: unknown) => {
+        onConflictDoUpdate: async (_config: unknown) => {
           settings.set(row.key, row.value);
         },
       }),
@@ -150,9 +150,9 @@ function createMockGoogleEvidenceDb(settings: Map<string, string>) {
         const value = key ? settings.get(key) : undefined;
         if (key && value !== undefined && queryContainsValue(condition, value)) {
           settings.delete(key);
-          return [{ affectedRows: 1 }];
+          return { rowCount: 1 };
         }
-        return [{ affectedRows: 0 }];
+        return { rowCount: 0 };
       },
     }),
   } as never;
@@ -196,7 +196,7 @@ function createMockGoogleEvidenceSyncDb(
   });
   const insert = (table: unknown) => ({
     values: (row: Record<string, unknown>) => ({
-      onDuplicateKeyUpdate: async () => {
+      onConflictDoUpdate: async () => {
         if (table === appSettings && typeof row.key === "string" && typeof row.value === "string") {
           settings.set(row.key, row.value);
         }
