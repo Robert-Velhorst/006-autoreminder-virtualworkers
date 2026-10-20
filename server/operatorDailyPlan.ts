@@ -1,5 +1,6 @@
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
-import { appSettings, aptlssPlans, aptlssSteps, dailyPlans, timeEntries, userWorkingHours, users, vaProfiles } from "../drizzle/schema.postgres";
+import { aptlssPlans, aptlssSteps, dailyPlans, timeEntries, userWorkingHours, users, vaProfiles } from "../drizzle/schema.postgres";
+import { readPersonalSetting } from "./personalAppSettings";
 import { dateKeyInTimeZone } from "../shared/workerTime";
 import { getWorkLaneRank } from "../shared/workLanePriority";
 import { getAllAptlssPlans } from "./aptlssDb";
@@ -121,14 +122,7 @@ function profileSchedule(worker?: WorkerOperatorContext): ScheduleSettings {
 
 async function getScheduleSettings(vaId: number, worker?: WorkerOperatorContext): Promise<ScheduleSettings> {
   const fallback = profileSchedule(worker);
-  const db = await getDb();
-  if (!db) return fallback;
-  const rows = await db
-    .select({ value: appSettings.value })
-    .from(appSettings)
-    .where(and(eq(appSettings.vaId, vaId), eq(appSettings.key, "daily_schedule")))
-    .limit(1);
-  return normalizeScheduleSettings(rows[0]?.value, fallback);
+  return normalizeScheduleSettings(await readPersonalSetting(vaId, "daily_schedule") ?? undefined, fallback);
 }
 
 function normalizeScheduleSettings(value: string | undefined, fallback: ScheduleSettings): ScheduleSettings {
@@ -299,10 +293,8 @@ async function assertCurrentSchedule(
   expectedPlanVersion: string | null,
   currentPlanVersion: string | null,
 ) {
-  const [currentSetting] = await tx.select({ value: appSettings.value }).from(appSettings)
-    .where(and(eq(appSettings.vaId, vaId), eq(appSettings.key, "daily_schedule")))
-    .limit(1).for("update");
-  const currentSchedule = normalizeScheduleSettings(currentSetting?.value, fallback);
+  const value = await readPersonalSetting(vaId, "daily_schedule", tx, true);
+  const currentSchedule = normalizeScheduleSettings(value ?? undefined, fallback);
   if (scheduleIdentity(currentSchedule) !== scheduleIdentity(expectedSchedule)) {
     throw new OperatorDailyPlanConflictError(
       expectedPlanVersion,

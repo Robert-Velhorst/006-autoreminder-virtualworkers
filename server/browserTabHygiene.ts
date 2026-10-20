@@ -15,6 +15,7 @@ import {
 } from "../shared/browserTabPolicy";
 import { dateKeyInTimeZone } from "../shared/workerTime";
 import { getDb } from "./db";
+import { readPersonalSetting } from "./personalAppSettings";
 import { resolveWorkerOperatorContextById } from "./workerOperatorContext";
 import { MAX_BROWSER_TAB_CAPTURE_SEQUENCE } from "../shared/browserTabProtocol";
 
@@ -77,16 +78,9 @@ async function readWorkerSetting(key: string, vaId: number) {
 }
 
 async function getWorkEndTime(vaId: number) {
-  const db = await getDb();
-  if (!db) return "18:00";
-  const rows = await db
-    .select({ value: appSettings.value })
-    .from(appSettings)
-    .where(and(eq(appSettings.vaId, vaId), eq(appSettings.key, "daily_schedule")))
-    .orderBy(desc(appSettings.updatedAt))
-    .limit(1);
+  const value = await readPersonalSetting(vaId, "daily_schedule");
   try {
-    const parsed = JSON.parse(rows[0]?.value ?? "{}") as { endTime?: unknown };
+    const parsed = JSON.parse(value ?? "{}") as { endTime?: unknown };
     return typeof parsed.endTime === "string" && /^\d{2}:\d{2}$/.test(parsed.endTime)
       ? parsed.endTime
       : (await resolveWorkerOperatorContextById(vaId)).workEndTime;

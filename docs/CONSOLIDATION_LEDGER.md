@@ -1,5 +1,30 @@
 # Consolidation Ledger
 
+## Current Consolidation Checkpoint: October 21, 2026
+
+PR [#99](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/99)
+merged as `77d4bf762893a735d9c2aa170b8e9bfe538c5b5f`, with a tree identical to
+the green reviewed head `01222c24b3cdf358781a95fa058d2c8b78e3e243`. That head
+is preserved by the verified remote tag
+`archive/production-consolidation-20261021`. The obsolete PR branch was deleted
+using its exact expected SHA. At this checkpoint GitHub and both inspected local
+Git common repositories contained only `main` as a branch. New work may require
+temporary review branches, which must be consolidated after acceptance.
+
+Six earlier local source snapshots are preserved under remote tags
+`archive/local-progress-20261020/*`; the additional preserved consolidation
+history remains reachable through archive tags and the consolidated history.
+Private configuration, database backups and operational evidence were not
+published. Docker cleanup and fixture removal are not authorization to destroy
+the retained recovery data or unrelated projects.
+
+Current runtime and acceptance limits are recorded in
+[Technical Audit](TECHNICAL_AUDIT.md) and [Production Cutover](PRODUCTION_CUTOVER.md).
+The entries below are dated recovery history, not instructions to recreate old
+branches, MySQL deployments, tunnel hosting or obsolete providers. In particular,
+old references to work being uncommitted describe the original observation,
+not the current publication state.
+
 ## Recovery Record
 
 | Item | Reference | Decision |
@@ -18,7 +43,7 @@ The `5a04e6a` and restored-checkpoint trees both resolve to tree object
 `4577bd1d959b3aceeb348093be2167dd3e9e5631`. Kamal's delivered code therefore
 remains byte-for-byte recoverable independently of later consolidation work.
 
-## Branch Disposition
+## Historical Branch Disposition (July 2026)
 
 | Branch | Disposition |
 | --- | --- |

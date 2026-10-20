@@ -14,6 +14,7 @@ import {
 } from '../../drizzle/schema.postgres';
 import { eq, and, sql, lte, gte } from 'drizzle-orm';
 import { sendEmail } from './email';
+import { hasPersistedEmailConsent } from './recipientEmailConsent';
 
 interface DigestNotification {
   id: number;
@@ -166,7 +167,7 @@ function generateDigestHtml(notifications: DigestNotification[], userName: strin
 /**
  * Send digest to a single user
  */
-async function sendDigestToUser(userOpenId: string): Promise<boolean> {
+export async function sendDigestToUser(userOpenId: string): Promise<boolean> {
   const db = await getDb();
   if (!db) return false;
 
@@ -188,7 +189,7 @@ async function sendDigestToUser(userOpenId: string): Promise<boolean> {
       .where(eq(userNotificationPreferences.userOpenId, userOpenId))
       .limit(1);
 
-    if (!prefs || prefs.notificationMode !== 'daily_digest') {
+    if (!prefs || !hasPersistedEmailConsent(prefs) || prefs.notificationMode !== 'daily_digest') {
       console.log(`[DigestScheduler] User ${userOpenId} not in digest mode, skipping`);
       return false;
     }
@@ -203,7 +204,11 @@ async function sendDigestToUser(userOpenId: string): Promise<boolean> {
 
     // Generate and send email
     const html = generateDigestHtml(notifications, user.name || 'there');
-    const emailAddress = prefs.emailAddress || user.email;
+    const [currentPreferences] = await db.select().from(userNotificationPreferences)
+      .where(eq(userNotificationPreferences.userOpenId, userOpenId)).limit(1);
+    if (!currentPreferences || !hasPersistedEmailConsent(currentPreferences)
+      || currentPreferences.notificationMode !== 'daily_digest') return false;
+    const emailAddress = currentPreferences.emailAddress || user.email;
 
     if (!emailAddress) {
       console.error(`[DigestScheduler] No email address for user ${userOpenId}`);

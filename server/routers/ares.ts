@@ -287,7 +287,12 @@ export const aresRouter = router({
           });
         }
 
-        const updated = await aresDb.updateAresValidationRule(input.ruleId, {
+        const rule = await aresDb.getAresValidationRule(input.ruleId, config.id);
+        if (!rule) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Validation rule not found' });
+        }
+
+        const updated = await aresDb.updateAresValidationRule(input.ruleId, config.id, {
           ruleName: input.ruleName,
           description: input.description,
           severity: input.severity,
@@ -295,6 +300,9 @@ export const aresRouter = router({
           threshold: input.threshold,
           customLogic: input.customLogic,
         });
+        if (!updated) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Validation rule not found' });
+        }
         return updated;
       } catch (error) {
         if (error instanceof TRPCError) throw error;
@@ -319,7 +327,15 @@ export const aresRouter = router({
           });
         }
 
-        await aresDb.deleteAresValidationRule(input.ruleId);
+        const rule = await aresDb.getAresValidationRule(input.ruleId, config.id);
+        if (!rule) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Validation rule not found' });
+        }
+
+        const deleted = await aresDb.deleteAresValidationRule(input.ruleId, config.id);
+        if (!deleted) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Validation rule not found' });
+        }
         return { success: true };
       } catch (error) {
         if (error instanceof TRPCError) throw error;

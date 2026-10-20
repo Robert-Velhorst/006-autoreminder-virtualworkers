@@ -100,6 +100,9 @@ function makeDatabase(initialPlan: OperatorDailyPlanPayload) {
     ownedSteps: Map<number, string>;
     scheduleValue: string | null;
     scheduleReads: number;
+    scheduleKey: string;
+    scheduleOwner: number | null;
+    scheduleLocks: number;
     activeTimers: Array<Record<string, unknown>>;
     workerProfiles: Array<Record<string, unknown>>;
     workingHours: Array<Record<string, unknown>>;
@@ -108,6 +111,9 @@ function makeDatabase(initialPlan: OperatorDailyPlanPayload) {
     ownedSteps: new Map(),
     scheduleValue: null,
     scheduleReads: 0,
+    scheduleKey: `daily_schedule:${VA_ID}`,
+    scheduleOwner: VA_ID,
+    scheduleLocks: 0,
     activeTimers: [],
     workerProfiles: [],
     workingHours: [],
@@ -135,7 +141,7 @@ function makeDatabase(initialPlan: OperatorDailyPlanPayload) {
     if (table === userWorkingHours) return [...state.workingHours];
     if (table === appSettings) {
       state.scheduleReads += 1;
-      return state.scheduleValue ? [{ value: state.scheduleValue }] : [];
+      return state.scheduleValue ? [{ id: 1, key: state.scheduleKey, vaId: state.scheduleOwner, value: state.scheduleValue }] : [];
     }
     if (table === timeEntries) return [...state.activeTimers];
     return [];
@@ -148,7 +154,7 @@ function makeDatabase(initialPlan: OperatorDailyPlanPayload) {
     query.where = () => query;
     query.orderBy = () => query;
     query.limit = () => query;
-    query.for = () => query;
+    query.for = () => { if (table === appSettings) state.scheduleLocks += 1; return query; };
     query.then = (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) =>
       Promise.resolve(rowsFor(table)).then(resolve, reject);
     query.catch = (reject: (reason: unknown) => unknown) => Promise.resolve(rowsFor(table)).catch(reject);
@@ -195,6 +201,31 @@ describe("operator daily-plan optimistic concurrency", () => {
     mocks.getAllCardStates.mockResolvedValue([]);
     mocks.getAllPriorityScores.mockResolvedValue([]);
     mocks.getOpenStepsForCards.mockResolvedValue([]);
+  });
+
+  it("uses the canonical personal schedule for generation and locks it during persistence", async () => {
+    const { db, state } = makeDatabase(emptyPlan("original"));
+    const schedule = { startTime: "10:00", endTime: "16:00", breaks: [] };
+    state.scheduleValue = JSON.stringify(schedule);
+    mocks.getDb.mockResolvedValue(db);
+    const generated = await generateOperatorDailyPlan(VA_ID, DATE_KEY, true);
+    expect(generated?.schedule.constraints).toEqual(schedule);
+    expect(state.scheduleLocks).toBe(1);
+  });
+
+  it.each([
+    { key: "daily_schedule", owner: VA_ID },
+    { key: "daily_schedule", owner: 99 },
+    { key: `daily_schedule:${VA_ID}`, owner: 99 },
+    { key: `daily_schedule:${VA_ID}`, owner: null },
+  ])("refuses unverified schedule $key owner $owner before writing a plan", async ({ key, owner }) => {
+    const { db, state } = makeDatabase(emptyPlan("original"));
+    state.scheduleKey = key; state.scheduleOwner = owner;
+    state.scheduleValue = JSON.stringify({ startTime: "10:00", endTime: "16:00", breaks: [] });
+    mocks.getDb.mockResolvedValue(db);
+    await expect(generateOperatorDailyPlan(VA_ID, DATE_KEY, true)).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+    expect(state.plan!.scheduleJson).toContain('"detail":"original"');
+    expect(state.scheduleLocks).toBe(0);
   });
 
   it("rejects a second session's stale save and preserves the newer plan", async () => {
@@ -360,6 +391,21 @@ describe("operator daily-plan optimistic concurrency", () => {
       name: "OperatorDailyPlanConflictError",
       message: expect.stringMatching(/working schedule changed/i),
     });
+    expect(state.plan!.scheduleJson).toContain('"detail":"original"');
+  });
+
+  it("fences the consumed canonical schedule if ownership changes before persistence", async () => {
+    const { db, state } = makeDatabase(emptyPlan("original"));
+    state.scheduleValue = JSON.stringify({ startTime: "09:00", endTime: "18:00", breaks: [] });
+    mocks.getDb.mockResolvedValue(db);
+    let finish!: (states: never[]) => void;
+    mocks.getAllCardStates.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    const pending = generateOperatorDailyPlan(VA_ID, DATE_KEY, true);
+    await vi.waitFor(() => expect(state.scheduleReads).toBe(1));
+    state.scheduleOwner = 99;
+    finish([]);
+    await expect(pending).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+    expect(state.scheduleLocks).toBe(1);
     expect(state.plan!.scheduleJson).toContain('"detail":"original"');
   });
 

@@ -1,9 +1,7 @@
-import { router, protectedProcedure } from '../_core/trpc';
+import { router, protectedProcedure, operatorAccountProcedure } from '../_core/trpc';
 import { z } from 'zod';
 import * as settingsDb from '../db/settings';
-import { getDb } from '../db';
-import { appSettings } from '../../drizzle/schema.postgres';
-import { eq, and } from 'drizzle-orm';
+import { readPersonalSetting, writePersonalSetting } from '../personalAppSettings';
 import { TRPCError } from '@trpc/server';
 import { normalizeDailySchedule } from '../dailySchedule';
 
@@ -55,32 +53,15 @@ const performanceMetricsSchema = z.object({
 });
 
 export const settingsRouter = router({
-  getReplyMonitorBadge: protectedProcedure.query(async ({ ctx }) => {
-    const vaId = Number(ctx.user.id);
-    const db = await getDb();
-    if (!db) return { enabled: true };
-    const rows = await db.select().from(appSettings)
-      .where(and(eq(appSettings.vaId, vaId), eq(appSettings.key, "reply_monitor_badge_enabled")))
-      .limit(1);
-    const val = rows[0]?.value;
-    return { enabled: val === undefined ? true : val === "true" };
+  getReplyMonitorBadge: operatorAccountProcedure.query(async ({ ctx }) => {
+    const value = await readPersonalSetting(ctx.user.id, "reply_monitor_badge_enabled");
+    return { enabled: value === null ? true : value === "true" };
   }),
 
-  setReplyMonitorBadge: protectedProcedure
+  setReplyMonitorBadge: operatorAccountProcedure
     .input(z.object({ enabled: z.boolean() }))
     .mutation(async ({ ctx, input }) => {
-      const vaId = Number(ctx.user.id);
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database not available" });
-      const value = String(input.enabled);
-      await db.insert(appSettings).values({
-        vaId,
-        key: "reply_monitor_badge_enabled",
-        value,
-      }).onConflictDoUpdate({
-        target: appSettings.key,
-        set: { value }
-      });
+      await writePersonalSetting(ctx.user.id, "reply_monitor_badge_enabled", String(input.enabled));
       return { success: true, enabled: input.enabled };
     }),
 
@@ -364,37 +345,19 @@ export const settingsRouter = router({
       }
     }),
 
-  getDailyGoal: protectedProcedure.query(async ({ ctx }) => {
-    const vaId = Number(ctx.user.id);
-    const db = await getDb();
-    if (!db) return { hours: 9 };
-
-    const rows = await db.select().from(appSettings)
-      .where(and(eq(appSettings.vaId, vaId), eq(appSettings.key, "daily_hour_goal")))
-      .limit(1);
-    const parsed = Number(rows[0]?.value);
+  getDailyGoal: operatorAccountProcedure.query(async ({ ctx }) => {
+    const parsed = Number(await readPersonalSetting(ctx.user.id, "daily_hour_goal"));
     return { hours: Number.isFinite(parsed) && parsed > 0 ? parsed : 9 };
   }),
 
-  setDailyGoal: protectedProcedure
+  setDailyGoal: operatorAccountProcedure
     .input(z.object({ hours: z.number().min(1).max(16) }))
     .mutation(async ({ ctx, input }) => {
-      const vaId = Number(ctx.user.id);
-      const db = await getDb();
-      if (!db) {
-        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database not available" });
-      }
-
-      const value = String(input.hours);
-      await db.insert(appSettings).values({
-        vaId,
-        key: "daily_hour_goal",
-        value,
-      }).onConflictDoUpdate({ target: appSettings.key, set: { value } });
+      await writePersonalSetting(ctx.user.id, "daily_hour_goal", String(input.hours));
       return { hours: input.hours };
     }),
 
-  getSchedule: protectedProcedure.query(async ({ ctx }) => {
+  getSchedule: operatorAccountProcedure.query(async ({ ctx }) => {
     const defaultSchedule = {
       startTime: "08:00",
       endTime: "23:00",
@@ -406,17 +369,11 @@ export const settingsRouter = router({
       typingPractice: true,
       typingPracticeMinutes: 30,
     };
-    const vaId = Number(ctx.user.id);
-    const db = await getDb();
-    if (!db) return defaultSchedule;
-
-    const rows = await db.select().from(appSettings)
-      .where(and(eq(appSettings.vaId, vaId), eq(appSettings.key, "daily_schedule")))
-      .limit(1);
-    if (!rows[0]?.value) return defaultSchedule;
+    const value = await readPersonalSetting(ctx.user.id, "daily_schedule");
+    if (!value) return defaultSchedule;
 
     try {
-      const savedSchedule = { ...defaultSchedule, ...JSON.parse(rows[0].value) };
+      const savedSchedule = { ...defaultSchedule, ...JSON.parse(value) };
       const normalized = normalizeDailySchedule(savedSchedule);
       return normalized.ok ? normalized.value : defaultSchedule;
     } catch {
@@ -424,7 +381,7 @@ export const settingsRouter = router({
     }
   }),
 
-  setSchedule: protectedProcedure
+  setSchedule: operatorAccountProcedure
     .input(z.object({
       startTime: z.string().regex(/^\d{2}:\d{2}$/),
       endTime: z.string().regex(/^\d{2}:\d{2}$/),
@@ -438,22 +395,11 @@ export const settingsRouter = router({
       typingPracticeMinutes: z.number().int().min(0).max(180).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      const vaId = Number(ctx.user.id);
-      const db = await getDb();
-      if (!db) {
-        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database not available" });
-      }
-
       const normalized = normalizeDailySchedule(input);
       if (!normalized.ok) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: normalized.error });
       }
-      const value = JSON.stringify(normalized.value);
-      await db.insert(appSettings).values({
-        vaId,
-        key: "daily_schedule",
-        value,
-      }).onConflictDoUpdate({ target: appSettings.key, set: { value } });
+      await writePersonalSetting(ctx.user.id, "daily_schedule", JSON.stringify(normalized.value));
       return normalized.value;
     }),
 });

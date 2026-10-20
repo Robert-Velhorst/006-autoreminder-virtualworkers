@@ -3,9 +3,17 @@
 ## Architecture
 
 The application is one persistent Node service with a React client, Express
-and tRPC APIs, MySQL, Redis, Socket.IO, scheduled jobs, and an optional ngrok
-edge. The developer platform through migration `0027` remains canonical.
-Worker-operator capabilities are additive migrations and route namespaces.
+and tRPC APIs, PostgreSQL, Socket.IO, and database-leased scheduled jobs.
+Redis is optional and external. Compose runs one application container; the
+shared PostgreSQL service must be provisioned separately with a dedicated
+application database and least-privilege role. Hetzner is the intended deployment
+target behind a stable HTTPS reverse proxy. The retired hosting/tunnel setup is
+not a production dependency.
+
+`drizzle/schema.postgres.ts` and `drizzle-postgres-v1` define the current
+database contract. Historical MySQL migrations and operator-only transfer tools
+are not an alternative runtime backend. Worker-operator capabilities share the
+canonical identity, evidence, planning and scheduled-job records.
 
 ## Correctness Improvements
 
@@ -26,8 +34,57 @@ Worker-operator capabilities are additive migrations and route namespaces.
   fabricating unsupported per-task detail.
 - Corrected batch pause targeting so a queue-row control always affects the
   selected running operation rather than an unrelated primary job.
-- Repaired migration/schema parity and rehearsed migrations against MySQL.
+- Repaired PostgreSQL migration/schema parity; an isolated migrated PostgreSQL
+  18.6 fixture has exactly 136 expected tables, with no missing or extra columns.
 - Added one-time owner access recovery without enabling public registration.
+- Made administrator ATIS sync/analysis asynchronous: durable operation IDs,
+  bounded status polling, explicit interruption recovery, request deduplication,
+  and ownership-fenced writes. Ordinary HTTP timeouts remain bounded.
+
+## Verification Boundary
+
+PR [#99](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/99)
+merged as `77d4bf762893a735d9c2aa170b8e9bfe538c5b5f`. Its tree exactly matches
+the reviewed head `01222c24b3cdf358781a95fa058d2c8b78e3e243`, whose required CI
+and CodeQL checks passed. CI covered migrations, schema parity, tests, build,
+authentication and worker browser contracts, guarded database/browser checks,
+backup/restore, and production image build/runtime. Five additional intercepted
+Chromium cases exercise the administrator's asynchronous-operation UI; these are
+UI contract tests, not live provider tests.
+
+The local database-backed suite passed 3,775 tests with 22 skipped using two
+workers. An earlier unrestricted local run timed out in one cache performance
+test; no assertion or timeout was weakened. Green source checks do not establish
+that a production database, deployment, provider connection or worker trial has
+been accepted. Consult the actual GitHub checks for later commits rather than
+transferring this checkpoint's result to changed code.
+
+The subsequent exact-main run `39516188582` failed in the collector-transfer
+integration case: concurrent shared-fixture transactions produced a deadlock
+instead of the expected ownership collision. The follow-up test isolates that
+transfer in its own disposable database, applies the complete canonical
+migrations, and retains the collision, unchanged-owner, and successful-import
+assertions while another fixture transaction stays open. This repairs test
+isolation, not online-import safety; operational imports still require quiesced
+writers. The follow-up also binds ARES rule mutations to their owned
+configuration, isolates personal settings by worker, and enforces persisted
+recipient email consent for scheduled digests and briefings. These changes need
+their own exact-head checks before acceptance.
+
+Local follow-up acceptance under Node 26.12.0 and PostgreSQL 18.6 passed 3,840
+tests with 22 skipped and four workers, plus TypeScript and the staged secret
+scan. The isolated collector databases were confirmed removed before stopping
+the sole tmpfs PostgreSQL fixture. Hosted checks and live infrastructure remain
+separate acceptance requirements.
+
+Personal settings use worker-qualified keys with an ownership-conditional
+upsert. Historical unqualified keys could have had their value overwritten
+without changing the recorded owner, so a matching old owner field is not proof
+of provenance. Such rows are retained for review, not automatically copied into
+another worker's scope. When ownership is reported as unverified, inspect the
+retained record privately and explicitly save the intended personal setting
+through the authenticated settings page. Do not repair this by relabeling an old
+row's owner or weakening the ownership predicate.
 
 ## Resource Improvements
 
@@ -41,6 +98,12 @@ Worker-operator capabilities are additive migrations and route namespaces.
 
 ## External Activation Still Required
 
+- Confirm and prepare the Hetzner host, domain, private shared PostgreSQL service,
+  application role/database, TLS, backups and tested restore procedure. Production
+  SSH deployment secrets were not configured at this checkpoint.
+- Resolve the two historical credential alerts through verified rotation or
+  revocation. Removing credentials from the current tree does not revoke them;
+  the owner declined deletion of the existing shared database user.
 - The owner must choose the initial owner password with the one-time token.
 - Each replacement worker must accept their own invitation and connect their
   own Google/Trello identity where required.
@@ -49,5 +112,10 @@ Worker-operator capabilities are additive migrations and route namespaces.
 - Outbound Gmail delivery remains disabled until send-only OAuth is approved
   and notifications are enabled.
 - Webhook health depends on a stable public HTTPS callback and Trello approval.
+- Subscription-backed manager execution needs a verified private host transport;
+  the base application container does not by itself provide that connection.
+- Keep the manager in shadow mode until the documented worker-trial acceptance
+  criteria pass. Unit tests and CI are not substitutes for that trial.
 
 These are provider or owner consent boundaries, not simulated completion.
+Follow [Production Cutover](PRODUCTION_CUTOVER.md) for the live acceptance gate.
