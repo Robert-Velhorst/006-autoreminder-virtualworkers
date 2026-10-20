@@ -1,5 +1,18 @@
 import { createHash } from "node:crypto";
 
+export const TRANSFER_EXPORT_FORMAT = "joyce-operator-export-v2";
+const CREDENTIAL_REASON = "credential-setting-private-restoration-required";
+
+// These operational tables use users.id, not va_profiles.id. Historical mixed
+// profile-ID rows require a separately reviewed migration, not implicit remapping.
+const USER_SCOPED_TABLES = new Set([
+  "app_settings", "aptlss_plans", "aptlss_steps", "card_states", "priority_scores", "daily_plans",
+  "aptlss_audit_log", "daily_compliance_snapshots", "time_entries", "aptlss_assessments",
+  "aptlss_assessment_feedback", "aptlss_waiting_reasons", "decision_outcomes", "workspace_evidence_items",
+  "communication_evidence", "compliance_card_evidence", "compliance_communication_evidence",
+  "compliance_clarification_requests", "browser_tab_states", "browser_tab_daily_evidence",
+]);
+
 const SENSITIVE_SETTING_NAMES = new Set([
   "key",
   "token",
@@ -21,10 +34,23 @@ function containsSensitiveSettingName(key) {
   return words.some(word => SENSITIVE_SETTING_NAMES.has(word));
 }
 
+function credentialSetting(row) {
+  if (typeof row.key !== "string" || !row.key) throw new Error("Invalid setting key");
+  if (containsSensitiveSettingName(row.key) || /^googleEvidenceOAuthState(?::|$)/.test(row.key)) return true;
+  const embeddedCredential = value => value && typeof value === "object"
+    && Object.entries(value).some(([key, item]) => containsSensitiveSettingName(key) || embeddedCredential(item));
+  try { return Boolean(embeddedCredential(JSON.parse(row.value))); } catch { return false; }
+}
+
 export function redactSensitiveSettings(rows) {
-  return rows.map((row) => typeof row.key === "string" && containsSensitiveSettingName(row.key)
-    ? { ...row, value: null }
-    : row);
+  const result = { rows: [], credentialOmissions: [] };
+  for (const row of rows) {
+    if (credentialSetting(row)) {
+      result.credentialOmissions.push({ table: "app_settings", id: positiveId(row.id),
+        vaId: row.vaId === null ? null : positiveId(row.vaId), key: row.key, reason: CREDENTIAL_REASON });
+    } else result.rows.push({ ...row });
+  }
+  return result;
 }
 
 export function quoteIdentifier(value) {
@@ -39,8 +65,8 @@ function positiveId(value) {
   return Number(value);
 }
 
-export function transferIdentity(workerId, founderId) {
-  return { workerId: positiveId(workerId), founderId: positiveId(founderId) };
+export function transferIdentity(workerUserId, founderUserId, workerProfileId) {
+  return { workerUserId: positiveId(workerUserId), founderUserId: positiveId(founderUserId), workerProfileId: positiveId(workerProfileId) };
 }
 
 function fingerprint(value) {
@@ -50,7 +76,7 @@ function fingerprint(value) {
 
 export function sourceIdentity(row) {
   return {
-    ...transferIdentity(row.workerId, row.founderId),
+    ...transferIdentity(row.workerUserId, row.founderUserId, row.workerProfileId),
     workerPrincipal: fingerprint(row.workerOpenId),
     founderPrincipal: fingerprint(row.founderOpenId),
     trelloPrincipal: row.trelloMemberId == null ? null : fingerprint(row.trelloMemberId),
@@ -58,14 +84,38 @@ export function sourceIdentity(row) {
 }
 
 export function validateTransferPayload(payload, definitions, identity) {
-  transferIdentity(identity.workerId, identity.founderId);
-  if (payload.format !== "joyce-operator-export-v1" || !payload.tables || !payload.counts
+  transferIdentity(identity.workerUserId, identity.founderUserId, identity.workerProfileId);
+  if (payload.format !== TRANSFER_EXPORT_FORMAT || !payload.tables || !payload.counts
     || !Array.isArray(payload.skipped) || payload.skipped.length) throw new Error("Incomplete export or skipped source tables");
+  if (!Array.isArray(payload.credentialOmissions)) throw new Error("Missing credential omission manifest");
+  const settingKeys = new Set();
+  const settingIds = new Set();
+  for (const omission of payload.credentialOmissions) {
+    if (!omission || omission.table !== "app_settings" || omission.reason !== CREDENTIAL_REASON
+      || typeof omission.key !== "string" || !omission.key
+      || Object.keys(omission).sort().join(",") !== "id,key,reason,table,vaId"
+      || (omission.vaId !== null && positiveId(omission.vaId) !== identity.workerUserId)) {
+      throw new Error("Unrecognized credential omission or ownership");
+    }
+    const id = positiveId(omission.id);
+    if (settingIds.has(id) || settingKeys.has(omission.key)) throw new Error("Duplicate credential omission key/ID");
+    settingIds.add(id);
+    settingKeys.add(omission.key);
+  }
+  if (payload.credentialOmissions.length && !definitions.some(table => table.name === "app_settings")) throw new Error("Omissions require canonical app_settings");
+  for (const row of payload.tables.app_settings || []) {
+    if (credentialSetting(row)) throw new Error("Credential setting must be omitted, never exported as data");
+    const id = positiveId(row.id);
+    if (settingIds.has(id) || settingKeys.has(row.key)) throw new Error("Setting data/omission key or ID collision");
+    settingIds.add(id);
+    settingKeys.add(row.key);
+  }
   const names = new Set(definitions.map(table => table.name));
   if (Object.keys(payload.tables).some(name => !names.has(name))
     || Object.keys(payload.counts).some(name => !names.has(name))) throw new Error("Unsupported source tables");
   for (const { name } of definitions) {
-    if (!Array.isArray(payload.tables[name]) || payload.counts[name] !== payload.tables[name].length) {
+    const omitted = name === "app_settings" ? payload.credentialOmissions.length : 0;
+    if (!Array.isArray(payload.tables[name]) || payload.counts[name] !== payload.tables[name].length + omitted) {
       throw new Error(`Missing or inconsistent source rows/counts: ${name}`);
     }
   }
@@ -73,7 +123,8 @@ export function validateTransferPayload(payload, definitions, identity) {
   // Unscoped legacy tables make multi-worker exports unsafe to remap implicitly.
   const source = payload.identities?.[0];
   if (!Array.isArray(payload.identities) || payload.identities.length !== 1 || !source
-    || source.workerId !== identity.workerId || source.founderId !== identity.founderId
+    || source.workerUserId !== identity.workerUserId || source.founderUserId !== identity.founderUserId
+    || source.workerProfileId !== identity.workerProfileId
     || ![source.workerPrincipal, source.founderPrincipal].every(value => /^[a-f0-9]{64}$/.test(value))
     || !(source.trelloPrincipal === null || /^[a-f0-9]{64}$/.test(source.trelloPrincipal))) {
     throw new Error("Require a source-bound single-worker export and matching worker/founder IDs; re-export legacy data to a new private path");
@@ -84,8 +135,9 @@ export function validateTransferPayload(payload, definitions, identity) {
 export function validateTargetIdentity(source, targetRows, identity) {
   if (targetRows.length !== 1) throw new Error("Target worker/founder identity missing or ambiguous");
   const target = targetRows[0];
-  if (Number(target.workerId) !== identity.workerId || Number(target.founderId) !== identity.founderId
-    || target.founderRole !== "admin" || target.workerStatus !== "active"
+  if (Number(target.workerUserId) !== identity.workerUserId || Number(target.founderUserId) !== identity.founderUserId
+    || Number(target.workerProfileId) !== identity.workerProfileId
+    || target.workerRole !== "worker" || target.founderRole !== "admin" || target.workerStatus !== "active"
     || source.workerPrincipal !== fingerprint(target.workerOpenId)
     || source.founderPrincipal !== fingerprint(target.founderOpenId)
     || source.trelloPrincipal !== (target.trelloMemberId == null ? null : fingerprint(target.trelloMemberId))) {
@@ -136,8 +188,13 @@ export function prepareTransferRow(source, columns, identity, table) {
   if (!source || Array.isArray(source) || typeof source !== "object") throw new Error(`Invalid source row: ${table}`);
   const metadata = new Map(columns.map(column => [column.column_name, column]));
   if (Object.keys(source).some(key => !metadata.has(key))) throw new Error(`Unmapped source columns: ${table}`);
-  for (const [column, id] of [["vaId", identity.workerId], ["founderId", identity.founderId]]) {
-    if (metadata.has(column) && positiveId(source[column]) !== id) throw new Error(`Source ownership mismatch: ${table}.${column}`);
+  for (const [column, id] of [["vaId", identity.workerUserId], ["founderId", identity.founderUserId]]) {
+    if (!metadata.has(column)) continue;
+    if (column === "vaId") {
+      if (!USER_SCOPED_TABLES.has(table)) throw new Error(`Unreviewed vaId semantics: ${table}`);
+      if (table === "app_settings" && source.vaId === null && metadata.get(column).is_nullable === "YES") continue;
+    }
+    if (positiveId(source[column]) !== id) throw new Error(`Source ownership mismatch: ${table}.${column}`);
   }
   const row = { ...source };
   for (const column of columns) {
@@ -190,9 +247,16 @@ export async function advanceTransferSequences(connection, table, columns) {
   }
 }
 
-export async function transferOperatorRecords(connection, payload, definitions, { identity, execute = false, reconcile = false }) {
+export async function transferOperatorRecords(connection, payload, definitions, { identity, execute = false, reconcile = false, acknowledgeCredentialOmissions = false }) {
   const sourceIdentity = validateTransferPayload(payload, definitions, identity);
-  const report = { success: false, applied: false, mode: reconcile ? "reconcile" : execute ? "import" : "dry-run", identity, tables: {} };
+  if (execute && !reconcile && payload.credentialOmissions.length && !acknowledgeCredentialOmissions) {
+    throw new Error("Acknowledge credential omissions before data-only import; restore credentials separately in private");
+  }
+  const report = { success: false, applied: false, dataCheckPassed: false,
+    completion: payload.credentialOmissions.length ? "private-credential-restoration-required" : "complete",
+    credentialOmissions: structuredClone(payload.credentialOmissions),
+    credentialPolicy: acknowledgeCredentialOmissions ? "acknowledged-private-restoration" : "unacknowledged",
+    mode: reconcile ? "reconcile" : execute ? "import" : "dry-run", identity, tables: {} };
   await connection.query(execute && !reconcile ? "BEGIN" : "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
   try {
     await connection.query("SET LOCAL lock_timeout = '10s'");
@@ -202,11 +266,11 @@ export async function transferOperatorRecords(connection, payload, definitions, 
       await connection.query(`LOCK TABLE ${tables.map(quoteIdentifier).join(", ")} IN ACCESS EXCLUSIVE MODE`);
     }
     const target = await connection.query(`
-      SELECT p.id AS "workerId", p."founderId" AS "founderId", p.status AS "workerStatus",
+      SELECT p.id AS "workerProfileId", p."userId" AS "workerUserId", p."founderId" AS "founderUserId", p.status AS "workerStatus", u.role AS "workerRole",
              p."trelloMemberId" AS "trelloMemberId", u."openId" AS "workerOpenId",
              f."openId" AS "founderOpenId", f.role AS "founderRole"
       FROM va_profiles p JOIN users u ON u.id = p."userId" JOIN users f ON f.id = p."founderId"
-      WHERE p.id = $1 AND p."founderId" = $2`, [identity.workerId, identity.founderId]);
+      WHERE p."userId" = $1 AND p."founderId" = $2`, [identity.workerUserId, identity.founderUserId]);
     validateTargetIdentity(sourceIdentity, target.rows, identity);
     const sequences = [];
     for (const { name, keys } of definitions) {
@@ -217,7 +281,9 @@ export async function transferOperatorRecords(connection, payload, definitions, 
       if (!columns.length) throw new Error(`Target table missing: ${name}`);
       const seen = new Set();
       const ids = new Set();
-      const counts = report.tables[name] = { source: payload.tables[name].length, inserted: 0, identical: 0, wouldInsert: 0 };
+      const counts = report.tables[name] = { source: payload.counts[name],
+        credentialOmissions: name === "app_settings" ? payload.credentialOmissions.length : 0,
+        inserted: 0, identical: 0, wouldInsert: 0 };
       for (const source of payload.tables[name]) {
         const row = prepareTransferRow(source, columns, identity, name);
         if (!keys.every(key => row[key] != null)) throw new Error(`Source natural key missing: ${name}`);
@@ -248,11 +314,12 @@ export async function transferOperatorRecords(connection, payload, definitions, 
         }
       }
       // Also repair verified rows left by an earlier import with stale sequences.
-      if (execute && !reconcile && counts.source) sequences.push({ name, columns });
+      if (execute && !reconcile && payload.tables[name].length) sequences.push({ name, columns });
     }
     for (const { name, columns } of sequences) await advanceTransferSequences(connection, name, columns);
     await connection.query(execute && !reconcile ? "COMMIT" : "ROLLBACK");
-    report.success = true;
+    report.success = payload.credentialOmissions.length === 0;
+    report.dataCheckPassed = true;
     report.applied = execute && !reconcile;
     return report;
   } catch (error) {

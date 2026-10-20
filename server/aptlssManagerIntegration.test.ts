@@ -3305,70 +3305,83 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
   });
 
   it("keeps the data-transfer command from reassigning an existing browser collector", async () => {
+    const { TABLES } = await import("../scripts/operator-data-transfer.mjs");
+    const { TRANSFER_EXPORT_FORMAT, sourceIdentity, transferIdentity, transferOperatorRecords } = await import("../scripts/operator-data-transfer-utils.mjs");
     const otherWorker = await insertWorker();
     const collectorId = `browser-import-it-${randomUUID()}`;
     const initial = {
-      protocolVersion: 2 as const,
-      collectorId,
-      captureSequence: 1,
-      sourceCapturedAt: NOW.toISOString(),
-      collectorLabel: "Import integration browser",
+      protocolVersion: 2 as const, collectorId, captureSequence: 1,
+      sourceCapturedAt: NOW.toISOString(), collectorLabel: "Import integration browser",
       tabs: [{ id: "1", title: "example.test", url: "https://example.test/", pinned: false, active: true, windowId: 1 }],
     };
     const { ingestBrowserTabInventory } = await import("./browserTabHygiene");
     await ingestBrowserTabInventory(worker.id, initial, NOW);
     const [before] = await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId));
+    // Export v2 preserves database wall-clock strings, not host-timezone Date objects.
     const sourceRow = {
-      ...before,
-      vaId: otherWorker.id,
-      captureSequence: 2,
-      sourceCapturedAt: "2026-09-04T10:01:00.000Z",
+      ...Object.fromEntries(Object.entries(before).map(([key, value]) => [
+        key, value instanceof Date ? value.toISOString().replace("T", " ").replace("Z", "") : value,
+      ])),
+      vaId: otherWorker.id, captureSequence: 2, sourceCapturedAt: "2026-09-04 10:01:00.000",
     };
+    const [founder] = await db.select().from(schema.users).where(eq(schema.users.id, adminId));
+    const identityFor = async (owner: Worker) => {
+      const [profile] = await db.select().from(schema.vaProfiles).where(eq(schema.vaProfiles.id, owner.profileId));
+      return sourceIdentity({
+        workerUserId: owner.id, workerProfileId: owner.profileId, founderUserId: adminId,
+        workerOpenId: owner.openId, founderOpenId: founder.openId, trelloMemberId: profile.trelloMemberId,
+      });
+    };
+    const tables: Record<string, Record<string, unknown>[]> = Object.fromEntries(TABLES.map(({ name }: { name: string }) => [name, []]));
+    tables.browser_tab_states = [sourceRow];
     const payload = {
-      format: "joyce-operator-export-v1",
-      createdAt: NOW.toISOString(),
-      tables: { browser_tab_states: [sourceRow] },
-      skipped: [],
-      counts: { browser_tab_states: 1 },
+      format: TRANSFER_EXPORT_FORMAT, createdAt: NOW.toISOString(), tables, skipped: [], credentialOmissions: [],
+      identities: [await identityFor(otherWorker)],
+      counts: Object.fromEntries(TABLES.map(({ name }: { name: string }) => [name, name === "browser_tab_states" ? 1 : 0])),
     };
     const directory = await mkdtemp(path.join(os.tmpdir(), "aptlss-browser-import-"));
     try {
       const input = path.join(directory, "export.json");
-      await writeFile(input, JSON.stringify({ ...payload, digest: hash(JSON.stringify(payload)) }), "utf8");
-      const result = spawnSync(process.execPath, [
+      const save = () => writeFile(input, JSON.stringify({ ...payload, digest: hash(JSON.stringify(payload)) }), "utf8");
+      const invoke = (owner: Worker) => spawnSync(process.execPath, [
         path.resolve(import.meta.dirname, "../scripts/operator-data-transfer.mjs"),
-        "import", "--in", input, "--target", controls.url!,
-      ], {
-        cwd: path.resolve(import.meta.dirname, ".."),
-        encoding: "utf8",
-        env: { ...process.env, TARGET_DATABASE_URL: controls.url!, OPERATOR_IMPORT_WORKER_ID: String(worker.id) },
-        timeout: 20_000,
-      });
-      expect(result.error).toBeUndefined();
-      expect(result.status, result.stderr).toBe(0);
-      const report = JSON.parse(result.stdout);
-      expect(report.conflicts).toContainEqual({
-        table: "browser_tab_states",
-        collectorId,
-        reason: "collector belongs to a different worker",
-      });
-      const [after] = await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId));
-      expect(after).toEqual(before);
-
-      // Exercise the actual PostgreSQL write path after proving ownership refusal.
-      payload.tables.browser_tab_states = [{ ...sourceRow, vaId: worker.id }];
-      await writeFile(input, JSON.stringify({ ...payload, digest: hash(JSON.stringify(payload)) }), "utf8");
-      const accepted = spawnSync(process.execPath, [
-        path.resolve(import.meta.dirname, "../scripts/operator-data-transfer.mjs"),
-        "import", "--in", input, "--target", controls.url!,
+        "import", "--execute", "--in", input, "--target", controls.url!,
+        "--worker-user-id", String(owner.id), "--worker-profile-id", String(owner.profileId),
+        "--founder-user-id", String(adminId),
       ], { cwd: path.resolve(import.meta.dirname, ".."), encoding: "utf8", timeout: 20_000,
-        env: { ...process.env, TARGET_DATABASE_URL: controls.url!, OPERATOR_IMPORT_WORKER_ID: String(worker.id) } });
+        env: { ...process.env, NODE_ENV: "test" } });
+      await save();
+      // This valid, source-bound payload reaches the actual PostgreSQL collision
+      // check rather than failing on missing identity, tables or execution flags.
+      const client = await pool.connect();
+      try {
+        await expect(transferOperatorRecords(client, payload, TABLES, {
+          identity: transferIdentity(otherWorker.id, adminId, otherWorker.profileId), execute: true,
+        })).rejects.toThrow(/collision/);
+      } finally { client.release(); }
+      const result = invoke(otherWorker);
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toContain("No successful transfer or reconciliation is claimed");
+      expect((await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId)))[0]).toEqual(before);
+
+      // Recovery never overwrites a different snapshot. Prove acceptance by
+      // importing a new, correctly owned collector and preserving the first one.
+      const { rows: [next] } = await pool.query("SELECT nextval(pg_get_serial_sequence('browser_tab_states', 'id'))::int AS id");
+      const acceptedCollectorId = `browser-import-accepted-${randomUUID()}`;
+      payload.tables.browser_tab_states = [{ ...sourceRow, id: next.id, vaId: worker.id, collectorId: acceptedCollectorId }];
+      payload.identities = [await identityFor(worker)];
+      await save();
+      const accepted = invoke(worker);
       expect(accepted.error).toBeUndefined();
       expect(accepted.status, accepted.stderr).toBe(0);
-      expect(JSON.parse(accepted.stdout).insertedOrUpdated.browser_tab_states).toBe(1);
-      const [updated] = await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId));
-      expect(updated.vaId).toBe(worker.id);
-      expect(Number(updated.captureSequence)).toBe(2);
+      expect(JSON.parse(accepted.stdout)).toMatchObject({ success: true, applied: true,
+        tables: { browser_tab_states: { inserted: 1, credentialOmissions: 0 } } });
+      const [imported] = await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, acceptedCollectorId));
+      expect(imported.vaId).toBe(worker.id);
+      expect(Number(imported.captureSequence)).toBe(2);
+      expect(imported.sourceCapturedAt?.toISOString()).toBe("2026-09-04T10:01:00.000Z");
+      expect((await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId)))[0]).toEqual(before);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

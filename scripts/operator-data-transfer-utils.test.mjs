@@ -7,10 +7,10 @@ import {
 } from "./operator-data-transfer-utils.mjs";
 import { TABLES, exportOperatorData, parseTransferArguments, verifyExport } from "./operator-data-transfer.mjs";
 
-const identity = transferIdentity(3, 1);
+const identity = transferIdentity(2, 1, 3);
 const target = {
-  workerId: 3, founderId: 1, workerOpenId: "worker-fixture", founderOpenId: "founder-fixture",
-  trelloMemberId: "trello-fixture", founderRole: "admin", workerStatus: "active",
+  workerUserId: 2, workerProfileId: 3, founderUserId: 1, workerOpenId: "worker-fixture", founderOpenId: "founder-fixture",
+  trelloMemberId: "trello-fixture", workerRole: "worker", founderRole: "admin", workerStatus: "active",
 };
 const definitions = [{ name: "time_entries", keys: ["id"] }, { name: "card_states", keys: ["vaId", "cardId"] }];
 const column = (column_name, data_type = "integer", extra = {}) => ({
@@ -19,12 +19,13 @@ const column = (column_name, data_type = "integer", extra = {}) => ({
 const columns = {
   time_entries: [column("id", "integer", { is_identity: "YES" }), column("vaId"), column("founderId"), column("notes", "text")],
   card_states: [column("id", "integer", { is_identity: "YES" }), column("vaId"), column("cardId", "text"), column("state", "jsonb")],
+  app_settings: [column("id", "integer", { is_identity: "YES" }), column("vaId", "integer", { is_nullable: "YES" }), column("key", "character varying"), column("value", "text")],
 };
-const entry = { id: 8, vaId: 3, founderId: 1, notes: "synthetic source" };
-const card = { id: 9, vaId: 3, cardId: "card-fixture", state: { b: 2, a: 1 } };
+const entry = { id: 8, vaId: 2, founderId: 1, notes: "synthetic source" };
+const card = { id: 9, vaId: 2, cardId: "card-fixture", state: { b: 2, a: 1 } };
 function payload(tables = { time_entries: [entry], card_states: [] }) {
   return {
-    format: "joyce-operator-export-v1", identities: [sourceIdentity(target)], skipped: [], tables,
+    format: "joyce-operator-export-v2", credentialOmissions: [], identities: [sourceIdentity(target)], skipped: [], tables,
     counts: Object.fromEntries(Object.entries(tables).map(([name, rows]) => [name, rows.length])),
   };
 }
@@ -132,24 +133,19 @@ describe("redactSensitiveSettings", () => {
       { key: "dbPassword", value: "database-secret" },
       { key: "working_hours", value: "09:00-17:00" },
       { key: "keyboard_shortcuts", value: "Ctrl+K" },
-    ];
-
-    assert.deepEqual(redactSensitiveSettings(rows), [
-      { key: "ai_groq_key", value: null },
-      { key: "refresh_token", value: null },
-      { key: "browserTabCollectorToken", value: null },
-      { key: "openaiKey", value: null },
-      { key: "oauth-client-secret", value: null },
-      { key: "dbPassword", value: null },
-      { key: "working_hours", value: "09:00-17:00" },
-      { key: "keyboard_shortcuts", value: "Ctrl+K" },
-    ]);
+    ].map((row, index) => ({ id: index + 1, vaId: null, ...row }));
+    const result = redactSensitiveSettings(rows);
+    assert.deepEqual(result.rows, rows.slice(6));
+    assert.equal(result.credentialOmissions.length, 6);
+    assert.deepEqual(result.credentialOmissions.map(row => row.key), rows.slice(0, 6).map(row => row.key));
+    assert.ok(result.credentialOmissions.every(row => !Object.hasOwn(row, "value") && row.vaId === null));
+    assert.equal(JSON.stringify(result).includes("provider-secret"), false);
     assert.equal(rows[0].value, "provider-secret");
   });
 });
 
 describe("operator transfer CLI and source validation", () => {
-  const args = ["import", "--worker-id", "3", "--founder-id", "1"];
+  const args = ["import", "--worker-user-id", "2", "--founder-user-id", "1", "--worker-profile-id", "3"];
   it("defaults to dry-run and requires explicit, unambiguous execution", () => {
     assert.equal(parseTransferArguments(args).execute, false);
     assert.equal(parseTransferArguments([...args, "--dry-run"]).execute, false);
@@ -161,12 +157,10 @@ describe("operator transfer CLI and source validation", () => {
   });
   it("requires positive safe worker and founder IDs for both import and reconcile", () => {
     for (const id of [undefined, "", "0", "-1", "3.1", "3x", "9007199254740992"]) {
-      assert.throws(() => transferIdentity(id, 1));
-      assert.throws(() => transferIdentity(3, id));
+      assert.throws(() => transferIdentity(id, 1, 3));
+      assert.throws(() => transferIdentity(2, id, 3));
     }
-    assert.deepEqual(parseTransferArguments(["reconcile"], {
-      OPERATOR_IMPORT_WORKER_ID: "3", OPERATOR_IMPORT_FOUNDER_ID: "1",
-    }).identity, identity);
+    assert.deepEqual(parseTransferArguments(["reconcile", ...args.slice(1)]).identity, identity);
   });
   it("rejects skipped, omitted, unknown, count-mismatched and identity-unbound exports before any query", async () => {
     const incomplete = [];
@@ -175,8 +169,8 @@ describe("operator transfer CLI and source validation", () => {
     p = payload(); p.counts.time_entries = 2; incomplete.push(p);
     p = payload(); p.tables.unknown = []; incomplete.push(p);
     p = payload(); delete p.identities; incomplete.push(p);
-    p = payload(); p.identities.push(sourceIdentity({ ...target, workerId: 4 })); incomplete.push(p);
-    p = payload(); p.identities[0].founderId = 99; incomplete.push(p);
+    p = payload(); p.identities.push(sourceIdentity({ ...target, workerUserId: 4 })); incomplete.push(p);
+    p = payload(); p.identities[0].founderUserId = 99; incomplete.push(p);
     for (const value of incomplete) {
       const db = database();
       await assert.rejects(transferOperatorRecords(db, value, definitions, { identity, execute: true }));
@@ -194,7 +188,7 @@ describe("operator transfer CLI and source validation", () => {
     assert.throws(() => verifyExport(p), /digest/);
   });
   it("rejects missing and different source owners rather than filling or retaining IDs", () => {
-    for (const row of [{ ...entry, vaId: 4 }, { ...entry, founderId: 2 }, { ...entry, vaId: null }, { ...entry, founderId: undefined }]) {
+    for (const row of [{ ...entry, vaId: 3 }, { ...entry, vaId: 4 }, { ...entry, founderId: 2 }, { ...entry, vaId: null }, { ...entry, founderId: undefined }]) {
       assert.throws(() => prepareTransferRow(row, columns.time_entries, identity, "time_entries"));
     }
     assert.deepEqual(prepareTransferRow(entry, columns.time_entries, identity, "time_entries"), entry);
@@ -217,6 +211,69 @@ describe("exact content comparison", () => {
     assert.equal(sameTransferRecord(card, { ...card, state: '{"a":1,"b":2}' }, columns.card_states), true);
     assert.equal(sameTransferRecord(card, { ...card, state: '{"a":1,"b":3}' }, columns.card_states), false);
     assert.equal(sameTransferRecord(entry, { ...entry, notes: "different" }, columns.time_entries), false);
+  });
+});
+
+describe("canonical global settings and explicit credential restoration", () => {
+  const settingsDefinitions = [{ name: "app_settings", keys: ["key"] }];
+  const global = { id: 7, vaId: null, key: "working_hours", value: "09:00-17:00" };
+  const secret = { id: 8, vaId: 2, key: "refresh_token", value: "synthetic-source-secret" };
+  const settingsPayload = () => {
+    const redacted = redactSensitiveSettings([global, secret]);
+    const value = payload({ app_settings: redacted.rows });
+    value.counts.app_settings = 2;
+    value.credentialOmissions = redacted.credentialOmissions;
+    return value;
+  };
+  const fixture = () => database({ tables: { app_settings: [{ ...secret, value: "synthetic-target-secret" }] },
+    sequences: { app_settings: { last: "1", called: false } } });
+
+  it("uses users.id=2, not profile.id=3, and permits explicit NULL scope only for canonical app_settings", () => {
+    assert.deepEqual(identity, { workerUserId: 2, founderUserId: 1, workerProfileId: 3 });
+    assert.deepEqual(sourceIdentity(target), { ...identity, workerPrincipal: sourceIdentity(target).workerPrincipal,
+      founderPrincipal: sourceIdentity(target).founderPrincipal, trelloPrincipal: sourceIdentity(target).trelloPrincipal });
+    assert.deepEqual(prepareTransferRow(global, columns.app_settings, identity, "app_settings"), global);
+    assert.throws(() => prepareTransferRow({ ...entry, vaId: null }, columns.time_entries.map(item => ({ ...item, is_nullable: "YES" })), identity, "time_entries"));
+    assert.throws(() => prepareTransferRow({ ...entry, vaId: 3 }, columns.time_entries, identity, "time_entries"));
+    assert.throws(() => prepareTransferRow({ ...global, vaId: 2 }, columns.app_settings, identity, "unreviewed_table"), /Unreviewed/);
+    assert.throws(() => prepareTransferRow({ ...global, vaId: undefined }, columns.app_settings, identity, "app_settings"));
+    assert.throws(() => prepareTransferRow({ ...global, value: null }, columns.app_settings, identity, "app_settings"), /Null required/);
+  });
+
+  it("allows data-only import with acknowledgement but never overwrites secrets or claims migration completion", async () => {
+    const value = settingsPayload();
+    const db = fixture();
+    await assert.rejects(transferOperatorRecords(db, value, settingsDefinitions, { identity, execute: true }), /Acknowledge/);
+    assert.equal(db.queries.length, 0);
+    const report = await transferOperatorRecords(db, value, settingsDefinitions, { identity, execute: true, acknowledgeCredentialOmissions: true });
+    assert.equal(report.success, false);
+    assert.equal(report.applied, true);
+    assert.equal(report.dataCheckPassed, true);
+    assert.equal(report.completion, "private-credential-restoration-required");
+    assert.deepEqual(report.tables.app_settings, { source: 2, credentialOmissions: 1, inserted: 1, identical: 0, wouldInsert: 0 });
+    assert.deepEqual(db.state.tables.app_settings, [{ ...secret, value: "synthetic-target-secret" }, global]);
+    assert.equal(JSON.stringify(value).includes(secret.value), false);
+    const reconciled = await transferOperatorRecords(db, value, settingsDefinitions, { identity, reconcile: true, acknowledgeCredentialOmissions: true });
+    assert.equal(reconciled.success, false);
+    assert.equal(reconciled.tables.app_settings.identical, 1);
+    assert.equal(reconciled.credentialOmissions.length, 1);
+    assert.equal(parseTransferArguments(["import", "--worker-user-id", "2", "--founder-user-id", "1", "--worker-profile-id", "3", "--acknowledge-credential-omissions"]).acknowledgeCredentialOmissions, true);
+  });
+
+  it("accounts for every omission and rejects hidden credentials, unknown reasons, altered scopes and manifest collisions", () => {
+    const invalid = [];
+    let p = settingsPayload(); p.credentialOmissions[0].value = "must-not-be-here"; invalid.push(p);
+    p = settingsPayload(); p.credentialOmissions[0].reason = "unknown"; invalid.push(p);
+    p = settingsPayload(); p.credentialOmissions[0].vaId = 3; invalid.push(p);
+    p = settingsPayload(); p.credentialOmissions[0].table = "time_entries"; invalid.push(p);
+    p = settingsPayload(); p.credentialOmissions[0].id = global.id; invalid.push(p);
+    p = settingsPayload(); p.counts.app_settings = 1; invalid.push(p);
+    p = settingsPayload(); p.tables.app_settings.push({ ...secret, value: null }); invalid.push(p);
+    for (const value of invalid) assert.throws(() => validateTransferPayload(value, settingsDefinitions, identity));
+    const nested = redactSensitiveSettings([{ ...global, key: "integration_config", value: JSON.stringify({ nested: { apiKey: "hidden-fixture-secret" } }) }]);
+    assert.equal(nested.rows.length, 0);
+    assert.equal(nested.credentialOmissions.length, 1);
+    assert.equal(JSON.stringify(nested).includes("hidden-fixture-secret"), false);
   });
 });
 
@@ -280,7 +337,7 @@ describe("operator import/reconciliation transactions", () => {
     }
   });
   it("rolls back earlier inserts when any later source ownership, key or schema is invalid", async () => {
-    for (const second of [{ ...entry, id: 10, vaId: 99 }, { ...entry }, { vaId: 3, founderId: 1, notes: "missing id" }]) {
+    for (const second of [{ ...entry, id: 10, vaId: 99 }, { ...entry }, { vaId: 2, founderId: 1, notes: "missing id" }]) {
       const db = database();
       await assert.rejects(transferOperatorRecords(db, payload({ time_entries: [entry, second], card_states: [] }), definitions, { identity, execute: true }));
       assert.deepEqual(db.state.tables.time_entries, []);

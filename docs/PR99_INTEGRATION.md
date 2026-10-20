@@ -22,4 +22,14 @@ Verification boundaries:
 
 The production environment has the owner's requested self-approval and administrator-bypass settings. No Hetzner SSH deployment secrets are configured. The target host, domain and app-specific database still need authoritative verification. No production deployment or stable-release acceptance is claimed.
 
+### Full Local PostgreSQL Follow-Up
+
+After independent review, transfer v2 was corrected to distinguish user IDs from profile IDs and to preserve global settings. Credentials now have an explicit omission manifest and require separate private restoration; acknowledged data-only imports do not report complete success. The one-time owner bootstrap only issues a session after winning the conditional password update.
+
+The final local full run on Node 26.12.0 / PostgreSQL 18.6 passed **3,654 tests in 327 files**, with **22 explicitly skipped tests in three files**, in 101.77 seconds. All canonical migrations applied; parity was exact for 136 tables with no missing/extra columns. The focused transfer utility run passed another 23 tests. The earlier 80-browser contract run remains valid only for the UI contract scope, not live providers. The temporary database used synthetic fixtures and memory-backed storage, never an operator database.
+
+The original 17 obsolete local branch heads are now local archive tags; their entire histories were first verified reachable from remote archives/main/candidate refs. Old worktrees remain detached at the same exact commits, preserving files and private configuration. The current common checkout retains only local main and the consolidation workbranch until required exact-head checks allow the PR merge. Other independent clones remain separate and must not be silently overwritten.
+
+These receipts do not establish real legacy-data reconciliation, restored credentials, target-host acceptance or the required five-working-day/100-reviewed-proposal shadow trial. Keep automatic planning in shadow mode until its separate acceptance criteria are met.
+
 Hosted PostgreSQL 18.6 has applied the appended migration chain and passed complete runtime table/column parity. A first real database test run passed 3,467 assertions and exposed remaining fixture/transfer compatibility issues; those corrections are committed for a fresh run. Final database, browser, source-attestation and container gates remain required before merge. The dependency audit reports no known vulnerabilities after the selector-parser patch.

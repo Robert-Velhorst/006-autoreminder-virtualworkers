@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  redactSensitiveSettings, sourceIdentity, transferIdentity, transferOperatorRecords,
+  TRANSFER_EXPORT_FORMAT, redactSensitiveSettings, sourceIdentity, transferIdentity, transferOperatorRecords,
 } from "./operator-data-transfer-utils.mjs";
 
 export const TABLES = [
@@ -40,14 +40,16 @@ export function parseTransferArguments(argv, env = {}) {
   if (!["export", "import", "reconcile"].includes(command)) {
     throw new Error("Usage: operator-data-transfer.mjs <export|import|reconcile> [options]");
   }
-  const options = { command, execute: false, dryRun: false };
-  const names = command === "export" ? ["--source", "--out"] : ["--target", "--in", "--worker-id", "--founder-id"];
+  const options = { command, execute: false, dryRun: false, acknowledgeCredentialOmissions: false };
+  const names = command === "export" ? ["--source", "--out"] : ["--target", "--in", "--worker-user-id", "--founder-user-id", "--worker-profile-id"];
   const seen = new Set();
   for (let index = 1; index < argv.length; index++) {
     const flag = argv[index];
     if (seen.has(flag)) throw new Error("Duplicate transfer option");
     seen.add(flag);
-    if (command === "import" && ["--execute", "--dry-run"].includes(flag)) {
+    if (command !== "export" && flag === "--acknowledge-credential-omissions") {
+      options.acknowledgeCredentialOmissions = true;
+    } else if (command === "import" && ["--execute", "--dry-run"].includes(flag)) {
       options[flag === "--execute" ? "execute" : "dryRun"] = true;
     } else {
       if (!names.includes(flag) || !argv[index + 1] || argv[index + 1].startsWith("--")) {
@@ -61,8 +63,7 @@ export function parseTransferArguments(argv, env = {}) {
   options.target ??= env.TARGET_DATABASE_URL;
   if (command !== "export") {
     options.identity = transferIdentity(
-      options["worker-id"] ?? env.OPERATOR_IMPORT_WORKER_ID,
-      options["founder-id"] ?? env.OPERATOR_IMPORT_FOUNDER_ID,
+      options["worker-user-id"], options["founder-user-id"], options["worker-profile-id"],
     );
   }
   return options;
@@ -73,7 +74,7 @@ function digest(value) {
 }
 
 export function verifyExport(payload) {
-  if (payload.format !== "joyce-operator-export-v1") throw new Error("Unsupported export format");
+  if (payload.format !== TRANSFER_EXPORT_FORMAT) throw new Error("Unsupported export format; re-export with explicit user/profile identities");
   const { digest: supplied, ...contents } = payload;
   if (typeof supplied !== "string" || supplied !== digest(contents)) throw new Error("Export digest verification failed");
   return payload;
@@ -104,6 +105,8 @@ export async function exportOperatorData(connection, output, files = { mkdir, wr
   try {
     const datasets = {};
     const skipped = [];
+    const counts = {};
+    let credentialOmissions = [];
     for (const table of TABLES) {
       const [exists] = await connection.query(
         "SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?", [table.name]);
@@ -112,23 +115,29 @@ export async function exportOperatorData(connection, output, files = { mkdir, wr
         continue;
       }
       const [rows] = await connection.query("SELECT * FROM \x60" + table.name + "\x60");
-      datasets[table.name] = table.name === "app_settings" ? redactSensitiveSettings(rows) : rows;
+      counts[table.name] = rows.length;
+      if (table.name === "app_settings") {
+        const redacted = redactSensitiveSettings(rows);
+        datasets[table.name] = redacted.rows;
+        credentialOmissions = redacted.credentialOmissions;
+      } else datasets[table.name] = rows;
     }
     const [profiles] = await connection.query(
-      "SELECT p.id AS workerId, p.founderId AS founderId, p.trelloMemberId AS trelloMemberId, "
+      "SELECT p.id AS workerProfileId, p.userId AS workerUserId, p.founderId AS founderUserId, p.trelloMemberId AS trelloMemberId, "
       + "u.openId AS workerOpenId, f.openId AS founderOpenId "
       + "FROM va_profiles p LEFT JOIN users u ON u.id = p.userId LEFT JOIN users f ON f.id = p.founderId");
     const payload = {
-      format: "joyce-operator-export-v1", createdAt: new Date().toISOString(), tables: datasets, skipped,
-      identities: profiles.map(sourceIdentity),
-      counts: Object.fromEntries(Object.entries(datasets).map(([name, rows]) => [name, rows.length])),
+      format: TRANSFER_EXPORT_FORMAT, createdAt: new Date().toISOString(), tables: datasets, skipped,
+      identities: profiles.map(sourceIdentity), counts, credentialOmissions,
     };
     payload.digest = digest(payload);
     await connection.query("COMMIT");
     await files.mkdir(path.dirname(output), { recursive: true });
     // Never replace a retained source export or backup.
     await files.writeFile(output, JSON.stringify(payload, null, 2) + "\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
-    return { success: skipped.length === 0, output, counts: payload.counts, skipped };
+    return { success: skipped.length === 0 && credentialOmissions.length === 0, exportWritten: true,
+      completion: credentialOmissions.length ? "private-credential-restoration-required" : skipped.length ? "incomplete" : "complete",
+      output, counts: payload.counts, skipped, credentialOmissions };
   } catch (error) {
     await connection.query("ROLLBACK");
     throw error;
@@ -158,8 +167,10 @@ async function run(options) {
   try {
     const report = await transferOperatorRecords(connection, payload, TABLES, {
       identity: options.identity, execute: options.execute, reconcile: options.command === "reconcile",
+      acknowledgeCredentialOmissions: options.acknowledgeCredentialOmissions,
     });
     console.log(JSON.stringify({ input, ...report }, null, 2));
+    if (!report.success) process.exitCode = 2;
   } finally {
     await connection.end();
   }
