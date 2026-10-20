@@ -17,3 +17,7 @@ If a credential is committed, assume it is compromised even after removing it fr
 ## Deployment security
 
 Deployments should use HTTPS, least-privilege provider credentials, private database/cache networks, restricted administrative accounts, backups, and the current supported container image. Never publish `.env` files, database dumps, tokens, or runtime state as package assets.
+
+## Response and disclosure
+
+Reports are reviewed on a best-effort basis. No response or remediation timeframe is guaranteed. Coordinate any public disclosure with the maintainers so users have a reasonable opportunity to receive a fix.
