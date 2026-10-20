@@ -29,6 +29,16 @@ function operationalError(error: unknown): never {
 }
 
 const clock = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+const timezone = z.string().trim().min(1).max(64).refine(value => {
+  // Intl also accepts numeric offsets; reminder policies require named zones.
+  if (value.startsWith("+") || value.startsWith("-")) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}, { message: "Timezone must be a valid IANA time zone" });
 
 export const reminderRouter = router({
   dashboard: reminderProcedure.query(async ({ ctx }) => {
@@ -73,7 +83,7 @@ export const reminderRouter = router({
     minIntervalMinutes: z.number().int().min(0).max(10_080),
     quietHoursStart: clock,
     quietHoursEnd: clock,
-    timezone: z.string().trim().min(1).max(64),
+    timezone,
     allowWeekends: z.boolean(),
   })).mutation(async ({ ctx, input }) => {
     try {
