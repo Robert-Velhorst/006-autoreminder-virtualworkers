@@ -747,8 +747,24 @@ function CardInspector({
   onRefresh: () => Promise<void>;
   refreshing: boolean;
 }) {
+  const utils = trpc.useUtils();
   const [preferredWidth, setPreferredWidth] = useState(INSPECTOR_DEFAULT_WIDTH);
   const [viewportWidth, setViewportWidth] = useState(() => typeof window === "undefined" ? 1_280 : window.innerWidth);
+  const [rawEvidenceOpen, setRawEvidenceOpen] = useState(false);
+  const [assertion, setAssertion] = useState("");
+  const cardEvidence = trpc.operator.getCardEvidence.useQuery(
+    { cardId: card?.cardId ?? "", limit: 30 },
+    { enabled: Boolean(card), staleTime: 60_000 },
+  );
+  const recordAssertion = trpc.operator.recordEvidenceAssertion.useMutation({
+    onSuccess: () => {
+      setAssertion("");
+      void utils.operator.getCardEvidence.invalidate();
+      void utils.operator.getWorkQueueContext.invalidate();
+      toast.success("Evidence note recorded");
+    },
+    onError: (error) => toast.error(error.message),
+  });
   const resizeState = useRef<{ startX: number; startWidth: number; nextWidth: number } | null>(null);
 
   useEffect(() => {
@@ -915,6 +931,18 @@ function CardInspector({
               <ManagerVerificationFollowups key={card.cardId} cardId={card.cardId} />
 
               <section>
+                <Collapsible open={rawEvidenceOpen} onOpenChange={setRawEvidenceOpen}>
+                  <CollapsibleTrigger className="flex w-full items-center justify-between rounded-md border p-3 text-left hover:bg-accent/30">
+                    <span><span className="block text-sm font-semibold">Linked source details</span><span className="block text-xs text-muted-foreground">Open only when you need the retained message or document.</span></span>{rawEvidenceOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="space-y-3 border-x border-b p-3">
+                    {cardEvidence.isLoading ? <QueueSkeleton /> : cardEvidence.isError ? <p role="alert" className="text-sm text-muted-foreground">Linked source details could not be loaded. Try again later.</p> : cardEvidence.data?.length ? cardEvidence.data.map((item) => <div key={item.id} className="rounded-md border p-3"><div className="flex items-start justify-between gap-3"><span className="text-sm font-medium">{item.title}</span><Badge variant="outline">{item.source}</Badge></div>{item.content && <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-muted/40 p-3 text-xs leading-relaxed">{item.content}</pre>}{item.sourceUrl && <a className="mt-2 inline-flex items-center gap-1 text-xs text-blue-600 hover:underline dark:text-blue-300" href={item.sourceUrl} target="_blank" rel="noreferrer">Open source <ExternalLink className="size-3" /></a>}</div>) : <p className="text-sm text-muted-foreground">No linked source details are available for this task.</p>}
+                    <div className="border-t pt-3"><Label htmlFor="evidence-assertion">Record what you verified</Label><Textarea id="evidence-assertion" className="mt-2 min-h-24" value={assertion} onChange={(event) => setAssertion(event.target.value)} placeholder="Note what you found and identify the source. This does not send a message or change Trello." /><Button className="mt-2" size="sm" variant="outline" disabled={assertion.trim().length < 3 || recordAssertion.isPending} onClick={() => card && recordAssertion.mutate({ cardId: card.cardId, title: `Worker update: ${card.cardName}`, detail: assertion })}>{recordAssertion.isPending ? <Loader2 className="size-4 animate-spin" /> : <FileCheck2 className="size-4" />}Save verification note</Button></div>
+                  </CollapsibleContent>
+                </Collapsible>
+              </section>
+
+              <section>
                 <InspectorLabel>Task steps</InspectorLabel>
                 <div className={`mt-2 grid gap-2 ${wide ? "grid-cols-2" : "grid-cols-1"}`}>
                   {card.steps.length ? card.steps.map((step) => {
@@ -956,7 +984,7 @@ function PlanView({ founderName, timeZone }: { founderName: string; timeZone: st
   const canEditPlan = editingPolicy.data?.editable === true;
   return (
     <div className="space-y-5">
-      <PageHeading title="Plan My Day" description="" actions={canEditPlan ? <Button onClick={() => run(Boolean(plan))} disabled={mutation.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{plan ? "Regenerate plan" : "Generate plan"}</Button> : undefined} />
+      <PageHeading title="Plan My Day" description="" actions={canEditPlan ? <Button onClick={() => run(Boolean(plan))} disabled={mutation.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{plan ? "Replan remaining" : "Generate plan"}</Button> : undefined} />
       {editingPolicy.isError && <Alert variant="destructive"><AlertTitle>Plan access could not be checked</AlertTitle><AlertDescription>Reload this page before making schedule changes.</AlertDescription></Alert>}
       {editingPolicy.data?.editable === false && <Alert><CalendarDays className="size-4" /><AlertTitle>Agenda changes are paused</AlertTitle><AlertDescription>{plan ? `Your saved agenda remains the schedule to follow. Suggested changes above are not applied. Contact ${founderName} if it needs to change.` : `No agenda is saved yet. Contact ${founderName} to set today's schedule.`}</AlertDescription></Alert>}
       {mutation.isPending && generationStartedAt !== null && <PendingPlanGenerationStatus startedAt={generationStartedAt} />}

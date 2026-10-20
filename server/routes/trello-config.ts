@@ -417,7 +417,7 @@ router.put('/cards/:cardId/status', async (req: Request, res: Response) => {
       return res.status(502).json({ error: 'Could not verify Trello card labels' });
     }
     const currentLabels = card.idLabels as string[];
-    
+
     // Get the completion label ID from user config
     const user = requestUser(req)!;
     const userLabels = await getCompletionLabels(user.id);
@@ -431,7 +431,7 @@ router.put('/cards/:cardId/status', async (req: Request, res: Response) => {
         error: 'Configure a Trello completion label before changing card status',
       });
     }
-    
+
     // Update labels based on completion status
     let newLabels = currentLabels;
     
@@ -558,7 +558,7 @@ router.put('/cards/:cardId/update', async (req: Request, res: Response) => {
     if (name === undefined && desc === undefined && idLabels === undefined) {
       return res.status(400).json({ error: 'Provide at least one card field to update' });
     }
-    
+
     const credentials = getTrelloCredentials();
     if (!credentials) return res.status(503).json({ error: 'Trello credentials not configured' });
 
@@ -608,7 +608,7 @@ router.put('/cards/:cardId/members', async (req: Request, res: Response) => {
     if (!Array.isArray(idMembers) || !idMembers.every((memberId) => typeof memberId === 'string')) {
       return res.status(400).json({ error: 'idMembers must be an array of strings' });
     }
-    
+
     const credentials = getTrelloCredentials();
     if (!credentials) return res.status(503).json({ error: 'Trello credentials not configured' });
 
