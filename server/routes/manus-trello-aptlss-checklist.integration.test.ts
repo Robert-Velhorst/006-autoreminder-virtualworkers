@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
-import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
-import { createPool, type Pool, type RowDataPacket } from "mysql2/promise";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
+import { requireIsolatedPostgresTestDatabase } from "../../shared/isolatedPostgresTestDatabase.mjs";
 import * as schema from "../../drizzle/schema.postgres";
 import type { TrpcContext } from "../_core/context";
 
 const controls = vi.hoisted(() => ({
   url: process.env.APTLSS_TEST_DATABASE_URL,
-  db: undefined as MySql2Database<typeof schema> | undefined,
+  db: undefined as NodePgDatabase<typeof schema> | undefined,
 }));
 
 vi.mock("../db", () => ({
@@ -29,24 +30,20 @@ type Fixture = {
   targetStepId: number;
 };
 
-describe.skipIf(!controls.url)("worker checklist route MySQL safeguards", { timeout: 30_000, hookTimeout: 30_000 }, () => {
+describe.skipIf(!controls.url && process.env.CI !== "true")("worker checklist route PostgreSQL safeguards", { timeout: 30_000, hookTimeout: 30_000 }, () => {
   let pool: Pool;
-  let db: MySql2Database<typeof schema>;
+  let db: NodePgDatabase<typeof schema>;
   let fixture: Fixture | undefined;
 
   beforeAll(async () => {
-    const url = new URL(controls.url!);
-    if (url.protocol !== "mysql:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
-      || !["/aptlss_test", "/recovery_test"].includes(url.pathname) || url.search || url.hash) {
-      throw new Error("Checklist route integration requires an explicit loopback MySQL URL naming aptlss_test or recovery_test.");
-    }
-
-    pool = createPool({ uri: controls.url!, connectionLimit: 4, connectTimeout: 10_000, timezone: "Z" });
-    db = drizzle(pool, { schema, mode: "default" });
+    const connectionString = requireIsolatedPostgresTestDatabase(controls.url, process.env.NODE_ENV === "production");
+    const url = new URL(connectionString);
+    pool = new Pool({ connectionString, max: 4, connectionTimeoutMillis: 10_000 });
+    db = drizzle(pool, { schema });
     controls.db = db;
-    const [identity] = await pool.query<RowDataPacket[]>("SELECT DATABASE() AS name, VERSION() AS version");
-    expect(identity[0].name).toBe(url.pathname.slice(1));
-    expect(identity[0].version).toMatch(/^8\./);
+    const { rows: [identity] } = await pool.query("SELECT current_database() AS name, version() AS version");
+    expect(identity.name).toBe(url.pathname.slice(1));
+    expect(identity.version).toMatch(/^PostgreSQL 18\./);
   });
 
   beforeEach(() => {
@@ -103,18 +100,18 @@ describe.skipIf(!controls.url)("worker checklist route MySQL safeguards", { time
       openId: `audit-founder-${suffix}`,
       name: "Checklist audit founder",
       role: "admin",
-    }).$returningId();
+    }).returning({ id: schema.users.id });
     const [worker] = await db.insert(schema.users).values({
       openId: workerOpenId,
       name: "Checklist audit worker",
       role: "worker",
-    }).$returningId();
+    }).returning({ id: schema.users.id });
     const [profile] = await db.insert(schema.vaProfiles).values({
       userId: worker.id,
       founderId: founder.id,
       name: "Checklist audit worker",
       status: "active",
-    }).$returningId();
+    }).returning({ id: schema.vaProfiles.id });
     await db.insert(schema.aptlssPlans).values({
       vaId: worker.id,
       cardId,
@@ -222,14 +219,14 @@ describe.skipIf(!controls.url)("worker checklist route MySQL safeguards", { time
       openId: `audit-other-worker-${suffix}`,
       name: "Second checklist audit worker",
       role: "worker",
-    }).$returningId();
+    }).returning({ id: schema.users.id });
     current.otherWorkerId = otherWorker.id;
     const [otherProfile] = await db.insert(schema.vaProfiles).values({
       userId: otherWorker.id,
       founderId: current.founderId,
       name: "Second checklist audit worker",
       status: "active",
-    }).$returningId();
+    }).returning({ id: schema.vaProfiles.id });
     const exactTaskId = `${current.cardId}:list-${current.checkItemId.slice("item-".length)}:${current.checkItemId}`;
     await db.update(schema.taskAssignments).set({ vaId: otherProfile.id })
       .where(eq(schema.taskAssignments.taskId, exactTaskId));

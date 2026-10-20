@@ -7,10 +7,10 @@ const evidence = () => ({ success: true, numFailedTests: 0, numPendingTests: 0,
   })),
 });
 
-describe("mandatory MySQL release gate", () => {
+describe("explicit historical MySQL evidence gate", () => {
   it.each([undefined, "", "mysql://secret:private@remote/recovery_test", "mysql://root:private@localhost/production",
     "mysql://root:private@127.0.0.1/recovery_test?option=true", "mysql://root:private@localhost/recovery_test#fragment",
-    "https://localhost/recovery_test"])("rejects unsafe or missing test targets without disclosing credentials", raw => {
+    "https://localhost/recovery_test", "postgresql://test:private@127.0.0.1/recovery_test"])("rejects unsafe or missing test targets without disclosing credentials", raw => {
     expect(() => assertIntegrationDatabase(raw)).toThrow(/explicit loopback/);
     try { assertIntegrationDatabase(raw); } catch (error) { expect(error.message).not.toMatch(/private|secret:/); }
   });

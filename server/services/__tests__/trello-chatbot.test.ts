@@ -96,9 +96,9 @@ describe('Trello Chatbot', () => {
       vi.stubGlobal('fetch', fetchSpy);
 
       try {
-        await expect(postTrelloComment('card/with space', 'Approved update')).resolves.toBe(true);
+        await expect(postTrelloComment('0123456789abcdef01234567', 'Approved update')).resolves.toBe(true);
         expect(fetchSpy).toHaveBeenCalledTimes(1);
-        expect(fetchSpy.mock.calls[0]?.[0]).toContain('cards/card%2Fwith%20space/actions/comments');
+        expect(fetchSpy.mock.calls[0]?.[0]).toContain('cards/0123456789abcdef01234567/actions/comments');
         expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({ method: 'POST' });
         expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
       } finally {
@@ -113,6 +113,17 @@ describe('Trello Chatbot', () => {
         else process.env.TRELLO_TOKEN = originalToken;
         vi.unstubAllGlobals();
       }
+    });
+
+    it.each(['card/with space', '../members/me', '%2fadmin'])('rejects unsafe comment target %s without provider traffic', async cardId => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'true');
+      vi.stubEnv('TRELLO_API_KEY', 'test-key');
+      vi.stubEnv('TRELLO_TOKEN', 'test-token');
+      vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '');
+      const fetchSpy = vi.fn();
+      vi.stubGlobal('fetch', fetchSpy);
+      await expect(postTrelloComment(cardId, 'Unsent update')).resolves.toBe(false);
+      expect(fetchSpy).not.toHaveBeenCalled();
     });
 
     it('blocks comments on a card mapped to an APTLSS pilot worker before Trello is called', async () => {
@@ -202,7 +213,7 @@ describe('Trello Chatbot', () => {
       vi.stubGlobal('fetch', fetchSpy);
       mockPilotOwners([10]);
 
-      await expect(postTrelloComment('other-card', 'Automatic reminder')).resolves.toBe(true);
+      await expect(postTrelloComment('0123456789abcdef01234568', 'Automatic reminder')).resolves.toBe(true);
 
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       expect(mocks.getDb).toHaveBeenCalledTimes(1);
@@ -272,7 +283,7 @@ describe('Trello Chatbot', () => {
         action: {
           type: 'commentCard',
           id: 'incoming-comment',
-          data: { text: '@bot what should I do?', card: { id: 'other-card', name: 'Other task' }, board: { id: 'board-1' } },
+          data: { text: '@bot what should I do?', card: { id: '0123456789abcdef01234568', name: 'Other task' }, board: { id: 'board-1' } },
           memberCreator: { id: 'unlinked-member', fullName: 'Unknown worker' },
         },
       });
@@ -304,7 +315,7 @@ describe('Trello Chatbot', () => {
         action: {
           type: 'commentCard',
           id: 'incoming-comment',
-          data: { text: '@bot what should I do?', card: { id: 'other-card', name: 'Other task' }, board: { id: 'board-1' } },
+          data: { text: '@bot what should I do?', card: { id: '0123456789abcdef01234568', name: 'Other task' }, board: { id: 'board-1' } },
           memberCreator: { id: 'non-pilot-member', fullName: 'Non-pilot worker' },
         },
       });

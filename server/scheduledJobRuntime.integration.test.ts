@@ -153,7 +153,7 @@ describe.skipIf(!url)("scheduled job runtime real PostgreSQL ownership", { timeo
     controls.db = new Proxy(db, { get(target, property) {
       if (property === "transaction") return (work: (tx: unknown) => unknown) => target.transaction(async tx => work(
         new Proxy(tx, { get(target, property) {
-          if (property === "insert") return () => ({ values: async () => { throw new Error("Synthetic run record failure"); } });
+          if (property === "insert") return () => ({ values: () => ({ returning: async () => { throw new Error("Synthetic run record failure"); } }) });
           const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
         } }),
       ));
@@ -239,7 +239,7 @@ describe.skipIf(!url)("scheduled job runtime real PostgreSQL ownership", { timeo
     controls.db = new Proxy(db, { get(target, property) {
       if (property === "transaction") return (work: (tx: unknown) => unknown) => target.transaction(async tx => work(
         new Proxy(tx, { get(target, property) {
-          if (property === "insert") return () => ({ values: async () => { throw new Error("Synthetic run record failure"); } });
+          if (property === "insert") return () => ({ values: () => ({ returning: async () => { throw new Error("Synthetic run record failure"); } }) });
           const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
         } }),
       ));

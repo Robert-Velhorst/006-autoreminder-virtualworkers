@@ -3347,7 +3347,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
         timeout: 20_000,
       });
       expect(result.error).toBeUndefined();
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       const report = JSON.parse(result.stdout);
       expect(report.conflicts).toContainEqual({
         table: "browser_tab_states",
@@ -3356,6 +3356,21 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
       });
       const [after] = await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId));
       expect(after).toEqual(before);
+
+      // Exercise the actual PostgreSQL write path after proving ownership refusal.
+      payload.tables.browser_tab_states = [{ ...sourceRow, vaId: worker.id }];
+      await writeFile(input, JSON.stringify({ ...payload, digest: hash(JSON.stringify(payload)) }), "utf8");
+      const accepted = spawnSync(process.execPath, [
+        path.resolve(import.meta.dirname, "../scripts/operator-data-transfer.mjs"),
+        "import", "--in", input, "--target", controls.url!,
+      ], { cwd: path.resolve(import.meta.dirname, ".."), encoding: "utf8", timeout: 20_000,
+        env: { ...process.env, TARGET_DATABASE_URL: controls.url!, OPERATOR_IMPORT_WORKER_ID: String(worker.id) } });
+      expect(accepted.error).toBeUndefined();
+      expect(accepted.status, accepted.stderr).toBe(0);
+      expect(JSON.parse(accepted.stdout).insertedOrUpdated.browser_tab_states).toBe(1);
+      const [updated] = await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId));
+      expect(updated.vaId).toBe(worker.id);
+      expect(Number(updated.captureSequence)).toBe(2);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

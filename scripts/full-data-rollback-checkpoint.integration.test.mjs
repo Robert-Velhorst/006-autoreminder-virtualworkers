@@ -4,9 +4,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { assertIntegrationDatabase } from "./run-mysql-integration.mjs";
 import { assertFullDataUnchanged, captureFullDataCheckpoint, fingerprintAllColumns } from "./full-data-rollback-checkpoint.mjs";
 
-const target = process.env.APTLSS_TEST_DATABASE_URL
-  || (process.env.CI === "true" ? process.env.DATABASE_URL : undefined);
-const required = process.env.CI === "true";
+const target = process.env.APTLSS_LEGACY_MYSQL_TEST_DATABASE_URL;
+const required = process.env.APTLSS_LEGACY_MYSQL_TESTS === "1";
 describe.skipIf(!target && !required)("full-data checkpoint real MySQL", { timeout: 60_000, hookTimeout: 60_000 }, () => {
   let reader, writer, db, options;
   const table = "rollback_checkpoint_" + randomUUID().replaceAll("-", "");
@@ -14,7 +13,7 @@ describe.skipIf(!target && !required)("full-data checkpoint real MySQL", { timeo
   const columns = ["id", "numberValue", "binaryValue", "memo", "derived"];
   beforeAll(async () => {
     assertIntegrationDatabase(target);
-    if (!target) throw new Error("Set APTLSS_TEST_DATABASE_URL to run the required CI MySQL checkpoint tests.");
+    if (!target) throw new Error("Set APTLSS_LEGACY_MYSQL_TEST_DATABASE_URL for the explicitly requested MySQL checkpoint tests.");
     reader = mysql.createConnection({ uri: target, supportBigNumbers: true, bigNumberStrings: true, dateStrings: true });
     writer = mysql.createConnection(target); db = writer.promise();
     const [[identity]] = await db.query("SELECT DATABASE() name,@@port port,@@datadir directory,@@event_scheduler scheduler");

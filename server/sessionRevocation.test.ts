@@ -11,13 +11,15 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./db", () => mocks);
 
 const originalEnvironment = { ...process.env };
+let sdk: typeof import("./_core/sdk")["sdk"];
 
-beforeEach(() => {
+beforeEach(async () => {
   process.env.JWT_SECRET = "test-session-secret-with-at-least-32-characters";
   delete process.env.LOCAL_AUTH_BYPASS;
   mocks.isSessionRevoked.mockReset();
   mocks.getUserByOpenId.mockReset();
   mocks.upsertUser.mockReset();
+  ({ sdk } = await import("./_core/sdk"));
 });
 
 afterEach(() => {
@@ -27,7 +29,6 @@ afterEach(() => {
 
 describe("session revocation", () => {
   it("rejects a valid signed cookie after its session id has been revoked", async () => {
-    const { sdk } = await import("./_core/sdk");
     const token = await sdk.createSessionToken("worker-1", { name: "Worker", expiresInMs: 60_000 });
     const session = await sdk.verifySession(token);
     expect(session).not.toBeNull();
@@ -45,7 +46,6 @@ describe("session revocation", () => {
   });
 
   it("continues authentication for an unrevoked session", async () => {
-    const { sdk } = await import("./_core/sdk");
     const token = await sdk.createSessionToken("worker-1", { name: "Worker", expiresInMs: 60_000 });
     const user = {
       id: 1,

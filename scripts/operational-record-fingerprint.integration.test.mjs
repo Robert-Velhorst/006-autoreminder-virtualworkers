@@ -4,7 +4,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { assertIntegrationDatabase } from "./run-mysql-integration.mjs";
 import { fingerprintTable } from "./operational-record-fingerprint.mjs";
 
-const target = process.env.APTLSS_TEST_DATABASE_URL;
+const target = process.env.APTLSS_LEGACY_MYSQL_TEST_DATABASE_URL;
+const required = process.env.APTLSS_LEGACY_MYSQL_TESTS === "1";
 const hash = value => createHash("sha256").update(value).digest("hex");
 const legacy = (rows, columns) => ({
   columns,
@@ -17,7 +18,7 @@ const legacy = (rows, columns) => ({
   ),
 });
 
-describe.skipIf(!target)(
+describe.skipIf(!target && !required)(
   "operational fingerprint real MySQL compatibility",
   { timeout: 30_000, hookTimeout: 30_000 },
   () => {

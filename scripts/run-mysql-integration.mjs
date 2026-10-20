@@ -3,14 +3,9 @@ import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+// Active application suites run against PostgreSQL through the normal CI test command.
+// This explicit opt-in runner preserves the two historical MySQL storage-tool rehearsals.
 export const MYSQL_INTEGRATION_SUITES = [
-  "server/aptlssManagerIntegration.test.ts",
-  "server/aptlssManagerQueueIntegration.test.ts",
-  "server/aptlssManagerReviewIndexIntegration.test.ts",
-  "server/googleEvidence.integration.test.ts",
-  "server/reminderOrchestration.integration.test.ts",
-  "server/scheduledJobRuntime.integration.test.ts",
-  "server/routes/manus-trello-aptlss-checklist.integration.test.ts",
   "scripts/operational-record-fingerprint.integration.test.mjs",
   "scripts/full-data-rollback-checkpoint.integration.test.mjs",
 ];
@@ -21,7 +16,7 @@ export function assertIntegrationDatabase(raw) {
   if (!url || url.protocol !== "mysql:" || url.search || url.hash
     || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
     || !["/aptlss_test", "/recovery_test"].includes(url.pathname)) {
-    throw new Error("Set APTLSS_TEST_DATABASE_URL to an explicit loopback MySQL test database named aptlss_test or recovery_test.");
+    throw new Error("Set APTLSS_LEGACY_MYSQL_TEST_DATABASE_URL to an explicit loopback MySQL test database named aptlss_test or recovery_test.");
   }
 }
 
@@ -51,7 +46,7 @@ export function verifyIntegrationReport(report) {
 }
 
 function run() {
-  const url = process.env.APTLSS_TEST_DATABASE_URL;
+  const url = process.env.APTLSS_LEGACY_MYSQL_TEST_DATABASE_URL;
   assertIntegrationDatabase(url);
   mkdirSync("artifacts", { recursive: true });
   const directory = mkdtempSync(resolve("artifacts/mysql-integration-"));
@@ -60,7 +55,7 @@ function run() {
     ...MYSQL_INTEGRATION_SUITES, "--no-file-parallelism", "--maxWorkers=1",
     "--reporter=json", `--outputFile=${reportPath}`], {
     stdio: "inherit",
-    env: { ...process.env, DATABASE_URL: url, APTLSS_TEST_DATABASE_URL: url,
+    env: { ...process.env, APTLSS_LEGACY_MYSQL_TEST_DATABASE_URL: url, APTLSS_LEGACY_MYSQL_TESTS: "1",
       NOTIFICATIONS_ENABLED: "false", REMINDER_WORKER_ENABLED: "false",
       BRIEFING_SCHEDULER_ENABLED: "false", APTLSS_MANAGER_SCHEDULER: "false",
       OPENAI_API_KEY: "", TRELLO_API_KEY: "", TRELLO_TOKEN: "" },
