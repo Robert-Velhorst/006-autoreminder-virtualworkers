@@ -6,7 +6,7 @@ allowBuilds:
   esbuild: true
 
 patchedDependencies:
-  wouter@3.7.1: patches/wouter@3.7.1.patch
+  wouter@3.13.0: patches/wouter@3.13.0.patch
 
 overrides:
   tailwindcss>nanoid: 3.3.7
