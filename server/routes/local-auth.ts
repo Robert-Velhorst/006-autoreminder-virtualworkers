@@ -113,9 +113,13 @@ router.post('/owner-bootstrap', async (req: Request, res: Response) => {
     const database = await db.getDb();
     if (!database) return respondDatabaseUnavailable(res);
     const passwordHash = await bcrypt.hash(password, 12);
-    await database.update(users)
+    const updatedOwners = await database.update(users)
       .set({ passwordHash, loginMethod: 'local', lastSignedIn: new Date() })
-      .where(and(eq(users.id, owner.id), isNull(users.passwordHash)));
+      .where(and(eq(users.id, owner.id), isNull(users.passwordHash)))
+      .returning({ id: users.id });
+    if (updatedOwners.length !== 1) {
+      return res.status(409).json({ error: 'Owner setup is no longer available. No session was created.' });
+    }
 
     const sessionToken = await sdk.createSessionToken(owner.openId, {
       name: owner.name || owner.openId,

@@ -98,7 +98,8 @@ describe.skipIf(!testUrl)("pending owner native PostgreSQL transactions", () => 
       await ready;
       const pid = (await admin.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
       let observed = false;
-      for (let attempt = 0; attempt < 100; attempt++) {
+      for (let attempt = 0; attempt < 300; attempt++) {
+        await admin.query('SELECT pg_stat_clear_snapshot()');
         const blocked = await admin.query('SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))) AS blocked', [pid]);
         if (blocked.rows[0].blocked) { observed = true; break; }
         await new Promise(resolve => setTimeout(resolve, 10));
