@@ -21,6 +21,8 @@ describe("outbound notification gate", () => {
     vi.stubEnv("TRELLO_API_KEY", "test-key");
     vi.stubEnv("TRELLO_TOKEN", "test-token");
     vi.stubEnv("SENDGRID_API_KEY", "test-sendgrid-key");
+    vi.stubEnv("SENDGRID_FROM_EMAIL", "verified-synthetic@example.test");
+    vi.stubEnv("EMAIL_PROVIDER", "sendgrid");
     send.mockReset().mockResolvedValue([{}]);
     axiosPost.mockReset().mockResolvedValue({ data: { id: "action-id", date: "2026-10-13T12:00:00.000Z" } });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));

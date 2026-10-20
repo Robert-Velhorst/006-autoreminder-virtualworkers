@@ -6,6 +6,8 @@ import { defineConfig, devices } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "./e2e",
+  // Manager fixtures run under their dedicated guarded database/server configuration.
+  testIgnore: /aptlss-manager(?:-live|-review)?\.spec\.ts/,
   globalSetup: "./e2e/global-setup.ts",
 
   /* Run tests in files in parallel */

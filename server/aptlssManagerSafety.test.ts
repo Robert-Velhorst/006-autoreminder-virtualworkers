@@ -23,7 +23,7 @@ function fixture() {
   return { root, manifest };
 }
 function prepareSourceTree(root: string) {
-  for (const dir of ["server","shared","client/src","drizzle","browser-extension","client/public/downloads"]) mkdirSync(join(root,dir),{recursive:true});
+  for (const dir of ["server","shared","client/src","drizzle","drizzle-postgres-v1","browser-extension","client/public/downloads"]) mkdirSync(join(root,dir),{recursive:true});
   writeFileSync(join(root,"client/public/downloads/worker-browser-collector.zip"), Buffer.from([1, 2, 3]));
   writeFileSync(join(root,"browser-extension/service-worker.js"), "initial worker");
   const files=["scripts/verify-aptlss-safety.ts","scripts/seal-aptlss-build.ts","scripts/package-browser-collector.ps1","scripts/aptlss-pilot-compose.mjs","scripts/aptlss-pilot-validation.mjs","scripts/run-manager-codex.ts","scripts/Start-ManagerCodex.ps1","package.json","pnpm-lock.yaml","pnpm-workspace.yaml","drizzle.config.ts","vitest.config.ts","Dockerfile","docker-compose.yml","deployment/shadow-pilot.yml","deployment/codex-subscription.yml","playwright.aptlss.config.ts","e2e/aptlss-manager.spec.ts","e2e/aptlss-manager-live.spec.ts","e2e/aptlss-manager-review.spec.ts","scripts/start-aptlss-test-server.ts"];
@@ -111,6 +111,14 @@ it("fails closed when a source tree contains a symbolic-link directory", () => {
   symlinkSync(target, join(root,"server","linked-source"), process.platform === "win32" ? "junction" : "dir");
   expect(() => managerSafetyDigest(root)).toThrow(/source identity cannot include symbolic links/);
 });
+it("includes PostgreSQL migration bytes in the reviewed source identity", () => {
+  const { root } = fixture();
+  prepareSourceTree(root);
+  const before = managerSafetyDigest(root);
+  writeFileSync(join(root, "drizzle-postgres-v1/0001.sql"), "ALTER TABLE example ADD COLUMN checked boolean;\n");
+  expect(managerSafetyDigest(root)).not.toBe(before);
+});
+
 it("requires a numeric integer count in the safety attestation", () => {
   const { root } = fixture();
   const attestationPath = join(root,"attestation.json");

@@ -37,7 +37,7 @@ export function managerSafetyDigest(root = process.cwd()) {
       return /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|css|html|json|sql)$/.test(entry.name) ? [file] : [];
     });
   const files = [
-    ...sourceFiles("server"), ...sourceFiles("shared"), ...sourceFiles("client/src"), ...sourceFiles("drizzle"), ...sourceFiles("browser-extension"),
+    ...sourceFiles("server"), ...sourceFiles("shared"), ...sourceFiles("client/src"), ...sourceFiles("drizzle"), ...sourceFiles("drizzle-postgres-v1"), ...sourceFiles("browser-extension"),
     "client/public/downloads/worker-browser-collector.zip",
     "scripts/verify-aptlss-safety.ts", "scripts/seal-aptlss-build.ts",
     "scripts/package-browser-collector.ps1", "scripts/aptlss-pilot-compose.mjs",
