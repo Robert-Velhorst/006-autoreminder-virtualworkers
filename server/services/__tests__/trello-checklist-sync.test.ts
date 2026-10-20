@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { taskAssignments } from '../../../drizzle/schema.postgres';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),
@@ -519,10 +520,9 @@ describe('Trello Checklist Sync Service', () => {
       expect(remote.calls.every(call => call.method === 'GET')).toBe(true);
     });
 
-    it('uses a database-scoped named lock when a transaction-capable database is available', async () => {
+    it('bounds PostgreSQL lock waiting and holds a transaction-scoped lock before provider work', async () => {
       const txExecute = vi.fn()
-        .mockResolvedValueOnce([[{ acquired: 1 }], []])
-        .mockResolvedValueOnce([[{ released: 1 }], []]);
+        .mockResolvedValue({ rows: [], rowCount: 1 });
       const db = {
         transaction: vi.fn(async (callback: (tx: { execute: typeof txExecute }) => Promise<unknown>) =>
           callback({ execute: txExecute })),
@@ -536,6 +536,21 @@ describe('Trello Checklist Sync Service', () => {
       expect(result.success).toBe(true);
       expect(db.transaction).toHaveBeenCalledTimes(1);
       expect(txExecute).toHaveBeenCalledTimes(2);
+      const queries = txExecute.mock.calls.map(([statement]) => new PgDialect().sqlToQuery(statement));
+      expect(queries[0].sql).toContain("set_config('lock_timeout'");
+      expect(queries[0].params).toEqual(['10s']);
+      expect(queries[1].sql).toContain('pg_advisory_xact_lock(hashtextextended(');
+      expect(queries[1].params[0]).toMatch(/^aptlss-checklist-[a-f0-9]{40}$/);
+      expect(txExecute.mock.invocationCallOrder[1]).toBeLessThan(mocks.fetchWithRetry.mock.invocationCallOrder[0]);
+    });
+
+    it('does not contact the provider when PostgreSQL cannot acquire the card lock', async () => {
+      const txExecute = vi.fn().mockResolvedValueOnce({ rows: [], rowCount: 1 })
+        .mockRejectedValueOnce(Object.assign(new Error('lock timeout'), { code: '55P03' }));
+      mocks.getDb.mockResolvedValue({ transaction: async (work: (tx: unknown) => unknown) => work({ execute: txExecute }) });
+      const result = await service.syncChecklistToCard('db-timeout-card', [firstPlan], syncOptions);
+      expect(result.success).toBe(false);
+      expect(mocks.fetchWithRetry).not.toHaveBeenCalled();
     });
   });
 

@@ -131,12 +131,6 @@ function checklistStageRevision(name: string): number | undefined {
   return Number.isSafeInteger(revision) && revision > 0 ? revision : undefined;
 }
 
-function sqlResultRows(result: unknown): Array<Record<string, unknown>> {
-  if (!Array.isArray(result)) return [];
-  const rows = result[0];
-  return Array.isArray(rows) ? rows as Array<Record<string, unknown>> : [];
-}
-
 function acquireSyncIntent(
   cardId: string,
   sourceRevision: number | undefined,
@@ -339,21 +333,12 @@ export class TrelloChecklistSyncService {
 
     const lockName = `aptlss-checklist-${createHash('sha256').update(cardId).digest('hex').slice(0, 40)}`;
     return db.transaction(async tx => {
-      const acquired = sqlResultRows(await tx.execute(sql`
-        SELECT GET_LOCK(${lockName}, ${CHECKLIST_SYNC_LOCK_TIMEOUT_SECONDS}) AS acquired
-      `));
-      if (Number(acquired[0]?.acquired) !== 1) {
-        throw new Error('Another checklist sync is in progress for this card. Retry shortly.');
-      }
-
-      try {
-        return await operation();
-      } finally {
-        const released = sqlResultRows(await tx.execute(sql`SELECT RELEASE_LOCK(${lockName}) AS released`));
-        if (Number(released[0]?.released) !== 1) {
-          throw new Error('The checklist sync lock could not be released cleanly.');
-        }
-      }
+      // Both settings and the advisory lock belong to this transaction's own
+      // pooled connection. PostgreSQL releases the lock on commit or rollback;
+      // no session lock can leak into the next borrower after a provider error.
+      await tx.execute(sql`SELECT set_config('lock_timeout', ${`${CHECKLIST_SYNC_LOCK_TIMEOUT_SECONDS}s`}, true)`);
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockName}, 0))`);
+      return operation();
     });
   }
 
