@@ -12,7 +12,7 @@ $script:Failed = 0
 # Function to check if file exists
 function Test-FileExists {
     param([string]$Path)
-    
+
     if (Test-Path $Path -PathType Leaf) {
         Write-Host "✓ File exists: $Path" -ForegroundColor Green
         $script:Passed++
@@ -27,7 +27,7 @@ function Test-FileExists {
 # Function to check if directory exists
 function Test-DirectoryExists {
     param([string]$Path)
-    
+
     if (Test-Path $Path -PathType Container) {
         Write-Host "✓ Directory exists: $Path" -ForegroundColor Green
         $script:Passed++
@@ -45,7 +45,7 @@ function Test-ContentExists {
         [string]$Path,
         [string]$Content
     )
-    
+
     if (Test-Path $Path) {
         $fileContent = Get-Content $Path -Raw -ErrorAction SilentlyContinue
         if ($fileContent -match [regex]::Escape($Content)) {
@@ -54,7 +54,7 @@ function Test-ContentExists {
             return $true
         }
     }
-    
+
     Write-Host "✗ Content missing in $Path`: $Content" -ForegroundColor Red
     $script:Failed++
     return $false

@@ -12,8 +12,19 @@ const app = express().use("/api/health", healthRoutes);
 
 describe("health routes", () => {
   beforeEach(() => {
+    vi.unstubAllEnvs();
     vi.mocked(isDatabaseReachable).mockReset();
     vi.mocked(isRedisAvailable).mockReturnValue(false);
+  });
+
+  it("reports a configured but unavailable Redis connection as unhealthy", async () => {
+    vi.stubEnv("REDIS_URL", "redis://cache.internal:6379");
+    vi.mocked(isDatabaseReachable).mockResolvedValue(true);
+    vi.mocked(isRedisAvailable).mockReturnValue(false);
+    const health = await request(app).get("/api/health/");
+    expect(health.status).toBe(503);
+    expect(health.body).toMatchObject({ status: "unhealthy", database: "connected", redis: "disconnected" });
+    vi.unstubAllEnvs();
   });
 
   it("reports unhealthy and not ready when PostgreSQL cannot answer", async () => {

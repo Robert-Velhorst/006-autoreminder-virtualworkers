@@ -739,27 +739,27 @@ export const userNotificationPreferences = mysqlTable('user_notification_prefere
   id: int('id').primaryKey().autoincrement(),
   userId: int('userId').notNull(),
   userOpenId: varchar('userOpenId', { length: 64 }).notNull().unique(),
-  
+
   // Notification mode: 'disabled' | 'daily_digest' | 'priority_only'
   notificationMode: mysqlEnum('notificationMode', ['disabled', 'daily_digest', 'priority_only']).default('priority_only').notNull(),
-  
+
   // Daily digest settings
   digestTime: varchar('digestTime', { length: 5 }).default('08:00').notNull(), // HH:MM format
   digestTimezone: varchar('digestTimezone', { length: 50 }).default('Europe/Amsterdam').notNull(),
-  
+
   // Priority only settings - what counts as "urgent"
   urgentThresholdHours: int('urgentThresholdHours').default(24).notNull(), // Tasks due within X hours are urgent
-  
+
   // Email notification settings
   emailEnabled: int('emailEnabled').default(1).notNull(), // 0=false, 1=true
   emailAddress: varchar('emailAddress', { length: 320 }),
-  
+
   // In-app notification settings
   inAppEnabled: int('inAppEnabled').default(1).notNull(),
-  
+
   // Last digest sent timestamp
   lastDigestSent: timestamp('lastDigestSent'),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -768,33 +768,33 @@ export const notificationHistory = mysqlTable('notification_history', {
   id: int('id').primaryKey().autoincrement(),
   userId: int('userId').notNull(),
   userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
-  
+
   // Notification details
   title: varchar('title', { length: 500 }).notNull(),
   content: text('content').notNull(),
   notificationType: mysqlEnum('notificationType', [
     'task_assigned',
-    'task_due_soon', 
+    'task_due_soon',
     'task_overdue',
     'task_completed',
     'daily_digest',
     'general'
   ]).notNull(),
-  
+
   // Related task info (optional)
   taskId: varchar('taskId', { length: 128 }),
   taskName: varchar('taskName', { length: 500 }),
   dueDate: timestamp('dueDate'),
-  
+
   // Delivery status
   channel: mysqlEnum('channel', ['in_app', 'email', 'both']).notNull(),
   deliveryStatus: mysqlEnum('deliveryStatus', ['pending', 'sent', 'failed', 'queued_for_digest']).default('pending').notNull(),
   deliveredAt: timestamp('deliveredAt'),
-  
+
   // Read status for in-app notifications
   isRead: int('isRead').default(0).notNull(), // 0=unread, 1=read
   readAt: timestamp('readAt'),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
@@ -827,29 +827,29 @@ export const chatbotConversations = mysqlTable('chatbot_conversations', {
   cardTrelloId: varchar('cardTrelloId', { length: 64 }).notNull(),
   cardName: varchar('cardName', { length: 500 }),
   boardTrelloId: varchar('boardTrelloId', { length: 64 }),
-  
+
   // Command details
   command: varchar('command', { length: 50 }).notNull(), // status, checkin, remind, etc.
   commandArgs: text('commandArgs'), // JSON array of arguments
-  
+
   // Author info
   authorTrelloId: varchar('authorTrelloId', { length: 64 }),
   authorName: varchar('authorName', { length: 255 }),
-  
+
   // Comment IDs
   incomingCommentId: varchar('incomingCommentId', { length: 64 }),
   responseCommentId: varchar('responseCommentId', { length: 64 }),
-  
+
   // Response details
   responseText: text('responseText'),
   responseStatus: mysqlEnum('responseStatus', ['success', 'failed', 'pending']).default('pending').notNull(),
   responseError: text('responseError'),
-  
+
   // Timing
   receivedAt: timestamp('receivedAt').defaultNow().notNull(),
   respondedAt: timestamp('respondedAt'),
   responseTimeMs: int('responseTimeMs'), // How long it took to respond
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
@@ -857,33 +857,33 @@ export const chatbotCheckinResponses = mysqlTable('chatbot_checkin_responses', {
   id: int('id').primaryKey().autoincrement(),
   conversationId: int('conversationId').notNull(), // References chatbotConversations.id
   cardTrelloId: varchar('cardTrelloId', { length: 64 }).notNull(),
-  
+
   // Worker info
   workerTrelloId: varchar('workerTrelloId', { length: 64 }),
   workerName: varchar('workerName', { length: 255 }),
   workerId: int('workerId'), // References vaProfiles.id if matched
-  
+
   // Response content
   responseCommentId: varchar('responseCommentId', { length: 64 }),
   responseText: text('responseText'),
-  
+
   // Parsed response data
   reportedProgress: text('reportedProgress'), // What they said they accomplished
   reportedBlockers: text('reportedBlockers'), // Any blockers mentioned
   estimatedCompletion: varchar('estimatedCompletion', { length: 100 }), // ETA if provided
-  
+
   // Timing
   checkinSentAt: timestamp('checkinSentAt').notNull(),
   responseReceivedAt: timestamp('responseReceivedAt').notNull(),
   responseTimeMinutes: int('responseTimeMinutes'), // How long worker took to respond
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
 export const chatbotAnalytics = mysqlTable('chatbot_analytics', {
   id: int('id').primaryKey().autoincrement(),
   date: timestamp('date').notNull(),
-  
+
   // Command counts
   totalCommands: int('totalCommands').default(0).notNull(),
   statusCommands: int('statusCommands').default(0).notNull(),
@@ -893,21 +893,21 @@ export const chatbotAnalytics = mysqlTable('chatbot_analytics', {
   progressCommands: int('progressCommands').default(0).notNull(),
   helpCommands: int('helpCommands').default(0).notNull(),
   unknownCommands: int('unknownCommands').default(0).notNull(),
-  
+
   // Response metrics
   successfulResponses: int('successfulResponses').default(0).notNull(),
   failedResponses: int('failedResponses').default(0).notNull(),
   avgResponseTimeMs: int('avgResponseTimeMs'),
-  
+
   // Check-in metrics
   checkinsSent: int('checkinsSent').default(0).notNull(),
   checkinsResponded: int('checkinsResponded').default(0).notNull(),
   avgCheckinResponseMinutes: int('avgCheckinResponseMinutes'),
-  
+
   // Worker engagement
   uniqueWorkers: int('uniqueWorkers').default(0).notNull(),
   uniqueCards: int('uniqueCards').default(0).notNull(),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -917,23 +917,23 @@ export const interviewSessions = mysqlTable('interview_sessions', {
   cardId: varchar('cardId', { length: 64 }).notNull(),
   userId: int('userId').notNull(),
   userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
-  
+
   // Interview state
   status: mysqlEnum('status', ['active', 'completed', 'abandoned']).notNull().default('active'),
   currentPhase: int('currentPhase').notNull().default(1), // ATIS phases 1-10
   currentQuestion: int('currentQuestion').notNull().default(0),
-  
+
   // Pre-analysis results
   preAnalysisSummary: text('preAnalysisSummary'),
-  
+
   // Interview progress
   questionsAsked: int('questionsAsked').notNull().default(0),
   responsesProvided: int('responsesProvided').notNull().default(0),
   overallConfidence: int('overallConfidence').notNull().default(0), // 0-100
-  
+
   // Session data (JSON)
   sessionData: text('sessionData'), // JSON serialized interview state
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
   completedAt: timestamp('completedAt'),
@@ -945,22 +945,22 @@ export const interviewHistory = mysqlTable('interview_history', {
   cardId: varchar('cardId', { length: 64 }).notNull(),
   userId: int('userId').notNull(),
   userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
-  
+
   // Question and response
   phase: int('phase').notNull(), // Which ATIS phase
   questionNumber: int('questionNumber').notNull(),
   question: text('question').notNull(),
   response: text('response').notNull(),
-  
+
   // Validation results
   isValid: int('isValid').notNull(), // 0=false, 1=true
   validationScore: int('validationScore').notNull().default(0), // 0-100
   validationNotes: text('validationNotes'),
-  
+
   // Confidence tracking
   confidenceScore: int('confidenceScore').notNull().default(0), // 0-100
   requiresEscalation: int('requiresEscalation').notNull().default(0), // 0=false, 1=true
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
@@ -970,26 +970,26 @@ export const interviewResults = mysqlTable('interview_results', {
   cardId: varchar('cardId', { length: 64 }).notNull(),
   userId: int('userId').notNull(),
   userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
-  
+
   // Final results from all phases
   finalGoal: text('finalGoal'),
   finalDeliverable: text('finalDeliverable'),
   finalAPTLSSChecklist: text('finalAPTLSSChecklist'), // JSON
-  
+
   // Confidence and quality metrics
   finalConfidence: int('finalConfidence').notNull().default(0), // 0-100
   clarityScore: int('clarityScore').notNull().default(0), // 0-100
   completenessScore: int('completenessScore').notNull().default(0), // 0-100
-  
+
   // Execution plan
   executionPlan: text('executionPlan'), // JSON
   estimatedDuration: int('estimatedDuration'), // minutes
-  
+
   // Quality metrics
   totalQuestionsAsked: int('totalQuestionsAsked').notNull().default(0),
   totalResponsesProvided: int('totalResponsesProvided').notNull().default(0),
   escalationsRequired: int('escalationsRequired').notNull().default(0),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   completedAt: timestamp('completedAt'),
 });
@@ -1000,57 +1000,57 @@ export const taskScheduleHistory = mysqlTable('task_schedule_history', {
   founderId: int('founderId'),
   assignmentId: int('assignmentId'),
   cardTrelloId: varchar('cardTrelloId', { length: 64 }),
-  
+
   // Previous schedule
   previousStartTime: timestamp('previousStartTime'),
   previousEndTime: timestamp('previousEndTime'),
-  
+
   // New schedule
   newStartTime: timestamp('newStartTime'),
   newEndTime: timestamp('newEndTime'),
-  
+
   // Change details
   changedBy: varchar('changedBy', { length: 64 }).notNull(), // User openId
   reason: varchar('reason', { length: 255 }), // Why was it rescheduled?
   source: mysqlEnum('source', ['manual', 'auto', 'batch', 'conflict_resolution']).default('manual').notNull(),
-  
+
   // Conflict info
   hadConflicts: int('hadConflicts').default(0).notNull(), // 0=false, 1=true
   conflictDetails: text('conflictDetails'), // JSON array of conflicts
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 }, table => [index("task_schedule_history_assignment_created_idx").on(table.assignmentId, table.createdAt)]);
 
 export const batchOperations = mysqlTable('batch_operations', {
   id: varchar('id', { length: 64 }).primaryKey(),
   userId: varchar('userId', { length: 64 }).notNull(), // User openId
-  
+
   // Operation details
   operationType: mysqlEnum('operationType', ['re_analyze', 'reschedule', 'conflict_resolution', 'optimization']).notNull(),
   description: varchar('description', { length: 255 }),
-  
+
   // Task scope
   totalTasks: int('totalTasks').notNull(),
   completedTasks: int('completedTasks').notNull().default(0),
   failedTasks: int('failedTasks').notNull().default(0),
-  
+
   // Progress tracking
   status: mysqlEnum('status', ['pending', 'running', 'completed', 'failed', 'cancelled']).default('pending').notNull(),
   progress: decimal('progress', { precision: 5, scale: 2 }).default('0.00').notNull(), // 0-100%
   currentTaskIndex: int('currentTaskIndex').default(0),
   currentTaskName: varchar('currentTaskName', { length: 255 }),
-  
+
   // Timing
   estimatedTimeSeconds: int('estimatedTimeSeconds'),
   elapsedTimeSeconds: int('elapsedTimeSeconds').default(0),
-  
+
   // Results
   results: text('results'), // JSON with operation results
   errorLog: text('errorLog'), // JSON array of errors
-  
+
   // Metadata
   parameters: text('parameters'), // JSON with operation parameters
-  
+
   startedAt: timestamp('startedAt'),
   completedAt: timestamp('completedAt'),
   createdAt: timestamp('createdAt').defaultNow().notNull(),
@@ -1060,16 +1060,16 @@ export const batchOperations = mysqlTable('batch_operations', {
 export const keyboardShortcuts = mysqlTable('keyboard_shortcuts', {
   id: int('id').primaryKey().autoincrement(),
   userId: varchar('userId', { length: 64 }).notNull(), // User openId
-  
+
   // Shortcut details
   shortcutKey: varchar('shortcutKey', { length: 50 }).notNull(), // e.g., 'Ctrl+D', 'Ctrl+R'
   action: varchar('action', { length: 100 }).notNull(), // e.g., 'open_calendar', 'batch_reanalyze'
   description: varchar('description', { length: 255 }),
-  
+
   // Customization
   isCustom: int('isCustom').default(0).notNull(), // 0=default, 1=custom
   isEnabled: int('isEnabled').default(1).notNull(), // 0=disabled, 1=enabled
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -1078,16 +1078,16 @@ export const taskSubtasks = mysqlTable('task_subtasks', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(), // References tasks/cards
   userId: varchar('userId', { length: 64 }).notNull(), // User openId
-  
+
   // Subtask details
   title: varchar('title', { length: 255 }).notNull(),
   description: text('description'),
   estimatedHours: decimal('estimatedHours', { precision: 10, scale: 2 }),
   sequence: int('sequence').notNull().default(0), // Order in decomposition
-  
+
   // Status tracking
   status: mysqlEnum('status', ['pending', 'in_progress', 'completed', 'blocked']).default('pending').notNull(),
-  
+
   // Metadata
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
@@ -1097,10 +1097,10 @@ export const subtaskDependencies = mysqlTable('subtask_dependencies', {
   id: varchar('id', { length: 36 }).primaryKey(),
   subtaskId: varchar('subtaskId', { length: 36 }).notNull(), // References taskSubtasks.id
   dependsOnSubtaskId: varchar('dependsOnSubtaskId', { length: 36 }).notNull(), // References taskSubtasks.id
-  
+
   // Dependency type
   dependencyType: mysqlEnum('dependencyType', ['sequential', 'parallel', 'blocking']).default('sequential').notNull(),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
@@ -1108,15 +1108,15 @@ export const criticalPathAnalysis = mysqlTable('critical_path_analysis', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
   userId: varchar('userId', { length: 64 }).notNull(),
-  
+
   // Critical path data
   criticalPath: text('criticalPath').notNull(), // JSON array of subtask IDs
   totalDurationHours: decimal('totalDurationHours', { precision: 10, scale: 2 }).notNull(),
   parallelizationOpportunities: int('parallelizationOpportunities').default(0),
-  
+
   // Analysis metadata
   analysisData: text('analysisData'), // JSON with detailed analysis
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -1125,20 +1125,20 @@ export const taskRisks = mysqlTable('task_risks', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
   userId: varchar('userId', { length: 64 }).notNull(),
-  
+
   // Risk details
   title: varchar('title', { length: 255 }).notNull(),
   description: text('description'),
   category: mysqlEnum('category', ['technical', 'resource', 'schedule', 'external']).notNull(),
-  
+
   // Risk scoring
   probability: int('probability').notNull(), // 1-10
   impact: int('impact').notNull(), // 1-10
   priority: int('priority').notNull(), // probability * impact
-  
+
   // Status
   status: mysqlEnum('status', ['identified', 'mitigated', 'resolved']).default('identified').notNull(),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -1146,12 +1146,12 @@ export const taskRisks = mysqlTable('task_risks', {
 export const riskMitigations = mysqlTable('risk_mitigations', {
   id: varchar('id', { length: 36 }).primaryKey(),
   riskId: varchar('riskId', { length: 36 }).notNull(), // References taskRisks.id
-  
+
   // Mitigation strategy
   strategy: varchar('strategy', { length: 255 }).notNull(),
   effort: varchar('effort', { length: 50 }), // e.g., 'low', 'medium', 'high'
   owner: varchar('owner', { length: 255 }),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
@@ -1159,17 +1159,17 @@ export const taskResourceRequirements = mysqlTable('task_resource_requirements',
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
   userId: varchar('userId', { length: 64 }).notNull(),
-  
+
   // Resource type
   resourceType: mysqlEnum('resourceType', ['skill', 'tool', 'training']).notNull(),
   resourceName: varchar('resourceName', { length: 255 }).notNull(),
-  
+
   // Proficiency level (for skills)
   proficiencyLevel: mysqlEnum('proficiencyLevel', ['beginner', 'intermediate', 'expert']),
-  
+
   // Cost estimation
   estimatedCost: decimal('estimatedCost', { precision: 10, scale: 2 }),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
@@ -1177,16 +1177,16 @@ export const taskTimeline = mysqlTable('task_timeline', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
   userId: varchar('userId', { length: 64 }).notNull(),
-  
+
   // Timeline data
   startDate: varchar('startDate', { length: 10 }), // YYYY-MM-DD
   endDate: varchar('endDate', { length: 10 }), // YYYY-MM-DD
   bufferDays: int('bufferDays').default(0),
   totalDays: int('totalDays'),
-  
+
   // Optimization metadata
   optimizationData: text('optimizationData'), // JSON with optimization details
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -1194,15 +1194,15 @@ export const taskTimeline = mysqlTable('task_timeline', {
 export const taskMilestones = mysqlTable('task_milestones', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
-  
+
   // Milestone details
   name: varchar('name', { length: 255 }).notNull(),
   description: text('description'),
   dueDate: varchar('dueDate', { length: 10 }).notNull(), // YYYY-MM-DD
-  
+
   // Status
   status: mysqlEnum('status', ['pending', 'completed']).default('pending').notNull(),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
@@ -1210,13 +1210,13 @@ export const taskQAStrategy = mysqlTable('task_qa_strategy', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
   userId: varchar('userId', { length: 64 }).notNull(),
-  
+
   // QA strategy
   strategy: text('strategy').notNull(),
   testingPhases: text('testingPhases'), // JSON array of testing phases
   qualityMetrics: text('qualityMetrics'), // JSON with quality metrics
   acceptanceCriteria: text('acceptanceCriteria'), // JSON with acceptance criteria
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -1225,15 +1225,15 @@ export const taskDocumentationRequirements = mysqlTable('task_documentation_requ
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
   userId: varchar('userId', { length: 64 }).notNull(),
-  
+
   // Documentation details
   docType: varchar('docType', { length: 100 }).notNull(), // e.g., 'user_guide', 'api_docs', 'technical_spec'
   audience: varchar('audience', { length: 255 }), // e.g., 'end_users', 'developers', 'stakeholders'
   estimatedEffort: decimal('estimatedEffort', { precision: 10, scale: 2 }), // Hours
-  
+
   // Content outline
   contentOutline: text('contentOutline'), // JSON with outline structure
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 
@@ -1241,16 +1241,16 @@ export const taskExternalDependencies = mysqlTable('task_external_dependencies',
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
   userId: varchar('userId', { length: 64 }).notNull(),
-  
+
   // Dependency details
   dependencyType: mysqlEnum('dependencyType', ['approval', 'third_party', 'regulatory']).notNull(),
   description: text('description').notNull(),
   owner: varchar('owner', { length: 255 }),
   dueDate: varchar('dueDate', { length: 10 }), // YYYY-MM-DD
-  
+
   // Status
   status: mysqlEnum('status', ['pending', 'completed']).default('pending').notNull(),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -1259,18 +1259,18 @@ export const taskExecutionPlan = mysqlTable('task_execution_plan', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
   userId: varchar('userId', { length: 64 }).notNull(),
-  
+
   // Execution plan data
   roadmap: text('roadmap'), // JSON with step-by-step roadmap
   successMetrics: text('successMetrics'), // JSON with success metrics
   communicationPlan: text('communicationPlan'), // Communication strategy
   escalationPath: text('escalationPath'), // JSON with escalation procedures
   preExecutionChecklist: text('preExecutionChecklist'), // JSON with checklist items
-  
+
   // Final APTLSS checklist
   aptlssChecklist: text('aptlssChecklist'), // JSON with final APTLSS checklist
   confidenceScore: decimal('confidenceScore', { precision: 5, scale: 2 }), // 0-100%
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -1279,17 +1279,17 @@ export const atisAnalysisSessions = mysqlTable('atis_analysis_sessions', {
   id: varchar('id', { length: 36 }).primaryKey(),
   taskId: varchar('taskId', { length: 128 }).notNull(),
   userId: varchar('userId', { length: 64 }).notNull(),
-  
+
   // Session tracking
   status: mysqlEnum('status', ['pending', 'in_progress', 'completed', 'failed']).default('pending').notNull(),
   currentPhase: int('currentPhase').default(3), // Current phase (3-10)
-  
+
   // Progress tracking
   phasesCompleted: int('phasesCompleted').default(0),
-  
+
   // Session data
   sessionData: text('sessionData'), // JSON with all phase results
-  
+
   startedAt: timestamp('startedAt'),
   completedAt: timestamp('completedAt'),
   createdAt: timestamp('createdAt').defaultNow().notNull(),
@@ -1300,20 +1300,20 @@ export const conflictDetectionSettings = mysqlTable('conflict_detection_settings
   id: int('id').autoincrement().primaryKey(),
   userId: int('userId').notNull(),
   userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
-  
+
   // Conflict detection configuration
   enabled: int('enabled').notNull().default(1), // 0=false, 1=true
   warningThresholdMinutes: int('warningThresholdMinutes').notNull().default(15),
   autoResolve: int('autoResolve').notNull().default(0), // 0=false, 1=true
   notifyOnConflict: int('notifyOnConflict').notNull().default(1), // 0=false, 1=true
-  
+
   // Conflict types to detect (JSON)
   conflictTypes: text('conflictTypes').notNull().default('{"timeOverlap":true,"resourceConflict":true,"dependencyConflict":true}'),
-  
+
   // Version tracking for sync
   version: int('version').notNull().default(1),
   lastModified: timestamp('lastModified').defaultNow().onUpdateNow().notNull(),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -1322,25 +1322,25 @@ export const batchOperationSettings = mysqlTable('batch_operation_settings', {
   id: int('id').autoincrement().primaryKey(),
   userId: int('userId').notNull(),
   userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
-  
+
   // Default operation settings
   defaultOperationType: varchar('defaultOperationType', { length: 50 }).notNull().default('re_analyze'),
   defaultPriority: varchar('defaultPriority', { length: 20 }).notNull().default('normal'),
   autoStartOnQueue: int('autoStartOnQueue').notNull().default(0), // 0=false, 1=true
   maxConcurrentOperations: int('maxConcurrentOperations').notNull().default(3),
-  
+
   // Retry configuration
   retryFailedTasks: int('retryFailedTasks').notNull().default(1), // 0=false, 1=true
   maxRetries: int('maxRetries').notNull().default(2),
-  
+
   // Notification settings
   notifyOnCompletion: int('notifyOnCompletion').notNull().default(1), // 0=false, 1=true
   notifyOnFailure: int('notifyOnFailure').notNull().default(1), // 0=false, 1=true
-  
+
   // Version tracking for sync
   version: int('version').notNull().default(1),
   lastModified: timestamp('lastModified').defaultNow().onUpdateNow().notNull(),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -1349,14 +1349,14 @@ export const keyboardShortcutsSettings = mysqlTable('keyboard_shortcuts_settings
   id: int('id').autoincrement().primaryKey(),
   userId: int('userId').notNull(),
   userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
-  
+
   // Shortcuts data (JSON array)
   shortcuts: text('shortcuts').notNull().default('[]'),
-  
+
   // Version tracking for sync
   version: int('version').notNull().default(1),
   lastModified: timestamp('lastModified').defaultNow().onUpdateNow().notNull(),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -1365,7 +1365,7 @@ export const performanceMetricsSettings = mysqlTable('performance_metrics_settin
   id: int('id').autoincrement().primaryKey(),
   userId: int('userId').notNull(),
   userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
-  
+
   // Metrics data
   totalOperations: int('totalOperations').notNull().default(0),
   successfulOperations: int('successfulOperations').notNull().default(0),
@@ -1374,14 +1374,14 @@ export const performanceMetricsSettings = mysqlTable('performance_metrics_settin
   averageTasksPerOperation: decimal('averageTasksPerOperation', { precision: 10, scale: 2 }).notNull().default('0.00'),
   conflictsDetected: int('conflictsDetected').notNull().default(0),
   conflictsResolved: int('conflictsResolved').notNull().default(0),
-  
+
   // Trend data (JSON)
   trends: text('trends').notNull().default('{"successRate":0,"executionTimeTrend":"stable","operationsTrend":"stable"}'),
-  
+
   // Version tracking for sync
   version: int('version').notNull().default(1),
   lastModified: timestamp('lastModified').defaultNow().onUpdateNow().notNull(),
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().onUpdateNow().notNull(),
 });
@@ -1390,21 +1390,21 @@ export const settingsSyncLog = mysqlTable('settings_sync_log', {
   id: int('id').autoincrement().primaryKey(),
   userId: int('userId').notNull(),
   userOpenId: varchar('userOpenId', { length: 64 }).notNull(),
-  
+
   // Sync details
   settingsType: varchar('settingsType', { length: 50 }).notNull(), // conflict_detection, batch_operation, keyboard_shortcuts, performance_metrics
   action: varchar('action', { length: 20 }).notNull(), // create, update, delete
   previousVersion: int('previousVersion'),
   newVersion: int('newVersion'),
-  
+
   // Device/client info
   deviceId: varchar('deviceId', { length: 128 }),
   clientVersion: varchar('clientVersion', { length: 20 }),
-  
+
   // Conflict resolution
   hadConflict: int('hadConflict').notNull().default(0), // 0=false, 1=true
   conflictResolution: varchar('conflictResolution', { length: 50 }), // merge, overwrite, keep_local
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 });
 

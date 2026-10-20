@@ -161,3 +161,11 @@ The current source-specific candidate and passing evidence are recorded in
 assertions, focused assertions and separate SQL assertions overlap; do not sum
 them. Synthetic local proof is not live provider acceptance or authorization to
 cut over production. Provider outcome reconciliation remains a separate gate.
+
+## Deployment branch reconciliation (2026-10-19)
+
+PR #103 keeps the current PostgreSQL runtime, verified TLS, source/release gates,
+notification policy, and working-day regression tests. Its obsolete MySQL
+Compose alternative is retired. Placeholder rejection, configured Redis health,
+Docker credential/data exclusions and the missing Trello comment opt-in guard
+are retained. No live cutover or credential rotation was performed.

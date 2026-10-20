@@ -778,4 +778,3 @@ describe('Trello Config Routes', () => {
     });
   });
 });
-

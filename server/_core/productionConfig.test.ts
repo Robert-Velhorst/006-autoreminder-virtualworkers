@@ -19,6 +19,26 @@ const validProductionEnvironment = {
 };
 
 describe("production configuration", () => {
+  it("rejects template credentials while keeping the PostgreSQL TLS contract", () => {
+    const errors = getProductionConfigurationErrors({
+      ...validProductionEnvironment,
+      DATABASE_URL: "postgresql://worker:URL_ENCODED_PASSWORD@postgres:5432/va_dashboard?sslmode=verify-full",
+      JWT_SECRET: "replace-with-at-least-32-random-characters",
+      TRELLO_TOKEN: "replace-with-your-scoped-trello-token",
+    });
+    expect(errors).toEqual([
+      "DATABASE_URL must not contain template placeholder values",
+      "JWT_SECRET must not contain template placeholder values",
+      "TRELLO_TOKEN must not contain template placeholder values",
+    ]);
+  });
+
+  it("rejects a request-only Vercel production runtime", () => {
+    expect(getProductionConfigurationErrors({ ...validProductionEnvironment, VERCEL: "1" })).toEqual([
+      "Vercel request-only runtime is unsupported; deploy the unified Docker container",
+    ]);
+  });
+
   it("accepts the production contract without a paid LLM API key", () => {
     expect(getProductionConfigurationErrors(validProductionEnvironment)).toEqual([]);
     expect(() => assertProductionConfiguration(validProductionEnvironment)).not.toThrow();

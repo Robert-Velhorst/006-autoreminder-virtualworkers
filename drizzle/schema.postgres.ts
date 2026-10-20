@@ -1842,24 +1842,24 @@ export const taskScheduleHistory = pgTable('task_schedule_history', {
   founderId: integer('founderId'),
   assignmentId: integer('assignmentId'),
   cardTrelloId: varchar('cardTrelloId', { length: 64 }),
-  
+
   // Previous schedule
   previousStartTime: timestamp('previousStartTime'),
   previousEndTime: timestamp('previousEndTime'),
-  
+
   // New schedule
   newStartTime: timestamp('newStartTime'),
   newEndTime: timestamp('newEndTime'),
-  
+
   // Change details
   changedBy: varchar('changedBy', { length: 64 }).notNull(), // User openId
   reason: varchar('reason', { length: 255 }), // Why was it rescheduled?
   source: enumText('source', ['manual', 'auto', 'batch', 'conflict_resolution']).default('manual').notNull(),
-  
+
   // Conflict info
   hadConflicts: integer('hadConflicts').default(0).notNull(), // 0=false, 1=true
   conflictDetails: text('conflictDetails'), // JSON array of conflicts
-  
+
   createdAt: timestamp('createdAt').defaultNow().notNull(),
 }, table => [index("task_schedule_history_assignment_created_idx").on(table.assignmentId, table.createdAt)]);
 

@@ -245,4 +245,3 @@ describe("active PostgreSQL feature migration metadata", () => {
     }
   }, 30000);
 });
-
