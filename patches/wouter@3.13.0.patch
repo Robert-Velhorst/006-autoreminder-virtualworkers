@@ -1,12 +1,12 @@
-diff --git a/esm/index.js b/esm/index.js
-index c83bc63a2c10431fb62e25b7d490656a3796f301..bcae513cc20a4be6c38dc116e0b8d9bacda62b5b 100644
---- a/esm/index.js
-+++ b/esm/index.js
-@@ -338,6 +338,23 @@ const Switch = ({ children, location }) => {
+diff --git a/src/index.js b/src/index.js
+index 7c8f549e51131c38be3617e389cf74897d6edf3d..14853843e9d09cf9ecd918bd40003a85690def0a 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -317,6 +317,23 @@ export const Switch = ({ children, location }) => {
    const router = useRouter();
-   const [originalLocation] = useLocationFromRouter(router);
+   const originalLocation = usePathnameFromRouter(router);
  
-+  // Collect all route paths to window object
++  // Collect all route paths to window object for the dashboard's route inventory.
 +  if (typeof window !== 'undefined') {
 +    if (!window.__WOUTER_ROUTES__) {
 +      window.__WOUTER_ROUTES__ = [];
