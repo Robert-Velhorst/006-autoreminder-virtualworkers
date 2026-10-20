@@ -17,6 +17,7 @@ import {
 } from '../../drizzle/schema.postgres';
 import { managerPilotWorkerIds } from '../aptlssManagerPilot';
 import { areNotificationsEnabled } from './notificationPolicy';
+import { encodeTrelloPathSegment } from '../utils/trello-path';
 
 const TRELLO_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -167,6 +168,8 @@ async function attemptTrelloComment(
     return { posted: false, failureReason: holdReason };
   }
 
+  const encodedCardId = encodeTrelloPathSegment(cardId);
+  if (!encodedCardId) return { posted: false, failureReason: "Invalid Trello card ID" };
   const credentials = trelloCredentials();
   if (!credentials) {
     console.error('[TrelloChatbot] Cannot post comment because Trello credentials are not configured');
@@ -175,9 +178,10 @@ async function attemptTrelloComment(
 
   try {
     const response = await fetch(
-      `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}/actions/comments?${new URLSearchParams(credentials).toString()}`,
+      `https://api.trello.com/1/cards/${encodedCardId}/actions/comments?${new URLSearchParams(credentials).toString()}`,
       {
         method: 'POST',
+        redirect: 'error',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
         signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS),

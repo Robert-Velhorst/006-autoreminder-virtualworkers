@@ -50,7 +50,7 @@ describe("outbound notification gate", () => {
       const { postCardComment } = await import("./trello-manus");
 
       await expect(sendEmail({ to: "worker@example.test", subject: "Test", html: "Test" })).resolves.toBe(false);
-      await expect(postTrelloComment("card-id", "Test comment")).resolves.toBe(false);
+      await expect(postTrelloComment("0123456789abcdef01234567", "Test comment")).resolves.toBe(false);
       await expect(postCardComment("card-id", "Test comment", "test-key", "test-token")).rejects.toThrow(
         "Outbound Trello comments are disabled",
       );
@@ -67,7 +67,7 @@ describe("outbound notification gate", () => {
     const { postCardComment } = await import("./trello-manus");
 
     await expect(sendEmail({ to: "worker@example.test", subject: "Test", html: "Test" })).resolves.toBe(true);
-    await expect(postTrelloComment("card-id", "Test comment")).resolves.toBe(true);
+    await expect(postTrelloComment("0123456789abcdef01234567", "Test comment")).resolves.toBe(true);
     await expect(postCardComment("card-id", "Test comment", "test-key", "test-token")).resolves.toEqual({
       id: "action-id",
       date: "2026-10-13T12:00:00.000Z",

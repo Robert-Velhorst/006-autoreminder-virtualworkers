@@ -1,3 +1,4 @@
+import { encodeTrelloPathSegment } from '../utils/trello-path';
 import { Router, Response } from 'express';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { getDb } from '../db';
@@ -327,14 +328,18 @@ router.delete('/:webhookId', requireAdmin, async (req: any, res: Response) => {
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
     const { webhookId } = req.params;
+    const encodedWebhookId = encodeTrelloPathSegment(webhookId);
+    if (!encodedWebhookId) {
+      return res.status(400).json({ error: 'Invalid Trello webhook ID' });
+    }
     const apiKey = process.env.TRELLO_API_KEY;
     const token = process.env.TRELLO_TOKEN;
 
     if (apiKey && token) {
       try {
         const response = await fetch(
-          `${TRELLO_API_BASE}/webhooks/${webhookId}?key=${apiKey}&token=${token}`,
-          { method: 'DELETE', signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS) }
+          `${TRELLO_API_BASE}/webhooks/${encodedWebhookId}?key=${apiKey}&token=${token}`,
+          { method: 'DELETE', redirect: 'error', signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS) }
         );
         if (response.ok) {
           console.log('[TrelloWebhook] Deleted webhook from Trello API');

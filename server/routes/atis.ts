@@ -1,3 +1,4 @@
+import { encodeTrelloPathSegment } from '../utils/trello-path';
 /**
  * ATIS API Routes
  * 
@@ -502,6 +503,10 @@ router.post('/understanding/reprocess/:cardId', atisRateLimiter, async (req: Req
 router.post('/cards/:trelloId/reingest', async (req: Request, res: Response) => {
   try {
     const { trelloId } = req.params;
+    const encodedTrelloId = encodeTrelloPathSegment(trelloId);
+    if (!encodedTrelloId) {
+      return res.status(400).json({ error: 'Invalid Trello card ID' });
+    }
     const db = await getDb();
     
     if (!db) {

@@ -1,3 +1,4 @@
+import { encodeTrelloPathSegment } from "../utils/trello-path";
 import { getLLMText, invokeLLM } from "../_core/llm";
 import { assertAptlssJobOwnership, createChecklistSyncService } from "./trello-checklist-sync";
 import { ScheduledJobLeaseLostError, type ScheduledJobContext } from "../scheduledJobRuntime";
@@ -262,6 +263,8 @@ export async function fetchAptlssSourceCard(cardId: string, context?: ScheduledJ
   const token = process.env.TRELLO_TOKEN?.trim();
   if (!apiKey || !token) throw new Error("Trello credentials not configured");
 
+  const encodedCardId = encodeTrelloPathSegment(cardId);
+  if (!encodedCardId) throw new Error("Invalid Trello card ID");
   const query = new URLSearchParams({
     key: apiKey,
     token,
@@ -278,7 +281,8 @@ export async function fetchAptlssSourceCard(cardId: string, context?: ScheduledJ
     action_fields: "data,date,type",
     action_memberCreator_fields: "username,fullName",
   });
-  const response = await fetch(`https://api.trello.com/1/cards/${encodeURIComponent(cardId)}?${query}`, {
+  const response = await fetch(`https://api.trello.com/1/cards/${encodedCardId}?${query}`, {
+    redirect: "error",
     signal: context ? AbortSignal.any([context.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
   });
   if (!response.ok) {

@@ -1,3 +1,4 @@
+import { encodeTrelloPathSegment } from '../utils/trello-path';
 /**
  * Enhanced Interview Route
  * 
@@ -33,6 +34,7 @@ router.use(requireAdmin);
  * Helper to get Trello card with all details
  */
 async function getTrelloCard(cardId: string, user: User) {
+  if (!encodeTrelloPathSegment(cardId)) throw new TrelloAccessError(400, "Invalid Trello card ID");
   return fetchAuthorizedTrelloCardWithComments<any>(user, cardId);
 }
 
@@ -48,8 +50,8 @@ router.post('/start', async (req: Request, res: Response) => {
     }
 
     const { cardId } = req.body;
-    if (!cardId) {
-      return res.status(400).json({ error: 'Missing cardId' });
+    if (!encodeTrelloPathSegment(cardId)) {
+      return res.status(400).json({ error: 'A valid Trello card ID is required' });
     }
 
     // Get card data from Trello

@@ -1,3 +1,4 @@
+import { encodeTrelloPathSegment } from '../utils/trello-path';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../db';
@@ -148,6 +149,7 @@ async function fetchUserWorkspaceBoards(apiKey: string, token: string) {
 }
 
 async function fetchCardForAptlss(cardId: string) {
+  if (!encodeTrelloPathSegment(cardId)) throw new Error("Invalid Trello card ID");
   return fetchAptlssSourceCard(cardId);
 }
 
