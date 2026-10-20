@@ -157,7 +157,7 @@ for (const viewport of [
         [`${prefix}-admin`, `${prefix} Admin`, "admin", "local", hash]
       );
       await db.query(
-        "INSERT INTO user_working_hours (\"userId\",\"userOpenId\",timezone,\"workingDays\",\"workStartHour\",\"workEndHour\",\"enableBreaks\") VALUES ($1,$2,$3,$4,9,18,FALSE)",
+        "INSERT INTO user_working_hours (\"userId\",\"userOpenId\",timezone,\"workingDays\",\"workStartHour\",\"workEndHour\",\"enableBreaks\") VALUES ($1,$2,$3,$4,9,18,0)",
         [workerId, `${prefix}-worker`, timezone, "0,1,2,3,4,5,6"]
       );
       await db.query(
