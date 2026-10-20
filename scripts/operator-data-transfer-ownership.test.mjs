@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { Client } from "pg";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { classifyBrowserCollectorImport } from "./operator-data-transfer-ownership.mjs";
+import {
+  prepareTransferRow, quoteIdentifier, sameTransferRecord, sourceIdentity,
+  transferIdentity, transferOperatorRecords, validateTargetIdentity,
+} from "./operator-data-transfer-utils.mjs";
+import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
 
 const collector = {
   id: 8,
@@ -53,4 +60,227 @@ describe("browser collector data-transfer ownership", () => {
       existing: collector,
     });
   });
+});
+
+describe("strict operator recovery identity and snapshot policy", () => {
+  const identity = transferIdentity(3, 1);
+  const target = {
+    workerId: 3, founderId: 1, workerOpenId: "worker-fixture", founderOpenId: "founder-fixture",
+    trelloMemberId: "trello-fixture", founderRole: "admin", workerStatus: "active",
+  };
+
+  it("binds matching numeric IDs to the actual source worker and founder principals", () => {
+    const source = sourceIdentity(target);
+    expect(() => validateTargetIdentity(source, [target], identity)).not.toThrow();
+    for (const change of [
+      { workerOpenId: "another-worker" }, { founderOpenId: "another-founder" },
+      { trelloMemberId: "another-trello-member" }, { founderId: 2 }, { workerId: 4 },
+      { founderRole: "worker" }, { workerStatus: "inactive" },
+    ]) {
+      expect(() => validateTargetIdentity(source, [{ ...target, ...change }], identity)).toThrow(/mismatch/);
+    }
+    expect(() => validateTargetIdentity(source, [], identity)).toThrow(/missing or ambiguous/);
+    expect(() => validateTargetIdentity(source, [target, target], identity)).toThrow(/missing or ambiguous/);
+  });
+
+  it("does not silently remap non-null source worker/founder IDs or invent missing ownership", () => {
+    const metadata = [
+      { column_name: "vaId", data_type: "integer" },
+      { column_name: "founderId", data_type: "integer" },
+    ];
+    expect(prepareTransferRow({ vaId: "3", founderId: "1" }, metadata, identity, "fixture"))
+      .toEqual({ vaId: "3", founderId: "1" });
+    for (const row of [{ vaId: 4, founderId: 1 }, { vaId: 3, founderId: 2 }, { founderId: 1 }, { vaId: 3 }]) {
+      expect(() => prepareTransferRow(row, metadata, identity, "fixture")).toThrow();
+    }
+  });
+
+  it("requires exact collector content including timestamps, not a freshness-based skip or overwrite", () => {
+    const expected = { ...collector, sourceCapturedAt: "2026-10-21 12:00:00" };
+    const metadata = Object.keys(expected).map(column_name => ({
+      column_name,
+      data_type: column_name === "sourceCapturedAt" ? "timestamp without time zone"
+        : typeof expected[column_name] === "number" ? "integer" : "text",
+    }));
+    expect(sameTransferRecord(expected, expected, metadata)).toBe(true);
+    for (const change of [
+      { captureSequence: 6 }, { captureSequence: 8 }, { sourceCapturedAt: "2026-10-21 12:01:00" },
+      { vaId: 4 }, { tabsJson: "[{}]" }, { collectorLabel: "different browser" },
+    ]) {
+      expect(sameTransferRecord(expected, { ...expected, ...change }, metadata)).toBe(false);
+    }
+  });
+
+  it("refuses production, remote, operational and connection-override URLs before native test setup", () => {
+    const safe = "postgresql://fixture:fixture@127.0.0.1:5432/recovery_test?sslmode=disable";
+    expect(() => requireIsolatedPostgresTestDatabase(safe, true)).toThrow();
+    for (const value of [undefined, safe.replace("127.0.0.1", "database.example.com"),
+      safe.replace("recovery_test", "production"), `${safe}&options=-csearch_path=public`]) {
+      expect(() => requireIsolatedPostgresTestDatabase(value)).toThrow();
+    }
+    expect(requireIsolatedPostgresTestDatabase(safe)).toBe(safe);
+  });
+});
+
+// Opt-in only. Never load .env or fall back to operational DATABASE_URL.
+const testUrl = process.env.APTLSS_TEST_DATABASE_URL;
+describe.skipIf(!testUrl)("operator transfer native isolated PostgreSQL transactions", () => {
+  let database;
+  let schema;
+  let schemaCreated;
+  let connectionString;
+  const identity = transferIdentity(3, 1);
+  const principal = {
+    workerId: 3, founderId: 1, workerOpenId: "synthetic-worker", founderOpenId: "synthetic-founder",
+    trelloMemberId: "synthetic-trello-member",
+  };
+  const definitions = [{ name: "time_entries", keys: ["id"] }, { name: "card_states", keys: ["vaId", "cardId"] }];
+  const entry = { id: 8, vaId: 3, founderId: 1, notes: "synthetic source" };
+  const card = { id: 9, vaId: 3, cardId: "synthetic-card", state: { b: 2, a: 1 } };
+  const payload = (entries = [entry], cards = []) => ({
+    format: "joyce-operator-export-v1", identities: [sourceIdentity(principal)], skipped: [],
+    tables: structuredClone({ time_entries: entries, card_states: cards }),
+    counts: { time_entries: entries.length, card_states: cards.length },
+  });
+  const transfer = (data, options = {}) => transferOperatorRecords(database, data, definitions, { identity, ...options });
+  const entrySequence = async () => (await database.query(
+    'SELECT last_value::text AS value, is_called AS called FROM time_entries_id_seq')).rows[0];
+  const nextEntry = async () => (await database.query(
+    `INSERT INTO time_entries ("vaId", "founderId", notes) VALUES (3, 1, 'synthetic next insert') RETURNING id`)).rows[0].id;
+
+  beforeEach(async () => {
+    schemaCreated = false;
+    database = undefined;
+    connectionString = requireIsolatedPostgresTestDatabase(testUrl, process.env.NODE_ENV === "production");
+    schema = `operator_transfer_${randomUUID().replaceAll("-", "")}`;
+    database = new Client({ connectionString, connectionTimeoutMillis: 5000 });
+    await database.connect();
+    await database.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
+    schemaCreated = true;
+    // No public search-path fallback: every application table and sequence is disposable.
+    await database.query(`SET search_path TO ${quoteIdentifier(schema)}`);
+    expect((await database.query("SELECT current_schema() AS schema")).rows[0].schema).toBe(schema);
+    await database.query(`
+      CREATE TABLE users (id integer PRIMARY KEY, "openId" text NOT NULL UNIQUE, role text NOT NULL);
+      CREATE TABLE va_profiles (id integer PRIMARY KEY, "userId" integer NOT NULL REFERENCES users(id),
+        "founderId" integer NOT NULL REFERENCES users(id), status text NOT NULL, "trelloMemberId" text);
+      CREATE TABLE time_entries (id integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        "vaId" integer NOT NULL REFERENCES va_profiles(id), "founderId" integer NOT NULL REFERENCES users(id), notes text NOT NULL);
+      CREATE TABLE card_states (id integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        "vaId" integer NOT NULL REFERENCES va_profiles(id), "cardId" text NOT NULL, state jsonb NOT NULL,
+        UNIQUE ("vaId", "cardId"));
+      INSERT INTO users VALUES (1, 'synthetic-founder', 'admin'), (2, 'synthetic-worker', 'worker');
+      INSERT INTO va_profiles VALUES (3, 2, 1, 'active', 'synthetic-trello-member');
+    `);
+  });
+
+  afterEach(async () => {
+    if (!database) return;
+    try {
+      if (schemaCreated) {
+        // Cleanup is confined to the schema this test successfully created.
+        if (!/^operator_transfer_[a-f0-9]{32}$/.test(schema)) throw new Error("Unsafe test cleanup schema");
+        await database.query(`DROP SCHEMA ${quoteIdentifier(schema)} CASCADE`);
+      }
+    } finally {
+      await database.end();
+    }
+  });
+
+  it("dry-run leaves rows and sequence allocation untouched; committed import supports the next ordinary insert", async () => {
+    expect(await transfer(payload())).toMatchObject({ success: true, applied: false, mode: "dry-run",
+      tables: { time_entries: { wouldInsert: 1, inserted: 0 } } });
+    expect((await database.query("SELECT * FROM time_entries")).rows).toEqual([]);
+    expect(await entrySequence()).toEqual({ value: "1", called: false });
+    expect(await transfer(payload(), { execute: true })).toMatchObject({ success: true, applied: true });
+    expect(await entrySequence()).toEqual({ value: "9", called: false });
+    expect(await nextEntry()).toBe(9);
+    expect(await transfer(payload(), { reconcile: true })).toMatchObject({ success: true, applied: false,
+      tables: { time_entries: { source: 1, identical: 1 } } });
+  });
+
+  it("rolls back an earlier insert on a later natural-key/record-ID collision without overwriting the target", async () => {
+    await database.query(`INSERT INTO card_states (id, "vaId", "cardId", state) VALUES (9, 3, 'independent-card', '{"keep":true}')`);
+    await expect(transfer(payload([entry], [card]), { execute: true })).rejects.toThrow(/collision/);
+    expect((await database.query("SELECT * FROM time_entries")).rows).toEqual([]);
+    expect((await database.query("SELECT * FROM card_states")).rows).toEqual([
+      { id: 9, vaId: 3, cardId: "independent-card", state: { keep: true } },
+    ]);
+    expect(await entrySequence()).toEqual({ value: "1", called: false });
+  });
+
+  it("rolls back rows AND an already-applied sequence restart if a later sequence cannot be repaired", async () => {
+    await database.query("ALTER SEQUENCE card_states_id_seq CACHE 2");
+    await expect(transfer(payload([entry], [card]), { execute: true })).rejects.toThrow(/Unsupported identity sequence: card_states/);
+    expect((await database.query("SELECT * FROM time_entries")).rows).toEqual([]);
+    expect((await database.query("SELECT * FROM card_states")).rows).toEqual([]);
+    expect(await entrySequence()).toEqual({ value: "1", called: false });
+    expect(await nextEntry()).toBe(1);
+    await database.query("ALTER SEQUENCE card_states_id_seq CACHE 1");
+    expect(await transfer(payload([entry], [card]), { execute: true })).toMatchObject({ success: true });
+    expect(await nextEntry()).toBe(9);
+  });
+
+  it.each([
+    { name: "stale", restart: null, consume: false, next: 9 },
+    { name: "ahead and uncalled", restart: 100, consume: false, next: 100 },
+    { name: "ahead and called", restart: 100, consume: true, next: 101 },
+  ])("repairs an idempotent import without rewinding a $name sequence", async ({ restart, consume, next }) => {
+    await database.query(`INSERT INTO time_entries (id, "vaId", "founderId", notes) VALUES ($1, $2, $3, $4)`,
+      [entry.id, entry.vaId, entry.founderId, entry.notes]);
+    if (restart) await database.query(`ALTER SEQUENCE time_entries_id_seq RESTART WITH ${restart}`);
+    if (consume) await database.query("SELECT nextval('time_entries_id_seq')");
+    expect(await transfer(payload(), { execute: true })).toMatchObject({ success: true,
+      tables: { time_entries: { identical: 1, inserted: 0 } } });
+    expect(await nextEntry()).toBe(next);
+  });
+
+  it("rejects independently initialized principal identities even when the numeric IDs match", async () => {
+    await database.query(`UPDATE users SET "openId" = 'synthetic-different-worker' WHERE id = 2`);
+    await expect(transfer(payload(), { execute: true })).rejects.toThrow(/principal or ownership mismatch/);
+    expect((await database.query("SELECT * FROM time_entries")).rows).toEqual([]);
+    expect(await entrySequence()).toEqual({ value: "1", called: false });
+  });
+
+  it("detects split natural-key/primary-key collisions and source omissions instead of accepting target row counts", async () => {
+    await database.query(`INSERT INTO card_states (id, "vaId", "cardId", state) VALUES
+      (9, 3, 'other-card', '{}'), (10, 3, 'synthetic-card', '{"a":1,"b":2}')`);
+    await expect(transfer(payload([], [card]), { execute: true })).rejects.toThrow(/collision/);
+    expect((await database.query("SELECT count(*)::int AS count FROM card_states")).rows[0].count).toBe(2);
+    await database.query(`INSERT INTO time_entries (id, "vaId", "founderId", notes) VALUES
+      (20, 3, 1, 'unrelated one'), (21, 3, 1, 'unrelated two')`);
+    await expect(transfer(payload(), { reconcile: true })).rejects.toThrow(/Source record missing/);
+    await database.query(`INSERT INTO time_entries (id, "vaId", "founderId", notes) VALUES (8, 3, 1, 'wrong content')`);
+    await expect(transfer(payload(), { reconcile: true })).rejects.toThrow(/collision/);
+  });
+
+  it("waits for an ordinary table writer and rejects its newly committed conflicting row", async () => {
+    const importer = new Client({ connectionString, options: `-c search_path=${schema}`, connectionTimeoutMillis: 5000 });
+    let result;
+    try {
+      await importer.connect();
+      const importerPid = (await importer.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      await database.query("BEGIN");
+      await database.query(`INSERT INTO time_entries (id, "vaId", "founderId", notes) VALUES (8, 3, 1, 'concurrent conflicting writer')`);
+      let settled = false;
+      result = transferOperatorRecords(importer, payload(), definitions, { identity, execute: true })
+        .then(value => ({ value }), error => ({ error })).finally(() => { settled = true; });
+      let blocked = false;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const observation = await database.query("SELECT cardinality(pg_blocking_pids($1)) > 0 AS blocked", [importerPid]);
+        if (observation.rows[0].blocked) { blocked = true; break; }
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      expect(blocked).toBe(true);
+      expect(settled).toBe(false);
+      await database.query("COMMIT");
+      expect(await result).toMatchObject({ error: { message: expect.stringContaining("collision") } });
+      expect((await database.query("SELECT notes FROM time_entries WHERE id = 8")).rows[0].notes)
+        .toBe("concurrent conflicting writer");
+    } finally {
+      await database.query("ROLLBACK");
+      if (result) await result;
+      await importer.end();
+    }
+  }, 15000);
 });

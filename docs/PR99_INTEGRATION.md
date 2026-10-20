@@ -6,4 +6,20 @@ The original MySQL pilot history remains in Git for provenance. Its historical v
 
 Current validation is in progress; this document is not a production acceptance declaration.
 
+## October 21 Consolidation Follow-Up
+
+The consolidated candidate contains current main's router dependency update. Six local development snapshots are preserved by verified `archive/local-progress-20261020/*` tags; superseded proxy and release-security commits are also preserved by `archive/consolidation-20261021/*` tags. Tags preserve exact history, not deployment acceptance. Private configurations and database archives are deliberately not published to this public repository.
+
+Functional comparison found that the old evidence-engine, shared-PostgreSQL, and retired-ingress branches are superseded by the candidate rather than safe to merge wholesale. In particular, historical MySQL runtime/deployment definitions must not replace the canonical PostgreSQL implementation. The missing evidence-load failure/retry UI and PostgreSQL proof-field validation have been ported. Production database completeness checks are retained alongside verified TLS. CI intentionally retains `ubuntu-latest` with pinned application tools; an older fork's OS runner pin is not a missing product feature.
+
+Verification boundaries:
+
+- Node 26.12.0 / frozen pnpm 12.14.0 installation; full local ordinary run: 3,413 passing tests, 213 environment skips. These skips do not prove database or provider behavior.
+- The 80 intercepted-API browser contract scenarios pass locally, including the evidence-failure recovery regression. They do not prove live provider access or persistence.
+- Focused parsing, DOM status-message, and production-configuration tests pass. The actual PostgreSQL owner test initially exposed a fixture DDL parameterization error; the fixture is repaired, but the new hosted database run remains required.
+- A disposable localhost PostgreSQL 18.6 instance subsequently passed all 22 owner/transfer ownership and transaction tests, plus 20 transfer utility tests, with no skips in those focused runs. This also exposed and repaired an ambiguous sequence-query parameter type and a missing fixture enum. The transfer tool now refuses principal/content collisions, defaults to dry run, uses exact keyed reconciliation, and repairs sequences transactionally. See [the transfer procedure](OPERATOR_DATA_TRANSFER.md); no private dataset was imported.
+- Required hosted CI, final-image acceptance, data-transfer/restore acceptance, and final exact-head security analysis remain merge/release gates. Do not use an older green run to approve a newer commit.
+
+The production environment has the owner's requested self-approval and administrator-bypass settings. No Hetzner SSH deployment secrets are configured. The target host, domain and app-specific database still need authoritative verification. No production deployment or stable-release acceptance is claimed.
+
 Hosted PostgreSQL 18.6 has applied the appended migration chain and passed complete runtime table/column parity. A first real database test run passed 3,467 assertions and exposed remaining fixture/transfer compatibility issues; those corrections are committed for a fresh run. Final database, browser, source-attestation and container gates remain required before merge. The dependency audit reports no known vulnerabilities after the selector-parser patch.

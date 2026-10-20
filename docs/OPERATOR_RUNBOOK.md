@@ -3,21 +3,21 @@
 ## Start Or Refresh
 
 ```powershell
-pnpm docker:public
+docker compose --env-file .env up -d --build
 pnpm run doctor
 ```
 
-The public URL is stored in `.local/public-dashboard.json`. The local fallback
-is `http://127.0.0.1:3025`.
-
-The refresh intentionally takes ngrok offline while the app container is
-replaced, then restores it only after local health succeeds. A short connection
-interruption is expected; an `ERR_NGROK_8012` upstream-error page is not.
+Production uses the configured HTTPS origin and trusted reverse proxy, not a
+development tunnel. The application container binds to loopback on the host;
+PostgreSQL and optional Redis are separately managed services. Verify readiness
+and the previous immutable image before replacing a running application.
+For an approved published release, follow [the deployment procedure](../DEPLOYMENT.md)
+rather than rebuilding unrelated source on the production host.
 
 ## First Owner Access
 
-1. Open the login page and choose **Set up owner access**.
-2. Read the ignored `.local/owner-bootstrap-token.txt` on the host.
+1. On a fresh migrated database, first follow [pending-owner provisioning](OWNER_PROVISIONING.md).
+2. Open **Set up owner access** and obtain the configured token from the private host environment or secret store. Never publish it.
 3. Enter that token and choose a unique password of at least 12 characters.
 4. Remove `OWNER_BOOTSTRAP_OPEN_ID` and `OWNER_BOOTSTRAP_TOKEN` from `.env`.
 5. Restart the app and confirm normal owner login.

@@ -3,7 +3,7 @@ import { Client } from "pg";
 import { sql } from "drizzle-orm";
 import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { users } from "../drizzle/schema.postgres";
+import { pgEnumType01, users } from "../drizzle/schema.postgres";
 import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
 import { provisionOwner, type OwnerProvisioningClient } from "./ownerProvisioning";
 
@@ -32,6 +32,8 @@ describe.skipIf(!testUrl)("pending owner native PostgreSQL transactions", () => 
     await admin.connect();
     await execute(sql`CREATE SCHEMA ${sql.identifier(schemaName)}`);
     await execute(sql`SET search_path TO ${sql.identifier(schemaName)}`);
+    await execute(sql`CREATE TYPE ${sql.identifier(pgEnumType01.enumName)} AS ENUM
+      (${sql.join(pgEnumType01.enumValues.map(value => sql`${value}`), sql`, `)})`.inlineParams());
     // Build an isolated users fixture from canonical column definitions, not a second schema.
     const columns = getTableConfig(users).columns.map(column => sql`${sql.identifier(column.name)}
       ${sql.raw(column.getSQLType())}
