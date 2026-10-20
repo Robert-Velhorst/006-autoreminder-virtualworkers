@@ -1,3 +1,5 @@
+> Current PostgreSQL integration: active application and scheduled-job integration suites run in ordinary CI against the explicitly guarded `APTLSS_TEST_DATABASE_URL`. `test:legacy-mysql` retains only the two historical MySQL storage-helper rehearsals and requires the separate `APTLSS_LEGACY_MYSQL_TEST_DATABASE_URL` opt-in; its runner sets `APTLSS_LEGACY_MYSQL_TESTS=1` and rejects skipped evidence. Historical MySQL results below do not attest the PostgreSQL runtime.
+
 # Configured Production Runtime Rehearsal
 
 ## Current Lifecycle Restriction, 2026-10-01
