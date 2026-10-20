@@ -30,9 +30,9 @@ unapproved external actions were rejected deliberately.
 ## Retired Legacy Line
 
 `auto-reminder-structured` is a separate 2025 application, not Kamal's final
-platform. It uses a MongoDB backend and Create React App frontend and includes
-automatic Trello, email, SMS, and WhatsApp reminder jobs. It also tracks a
-populated `Backend/.env`.
+platform. It used a split frontend/backend architecture and included automatic
+Trello, email, SMS, and WhatsApp reminder jobs. It also tracked populated
+credentials in `Backend/.env`.
 
 For that reason:
 

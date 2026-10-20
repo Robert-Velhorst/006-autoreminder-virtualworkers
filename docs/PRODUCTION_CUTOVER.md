@@ -80,14 +80,14 @@ an OpenAI API key as an equivalent subscription credential.
   Trello push updates after a public HTTPS domain exists.
 - `SCHEDULED_TASK_SECRET` protects explicitly exposed scheduled-task routes.
 
-Do not migrate the legacy MongoDB URL, Twilio credentials, React frontend URL,
-or old reminder timing variables. They belong to the retired split
-application, not the consolidated runtime. Before production cutover, revoke
-any credentials exposed by that retired application and resolve the related
-secret-scanning alerts after rotation; removing a value from Git history does
-not revoke it. Use [the Atlas credential rotation runbook](ATLAS_CREDENTIAL_ROTATION.md)
-to inventory consumers, rotate safely, and verify revocation before closing
-the two remaining Atlas alerts.
+Do not migrate legacy database URLs, Twilio credentials, the old frontend URL,
+or reminder timing variables. They belong to the retired split application,
+not the consolidated runtime. Before production cutover, inventory and revoke
+any credentials exposed by that retired application, then resolve the related
+secret-scanning alerts only after revocation is verified. Removing a value
+from Git history does not revoke it. The repository's historical credential
+alerts remain an operational security issue until their providers confirm
+revocation; do not copy those credentials into the current deployment.
 
 ## Verification Gate
 

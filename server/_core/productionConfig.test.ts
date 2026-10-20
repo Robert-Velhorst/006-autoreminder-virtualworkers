@@ -40,7 +40,7 @@ describe("production configuration", () => {
   it("reports missing or unsafe production configuration without values", () => {
     const unsafeEnvironment = {
       NODE_ENV: "production",
-      DATABASE_URL: "mongodb://legacy",
+      DATABASE_URL: "file://legacy",
       REDIS_URL: "",
       JWT_SECRET: "short-secret-value",
       TRELLO_API_KEY: "private-trello-key",
