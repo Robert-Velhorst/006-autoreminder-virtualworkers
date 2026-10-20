@@ -117,3 +117,6 @@ temp/
 .playwright-cli/
 playwright-report/
 test-results/
+artifacts/aptlss-safety.json
+artifacts/aptlss-safety-results.json
+artifacts/aptlss-full-tests.json

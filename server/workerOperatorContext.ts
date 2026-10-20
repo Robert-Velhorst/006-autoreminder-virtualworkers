@@ -51,8 +51,8 @@ function missingTable(error: unknown) {
     && (error as { code?: string }).code === "ER_NO_SUCH_TABLE";
 }
 
-export async function resolveWorkerOperatorContext(user: User): Promise<WorkerOperatorContext> {
-  const db = await getDb();
+export async function resolveWorkerOperatorContext(user: User, database?: NonNullable<Awaited<ReturnType<typeof getDb>>>): Promise<WorkerOperatorContext> {
+  const db = database ?? await getDb();
   const fallbackName = user.name?.trim() || "Worker";
   if (!db) {
     return {
@@ -118,10 +118,10 @@ export async function resolveWorkerOperatorContext(user: User): Promise<WorkerOp
   };
 }
 
-export async function resolveWorkerOperatorContextById(userId: number) {
-  const db = await getDb();
+export async function resolveWorkerOperatorContextById(userId: number, database?: NonNullable<Awaited<ReturnType<typeof getDb>>>) {
+  const db = database ?? await getDb();
   if (!db) throw new Error("Database is required to resolve worker context");
   const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   if (!user || user.role !== "worker") throw new Error("Worker profile not found");
-  return resolveWorkerOperatorContext(user);
+  return resolveWorkerOperatorContext(user, db);
 }

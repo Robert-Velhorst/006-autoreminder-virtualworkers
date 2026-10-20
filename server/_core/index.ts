@@ -46,6 +46,7 @@ import { log } from "../utils/logger.js";
 import { registerBrowserTabRoutes } from "../browserTabRoutes.js";
 import { assertLocalAuthBypassConfiguration } from "./localAuthBypass.js";
 import { assertProductionConfiguration } from "./productionConfig.js";
+import { startManagerScheduler, stopManagerScheduler } from "../aptlssManagerService.js";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -284,6 +285,8 @@ async function startServer() {
   } catch (error) {
     log.error('Cache warming failed', error as Error);
   }
+  // The worker manager is independent of cache warming and remains available in degraded mode.
+  startManagerScheduler();
 
   const host = process.env.HOST ?? "127.0.0.1";
   server.listen(port, host, async () => {
@@ -297,6 +300,12 @@ async function startServer() {
   // Graceful shutdown handling
   const gracefulShutdown = async () => {
     log.info('Shutting down gracefully...');
+    // Unfinished manager leases remain durable if the bounded drain must stop.
+    const forcedExit = setTimeout(() => {
+      log.fatal('Forced shutdown after timeout');
+      process.exit(1);
+    }, 10000);
+    await stopManagerScheduler();
     
     // Close WebSocket connections
     const io = websocketService.getIO();
@@ -310,15 +319,11 @@ async function startServer() {
     
     // Close HTTP server
     server.close(() => {
+      clearTimeout(forcedExit);
       log.info('HTTP server closed');
       process.exit(0);
     });
     
-    // Force exit after 10 seconds
-    setTimeout(() => {
-      log.fatal('Forced shutdown after timeout');
-      process.exit(1);
-    }, 10000);
   };
 
   process.on('SIGTERM', gracefulShutdown);

@@ -26,6 +26,20 @@ The worker experience has one canonical application shell. Historical
 dashboard source remains preserved in Git history and the Kamal delivery
 archive, but it is not mounted as a second portal.
 
+## Evidence-Backed APTLSS Manager
+
+The worker queue includes an evidence-backed project manager. It starts in **shadow mode**:
+it retains assessments, source passages, verification questions and proposed day plans,
+but does not overwrite the worker's executing plan or send external messages.
+The founder can review proposals in the existing founder portal. Automatic plan changes
+are restricted to one pilot worker after code-specific safety tests and a real reviewed
+trial of at least five working days and 100 distinct proposals pass. A displayed trial
+result is not a probability that future decisions will be correct.
+
+See [APTLSS reliability and acceptance](docs/APTLSS_RELIABILITY.md) for the behavior,
+permissions, additive migrations, test commands, activation gates and remaining live
+acceptance requirements. Automated tests do not substitute for the human shadow trial.
+
 ## Local Setup
 
 1. Install Node.js 20 or newer and pnpm 10.4.1.

@@ -42,6 +42,13 @@ import {
 import { protectedProcedure, router } from "./_core/trpc";
 import { resolveWorkerOperatorContext } from "./workerOperatorContext";
 import { interpretWaitingReasonForWorker } from "./workerWaitingReason";
+import { getManagerStatus, runManager, submitManagerUpdate, updateManagerPolicy } from "./aptlssManagerService";
+import { closeManagerTrial, getManagerReviewInbox, managerCorrectionRevokeInputSchema, managerReviewInboxInputSchema, managerReviewInputSchema, managerTrialInputSchema, recordManagerReview, requireManagerReviewer, restartManagerTrial, restoreManagerPlan, revokeManagerCorrection, setManagerMode } from "./aptlssManagerReviewService";
+
+const managerReviewer = protectedProcedure.use(async ({ ctx, next }) => {
+  if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Founder/admin access is required" });
+  return next({ ctx });
+});
 
 const operatorProcedure = protectedProcedure.use(async ({ ctx, next }) => {
   if (ctx.user.role !== "worker") {
@@ -124,6 +131,34 @@ const dailyPlanPayloadSchema = z.object({
 
 export const operatorRouter = router({
   getContext: operatorProcedure.query(async ({ ctx }) => resolveWorkerOperatorContext(ctx.user)),
+
+  getManagerReviewInbox: managerReviewer.input(managerReviewInboxInputSchema.optional())
+    .query(({ ctx, input }) => getManagerReviewInbox(ctx.user.id, input?.vaId, input?.page)),
+  recordManagerReview: managerReviewer.input(managerReviewInputSchema)
+    .mutation(({ctx,input}) => recordManagerReview(ctx.user.id,input)),
+  closeManagerTrial: managerReviewer.input(managerTrialInputSchema)
+    .mutation(({ctx,input}) => closeManagerTrial(ctx.user.id,input)),
+  restartManagerTrial: managerReviewer.input(managerTrialInputSchema)
+    .mutation(({ctx,input}) => restartManagerTrial(ctx.user.id,input)),
+  revokeManagerCorrection: managerReviewer.input(managerCorrectionRevokeInputSchema)
+    .mutation(({ctx,input}) => revokeManagerCorrection(ctx.user.id,input)),
+  setManagerMode: managerReviewer.input(z.object({ vaId: z.number().int().positive(), mode: z.enum(["shadow", "active"]) }))
+    .mutation(({ctx,input}) => setManagerMode(ctx.user.id,input.vaId,input.mode)),
+  restoreManagerPlan: managerReviewer.input(z.object({ vaId: z.number().int().positive(), runId: z.number().int().positive() }))
+    .mutation(({ctx,input}) => restoreManagerPlan(ctx.user.id,input.vaId,input.runId)),
+  runManagerForReview: managerReviewer.input(z.object({ vaId: z.number().int().positive() }))
+    .mutation(({input}) => runManager(input.vaId,"founder_review")),
+
+  getManagerStatus: operatorProcedure.query(({ ctx }) => getManagerStatus(Number(ctx.user.id))),
+  runManager: workerMutation
+    .input(z.object({ trigger: z.enum(["manual", "worker_update"]).default("manual") }).optional())
+    .mutation(({ ctx, input }) => runManager(Number(ctx.user.id), input?.trigger ?? "manual")),
+  updateManagerPolicy: workerMutation
+    .input(z.object({ enabled: z.boolean(), intervalMinutes: z.number().int().min(1).max(60) }))
+    .mutation(({ ctx, input }) => updateManagerPolicy(Number(ctx.user.id), input)),
+  submitManagerUpdate: workerMutation
+    .input(z.object({ cardId: z.string().min(1).max(512), detail: z.string().trim().min(3).max(8_000), interventionId: z.string().max(200).optional() }))
+    .mutation(({ ctx, input }) => submitManagerUpdate(Number(ctx.user.id), input.cardId, input.detail, input.interventionId)),
 
   getWorkQueueContext: operatorProcedure.query(async ({ ctx }) => {
     const db = await getDb();
@@ -367,14 +402,18 @@ export const operatorRouter = router({
       }
     }),
   resolveVerificationFollowup: workerMutation
-    .input(z.object({ followupId: z.number().int().positive(), resolution: z.string().trim().min(3).max(4_000) }))
+    .input(z.object({ followupId: z.number().int().positive(), resolution: z.string().trim().min(3).max(4_000),
+      sourceEvidenceId: z.number().int().positive().optional(), sourceQuote: z.string().trim().min(3).max(4_000).optional() }))
     .mutation(async ({ input, ctx }) => {
       try {
-        return await resolveVerificationFollowup({
+        const result = await resolveVerificationFollowup({
           ...input,
           vaId: ctx.user.id,
           resolvedBy: String(ctx.user.openId),
         });
+        // The evidence write is durable even if reassessment fails; manager status retains that error.
+        await runManager(Number(ctx.user.id), "worker_update").catch(() => null);
+        return result;
       } catch (error) {
         if (error instanceof AptlssEvidenceGraphError) {
           throw new TRPCError({ code: "BAD_REQUEST", message: error.message });

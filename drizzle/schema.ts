@@ -1785,6 +1785,110 @@ export type InsertAresValidationHistory = typeof aresValidationHistory.$inferIns
 
 // ─── APTLSS PLANS & STEPS (Merged from Manus Dashboard) ───
 
+export const aptlssManagerState = mysqlTable("aptlss_manager_state", {
+  vaId: int("vaId").primaryKey(),
+  enabled: boolean("enabled").notNull().default(true),
+  intervalMinutes: int("intervalMinutes").notNull().default(5),
+  mode: mysqlEnum("mode", ["shadow", "active"]).notNull().default("shadow"),
+  policyRevision: int("policyRevision").notNull().default(0),
+  shadowStartedAt: timestamp("shadowStartedAt").defaultNow().notNull(),
+  lastSuccessfulAt: timestamp("lastSuccessfulAt"),
+  checkedAt: timestamp("checkedAt"),
+  inputHash: varchar("inputHash", { length: 64 }),
+  sourceHash: varchar("sourceHash", { length: 64 }),
+  lastError: varchar("lastError", { length: 512 }),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export const aptlssManagerUpdates = mysqlTable("aptlss_manager_updates", {
+  id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId").notNull(),
+  cardId: varchar("cardId", { length: 64 }).notNull(),
+  detail: text("detail").notNull(),
+  interventionId: varchar("interventionId", { length: 256 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [index("aptlss_manager_updates_worker_card_idx").on(table.vaId, table.cardId, table.createdAt)]);
+
+export const aptlssManagerRuns = mysqlTable("aptlss_manager_runs", {
+  id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId").notNull(),
+  inputHash: varchar("inputHash", { length: 64 }).notNull(),
+  trigger: varchar("trigger", { length: 32 }).notNull(),
+  mode: mysqlEnum("mode", ["shadow", "active"]).notNull().default("shadow"),
+  proposalHash: varchar("proposalHash", { length: 64 }),
+  previousPlanJson: longtext("previousPlanJson"),
+  appliedPlanHash: varchar("appliedPlanHash", { length: 64 }),
+  snapshotJson: longtext("snapshotJson").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("aptlss_manager_runs_worker_created_idx").on(table.vaId, table.createdAt, table.id),
+  index("aptlss_manager_runs_proposal_idx").on(table.vaId, table.proposalHash, table.createdAt, table.id),
+]);
+
+export const aptlssManagerReviews = mysqlTable("aptlss_manager_reviews", {
+  id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId").notNull(),
+  runId: int("runId").notNull(),
+  proposalHash: varchar("proposalHash", { length: 64 }).notNull(),
+  verdict: mysqlEnum("verdict", ["correct", "incorrect", "insufficient"]).notNull(),
+  critical: boolean("critical").notNull().default(false),
+  correction: text("correction").notNull(),
+  source: text("source").notNull(),
+  reviewerId: int("reviewerId").notNull(),
+  reviewedAt: timestamp("reviewedAt").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("aptlss_manager_review_run_unique").on(table.runId),
+  index("aptlss_manager_review_worker_idx").on(table.vaId, table.reviewedAt),
+  index("aptlss_manager_reviews_proposal_idx").on(table.vaId, table.proposalHash, table.runId),
+  foreignKey({ columns: [table.runId], foreignColumns: [aptlssManagerRuns.id], name: "manager_review_run_fk" }),
+]);
+
+// One deployment-wide pilot lease serializes activation across application processes.
+export const aptlssManagerControl = mysqlTable("aptlss_manager_control", {
+  id: int("id").primaryKey(),
+  activeVaId: int("activeVaId"),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+// Trial lifecycle events are appended; historical runs and reviews are never reset.
+export const aptlssManagerTrialEvents = mysqlTable("aptlss_manager_trial_events", {
+  id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId").notNull(),
+  trialKey: varchar("trialKey", { length: 64 }).notNull(),
+  event: mysqlEnum("event", ["started", "closed"]).notNull(),
+  afterRunId: int("afterRunId").notNull(),
+  implementationDigest: varchar("implementationDigest", { length: 64 }).notNull(),
+  actorId: int("actorId").notNull(),
+  reason: text("reason").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, table => [
+  uniqueIndex("aptlss_manager_trial_event_unique").on(table.vaId, table.trialKey, table.event),
+  index("aptlss_manager_trial_worker_idx").on(table.vaId, table.id),
+]);
+
+export const aptlssManagerCorrections = mysqlTable("aptlss_manager_corrections", {
+  id: int("id").autoincrement().primaryKey(),
+  vaId: int("vaId").notNull(),
+  reviewId: int("reviewId").notNull(),
+  scope: mysqlEnum("scope", ["card", "worker"]).notNull().default("card"),
+  cardId: varchar("cardId", { length: 64 }),
+  topic: varchar("topic", { length: 64 }).notNull(),
+  correction: text("correction").notNull(),
+  conditionsJson: text("conditionsJson").notNull(),
+  evidenceJson: longtext("evidenceJson").notNull(),
+  validFrom: timestamp("validFrom").notNull(),
+  validUntil: timestamp("validUntil").notNull(),
+  createdBy: int("createdBy").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  revokedAt: timestamp("revokedAt"),
+  revokedBy: int("revokedBy"),
+  revocationReason: text("revocationReason"),
+}, table => [
+  uniqueIndex("aptlss_manager_correction_review_unique").on(table.reviewId),
+  index("aptlss_manager_correction_scope_idx").on(table.vaId, table.scope, table.cardId, table.validUntil),
+  foreignKey({ columns: [table.reviewId], foreignColumns: [aptlssManagerReviews.id], name: "manager_correction_review_fk" }),
+]);
+
 export const aptlssPlans = mysqlTable("aptlss_plans", {
   id: int("id").autoincrement().primaryKey(),
   vaId: int("vaId").notNull(),
@@ -2501,3 +2605,5 @@ export type BrowserTabDailyEvidence = typeof browserTabDailyEvidence.$inferSelec
 export type InsertBrowserTabDailyEvidence = typeof browserTabDailyEvidence.$inferInsert;
 export type UnsignedMessageFlag = typeof unsignedMessageFlags.$inferSelect;
 export type InsertUnsignedMessageFlag = typeof unsignedMessageFlags.$inferInsert;
+
+export { aptlssManagerQueue, aptlssManagerQueueEvents, aptlssManagerQueueSlots } from "./aptlssManagerQueueSchema";

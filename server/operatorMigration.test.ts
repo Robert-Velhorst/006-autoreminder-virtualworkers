@@ -18,24 +18,34 @@ describe("operator migration contract", () => {
     new URL("../drizzle/0032_aptlss_evidence_graph.sql", import.meta.url),
     "utf8",
   );
+  const managerMigration = readFileSync(
+    new URL("../drizzle/0033_aptlss_project_manager.sql", import.meta.url),
+    "utf8",
+  );
   const journal = JSON.parse(
     readFileSync(new URL("../drizzle/meta/_journal.json", import.meta.url), "utf8"),
   ) as { entries: Array<{ idx: number; tag: string }> };
 
   it("is appended after the developer migration lineage", () => {
-    const entries = journal.entries.slice(-5);
+    const entries = journal.entries.slice(28);
     expect(entries.map((entry) => entry.tag)).toEqual([
       "0028_add_task_assignment_schedule",
       "0029_operator_evidence_foundation",
       "0030_restore_schema_parity",
       "0031_worker_operator_scope",
       "0032_aptlss_evidence_graph",
+      "0033_aptlss_project_manager",
+      "0034_aptlss_manager_reliability",
+      "0035_aptlss_review_learning",
+      "0036_aptlss_manager_queue",
     ]);
-    expect(entries.map((entry) => entry.idx)).toEqual([28, 29, 30, 31, 32]);
+    expect(entries.map((entry) => entry.idx)).toEqual([28, 29, 30, 31, 32, 33, 34, 35, 36]);
   });
 
   it("does not drop or rename developer data", () => {
-    for (const sql of [migration, parityMigration, workerScopeMigration, evidenceGraphMigration]) {
+    const additions = ["0034_aptlss_manager_reliability", "0035_aptlss_review_learning", "0036_aptlss_manager_queue"]
+      .map(tag => readFileSync(new URL(`../drizzle/${tag}.sql`, import.meta.url), "utf8"));
+    for (const sql of [migration, parityMigration, workerScopeMigration, evidenceGraphMigration, managerMigration, ...additions]) {
       expect(sql).not.toMatch(/\bDROP\s+(?:TABLE|COLUMN)\b/i);
       expect(sql).not.toMatch(/\bRENAME\s+TABLE\b/i);
       expect(sql).not.toMatch(/\bTRUNCATE\b/i);
@@ -69,6 +79,12 @@ describe("operator migration contract", () => {
       "browser_tab_daily_evidence",
     ]) {
       expect(migration).toContain(`CREATE TABLE \`${table}\``);
+    }
+  });
+
+  it("adds durable manager state, worker updates, and append-only run snapshots", () => {
+    for (const table of ["aptlss_manager_state", "aptlss_manager_updates", "aptlss_manager_runs"]) {
+      expect(managerMigration).toContain(`CREATE TABLE \`${table}\``);
     }
   });
 

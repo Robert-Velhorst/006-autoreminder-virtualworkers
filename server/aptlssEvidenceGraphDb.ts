@@ -11,6 +11,9 @@ import {
 } from "../drizzle/schema";
 import { normalizeEvidenceDraft, resolveEvidenceConflict, type EvidenceDraft, type EvidenceTruth } from "./aptlssEvidenceGraph";
 import { getDb } from "./db";
+import { enqueueManagerTask } from "./aptlssManagerQueue";
+import { extractManagerFacts } from "./aptlssManagerFacts";
+import { validManagerDate, type ManagerEvidenceMetadata, type ManagerFact } from "../shared/aptlssManagerEvidence";
 
 export class AptlssEvidenceGraphError extends Error {}
 
@@ -26,6 +29,7 @@ export async function recordAptlssEvidence({
   recordedBy,
   matchReason,
   linkMethod = "automatic",
+  database,
 }: {
   vaId: number;
   cardId?: string | null;
@@ -34,8 +38,9 @@ export async function recordAptlssEvidence({
   recordedBy?: string | null;
   matchReason?: string;
   linkMethod?: "automatic" | "manual" | "confirmed";
+  database?: NonNullable<Awaited<ReturnType<typeof getDb>>>;
 }) {
-  const db = await getDb();
+  const db = database ?? await getDb();
   if (!db) throw new AptlssEvidenceGraphError("Database unavailable");
   const evidence = normalizeEvidenceDraft(draft);
 
@@ -135,6 +140,8 @@ export async function recordAptlssEvidence({
       }
     }
 
+    await enqueueManagerTask(tx, { vaId, trigger: "source_ingested",
+      eventKey: JSON.stringify(["evidence", evidenceId, evidence.contentHash, cardId ?? null, truthClass]) });
     return { evidenceId, created: !existing[0], cardId: cardId ?? null };
   });
 }
@@ -146,6 +153,7 @@ export async function recordWorkerEvidenceAssertion({
   detail,
   recordedBy,
   observedAt = new Date(),
+  database,
 }: {
   vaId: number;
   cardId?: string | null;
@@ -153,6 +161,7 @@ export async function recordWorkerEvidenceAssertion({
   detail: string;
   recordedBy: string;
   observedAt?: Date;
+  database?: NonNullable<Awaited<ReturnType<typeof getDb>>>;
 }) {
   const normalizedTitle = title.trim();
   const normalizedDetail = detail.trim();
@@ -178,6 +187,7 @@ export async function recordWorkerEvidenceAssertion({
     recordedBy,
     matchReason: "Worker assertion explicitly linked to this card",
     linkMethod: "confirmed",
+    database,
   });
 }
 
@@ -268,6 +278,7 @@ export async function createEvidenceConflict({
         dueAt: new Date(),
       });
     }
+    await enqueueManagerTask(tx, { vaId, trigger: "conflict", urgent: true, eventKey: `conflict:${conflictId}` });
     return { conflictId, status: conflict.status, createdBy };
   });
 }
@@ -312,32 +323,224 @@ export async function getCardEvidence(vaId: number, cardId: string, limit = 30) 
     .limit(Math.max(1, Math.min(100, limit)));
 }
 
+type ConflictRevision = Pick<typeof aptlssEvidenceRevisions.$inferSelect,
+  "id" | "evidenceId" | "truthClass" | "contentHash" | "content" | "summary" | "metadataJson" | "observedAt" | "createdAt">;
+
+export type ConflictResolutionEvidence = Pick<typeof workspaceEvidenceItems.$inferSelect,
+  "source" | "sourceId" | "sourceUrl" | "kind" | "active" | "modifiedAt"> & {
+  evidenceId: number;
+  links: Array<{ vaId: number; cardId: string }>;
+  revisions: ConflictRevision[];
+};
+
+function revisionMetadata(revision: ConflictRevision): ManagerEvidenceMetadata {
+  if (!revision.metadataJson) return {};
+  try {
+    const metadata: unknown = JSON.parse(revision.metadataJson);
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) throw new Error();
+    return metadata as ManagerEvidenceMetadata;
+  } catch {
+    throw new AptlssEvidenceGraphError("Source revision metadata must be verified");
+  }
+}
+
+function revisionFacts(record: ConflictResolutionEvidence, revision: ConflictRevision, cardId: string, text?: string) {
+  return extractManagerFacts({ id: `evidence:${record.evidenceId}:${cardId}`, cardId,
+    source: record.source, kind: revision.truthClass === "worker_assertion" ? "worker" : "source",
+    text: text ?? revision.content ?? revision.summary ?? "", observedAt: revision.observedAt.toISOString(),
+    metadata: { ...revisionMetadata(revision), truthClass: revision.truthClass === "worker_assertion" ? "worker_report"
+      : revision.truthClass === "source_record" ? "source_record" : "model_proposal" } });
+}
+
+const factKey = (fact: ManagerFact) => JSON.stringify([fact.subject, fact.topic]);
+const explicitFact = (fact: ManagerFact) => fact.support === "explicit" && !["unknown", "context"].includes(fact.topic);
+
+/** Validate retained records, not caller-supplied claims of authority or fact values. */
+export function validateConflictResolutionProof(args: {
+  vaId: number; cardId: string; sourceEvidenceId: number; sourceQuote: string; now: Date;
+  conflict: Pick<typeof aptlssEvidenceConflicts.$inferSelect, "id" | "vaId" | "sourceEvidenceId" | "assertedEvidenceId" | "createdAt">;
+  evidence: ConflictResolutionEvidence[];
+}) {
+  const { vaId, cardId, conflict, sourceEvidenceId, sourceQuote, now, evidence } = args;
+  const fail = (reason: string): never => { throw new AptlssEvidenceGraphError(reason); };
+  const timestamp = now.getTime();
+  if (!Number.isFinite(timestamp) || conflict.vaId !== vaId || !cardId || !Number.isSafeInteger(sourceEvidenceId) || sourceEvidenceId <= 0) {
+    fail("Conflict resolution is outside this worker/card scope");
+  }
+  if (!sourceQuote.trim() || sourceQuote.length > 8000) fail("An exact source quote of at most 8000 characters is required");
+  const scoped = (id: number) => {
+    const records = evidence.filter(e => e.evidenceId === id);
+    if (records.length !== 1 || !records[0].links.some(l => l.vaId === vaId && l.cardId === cardId)) {
+      fail("Conflict evidence must be linked to the same worker and card");
+    }
+    return records[0];
+  };
+  const sortedRevisions = (record: ConflictResolutionEvidence) => {
+    if (record.revisions.some(r => r.evidenceId !== record.evidenceId ||
+      !Number.isFinite(r.observedAt.getTime()) || !Number.isFinite(r.createdAt.getTime()) ||
+      r.observedAt.getTime() > timestamp || r.createdAt.getTime() > timestamp || !r.contentHash.trim())) {
+      fail("Invalid, future, or mismatched source revision provenance");
+    }
+    return [...record.revisions].sort((a, b) => b.observedAt.getTime() - a.observedAt.getTime() || b.id - a.id);
+  };
+  const original = scoped(conflict.sourceEvidenceId), assertion = scoped(conflict.assertedEvidenceId), selected = scoped(sourceEvidenceId);
+  if (!selected.active || !selected.sourceId.trim() || !selected.source ||
+      /worker_assertion|system_inference|verified_conflict_resolution/.test(selected.kind) ||
+      /^(?:worker-assertion|verified-conflict-resolution):/.test(selected.sourceId)) fail("Proof must be an active retained external source record");
+  const revision = sortedRevisions(selected)[0];
+  if (!revision || revision.truthClass !== "source_record") fail("The current proof revision must be a source_record");
+  const atConflict = (record: ConflictResolutionEvidence, truth: ConflictRevision["truthClass"]) => {
+    const found = sortedRevisions(record).find(r => r.observedAt <= conflict.createdAt && r.createdAt <= conflict.createdAt);
+    if (!found || found.truthClass !== truth) return fail("Original conflicting source/assertion revisions could not be verified");
+    return found;
+  };
+  const originalRevision = atConflict(original, "source_record"), assertedRevision = atConflict(assertion, "worker_assertion");
+  const sourceFacts = revisionFacts(original, originalRevision, cardId).filter(explicitFact);
+  const assertedFacts = revisionFacts(assertion, assertedRevision, cardId).filter(explicitFact);
+  const disputed = new Map(sourceFacts.filter(f => assertedFacts.some(a => factKey(a) === factKey(f) && a.value !== f.value)).map(f => [factKey(f), f]));
+  if (!disputed.size) fail("The original conflicting subject and topic need explicit source facts");
+
+  const fullText = revision.content ?? revision.summary ?? "";
+  if (!fullText.includes(sourceQuote)) fail("The source quote must match the current retained revision exactly");
+  const fullFacts = revisionFacts(selected, revision, cardId);
+  const quotedFacts = revisionFacts(selected, revision, cardId, sourceQuote);
+  if (!quotedFacts.length || quotedFacts.some(f => !explicitFact(f) || !disputed.has(factKey(f)) ||
+    !fullFacts.some(originalFact => explicitFact(originalFact) && originalFact.quote === f.quote && factKey(originalFact) === factKey(f) && originalFact.value === f.value))) {
+    fail("Quote complete, explicit source statements about the original conflicting subject/topic");
+  }
+  for (const key of disputed.keys()) {
+    const values = new Set(quotedFacts.filter(f => factKey(f) === key).map(f => f.value));
+    if (values.size !== 1) fail("Proof must resolve every conflicting topic without contradictory values");
+  }
+
+  const metadata = revisionMetadata(revision);
+  const validateDates = (facts: ManagerFact[], meta: ManagerEvidenceMetadata) => {
+    for (const date of [meta.sourceDate, meta.effectiveFrom, meta.effectiveTo]) {
+      if (date !== undefined && date !== null && (typeof date !== "string" || !validManagerDate(date))) fail("Invalid source/effective date in proof");
+    }
+    if ((meta.sourceDate && Date.parse(meta.sourceDate) > timestamp) ||
+      facts.some(f => f.effectiveFrom && (!validManagerDate(f.effectiveFrom) || Date.parse(f.effectiveFrom) > timestamp)) ||
+      (meta.effectiveTo && Date.parse(meta.effectiveTo) <= timestamp)) fail("Source proof is future-effective or expired");
+  };
+  validateDates(quotedFacts, metadata);
+  const sourceDate = metadata.sourceDate ?? selected.modifiedAt?.toISOString() ?? revision.observedAt.toISOString();
+  if (!validManagerDate(sourceDate) || Date.parse(sourceDate) > timestamp) fail("The source date must be verified");
+  const originalMetadata = revisionMetadata(originalRevision);
+  const originalDate = originalMetadata.sourceDate ?? originalRevision.observedAt.toISOString();
+  const sourceChanged = quotedFacts.some(f => disputed.get(factKey(f))?.value !== f.value);
+  if (sourceChanged) {
+    const sameRecordRevision = selected.evidenceId === original.evidenceId && revision.contentHash !== originalRevision.contentHash;
+    const supersedes = Array.isArray(metadata.supersedesEvidenceIds) && metadata.supersedesEvidenceIds.includes(`evidence:${original.evidenceId}:${cardId}`);
+    if ((!sameRecordRevision && !supersedes) || !validManagerDate(originalDate) ||
+      Date.parse(sourceDate) <= Date.parse(originalDate) || revision.observedAt <= conflict.createdAt || revision.createdAt <= conflict.createdAt ||
+      (!sameRecordRevision && (!metadata.effectiveFrom || Date.parse(metadata.effectiveFrom) > timestamp))) {
+      fail("Changing the original source fact requires a newer dated source revision or explicit effective supersession");
+    }
+  }
+
+  // Check every current linked source, never vote by the number of corroborating records.
+  for (const record of evidence.filter(e => e.active && e.links.some(l => l.vaId === vaId && l.cardId === cardId))) {
+    const current = sortedRevisions(record)[0];
+    if (!current || current.truthClass !== "source_record" || record.kind === "verified_conflict_resolution") continue;
+    const contrary = revisionFacts(record, current, cardId).filter(explicitFact).some(f => quotedFacts.some(q => factKey(q) === factKey(f) && q.value !== f.value));
+    if (contrary && !(sourceChanged && record.evidenceId === original.evidenceId && record.evidenceId !== selected.evidenceId)) {
+      fail("Current source records still disagree with the proposed proof");
+    }
+  }
+  return { version: 1 as const, conflictId: conflict.id, cardId, sourceEvidenceId,
+    sourceRevisionId: revision.id, sourceRevisionHash: revision.contentHash, sourceQuote,
+    source: selected.source, sourceId: selected.sourceId, sourceUrl: selected.sourceUrl,
+    sourceObservedAt: revision.observedAt.toISOString(), sourceDate, sourceMetadata: metadata,
+    originalSourceEvidenceId: original.evidenceId, originalSourceRevisionId: originalRevision.id,
+    originalSourceRevisionHash: originalRevision.contentHash, assertedEvidenceId: assertion.evidenceId,
+    assertedRevisionId: assertedRevision.id, assertedRevisionHash: assertedRevision.contentHash,
+    sourceChanged, facts: quotedFacts, validatedAt: now.toISOString() };
+}
+
 export async function resolveVerificationFollowup({
   vaId,
   followupId,
   resolution,
   resolvedBy,
+  sourceEvidenceId,
+  sourceQuote,
 }: {
   vaId: number;
   followupId: number;
   resolution: string;
   resolvedBy: string;
+  sourceEvidenceId?: number;
+  sourceQuote?: string;
 }) {
   const db = await getDb();
   if (!db) throw new AptlssEvidenceGraphError("Database unavailable");
   const detail = resolution.trim();
-  if (!detail) throw new AptlssEvidenceGraphError("A verification resolution is required");
+  if (!detail || !resolvedBy.trim()) throw new AptlssEvidenceGraphError("A verification explanation and resolver are required");
+  if ((sourceEvidenceId === undefined) !== (sourceQuote === undefined)) {
+    throw new AptlssEvidenceGraphError("Provide both sourceEvidenceId and the exact sourceQuote");
+  }
   const resolvedAt = new Date();
-  const update = await db.update(aptlssVerificationFollowups).set({
-    status: "resolved",
-    resolution: detail,
-    resolvedBy,
-    resolvedAt,
-  }).where(and(
-    eq(aptlssVerificationFollowups.id, followupId),
-    eq(aptlssVerificationFollowups.vaId, vaId),
-    eq(aptlssVerificationFollowups.status, "open"),
-  ));
-  if (update[0].affectedRows !== 1) throw new AptlssEvidenceGraphError("Verification follow-up is no longer open");
-  return { followupId, resolvedAt };
+  return db.transaction(async tx => {
+    const [followup] = await tx.select().from(aptlssVerificationFollowups).where(and(
+      eq(aptlssVerificationFollowups.id, followupId), eq(aptlssVerificationFollowups.vaId, vaId),
+      eq(aptlssVerificationFollowups.status, "open"),
+    )).limit(1).for("update");
+    if (!followup) throw new AptlssEvidenceGraphError("Verification follow-up is no longer open");
+    const explanation = [followup.resolution, `${resolvedAt.toISOString()} ${resolvedBy}: ${detail}`].filter(Boolean).join("\n\n");
+    if (followup.conflictId && sourceEvidenceId === undefined) {
+      await tx.update(aptlssVerificationFollowups).set({ resolution: explanation }).where(and(
+        eq(aptlssVerificationFollowups.id, followupId), eq(aptlssVerificationFollowups.vaId, vaId), eq(aptlssVerificationFollowups.status, "open"),
+      ));
+      await enqueueManagerTask(tx, { vaId, trigger: "conflict", urgent: true, eventKey: `followup-note:${followupId}:${sha256(explanation)}` });
+      return { followupId, resolvedAt: null, requiresEvidence: true as const };
+    }
+
+    let storedResolution = explanation;
+    let decisionEvidenceId: number | undefined;
+    if (followup.conflictId) {
+      const [conflict] = await tx.select().from(aptlssEvidenceConflicts).where(and(
+        eq(aptlssEvidenceConflicts.id, followup.conflictId), eq(aptlssEvidenceConflicts.vaId, vaId),
+        eq(aptlssEvidenceConflicts.status, "needs_verification"),
+      )).limit(1).for("update");
+      if (!conflict || !followup.cardId) throw new AptlssEvidenceGraphError("An unresolved worker/card conflict is required");
+      const cardId = followup.cardId;
+      const [ownedCard] = await tx.select({ cardId: aptlssPlans.cardId }).from(aptlssPlans)
+        .where(and(eq(aptlssPlans.vaId, vaId), eq(aptlssPlans.cardId, cardId))).limit(1).for("update");
+      if (!ownedCard) throw new AptlssEvidenceGraphError("Conflict resolution is outside this worker/card scope");
+      const links = await tx.select().from(aptlssEvidenceSubjectLinks).where(and(
+        eq(aptlssEvidenceSubjectLinks.vaId, vaId), eq(aptlssEvidenceSubjectLinks.subjectType, "card"),
+        eq(aptlssEvidenceSubjectLinks.subjectId, cardId),
+      )).for("update");
+      const ids = [...new Set(links.map(l => l.evidenceId))];
+      if (!ids.length) throw new AptlssEvidenceGraphError("Conflict has no linked source evidence");
+      const items = await tx.select().from(workspaceEvidenceItems).where(inArray(workspaceEvidenceItems.id, ids)).for("update");
+      const revisions = await tx.select().from(aptlssEvidenceRevisions).where(inArray(aptlssEvidenceRevisions.evidenceId, ids)).for("update");
+      const proof = validateConflictResolutionProof({ vaId, cardId, conflict, sourceEvidenceId: sourceEvidenceId!, sourceQuote: sourceQuote!, now: resolvedAt,
+        evidence: items.map(item => ({ ...item, evidenceId: item.id,
+          links: links.filter(l => l.evidenceId === item.id).map(l => ({ vaId: l.vaId, cardId: l.subjectId })),
+          revisions: revisions.filter(r => r.evidenceId === item.id) })) });
+      const nowISO = resolvedAt.toISOString();
+      const proofHash = sha256(JSON.stringify(proof));
+      const decision = await recordAptlssEvidence({ vaId, cardId, recordedBy: resolvedBy,
+        truthClass: "source_record", linkMethod: "confirmed", matchReason: "Verified conflict resolution backed by retained source quote",
+        database: tx as unknown as NonNullable<Awaited<ReturnType<typeof getDb>>>,
+        draft: { source: "communication", sourceId: `verified-conflict-resolution:${vaId}:${conflict.id}:${proofHash}`,
+          kind: "verified_conflict_resolution", title: "Verified source fact for conflicting work evidence",
+          content: proof.sourceQuote, summary: proof.sourceQuote, sourceUrl: proof.sourceUrl,
+          observedAt: nowISO, modifiedAt: nowISO, contentHash: proofHash,
+          metadataJson: JSON.stringify({ origin: "verified_conflict_resolution", truthClass: "human_decision",
+            authority: "authoritative", sender: resolvedBy, sourceDate: nowISO, effectiveFrom: nowISO,
+            supersedesEvidenceIds: [`evidence:${conflict.sourceEvidenceId}:${cardId}`, `evidence:${conflict.assertedEvidenceId}:${cardId}`], proof }) } });
+      decisionEvidenceId = decision.evidenceId;
+      storedResolution = JSON.stringify({ version: 1, explanation, proof, decisionEvidenceId });
+      const [updated] = await tx.update(aptlssEvidenceConflicts).set({ status: "resolved", resolution: storedResolution, resolvedBy, resolvedAt })
+        .where(and(eq(aptlssEvidenceConflicts.id, conflict.id), eq(aptlssEvidenceConflicts.vaId, vaId), eq(aptlssEvidenceConflicts.status, "needs_verification")));
+      if (updated.affectedRows !== 1) throw new AptlssEvidenceGraphError("Canonical conflict changed during resolution");
+    }
+    const [updated] = await tx.update(aptlssVerificationFollowups).set({ status: "resolved", resolution: storedResolution, resolvedBy, resolvedAt })
+      .where(and(eq(aptlssVerificationFollowups.id, followupId), eq(aptlssVerificationFollowups.vaId, vaId), eq(aptlssVerificationFollowups.status, "open")));
+    if (updated.affectedRows !== 1) throw new AptlssEvidenceGraphError("Verification follow-up is no longer open");
+    await enqueueManagerTask(tx, { vaId, trigger: "conflict_resolved", urgent: true, eventKey: `followup-resolved:${followupId}` });
+    return { followupId, resolvedAt, requiresEvidence: false as const, ...(decisionEvidenceId ? { decisionEvidenceId } : {}) };
+  });
 }

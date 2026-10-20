@@ -3,6 +3,7 @@ import { io, Socket } from 'socket.io-client';
 import { useAuth } from '@/_core/hooks/useAuth';
 
 interface UseWebSocketOptions {
+  onManagerUpdated?: (data: { runId: number; assessedAt: string; urgent: boolean }) => void;
   onTaskCompleted?: (data: any) => void;
   onTaskRescheduled?: (data: any) => void;
   onTaskPriorityChanged?: (data: any) => void;
@@ -16,7 +17,7 @@ interface WebSocketStatus {
 
 export function useWebSocket(options: UseWebSocketOptions = {}) {
   const { user } = useAuth();
-  const isAuthenticated = Boolean(user?.openId);
+  const userIdentity = user?.openId;
   const socketRef = useRef<Socket | null>(null);
   const [status, setStatus] = useState<WebSocketStatus>({
     connected: false,
@@ -31,13 +32,12 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
   optionsRef.current = options;
 
   useEffect(() => {
-    if (!isAuthenticated) {
+    setStatus({ connected: false, connectedClients: 0 });
+    if (!userIdentity) {
       return;
     }
 
-    // Connect to WebSocket server — runs ONCE on mount (empty deps []).
-    // Previously the deps were [options.onTaskCompleted, ...] which caused new
-    // function references on every render → rapid connect/disconnect loop.
+    // Reconnect when identity changes, not when callback references change.
     const socket = io({
       path: '/ws',
       transports: ['websocket', 'polling'],
@@ -93,6 +93,10 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       optionsRef.current.onTaskPriorityChanged?.(data);
     });
 
+    socket.on('aptlss:manager-updated', (data: { runId: number; assessedAt: string; urgent: boolean }) => {
+      optionsRef.current.onManagerUpdated?.(data);
+    });
+
     // Reconnection events
     socket.on('reconnect', (attemptNumber: number) => {
       console.log(`[WebSocket] Reconnected after ${attemptNumber} attempts`);
@@ -106,12 +110,13 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       console.error('[WebSocket] Reconnection failed');
     });
 
-    // Cleanup on unmount only — socket stays alive for the full component lifetime
+    // Never retain a socket authenticated for a previous identity.
     return () => {
       console.log('[WebSocket] Disconnecting');
       socket.disconnect();
+      socketRef.current = null;
     };
-  }, [isAuthenticated]);
+  }, [userIdentity]);
 
   // Helper functions to emit events
   const emitTaskComplete = (data: { taskId: string; isCompleted: boolean }) => {

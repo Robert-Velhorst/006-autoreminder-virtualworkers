@@ -28,6 +28,7 @@ import { LabelAutocompleteSearch } from '@/components/LabelAutocompleteSearch';
 import TIMEZONES from '@/data/timezones';
 import CURRENCIES from '@/data/currencies';
 import WeeklyPayCalculator from './manus/WeeklyPayCalculator';
+import AptlssManagerReview from '@/components/AptlssManagerReview';
 
 interface VirtualWorker {
   id: number;
@@ -608,7 +609,7 @@ export default function FounderDashboard() {
     <div className="min-h-screen bg-background">
       {/* Header */}
       <header className="border-b border-border/40 bg-card/50 backdrop-blur-sm sticky top-0 z-50">
-        <div className="container flex h-16 items-center justify-between">
+        <div className="container flex min-h-16 flex-wrap items-center justify-between gap-3 py-3">
           <div className="flex items-center gap-4">
             <Link href="/">
               <Button variant="ghost" size="icon">
@@ -623,7 +624,7 @@ export default function FounderDashboard() {
               <p className="text-sm text-muted-foreground">Manage your virtual workers and workload</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" size="sm" onClick={fetchAllData}>
               <RefreshCw className="h-4 w-4 mr-2" />
               Refresh
@@ -910,7 +911,7 @@ export default function FounderDashboard() {
 
       <main className="container py-6">
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="grid w-full grid-cols-2 md:grid-cols-7 lg:w-auto lg:inline-grid">
+          <TabsList className="grid h-auto w-full grid-cols-2 gap-1 md:grid-cols-4 xl:grid-cols-8">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="assignments">Assignments</TabsTrigger>
             <TabsTrigger value="dependencies">Dependencies</TabsTrigger>
@@ -918,7 +919,10 @@ export default function FounderDashboard() {
             <TabsTrigger value="timezones">Timezones</TabsTrigger>
             <TabsTrigger value="briefings">Briefings</TabsTrigger>
             <TabsTrigger value="paylogs">Pay Logs</TabsTrigger>
+            <TabsTrigger value="manager-review">Manager review</TabsTrigger>
           </TabsList>
+
+          <TabsContent value="manager-review"><AptlssManagerReview /></TabsContent>
 
           {/* Overview Tab */}
           <TabsContent value="overview" className="space-y-6">

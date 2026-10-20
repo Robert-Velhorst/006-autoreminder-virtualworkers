@@ -1,14 +1,16 @@
 import { useState } from "react";
 import { Link, useLocation } from "wouter";
-import { Menu, X, Home, ListTodo, Settings, LogOut, User } from "lucide-react";
+import { Menu, Home, ListTodo, Settings, LogOut, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
 interface MobileNavProps {
   user: {
     name?: string | null;
     email?: string | null;
+    role?: string;
   } | null;
   onLogout: () => void;
 }
@@ -20,49 +22,28 @@ export function MobileNav({ user, onLogout }: MobileNavProps) {
   const navItems = [
     { href: "/", label: "Dashboard", icon: Home },
     { href: "/aptlss", label: "APTLSS Management", icon: ListTodo },
+    ...(user?.role === "admin" ? [{ href: "/founder", label: "VA Management", icon: Users }] : []),
     { href: "/settings", label: "Settings", icon: Settings },
   ];
 
   return (
-    <>
+    <Sheet open={isOpen} onOpenChange={setIsOpen}>
       {/* Hamburger button - only visible on mobile */}
+      <SheetTrigger asChild>
       <Button
         variant="ghost"
         size="icon"
         className="md:hidden"
-        onClick={() => setIsOpen(true)}
         aria-label="Open menu"
       >
         <Menu className="h-5 w-5" />
       </Button>
+      </SheetTrigger>
 
-      {/* Backdrop */}
-      {isOpen && (
-        <div
-          className="fixed inset-0 bg-black/50 z-40 md:hidden"
-          onClick={() => setIsOpen(false)}
-        />
-      )}
-
-      {/* Slide-out drawer */}
-      <div
-        className={cn(
-          "fixed top-0 right-0 h-full w-72 bg-card border-l shadow-xl z-50 transform transition-transform duration-300 ease-in-out md:hidden",
-          isOpen ? "translate-x-0" : "translate-x-full"
-        )}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b">
-          <span className="font-semibold">Menu</span>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setIsOpen(false)}
-            aria-label="Close menu"
-          >
-            <X className="h-5 w-5" />
-          </Button>
-        </div>
+      <SheetContent side="right" className="w-72 max-w-full gap-0 overflow-y-auto p-0" aria-describedby={undefined}>
+        <SheetHeader className="border-b">
+          <SheetTitle>Menu</SheetTitle>
+        </SheetHeader>
 
         {/* User info */}
         <div className="p-4 border-b">
@@ -105,7 +86,7 @@ export function MobileNav({ user, onLogout }: MobileNavProps) {
         </nav>
 
         {/* Logout button */}
-        <div className="absolute bottom-0 left-0 right-0 p-4 border-t">
+        <SheetFooter className="border-t">
           <Button
             variant="outline"
             className="w-full text-destructive hover:text-destructive"
@@ -117,8 +98,8 @@ export function MobileNav({ user, onLogout }: MobileNavProps) {
             <LogOut className="h-4 w-4 mr-2" />
             Log out
           </Button>
-        </div>
-      </div>
-    </>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   );
 }

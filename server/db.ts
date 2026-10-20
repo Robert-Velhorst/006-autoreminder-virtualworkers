@@ -7,7 +7,9 @@ import { ENV } from './_core/env';
 import { parseDateKey } from "./utils/date-only";
 
 let _db: MySql2Database<typeof schema> | null = null;
-let _migrationRan = false;
+let _pool: mysql2.Pool | null = null;
+let _initializing: Promise<MySql2Database<typeof schema> | null> | null = null;
+let _closing: Promise<void> | null = null;
 
 /**
  * Detect database type from CONNECTION_STRING
@@ -21,17 +23,10 @@ function detectDatabaseType(url: string): "mysql" | "sqlite" {
 }
 
 /**
- * Run any pending CREATE TABLE IF NOT EXISTS migrations using a raw connection.
+ * Run the legacy compatibility migrations on the pool's first ready connection.
  * Safe to call multiple times — all statements use IF NOT EXISTS.
  */
-async function runPendingMigrations(connectionUrl: string): Promise<void> {
-  if (_migrationRan) return;
-  _migrationRan = true;
-
-  let conn: mysql2.Connection | null = null;
-  try {
-    conn = await mysql2.createConnection(connectionUrl);
-
+async function runPendingMigrations(conn: mysql2.PoolConnection): Promise<void> {
     const statements = [
       `CREATE TABLE IF NOT EXISTS \`ares_configurations\` (
         \`id\` varchar(64) NOT NULL,
@@ -97,36 +92,64 @@ async function runPendingMigrations(connectionUrl: string): Promise<void> {
     }
 
     console.log("[Database] ARES tables ensured (migration applied)");
-  } catch (err) {
-    // Non-fatal — log and continue. The ARES panel will show its own error state.
-    console.warn("[Database] ARES migration warning:", err);
-    _migrationRan = false; // allow retry on next request
-  } finally {
-    if (conn) await conn.end().catch(() => {});
+}
+
+async function initializeDatabase(connectionUrl: string) {
+  let pool: mysql2.Pool | null = null;
+  try {
+    pool = mysql2.createPool({ uri: connectionUrl, connectTimeout: 10_000 });
+    const connection = await pool.getConnection();
+    try {
+      await runPendingMigrations(connection);
+    } finally {
+      connection.release();
+    }
+    const database = drizzleMySQL(pool, { schema, mode: "default" });
+    _pool = pool;
+    _db = database;
+    console.log("[Database] Connected to MySQL");
+    return database;
+  } catch (error) {
+    if (pool) await pool.end().catch(() => {});
+    console.warn("[Database] Failed to initialize:", error);
+    return null;
   }
 }
 
-// Lazily create the drizzle instance so local tooling can run without a DB.
-export async function getDb() {
-  if (!_db && process.env.DATABASE_URL) {
-    try {
-      const dbType = detectDatabaseType(process.env.DATABASE_URL);
-      
-      if (dbType === "sqlite") {
-        console.warn("[Database] SQLite support is planned but not yet implemented. Please use MySQL.");
-        _db = null;
-      } else {
-        // Run pending migrations before handing out the connection
-        await runPendingMigrations(process.env.DATABASE_URL);
-        _db = drizzleMySQL(process.env.DATABASE_URL, { schema, mode: 'default' });
-        console.log("[Database] Connected to MySQL");
-      }
-    } catch (error) {
-      console.warn("[Database] Failed to connect:", error);
-      _db = null;
-    }
+// Every caller awaits the same initialization; no handle escapes before readiness.
+export async function getDb(): Promise<MySql2Database<typeof schema> | null> {
+  if (_closing) await _closing;
+  if (_db) return _db;
+  if (_initializing) return _initializing;
+  const connectionUrl = process.env.DATABASE_URL;
+  if (!connectionUrl) return null;
+  if (detectDatabaseType(connectionUrl) === "sqlite") {
+    console.warn("[Database] SQLite support is planned but not yet implemented. Please use MySQL.");
+    return null;
   }
-  return _db;
+  _initializing = initializeDatabase(connectionUrl);
+  try {
+    return await _initializing;
+  } finally {
+    _initializing = null;
+  }
+}
+
+/** Drain owned connections for process shutdown or isolated integration tests. */
+export async function closeDb(): Promise<void> {
+  if (_closing) return _closing;
+  _closing = (async () => {
+    await _initializing;
+    const pool = _pool;
+    _pool = null;
+    _db = null;
+    if (pool) await pool.end();
+  })();
+  try {
+    await _closing;
+  } finally {
+    _closing = null;
+  }
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {

@@ -49,6 +49,10 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { getWorkLaneRank } from "@shared/workLanePriority";
+import { compareManagerWork } from "@shared/aptlssManagerEvidence";
+import { useWebSocket } from "@/hooks/useWebSocket";
+import { ManagerSnapshotDetails, ManagerTimestamp } from "@/components/AptlssManagerReview";
+import { ManagerVerificationDetails } from "@/components/ManagerVerificationDetails";
 import { formatWorkerDate } from "@shared/workerTime";
 import { toast } from "sonner";
 
@@ -64,6 +68,8 @@ type OperatorCard = {
   stateReason: string | null;
   actionability: string | null;
   priorityScore: number;
+  dueAt?: string | null;
+  overdue?: boolean;
   priorityTier: string;
   confidenceScore: number | null;
   confidenceReason: string | null;
@@ -275,12 +281,14 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
           ...card,
           boardName: card.boardName || alert?.boardName || "Unknown board",
           listName: card.listName || alert?.listName || "Unknown list",
+          dueAt: alert?.due ?? null,
         } as OperatorCard;
       })
-      .sort((left, right) => {
-        const lane = getWorkLaneRank(left.listName) - getWorkLaneRank(right.listName);
-        return lane || right.priorityScore - left.priorityScore;
-      });
+      .sort((left, right) => compareManagerWork(
+        { id: left.cardId, state: left.primaryState ?? "", list: left.listName, dueAt: left.dueAt ?? null, overdue: left.overdue ?? actionQuery.data?.overdueCards.some(card => card.id === left.cardId) ?? false, priority: left.priorityScore },
+        { id: right.cardId, state: right.primaryState ?? "", list: right.listName, dueAt: right.dueAt ?? null, overdue: right.overdue ?? actionQuery.data?.overdueCards.some(card => card.id === right.cardId) ?? false, priority: right.priorityScore },
+        Date.now(),
+      ));
   }, [actionQuery.data, intelligenceQuery.data]);
   useEffect(() => {
     if (!selected) return;
@@ -314,6 +322,7 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
   return (
     <div className="space-y-5">
       <PageHeading title="Today" description="Work from one trusted sequence. Context and deeper actions stay out of the execution path." />
+      <ManagerCoach />
       {browserQuery.data?.shouldWarn && (
         <Alert className="border-amber-500/40 bg-amber-500/5">
           <Archive className="size-4 text-amber-500" />
@@ -367,7 +376,7 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
         </div>
 
         <aside className="space-y-3">
-          <ContextMetric icon={CalendarDays} label="Plan health" value={plan ? `${plan.planHealth.confidence}%` : "Not generated"} detail={plan ? `${plan.planHealth.scheduledMinutes} min scheduled` : "Create today's time blocks"} onClick={onOpenPlan} />
+          <ContextMetric icon={CalendarDays} label="Plan health" value={plan ? (plan.auditTrail.some(item => item.action === "APTLSS manager reconciliation") ? "Uncalibrated" : `${plan.planHealth.confidence}%`) : "Not generated"} detail={plan ? `${plan.planHealth.scheduledMinutes} min scheduled` : "Create today's time blocks"} onClick={onOpenPlan} />
           <ContextMetric icon={Timer} label="Time now" value={timerQuery.data ? "Tracking" : "Stopped"} detail={timerQuery.data?.cardName ?? "No active timer"} />
           <ContextMetric icon={BrainCircuit} label="Decisions" value={`${openDecisions} open`} detail="Outcome required to close" onClick={onOpenDecisions} />
           <ContextMetric icon={Archive} label="Browser hygiene" value={browserQuery.data?.connected ? `${browserQuery.data.actionableTabs} tabs` : "Disconnected"} detail={browserQuery.data?.connected ? `Limit ${browserQuery.data.allowedTabs}` : "Collector has not reported"} />
@@ -382,6 +391,145 @@ function TodayView({ onOpenPlan, onOpenDecisions }: { onOpenPlan: () => void; on
       />
     </div>
   );
+}
+
+function ManagerCoach() {
+  const utils = trpc.useUtils();
+  const [detail, setDetail] = useState("");
+  const [open, setOpen] = useState(false);
+  const [selectedCardId, setSelectedCardId] = useState("");
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const refresh = () => {
+    void utils.operator.getManagerStatus.invalidate();
+    void utils.operator.getDailyPlan.invalidate();
+    void utils.operator.getWorkQueueContext.invalidate();
+  };
+  const { status: connection } = useWebSocket({ onManagerUpdated: refresh });
+  useEffect(() => {
+    if (connection.connected) refresh();
+  }, [connection.connected]);
+  const query = trpc.operator.getManagerStatus.useQuery(undefined, { retry: false, staleTime: 30_000, refetchInterval: 60_000 });
+  const queue = trpc.operator.getWorkQueueContext.useQuery(undefined, { retry: false, staleTime: 60_000 });
+  const run = trpc.operator.runManager.useMutation({
+    onSuccess: result => { refresh(); toast.success(result?.applied ? "Assessment applied to remaining plan" : "Proposal assessed; active plan unchanged"); },
+    onError: (error) => toast.error(error.message),
+  });
+  const update = trpc.operator.submitManagerUpdate.useMutation({
+    onSuccess: result => { setDetail(""); refresh(); toast.success(result?.applied ? "Update assessed; remaining plan adjusted" : "Proposal assessed; active plan unchanged"); },
+    onError: (error) => toast.error(error.message),
+  });
+  const snapshot = query.data?.snapshot;
+  const policy = query.data?.policy;
+  const firstIntervention = snapshot?.interventions.find((item) => item.severity === "urgent") ?? snapshot?.interventions[0];
+  const firstNext = snapshot?.actions.find((item) => !item.blocked);
+  const availableCards = snapshot?.cards.length ? snapshot.cards : (queue.data?.cards ?? []).map(card => ({ id: card.cardId, name: card.cardName }));
+  const cardId = selectedCardId ? (availableCards.some(card => card.id === selectedCardId) ? selectedCardId : "") : (availableCards.find(card => card.id === (firstIntervention?.cardId ?? firstNext?.cardId))?.id ?? availableCards[0]?.id ?? "");
+  const intervention = selectedCardId ? snapshot?.interventions.find(item => item.cardId === cardId) : firstIntervention;
+  const next = selectedCardId ? snapshot?.actions.find(item => item.cardId === cardId && !item.blocked) : firstNext;
+  const processing = query.data?.queue;
+  const lastSuccessfulAt = query.data?.lastSuccessfulAt;
+  const lastSuccessfulTime = lastSuccessfulAt ? new Date(lastSuccessfulAt).getTime() : NaN;
+  const ageMinutes = Number.isFinite(lastSuccessfulTime) ? Math.max(0, Math.floor((now - lastSuccessfulTime) / 60_000)) : null;
+  const age = ageMinutes === null ? "not recorded" : ageMinutes < 1 ? "less than a minute ago" : ageMinutes < 60 ? `${ageMinutes} min ago` : `${Math.floor(ageMinutes / 60)}h ${ageMinutes % 60}m ago`;
+  const busy = run.isPending || update.isPending;
+  return (
+    <section aria-label="APTLSS work manager" className={`min-w-0 space-y-3 border-y py-4 ${intervention?.severity === "urgent" ? "border-red-500/40" : ""}`}>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2"><BrainCircuit className="size-4 text-blue-500" /><h2 className="text-sm font-semibold">APTLSS work manager</h2><Badge variant="outline">{policy?.mode === "active" ? "Active" : policy?.mode === "shadow" ? "Shadow" : "Mode unavailable"}</Badge>{snapshot && <Badge variant="outline">{snapshot.assessments.length} assessed</Badge>}</div>
+            <p className="mt-1 text-xs text-muted-foreground">{policy?.mode === "shadow" ? "Proposals only; the active plan is unchanged." : policy?.mode === "active" ? "Active reconciliation of remaining plan blocks." : "Manager policy has not loaded."}</p>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => run.mutate({ trigger: "manual" })} disabled={busy || !policy}>
+            {run.isPending ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}Reassess now
+          </Button>
+        </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground" role="status">
+        <span>{connection.connected ? "Realtime connected" : "Fallback polling every 60 seconds"}</span>
+        <span title={lastSuccessfulAt ? new Date(lastSuccessfulAt).toLocaleString() : undefined}>Last successful data: {age}</span>
+        {ageMinutes !== null && ageMinutes > Math.max(2, (policy?.intervalMinutes ?? 5) * 2) && <span className="text-amber-700 dark:text-amber-300">Data may be stale</span>}
+        <span>Last check: <ManagerTimestamp value={query.data?.checkedAt} /></span>
+        {processing && processing.state !== "idle" && <span>{!policy?.enabled ? "Automatic processing paused" : processing.state === "leased" ? "Assessment processing" : processing.state === "failed" ? "Assessment needs attention" : "Assessment queued"}</span>}
+      </div>
+      {processing && processing.state !== "idle" && <p className="text-xs text-muted-foreground">Received: <ManagerTimestamp value={processing.requestedAt} />{processing.attempts > 0 && <> · Attempts: {processing.attempts}</>}{processing.lastError && <> · {processing.lastError} · Next eligible retry: <ManagerTimestamp value={processing.availableAt} /></>}</p>}
+      {(query.error || query.data?.error) && <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Latest manager check unavailable</AlertTitle><AlertDescription>{query.error?.message ?? query.data?.error}</AlertDescription></Alert>}
+      {query.isLoading ? <QueueSkeleton /> : !snapshot ? <p className="text-sm text-muted-foreground">No assessment has been recorded yet.</p> : (
+          <div className="space-y-3">
+            <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+              <div className="min-w-0">
+                <div className={`text-xs font-semibold uppercase ${intervention?.severity === "urgent" ? "text-red-500" : "text-blue-500"}`}>{intervention ? "Immediate clarification" : "Recommended next"}</div>
+                <h2 className="mt-1 font-semibold">{intervention?.title ?? next?.title ?? "No executable work remains"}</h2>
+                <p className="mt-1 text-sm text-muted-foreground">{intervention?.explanation ?? next?.reason ?? "The linked sources contain no open action."}</p>
+                {next && !intervention && <p className="mt-2 text-xs text-muted-foreground">About {next.minutes.likely} min · {next.where}</p>}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground"><span>Assessment: <ManagerTimestamp value={snapshot.assessedAt} /></span><span>Next check: {policy?.enabled ? (snapshot.nextCheckAt ? <ManagerTimestamp value={snapshot.nextCheckAt} /> : "not scheduled") : "paused"}</span><span>{snapshot.applied ? "Applied to active plan" : "Proposal not applied"}</span></div>
+          </div>
+        )}
+      <Button variant="outline" size="sm" aria-expanded={open} aria-controls="manager-context" onClick={() => setOpen(value => !value)}>{open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}{open ? "Hide context" : "Review context"}</Button>
+      {open && <div id="manager-context" className="min-w-0 space-y-4 border-t pt-3">
+        {intervention && <div className="border-l-2 border-amber-500 pl-3"><p className="text-sm font-medium">{intervention.question}</p><p className="mt-1 text-xs text-muted-foreground">{intervention.safeAction}</p></div>}
+        {intervention && <ManagerVerificationDetails intervention={intervention} />}
+        <form className="space-y-3" onSubmit={event => { event.preventDefault(); if (cardId && detail.trim().length >= 3 && !busy) update.mutate({ cardId, detail: detail.trim(), interventionId: intervention?.cardId === cardId ? intervention.id : undefined }); }}>
+          <div className="max-w-md space-y-1"><Label htmlFor="manager-context-card">Context card</Label><select id="manager-context-card" value={cardId} disabled={busy || !availableCards.length} onChange={event => { setSelectedCardId(event.target.value); setDetail(""); }} className="h-10 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm text-foreground">{!availableCards.length && <option value="">No linked card available</option>}{availableCards.map(card => <option key={card.id} value={card.id}>{card.name}</option>)}</select></div>
+          <div><Label htmlFor="manager-update">What changed in reality?</Label><Textarea id="manager-update" className="mt-2 min-h-24" value={detail} disabled={busy} maxLength={8000} onChange={event => { setSelectedCardId(cardId); setDetail(event.target.value); }} /></div>
+          <Button type="submit" size="sm" disabled={!cardId || detail.trim().length < 3 || busy}>{update.isPending ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}Submit context</Button>
+          {!availableCards.length && <p className="text-xs text-muted-foreground">A linked card is required before context can be submitted.</p>}
+        </form>
+        {snapshot && <ManagerSnapshotDetails snapshot={snapshot} cardId={cardId || undefined} presentedInterventionId={intervention?.id} />}
+      </div>}
+    </section>
+  );
+}
+
+function VerificationFollowup({ followup, evidence, evidenceUnavailable, refreshEvidence }: {
+  followup: { id: number; conflictId: number | null; title: string; question: string };
+  evidence: Array<{ id: number; source: string; kind: string; title: string; content: string | null; summary: string | null; observedAt: Date; modifiedAt: Date | null }>;
+  evidenceUnavailable: boolean;
+  refreshEvidence: () => void;
+}) {
+  const utils = trpc.useUtils();
+  const [resolution, setResolution] = useState("");
+  const [sourceId, setSourceId] = useState("");
+  const [quote, setQuote] = useState("");
+  const sources = evidence.filter(item => !/worker_assertion|system_inference|verified_conflict_resolution/.test(item.kind));
+  const source = sources.find(item => String(item.id) === sourceId);
+  const sourceText = source?.content ?? source?.summary ?? "";
+  const conflict = followup.conflictId !== null;
+  const quoted = quote.trim();
+  const proofReady = !!source && quoted.length >= 3 && sourceText.includes(quoted) && !evidenceUnavailable;
+  const prefix = `followup-${followup.id}`;
+  const resolve = trpc.operator.resolveVerificationFollowup.useMutation({
+    onSuccess: result => {
+      toast.success(result.requiresEvidence ? "Note saved; conflict remains open" : "Verification follow-up resolved");
+      setResolution("");
+      void utils.operator.getVerificationFollowups.invalidate();
+      void utils.operator.getCardEvidence.invalidate();
+      void utils.operator.getManagerStatus.invalidate();
+      void utils.operator.getWorkQueueContext.invalidate();
+    },
+    onError: error => toast.error(error.message),
+  });
+  return <form className="min-w-0 space-y-3 border-l-2 border-amber-500 pl-3" aria-label={followup.title} onSubmit={event => {
+    event.preventDefault();
+    if (resolution.trim().length < 3 || resolve.isPending || (conflict && !proofReady)) return;
+    resolve.mutate({ followupId: followup.id, resolution: resolution.trim(), ...(conflict && source ? { sourceEvidenceId: source.id, sourceQuote: quoted } : {}) });
+  }}>
+    <div><p className="text-sm font-medium">{followup.title}</p><p className="mt-1 text-sm text-muted-foreground">{followup.question}</p></div>
+    <div className="space-y-1"><Label htmlFor={`${prefix}-resolution`}>Verification explanation</Label><Textarea id={`${prefix}-resolution`} value={resolution} onChange={event => setResolution(event.target.value)} maxLength={4000} disabled={resolve.isPending} /></div>
+    {conflict && <>
+      <div className="space-y-1"><Label htmlFor={`${prefix}-source`}>Proof source</Label><select id={`${prefix}-source`} value={sourceId} onChange={event => { setSourceId(event.target.value); setQuote(""); }} disabled={resolve.isPending || evidenceUnavailable} className="h-10 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm text-foreground"><option value="">Select retained source evidence</option>{sources.map(item => <option key={item.id} value={item.id}>{item.source}: {item.title} [#{item.id}]</option>)}</select></div>
+      <Button type="button" size="sm" variant="outline" disabled={evidenceUnavailable || resolve.isPending} onClick={refreshEvidence}><RefreshCw className="size-4" />Refresh proof sources</Button>
+      {!sources.length && <p className="text-xs text-muted-foreground">No retained source proof is linked to this card. The conflict remains open.</p>}
+      {source && <div className="space-y-1 text-xs"><p className="font-medium">Retained source text</p><p className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words">{sourceText || "No source text recorded."}</p><p className="text-muted-foreground">Observed: <ManagerTimestamp value={source.observedAt} />; source date: <ManagerTimestamp value={source.modifiedAt} /></p></div>}
+      <div className="space-y-1"><Label htmlFor={`${prefix}-quote`}>Exact source quote</Label><Textarea id={`${prefix}-quote`} value={quote} onChange={event => setQuote(event.target.value)} maxLength={4000} disabled={!source || resolve.isPending} aria-describedby={`${prefix}-proof-status`} /><p id={`${prefix}-proof-status`} className="text-xs text-muted-foreground">{quoted && !sourceText.includes(quoted) ? "The quote does not match the retained source text." : "Source authority, revision and disputed facts must pass backend verification."}</p></div>
+    </>}
+    {resolve.error && <p role="alert" className="text-sm text-destructive">{resolve.error.message}</p>}
+    <div className="flex flex-wrap gap-2"><Button type="submit" size="sm" disabled={resolve.isPending || resolution.trim().length < 3 || (conflict && !proofReady)}>{resolve.isPending ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}{conflict ? "Verify source and resolve" : "Resolve follow-up"}</Button>{conflict && <Button type="button" variant="outline" size="sm" disabled={resolve.isPending || resolution.trim().length < 3} onClick={() => resolve.mutate({ followupId: followup.id, resolution: resolution.trim() })}>Save note (keep open)</Button>}</div>
+  </form>;
 }
 
 function QueueLanes({ cards, onSelect }: { cards: OperatorCard[]; onSelect: (card: OperatorCard) => void }) {
@@ -442,7 +590,7 @@ function CardInspector({
   const [rawEvidenceOpen, setRawEvidenceOpen] = useState(false);
   const [assertion, setAssertion] = useState("");
   const cardEvidence = trpc.operator.getCardEvidence.useQuery(
-    { cardId: card?.cardId ?? "", limit: 30 },
+    { cardId: card?.cardId ?? "", limit: 100 },
     { enabled: Boolean(card), staleTime: 60_000 },
   );
   const verification = trpc.operator.getVerificationFollowups.useQuery(
@@ -601,18 +749,13 @@ function CardInspector({
                   <p className="text-sm leading-relaxed">{card.stateReason ?? card.planSummary ?? "No assessment context available."}</p>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <Badge variant="outline" className={priorityTone(card.priorityTier)}>{card.priorityTier} / {card.priorityScore}</Badge>
-                    {card.confidenceScore !== null && <Badge variant="outline">{card.confidenceScore}% confidence</Badge>}
                   </div>
                 </section>
 
                 <section>
                   <div className="flex items-center justify-between gap-3">
-                    <InspectorLabel>Confidence</InspectorLabel>
-                    {evidenceSummary.confidenceProfile?.targetScore && (
-                      <span className="text-xs text-muted-foreground">Target {evidenceSummary.confidenceProfile.targetScore}%</span>
-                    )}
+                    <InspectorLabel>Evidence limitations</InspectorLabel>
                   </div>
-                  <Progress value={card.confidenceScore ?? 0} className="mt-2 h-2" />
                   <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
                     {card.confidenceReason ?? "No confidence explanation recorded."}
                   </p>
@@ -684,7 +827,8 @@ function CardInspector({
                   <InspectorLabel>Verification follow-ups</InspectorLabel>
                   <Badge variant="outline">{verification.data?.length ?? 0} open</Badge>
                 </div>
-                {verification.data?.length ? <div className="mt-2 space-y-2">{verification.data.map((followup) => <div key={followup.id} className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3"><p className="text-sm font-medium">{followup.title}</p><p className="mt-1 text-sm text-muted-foreground">{followup.question}</p></div>)}</div> : <p className="mt-2 text-sm text-muted-foreground">No conflicting evidence needs a worker response.</p>}
+                {verification.error && <p role="alert" className="mt-2 text-sm text-destructive">{verification.error.message}</p>}
+                {verification.data?.length ? <div className="mt-2 space-y-3">{verification.data.map((followup) => <VerificationFollowup key={`${card.cardId}-${followup.id}`} followup={followup} evidence={cardEvidence.data ?? []} evidenceUnavailable={!!cardEvidence.error || cardEvidence.isFetching} refreshEvidence={() => void cardEvidence.refetch()} />)}</div> : !verification.error && <p className="mt-2 text-sm text-muted-foreground">No conflicting evidence needs a worker response.</p>}
               </section>
 
               <section>
@@ -794,7 +938,7 @@ function PlanView({ founderName, timeZone }: { founderName: string; timeZone: st
             </CardContent>
           </Card>
           <div className="space-y-3">
-            <ContextMetric icon={Gauge} label="Confidence" value={`${plan.planHealth.confidence}%`} detail="Evidence-backed, capped below certainty" />
+            <ContextMetric icon={Gauge} label="Assessment" value={plan.auditTrail.some(item => item.action === "APTLSS manager reconciliation") ? "Uncalibrated" : "Evidence reviewed"} detail="See source evidence and outstanding limitations" />
             <ContextMetric icon={Clock3} label="Scheduled" value={`${Math.round(plan.planHealth.scheduledMinutes / 60 * 10) / 10}h`} detail={`${plan.planHealth.gaps} min remains available`} />
             <ContextMetric icon={BrainCircuit} label={`${founderName} items`} value={`${plan.robertItems.length}`} detail="Visible even when unscheduled" />
             <ContextMetric icon={ListTodo} label="Unscheduled" value={`${plan.unscheduledCards.length}`} detail="Retained for replanning" />
@@ -897,6 +1041,7 @@ function WorkerSettingsView() {
   const utils = trpc.useUtils();
   const context = trpc.operator.getContext.useQuery(undefined, { staleTime: 5 * 60_000 });
   const policy = trpc.operator.getBrowserTabPolicy.useQuery(undefined, { staleTime: 60_000 });
+  const manager = trpc.operator.getManagerStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const browser = trpc.operator.getBrowserTabStatus.useQuery(undefined, { retry: false, staleTime: 30_000 });
   const email = trpc.emailInbox.getPendingCount.useQuery(undefined, { retry: false, staleTime: 60_000 });
   const apiHealth = trpc.system.health.useQuery(
@@ -908,6 +1053,8 @@ function WorkerSettingsView() {
   const [warningMinutes, setWarningMinutes] = useState(30);
   const [staleMinutes, setStaleMinutes] = useState(10);
   const [includePinnedTabs, setIncludePinnedTabs] = useState(false);
+  const [managerEnabled, setManagerEnabled] = useState(true);
+  const [managerInterval, setManagerInterval] = useState(5);
 
   useEffect(() => {
     if (!policy.data) return;
@@ -917,6 +1064,11 @@ function WorkerSettingsView() {
     setStaleMinutes(policy.data.staleAfterMinutes);
     setIncludePinnedTabs(policy.data.includePinnedTabs);
   }, [policy.data]);
+  useEffect(() => {
+    if (!manager.data?.policy) return;
+    setManagerEnabled(manager.data.policy.enabled);
+    setManagerInterval(manager.data.policy.intervalMinutes);
+  }, [manager.data?.policy.enabled, manager.data?.policy.intervalMinutes]);
 
   const savePolicy = trpc.operator.setBrowserTabPolicy.useMutation({
     onSuccess: () => {
@@ -937,6 +1089,10 @@ function WorkerSettingsView() {
     },
     onError: (error) => toast.error(error.message),
   });
+  const saveManager = trpc.operator.updateManagerPolicy.useMutation({
+    onSuccess: () => { void utils.operator.getManagerStatus.invalidate(); toast.success("APTLSS manager schedule saved"); },
+    onError: (error) => toast.error(error.message),
+  });
   const worker = context.data;
   const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -944,6 +1100,7 @@ function WorkerSettingsView() {
     <div className="space-y-5">
       <PageHeading title="Settings" description="Personal operating controls for this worker profile. Founder and system administration remain separate." />
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="space-y-4">
         <Card className="gap-0 rounded-lg py-0">
           <CardHeader className="border-b py-4">
             <CardTitle className="text-sm">Browser organization</CardTitle>
@@ -982,6 +1139,18 @@ function WorkerSettingsView() {
             </div>
           </CardContent>
         </Card>
+        <Card className="gap-0 rounded-lg py-0">
+          <CardHeader className="border-b py-4"><CardTitle className="text-sm">APTLSS work manager</CardTitle><Badge variant="outline" className="w-fit">{manager.data?.policy.mode === "active" ? "Active" : manager.data?.policy.mode === "shadow" ? "Shadow" : "Mode unavailable"}</Badge></CardHeader>
+          <CardContent className="space-y-5 p-5">
+            {manager.error && <p role="alert" className="text-sm text-destructive">{manager.error.message}</p>}
+            <fieldset disabled={!manager.data?.policy || !!manager.error || saveManager.isPending} className="space-y-4">
+            <div className="flex items-center justify-between gap-4"><Label htmlFor="manager-enabled">Continuous guidance</Label><Switch id="manager-enabled" checked={managerEnabled} onCheckedChange={setManagerEnabled} disabled={!manager.data?.policy || !!manager.error || saveManager.isPending} /></div>
+            <div className="max-w-xs"><NumberSetting id="manager-interval" label="Assessment interval" value={managerInterval} min={1} max={60} suffix="min" onChange={setManagerInterval} /></div>
+            <div className="flex justify-end"><Button onClick={() => saveManager.mutate({enabled:managerEnabled,intervalMinutes:managerInterval})} disabled={saveManager.isPending || !Number.isInteger(managerInterval)}>{saveManager.isPending && <Loader2 className="size-4 animate-spin" />}Save manager schedule</Button></div>
+            </fieldset>
+          </CardContent>
+        </Card>
+        </div>
 
         <div className="space-y-4">
           <Card className="gap-0 rounded-lg py-0">

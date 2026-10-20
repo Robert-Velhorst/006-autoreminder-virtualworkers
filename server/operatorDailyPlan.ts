@@ -33,6 +33,7 @@ export type OperatorPlanBlock = {
 };
 
 export type OperatorDailyPlanPayload = {
+  planningImpact?: import("../shared/aptlssManagerPlanImpact").ManagerPlanImpact;
   version: 2;
   dateKey: string;
   generatedAt: string;
