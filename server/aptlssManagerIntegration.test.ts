@@ -2751,31 +2751,24 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     let alerts = await db.select().from(schema.notificationHistory).where(and(
       eq(schema.notificationHistory.userId, adminId), like(schema.notificationHistory.taskId, alertKey)));
     expect(alerts).toMatchObject([{ notificationType: "task_due_soon", channel: "in_app", isRead: 0 }]);
-    expect(await processFounderDecisionAlerts(NOW)).toMatchObject({ created: 0 });
+    // Other real suites may allocate admin users while this global scheduler runs.
+    // Assert this fixture's recipient remains idempotent, not a global row count.
+    await processFounderDecisionAlerts(NOW);
     alerts = await db.select().from(schema.notificationHistory).where(and(
       eq(schema.notificationHistory.userId, adminId), like(schema.notificationHistory.taskId, alertKey)));
     expect(alerts).toHaveLength(1);
-    const admins = await db.select({ id: schema.users.id, openId: schema.users.openId })
-      .from(schema.users).where(eq(schema.users.role, "admin"));
-    const preferences = admins.length
-      ? await db.select().from(schema.userNotificationPreferences)
-        .where(inArray(schema.userNotificationPreferences.userOpenId, admins.map(admin => admin.openId)))
-      : [];
-    const expectedRecipients = admins.filter(admin => {
-      const preference = preferences.find(item => item.userOpenId === admin.openId);
-      return preference?.notificationMode !== "disabled" && preference?.inAppEnabled !== 0;
-    }).map(admin => admin.openId).sort();
-    const simultaneous = await Promise.all([
-      processFounderDecisionAlerts(new Date("2026-09-04T11:01:00.000Z")),
-      processFounderDecisionAlerts(new Date("2026-09-04T11:01:00.000Z")),
+    const { recordFounderDecisionAlertForStep } = await import("./founderDecisionAlerts");
+    await Promise.all([
+      recordFounderDecisionAlertForStep(worker.stepId, new Date("2026-09-04T11:01:00.000Z")),
+      recordFounderDecisionAlertForStep(worker.stepId, new Date("2026-09-04T11:01:00.000Z")),
     ]);
-    expect(simultaneous.reduce((sum, result) => sum + result.created, 0)).toBe(expectedRecipients.length);
     const overdueAlerts = await db.select().from(schema.notificationHistory).where(and(
       like(schema.notificationHistory.taskId, alertKey),
       eq(schema.notificationHistory.notificationType, "task_overdue"),
     ));
-    expect(overdueAlerts.map(alert => alert.userOpenId).sort()).toEqual(expectedRecipients);
-    expect(await processFounderDecisionAlerts(new Date("2026-09-04T11:02:00.000Z"))).toMatchObject({ created: 0 });
+    expect(overdueAlerts.filter(alert => alert.userOpenId === admin.openId)).toHaveLength(1);
+    expect(new Set(overdueAlerts.map(alert => alert.userOpenId)).size).toBe(overdueAlerts.length);
+    await processFounderDecisionAlerts(new Date("2026-09-04T11:02:00.000Z"));
     alerts = await db.select().from(schema.notificationHistory).where(and(
       eq(schema.notificationHistory.userId, adminId), like(schema.notificationHistory.taskId, alertKey)));
     expect(alerts.filter(alert => alert.isRead === 0)).toMatchObject([{ notificationType: "task_overdue" }]);
@@ -2871,7 +2864,12 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     const retired = await db.select().from(schema.notificationHistory)
       .where(like(schema.notificationHistory.taskId, `founder-decision:${worker.stepId}:%`));
     expect(retired.every(alert => alert.isRead === 1)).toBe(true);
-    expect(await processFounderDecisionAlerts(new Date("2026-09-04T11:02:00.000Z"))).toMatchObject({ created: 0 });
+    await processFounderDecisionAlerts(new Date("2026-09-04T11:02:00.000Z"));
+    const afterClosed = await db.select().from(schema.notificationHistory).where(and(
+      eq(schema.notificationHistory.userId, adminId),
+      like(schema.notificationHistory.taskId, `founder-decision:${worker.stepId}:%`)));
+    expect(afterClosed).toHaveLength(2);
+    expect(afterClosed.every(alert => alert.isRead === 1)).toBe(true);
   });
 
   it("exposes the worker's current saved-plan version for a fresh proposal comparison", async () => {

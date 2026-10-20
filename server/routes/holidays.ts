@@ -46,13 +46,14 @@ router.get('/fetch/:country/:year', async (req: any, res: Response) => {
     }
 
     // Validate year
-    const yearNum = parseInt(year);
-    if (isNaN(yearNum) || yearNum < 2020 || yearNum > 2030) {
+    const yearNum = Number(year);
+    if (typeof year !== 'string' || !/^\d{4}$/.test(year) || !Number.isInteger(yearNum) || yearNum < 2020 || yearNum > 2030) {
       return res.status(400).json({ error: 'Invalid year' });
     }
 
     // Fetch holidays from Nager.Date API
-    const response = await fetch(`${HOLIDAY_API_BASE}/PublicHolidays/${year}/${country}`, {
+    const response = await fetch(`${HOLIDAY_API_BASE}/PublicHolidays/${yearNum}/${encodeURIComponent(country)}`, {
+      redirect: 'error',
       signal: AbortSignal.timeout(HOLIDAY_REQUEST_TIMEOUT_MS),
     });
     
@@ -408,20 +409,21 @@ router.get('/by-timezone/:timezone/:year', async (req: any, res: Response) => {
       'Pacific/Guam': 'BD', // Guam not supported, using Bangladesh
     };
 
-    const countryCode = timezoneToCountryMap[timezone];
+    const countryCode = Object.hasOwn(timezoneToCountryMap, timezone) ? timezoneToCountryMap[timezone] : undefined;
     if (!countryCode) {
       return res.status(400).json({ error: 'Timezone not supported or country mapping not found' });
     }
 
     // Validate year
-    const yearNum = parseInt(year);
-    if (isNaN(yearNum) || yearNum < 2020 || yearNum > 2030) {
+    const yearNum = Number(year);
+    if (typeof year !== 'string' || !/^\d{4}$/.test(year) || !Number.isInteger(yearNum) || yearNum < 2020 || yearNum > 2030) {
       return res.status(400).json({ error: 'Invalid year' });
     }
 
     // Fetch holidays from Nager.Date API
     console.log('[Holidays] Fetching from API for year:', year, 'country:', countryCode);
-    const response = await fetch(`${HOLIDAY_API_BASE}/PublicHolidays/${year}/${countryCode}`, {
+    const response = await fetch(`${HOLIDAY_API_BASE}/PublicHolidays/${yearNum}/${encodeURIComponent(countryCode)}`, {
+      redirect: 'error',
       signal: AbortSignal.timeout(HOLIDAY_REQUEST_TIMEOUT_MS),
     });
     

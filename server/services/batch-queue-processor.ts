@@ -462,7 +462,7 @@ class BatchQueueProcessor extends EventEmitter {
         estimatedTimeSeconds: currentProgress.estimatedTimeSeconds,
       });
     } catch (error) {
-      console.error(`[Batch] Failed to persist progress for job ${jobId}:`, error);
+      console.error('[Batch] Failed to persist progress for job %s:', jobId, error);
     }
   }
 }

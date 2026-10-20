@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import nodemailer from "nodemailer";
+import sanitizeHtml from "sanitize-html";
 import {
   appSettings,
   aptlssPlans,
@@ -769,7 +770,11 @@ export async function sendGoogleMail(options: { to: string; subject: string; htm
     from,
     to: options.to,
     subject: options.subject,
-    html: options.html,
+    html: sanitizeHtml(options.html, {
+      allowedTags: ["p", "br", "div", "span", "strong", "b", "em", "i", "u", "s", "h1", "h2", "h3", "h4", "ul", "ol", "li", "blockquote", "pre", "code", "table", "thead", "tbody", "tr", "th", "td", "a", "hr"],
+      allowedAttributes: { a: ["href", "title"], td: ["colspan", "rowspan"], th: ["colspan", "rowspan"] },
+      allowedSchemes: ["https", "http", "mailto"], allowProtocolRelative: false,
+    }),
     text: options.text,
   });
   const raw = (composed.message as Buffer).toString("base64url");
@@ -1127,7 +1132,7 @@ async function syncGmailEvidence(vaId: number, settings: GoogleEvidenceSettings[
 export async function listDriveFiles(token: string, settings: GoogleEvidenceSettings["drive"], context?: ScheduledJobContext): Promise<DriveFile[]> {
   const modifiedAfter = new Date(Date.now() - settings.lookbackDays * 24 * 60 * 60 * 1_000).toISOString();
   const clauses = ["trashed = false", `modifiedTime >= '${modifiedAfter}'`];
-  if (settings.folderId) clauses.push(`'${settings.folderId.replace(/'/g, "\\'")}' in parents`);
+  if (settings.folderId) clauses.push(`'${settings.folderId.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}' in parents`);
   const query = new URLSearchParams({
     q: clauses.join(" and "),
     pageSize: "100",

@@ -1,4 +1,5 @@
 import express from "express";
+import { rateLimit } from "express-rate-limit";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -21,6 +22,7 @@ const unavailable = () => Object.assign(new Error("private-driver-query"), { cau
 
 async function serve(run: (base: string, action: ReturnType<typeof vi.fn>) => Promise<void>) {
   const app = express();
+  app.use(rateLimit({ windowMs: 60_000, limit: 1000, legacyHeaders: false }));
   const action = vi.fn();
   app.use(express.json());
   app.use("/api", attachRequestAuthentication);

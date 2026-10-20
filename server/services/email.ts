@@ -1,4 +1,5 @@
 import sgMail from '@sendgrid/mail';
+import { convert } from 'html-to-text';
 import { areNotificationsEnabled } from './notificationPolicy';
 import nodemailer, { type Transporter } from 'nodemailer';
 import { ScheduledJobLeaseLostError, type ScheduledJobContext } from '../scheduledJobRuntime';
@@ -177,12 +178,20 @@ export async function sendEmailWithOutcome(
   }
 
   if (!status.ready || !status.provider) {
-    console.log(`[Email] Not sent: ${status.reason}`);
+    console.log('[Email] Not sent: %s', status.reason);
     return { status: 'not_sent', reason: `${status.reason ?? 'Email provider is not ready'}; no email was sent.` };
   }
 
   try {
-    const text = options.text || options.html.replace(/<[^>]*>/g, '');
+    const text = options.text || convert(options.html, {
+      wordwrap: false,
+      selectors: [
+        { selector: 'script', format: 'skip' },
+        { selector: 'style', format: 'skip' },
+        { selector: 'img', format: 'skip' },
+        { selector: 'a', options: { ignoreHref: true } },
+      ],
+    });
     if (status.provider === 'gmail_api') {
       const message = { to: options.to, subject: options.subject, html: options.html, text };
       await assertEmailOwnership(context);

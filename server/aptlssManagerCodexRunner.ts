@@ -1,10 +1,13 @@
+import { atomicWriteLocalFile, confinedLocalPath } from "../shared/local-filesystem-policy.mjs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { basename, isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { CODEX_MANAGER_EFFORTS, CODEX_MANAGER_ROUTE, CODEX_MANAGER_MODEL, codexInputHash, codexReplySchema, codexRequestSchema, type CodexManagerEffort } from "./aptlssManagerCodex";
 import { managerSemanticInstructions } from "./aptlssManagerModel";
 import { codexAssessmentSchema, codexContextInstructions, runCodexCascade } from "./aptlssManagerCodexCascade";
+const localPath = (...segments: string[]) => confinedLocalPath(join(...segments));
 
 const disabled = ["shell_tool", "unified_exec", "shell_snapshot", "apps", "plugins", "remote_plugin", "hooks", "browser_use",
   "browser_use_external", "in_app_browser", "computer_use", "image_generation", "view_image", "multi_agent", "multi_agent_v2",
@@ -82,10 +85,26 @@ export function parseCodexAssessment(lines: string[]) {
   return { text, usage };
 }
 
+export function codexInvocation(executable: string) {
+  const env = codexEnvironment(process.env);
+  if (process.env.NODE_ENV === "test" && executable === process.execPath) return { command: process.execPath, env };
+  const command = process.platform === "win32" ? "codex.exe" : "codex";
+  if (!isAbsolute(executable) || basename(executable) !== command || /[\0\r\n]/.test(executable)) {
+    throw new Error("Configure an absolute path to the official Codex executable");
+  }
+  const canonical = realpathSync(executable);
+  if (lstatSync(executable).isSymbolicLink() || basename(canonical) !== command || !statSync(canonical).isFile()) {
+    throw new Error("Configure a regular official Codex executable, not a link or directory");
+  }
+  // Execute exactly the configured installed binary: never search cwd or PATH.
+  return { command: canonical, env };
+}
+
 async function runAssessment(executable: string, work: string, input: string, effort: CodexManagerEffort, feedback: string, signal: AbortSignal) {
   return new Promise<{ text: string; usage?: any }>((accept, reject) => {
-    const child = spawn(executable, codexAssessmentArgs(work, effort), { cwd: work, shell: false, windowsHide: true,
-      env: codexEnvironment(process.env), stdio: ["pipe", "pipe", "pipe"] });
+    const execution = codexInvocation(executable);
+    const child = spawn(execution.command, codexAssessmentArgs(work, effort), { cwd: work, shell: false, windowsHide: true,
+      env: execution.env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "", stderr = "", finished = false;
     const stop = () => child.kill();
     const timeout = setTimeout(stop, 120_000);
@@ -118,69 +137,69 @@ async function runAssessment(executable: string, work: string, input: string, ef
 }
 
 export async function startCodexManagerRunner(root: string, work: string, executable: string, signal: AbortSignal) {
-  root = resolve(root); work = resolve(work);
+  root = confinedLocalPath(root); work = confinedLocalPath(work);
   if (root === work || work.startsWith(root + "/") || work.startsWith(root + "\\")) throw new Error("Private work directory must not be shared with the dashboard");
-  await mkdir(root, { recursive: true });
-  await mkdir(work, { recursive: true });
-  const lock = join(work, "runner.lock");
+  await mkdir(confinedLocalPath(root), { recursive: true });
+  await mkdir(confinedLocalPath(work), { recursive: true });
+  const lock = localPath(work, "runner.lock");
   try {
-    const pid = Number(await readFile(lock, "utf8"));
+    const pid = Number(await readFile(confinedLocalPath(lock), "utf8"));
     if (Number.isInteger(pid) && pid > 0) {
       try { process.kill(pid, 0); throw new Error("Runner already active"); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
     }
-    await unlink(lock);
+    await unlink(confinedLocalPath(lock));
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  await writeFile(lock, String(process.pid), { flag: "wx", mode: 0o600 });
+  await writeFile(confinedLocalPath(lock), String(process.pid), { flag: "wx", mode: 0o600 });
   let interval: ReturnType<typeof setInterval> | undefined;
   try {
   const schema = z.toJSONSchema(codexAssessmentSchema) as Record<string, any>;
   delete schema.$schema; delete schema.properties.claims.default; schema.required = ["claims", "actions", "interventions", "contextCheck"];
-  await writeFile(join(work, "schema.json"), JSON.stringify(schema), { mode: 0o600 });
-  await writeFile(join(work, "instructions.txt"), assessmentInputInstructions + " " + managerSemanticInstructions + codexContextInstructions + " You are a read-only evidence classifier. No tools, browsing, file access, code execution, or external actions are allowed. Return only the requested JSON.", { mode: 0o600 });
-  const requests = join(root, "requests"), replies = join(root, "replies");
-  await mkdir(requests, { recursive: true }); await mkdir(replies, { recursive: true });
+  await atomicWriteLocalFile(localPath(work, "schema.json"), JSON.stringify(schema));
+  await atomicWriteLocalFile(localPath(work, "instructions.txt"), assessmentInputInstructions + " " + managerSemanticInstructions + codexContextInstructions + " You are a read-only evidence classifier. No tools, browsing, file access, code execution, or external actions are allowed. Return only the requested JSON.");
+  const requests = localPath(root, "requests"), replies = localPath(root, "replies");
+  await mkdir(confinedLocalPath(requests), { recursive: true }); await mkdir(confinedLocalPath(replies), { recursive: true });
   let heartbeatBusy = false;
   const heartbeat = async () => {
     if (heartbeatBusy) return;
     heartbeatBusy = true;
     try {
-      await writeFile(join(root, "heartbeat.pending"), JSON.stringify({ at: new Date().toISOString(), model: CODEX_MANAGER_MODEL, route: CODEX_MANAGER_ROUTE, efforts: CODEX_MANAGER_EFFORTS }));
-      await rename(join(root, "heartbeat.pending"), join(root, "heartbeat.json"));
+      await atomicWriteLocalFile(localPath(root, "heartbeat.json"), JSON.stringify({ at: new Date().toISOString(), model: CODEX_MANAGER_MODEL, route: CODEX_MANAGER_ROUTE, efforts: CODEX_MANAGER_EFFORTS }));
     } finally { heartbeatBusy = false; }
   };
   await heartbeat();
   interval = setInterval(() => void heartbeat().catch(() => {}), 3000);
     while (!signal.aborted) {
-      const files = (await readdir(requests)).filter(name => /^[a-f0-9-]{36}\.(json|pending)$/.test(name)).sort();
+      const files = (await readdir(confinedLocalPath(requests))).filter(name => /^[a-f0-9-]{36}\.(json|pending)$/.test(name)).sort();
       for (const file of files) {
         if (signal.aborted) break;
-        const path = join(requests, file), replyPath = join(replies, file.replace(/\.pending$/, ".json"));
+        const path = localPath(requests, file), replyPath = localPath(replies, file.replace(/\.pending$/, ".json"));
         try {
-          if ((await stat(path)).size > 150_000) continue;
-          const request = codexRequestSchema.parse(JSON.parse(await readFile(path, "utf8")));
+          if ((await stat(confinedLocalPath(path))).size > 150_000) continue;
+          const request = codexRequestSchema.parse(JSON.parse(await readFile(confinedLocalPath(path), "utf8")));
           if (![`${request.id}.json`, `${request.id}.pending`].includes(file) || request.inputHash !== codexInputHash(request.input)) continue;
           const expiry = Date.parse(request.expiresAt);
           const lifetime = expiry - Date.parse(request.createdAt);
           if (lifetime <= 0 || lifetime > 420_000 || Date.parse(request.createdAt) > Date.now() + 5000) continue;
           if (expiry <= Date.now()) {
             // Recover only this validated request's expired transport, never evidence history.
-            await Promise.all([path, join(requests, `${request.id}.pending`), replyPath, replyPath + ".pending"]
-              .map(file => unlink(file).catch(() => {})));
+            await Promise.all([path, localPath(requests, `${request.id}.pending`), replyPath, replyPath + ".pending"]
+              .map(async file => { try { await unlink(confinedLocalPath(file)); } catch { /* Never follow a replaced transport link during cleanup. */ } }));
             continue;
           }
           if (file.endsWith(".pending")) continue;
-          try { await stat(replyPath); continue; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+          try { await stat(confinedLocalPath(replyPath)); continue; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
           const controller = new AbortController();
           const cancel = () => controller.abort(); signal.addEventListener("abort", cancel, { once: true });
           const timeout = setTimeout(cancel, expiry - Date.now());
-          const check = setInterval(() => void stat(path).catch(cancel), 1000);
+          const check = setInterval(() => void (async () => { await stat(confinedLocalPath(path)); })().catch(cancel), 1000);
           let reply: z.infer<typeof codexReplySchema> = { version: 2, id: request.id, inputHash: request.inputHash,
             model: CODEX_MANAGER_MODEL, route: CODEX_MANAGER_ROUTE, effort: "low", status: "unavailable",
             attempts: [{ effort: "low", outcome: "unavailable", durationMs: 0 }] };
           try {
-            const auth = spawnSync(executable, ["login", "status"], { cwd: work, windowsHide: true, timeout: 10_000,
-              env: codexEnvironment(process.env), encoding: "utf8" });
+            const execution = codexInvocation(executable);
+            const auth = spawnSync(execution.command, ["login", "status"], { cwd: work, windowsHide: true, timeout: 10_000,
+              env: execution.env, encoding: "utf8" });
             if (auth.status !== 0 || !/Logged in using ChatGPT/i.test(`${auth.stdout}\n${auth.stderr}`)) throw new Error("unauthenticated");
             const result = await runCodexCascade(request.input, controller.signal, (effort, feedback, signal) => runAssessment(executable, work, request.input, effort, feedback, signal));
             reply = { ...reply, ...result };
@@ -191,9 +210,8 @@ export async function startCodexManagerRunner(root: string, work: string, execut
             reply.attempts = [{ effort: "low", outcome: failedStatus, durationMs: 0 }];
           } finally { clearTimeout(timeout); clearInterval(check); signal.removeEventListener("abort", cancel); }
           if (!controller.signal.aborted && Date.now() < expiry) {
-            try { await stat(path); } catch { continue; }
-            await writeFile(replyPath + ".pending", JSON.stringify(codexReplySchema.parse(reply)), { mode: 0o600 });
-            await rename(replyPath + ".pending", replyPath);
+            try { await stat(confinedLocalPath(path)); } catch { continue; }
+            await atomicWriteLocalFile(confinedLocalPath(replyPath), JSON.stringify(codexReplySchema.parse(reply)));
             console.log(JSON.stringify({ at: new Date().toISOString(), id: request.id, model: CODEX_MANAGER_MODEL,
               effort: reply.effort, status: reply.status, attempts: reply.attempts }));
           }
@@ -204,8 +222,8 @@ export async function startCodexManagerRunner(root: string, work: string, execut
   } finally {
     if (interval) clearInterval(interval);
     // Release only the lease this process acquired, including partial startup failures.
-    if (await readFile(lock, "utf8").catch(() => "") === String(process.pid)) {
-      await unlink(lock).catch(() => {});
+    if (await readFile(confinedLocalPath(lock), "utf8").catch(() => "") === String(process.pid)) {
+      await unlink(confinedLocalPath(lock)).catch(() => {});
     }
   }
 }

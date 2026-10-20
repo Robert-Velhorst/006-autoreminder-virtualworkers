@@ -118,7 +118,9 @@
     "ws": "^8.21.1",
     "zod": "^4.1.12",
     "compression": "1.8.2",
-    "nodemailer": "^10.0.10"
+    "nodemailer": "^10.0.10",
+    "sanitize-html": "2.18.1",
+    "html-to-text": "10.0.1"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",
@@ -154,7 +156,9 @@
     "@tailwindcss/typography": "^0.5.15",
     "@types/bcryptjs": "^3.0.0",
     "@types/compression": "1.8.1",
-    "typescript-legacy": "npm:typescript@5.9.3"
+    "typescript-legacy": "npm:typescript@5.9.3",
+    "@types/sanitize-html": "2.16.2",
+    "@types/html-to-text": "9.0.4"
   },
   "packageManager": "pnpm@12.14.0+sha512.wYum2HmT09Fky16JSPMrLAbuhUSH4GzY2GeBNC+z5btGNDZwNHEehoArqpw3vqkGzhkprQjXCITJfYAd8TOJpg=="
 }

@@ -2,12 +2,18 @@ import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Read React children as text for assertions; rendered HTML is never sanitized or reinjected.
+function childText(node: React.ReactNode): string {
+  return React.Children.toArray(node).map(child => React.isValidElement<{ children?: React.ReactNode }>(child)
+    ? childText(child.props.children) : String(child)).join("");
+}
+
 const mocks = vi.hoisted(() => ({
   states: [] as any[], refs: [] as any[], stateIndex: 0, refIndex: 0,
   effects: [] as Array<() => unknown>,
   buttons: [] as Array<{ label: string; disabled?: boolean; onClick?: () => unknown }>,
   selects: [] as Array<{ label: string; disabled?: boolean; onValueChange?: (value: string) => unknown }>,
-  graph: null as any, search: null as any,
+  graph: null as any, search: null as any, badges: [] as string[],
   fetch: vi.fn(), toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() },
 }));
 
@@ -34,8 +40,12 @@ vi.mock("@/lib/trpc", () => ({ trpc: { operator: {
 } } }));
 vi.mock("sonner", () => ({ toast: mocks.toast }));
 vi.mock("wouter", () => ({ Link: ({ href, children }: any) => React.createElement("a", { href }, children) }));
+vi.mock("@/components/ui/badge", () => ({ Badge: ({ children }: any) => {
+  mocks.badges.push(childText(children));
+  return React.createElement("span", { "data-slot": "badge" }, children);
+} }));
 vi.mock("@/components/ui/button", () => ({ Button: ({ children, onClick, disabled }: any) => {
-  const label = renderToStaticMarkup(React.createElement(React.Fragment, null, children)).replace(/<[^>]*>/g, "").trim();
+  const label = childText(children).trim();
   mocks.buttons.push({ label, onClick, disabled });
   return React.createElement("button", { disabled }, children);
 } }));
@@ -57,7 +67,7 @@ vi.mock("@/components/ui/dropdown-menu", () => {
     DropdownMenu: content, DropdownMenuContent: content, DropdownMenuLabel: content,
     DropdownMenuSeparator: () => null, DropdownMenuTrigger: content,
     DropdownMenuItem: ({ children, onClick, disabled }: any) => {
-      const label = renderToStaticMarkup(React.createElement(React.Fragment, null, children)).replace(/<[^>]*>/g, "").trim();
+      const label = childText(children).trim();
       mocks.buttons.push({ label, onClick, disabled });
       return React.createElement("button", { disabled }, children);
     },
@@ -123,7 +133,7 @@ const settle = async () => {
 };
 const render = () => {
   mocks.stateIndex = 0; mocks.refIndex = 0; mocks.effects = [];
-  mocks.buttons = []; mocks.selects = []; mocks.graph = null; mocks.search = null;
+  mocks.buttons = []; mocks.selects = []; mocks.graph = null; mocks.search = null; mocks.badges = [];
   return renderToStaticMarkup(React.createElement(FounderDashboard));
 };
 const mount = () => {
@@ -185,8 +195,8 @@ describe("Founder assignment availability", () => {
   ])("labels the %s task status accurately", async (status, label) => {
     result = () => json([{ ...task, status }]);
     mount(); await settle();
-    const badges = [...render().matchAll(/<span[^>]*data-slot="badge"[^>]*>([\s\S]*?)<\/span>/g)]
-      .map(match => match[1].replace(/<[^>]*>/g, ""));
+    render();
+    const badges = mocks.badges;
     expect(badges).toContain(label);
     if (status === "unassigned") expect(badges).not.toContain("Assigned");
   });

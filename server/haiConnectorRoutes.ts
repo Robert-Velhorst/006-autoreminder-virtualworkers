@@ -12,8 +12,11 @@ export function registerHaiConnectorRoutes(app: Express) {
     res.setHeader("Cache-Control", "no-store");
     try {
       const authorization = req.header("authorization") ?? "";
-      const match = authorization.match(/^Bearer\s+(.+)$/i);
-      const workspaceOwnerId = await resolveHaiConnectorOwner(match?.[1]?.trim());
+      const separator = authorization.indexOf(" ");
+      const bearer = authorization.length <= 4096 && separator === 6
+        && authorization.slice(0, separator).toLowerCase() === "bearer"
+        ? authorization.slice(separator + 1).trim() : undefined;
+      const workspaceOwnerId = await resolveHaiConnectorOwner(bearer);
       if (!workspaceOwnerId) {
         res.status(401).json({ error: "HAI connector authorization failed" });
         return;

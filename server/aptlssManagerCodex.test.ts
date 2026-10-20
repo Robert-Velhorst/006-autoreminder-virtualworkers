@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CODEX_MANAGER_MODEL, CODEX_MANAGER_ROUTE, CODEX_MANAGER_EFFORTS, codexInputHash, codexReplySchema, managerSemanticProvider, requestManagerCodexReview } from "./aptlssManagerCodex";
@@ -17,6 +17,29 @@ async function queue(at = new Date().toISOString()) {
 const output = JSON.stringify({claims:[],actions:[],interventions:[]});
 const completed = [JSON.stringify({type:"thread.started"}),JSON.stringify({type:"item.completed",item:{type:"agent_message",text:output}}),JSON.stringify({type:"turn.completed",usage:{input_tokens:4,output_tokens:2}})];
 describe("Codex subscription bridge", () => {
+
+  it.each(["requests", "replies"])("rejects a %s junction before enqueuing outside the queue", async child => {
+    const dir = await queue();
+    const outside = await mkdtemp(join(tmpdir(), "aptlss-codex-outside-")); directories.push(outside);
+    await rm(join(dir, child), { recursive: true });
+    await symlink(outside, join(dir, child), process.platform === "win32" ? "junction" : "dir");
+    await expect(requestManagerCodexReview("{}", AbortSignal.timeout(5000))).rejects.toThrow(/symbolic links/);
+    expect(await readdir(outside)).toEqual([]);
+  });
+  it("rejects a replaced requests junction while the runner is active", async () => {
+    const dir = await queue();
+    const outside = await mkdtemp(join(tmpdir(), "aptlss-codex-outside-")); directories.push(outside);
+    const work = await mkdtemp(join(tmpdir(), "aptlss-codex-private-")); directories.push(work);
+    const initialHeartbeat = await readFile(join(dir, "heartbeat.json"), "utf8");
+    const controller = new AbortController();
+    const runner = startCodexManagerRunner(dir, work, "must-not-execute", controller.signal);
+    const rejected = expect(runner).rejects.toThrow(/symbolic links/);
+    await vi.waitFor(async () => expect(await readFile(join(dir, "heartbeat.json"), "utf8")).not.toBe(initialHeartbeat));
+    await rm(join(dir, "requests"), { recursive: true });
+    await symlink(outside, join(dir, "requests"), process.platform === "win32" ? "junction" : "dir");
+    try { await rejected; } finally { controller.abort(); }
+    expect(await readdir(outside)).toEqual([]);
+  });
   it("aborts an active local CLI fixture before releasing the runner lease", async () => {
     const dir = await queue();
     const work = await mkdtemp(join(tmpdir(), "aptlss-codex-active-stop-")); directories.push(work);

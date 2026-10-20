@@ -864,7 +864,7 @@ router.post('/aptlss/generate', async (req: Request, res: Response) => {
       });
     }
 
-    console.log(`Generating APTLSS for card ${card.id} with settings:`, settings);
+    console.log('Generating APTLSS for card %s with settings:', card.id, settings);
 
     const result = await generateAptlssForCard(card, {
       ...(settings && typeof settings === 'object' ? settings : {}),

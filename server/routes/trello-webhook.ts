@@ -283,8 +283,8 @@ router.get('/list', requireAdmin, async (req: any, res: Response) => {
     if (apiKey && token) {
       try {
         const response = await fetch(
-          `${TRELLO_API_BASE}/tokens/${token}/webhooks?key=${apiKey}`,
-          { signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS) },
+          `${TRELLO_API_BASE}/tokens/${encodeURIComponent(token)}/webhooks?key=${encodeURIComponent(apiKey)}`,
+          { redirect: 'error', signal: AbortSignal.timeout(TRELLO_REQUEST_TIMEOUT_MS) },
         );
         if (response.ok) {
           const raw = await response.json();

@@ -895,6 +895,15 @@ describe("Google evidence pagination", () => {
     expect(fetchMock.mock.calls.every(([, init]) => new Headers(init?.headers).get("authorization") === "Bearer mock-access-token")).toBe(true);
   });
 
+  it("escapes both backslashes and quotes in a Drive folder query literal", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ files: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const folderId = "folder" + String.fromCharCode(92) + "' or trashed = true";
+    await listDriveFiles("mock-access-token", { enabled: true, intervalMinutes: 180, lookbackDays: 30, folderId });
+    const query = new URL(String(fetchMock.mock.calls[0][0])).searchParams.get("q")!;
+    expect(query).toContain("'folder" + String.fromCharCode(92).repeat(3) + "' or trashed = true' in parents");
+  });
+
   it("imports Drive files from pages beyond the first 100 results", async () => {
     const firstPage = Array.from({ length: 100 }, (_, index) => ({ id: `drive-${index}`, name: `File ${index}` }));
     const pageTokens: Array<string | null> = [];

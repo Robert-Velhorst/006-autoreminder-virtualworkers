@@ -1713,6 +1713,11 @@ export async function closeCommitment(actor: ReminderActor, commitmentId: number
 
 let reminderTimer: NodeJS.Timeout | null = null;
 
+export function normalizeReminderWorkerInterval(intervalMs: number) {
+  const requested = Number.isFinite(intervalMs) ? Math.trunc(intervalMs) : 60_000;
+  return Math.min(3_600_000, Math.max(15_000, requested));
+}
+
 export function startReminderWorker(intervalMs = Number(process.env.REMINDER_WORKER_INTERVAL_MS ?? 60_000)) {
   if (reminderTimer || process.env.REMINDER_WORKER_ENABLED === "false") return;
   const run = createNonOverlappingRunner(async () => {
@@ -1724,7 +1729,7 @@ export function startReminderWorker(intervalMs = Number(process.env.REMINDER_WOR
     }
   });
   void run();
-  reminderTimer = setInterval(() => void run(), Math.max(15_000, intervalMs));
+  reminderTimer = setInterval(() => void run(), normalizeReminderWorkerInterval(intervalMs));
   reminderTimer.unref?.();
 }
 

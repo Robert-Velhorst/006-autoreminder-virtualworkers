@@ -1,4 +1,4 @@
-import { createHash } from "crypto";
+import { googlePkceChallenge } from "./googleEvidenceRoutes";
 import express, { type NextFunction, type Request, type Response } from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -243,7 +243,7 @@ describe("Google evidence route worker-scope boundary", () => {
     expect(authorization.searchParams.has("include_granted_scopes")).toBe(false);
     expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
     expect(authorization.searchParams.get("code_challenge")).toBe(
-      createHash("sha256").update(payload.codeVerifier).digest("base64url"),
+      googlePkceChallenge(payload.codeVerifier),
     );
     expect(mocks.saveGoogleOAuthState).toHaveBeenCalledWith("worker", 17, payload.nonce, payload.expiresAt);
 
@@ -389,4 +389,11 @@ describe("Google evidence route worker-scope boundary", () => {
     expect(callback.headers.location).toBe("/settings?gmailDelivery=error");
     expect(mocks.saveGoogleMailDeliveryConnection).not.toHaveBeenCalled();
   });
+});
+
+ it("uses the RFC7636 S256 vector and rejects noncanonical PKCE values", () => {
+  expect(googlePkceChallenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")).toBe("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+  for (const nonce of ["password", "!".repeat(64), "_".repeat(43), "a".repeat(129)]) {
+    expect(() => googlePkceChallenge(nonce)).toThrow("Invalid PKCE nonce");
+  }
 });

@@ -1,3 +1,4 @@
+import { confinedLocalPath } from "../shared/local-filesystem-policy.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -16,7 +17,7 @@ const main = path.resolve("../joyce-work-schedule");
 const runtime = JSON.parse(fs.readFileSync(path.join(root, "runtime-compose.json"), "utf8"));
 const before = JSON.parse(fs.readFileSync(path.join(root, "runtime-before.json"), "utf8"));
 const image = mode === "rollback" ? before.image : process.env.PILOT_IMAGE || "va-dashboard:joyce-shadow-pilot-20260906";
-const proofDirectory = path.resolve(process.env.PILOT_PROOF_DIRECTORY || path.join(root, "proof"));
+const proofDirectory = confinedLocalPath(process.env.PILOT_PROOF_DIRECTORY || path.join(root, "proof"));
 const subscription = mode !== "rollback" && process.env.PILOT_CODEX_SUBSCRIPTION === "true";
 const queueDirectory = path.join(root, "codex-queue");
 const env = { ...process.env, PILOT_IMAGE: image, PILOT_PROOF_DIRECTORY: proofDirectory, PILOT_CODEX_QUEUE_DIRECTORY: queueDirectory };

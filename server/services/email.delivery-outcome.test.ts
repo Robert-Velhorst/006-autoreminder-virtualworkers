@@ -64,4 +64,25 @@ describe("email delivery outcome", () => {
 
     expect(outcome).toMatchObject({ status: "uncertain" });
   });
+
+  it("creates plain text using parsed HTML without script/style content or broken quoted attributes", async () => {
+    vi.stubEnv("NOTIFICATIONS_ENABLED", "true");
+    vi.stubEnv("EMAIL_PROVIDER", "gmail_api");
+    controls.getGoogleMailDeliveryStatus.mockResolvedValue({ connected: true });
+    controls.sendGoogleMail.mockResolvedValue(undefined);
+
+    const { sendEmailWithOutcome } = await import("./email");
+    const outcome = await sendEmailWithOutcome({
+      to: "worker@example.test",
+      subject: "Reminder",
+      html: '<p title="1 > 0">Alice &amp; Bob</p><script>privateScript()</script><style>.secret{display:none}</style><p><a href="https://example.test">Review</a><br>Next line</p>',
+    });
+
+    expect(outcome).toEqual({ status: "sent" });
+    expect(controls.sendGoogleMail).toHaveBeenCalledOnce();
+    const message = controls.sendGoogleMail.mock.calls[0][0];
+    expect(message.text).toContain("Alice & Bob");
+    expect(message.text).toContain("Review\nNext line");
+    expect(message.text).not.toMatch(/privateScript|\.secret|1 > 0|https:\/\/example/);
+  });
 });

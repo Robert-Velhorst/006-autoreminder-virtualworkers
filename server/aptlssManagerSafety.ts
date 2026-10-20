@@ -1,3 +1,4 @@
+import { confinedLocalPath } from "../shared/local-filesystem-policy.mjs";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
@@ -57,7 +58,7 @@ export function managerSafetyDigest(root = process.cwd()) {
 
 export function managerSafetyVerified() {
   try {
-    const proof = JSON.parse(readFileSync(resolve(process.env.APTLSS_SAFETY_ATTESTATION || "artifacts/aptlss-safety.json"), "utf8"));
+    const proof = JSON.parse(readFileSync(confinedLocalPath(process.env.APTLSS_SAFETY_ATTESTATION || "artifacts/aptlss-safety.json"), "utf8"));
     return proof.version === MANAGER_IMPLEMENTATION_VERSION && proof.digest === managerSafetyDigest()
       && proof.scope === "shadow-pilot" && proof.activeModeVerified === false
       && proof.success === true && Number.isSafeInteger(proof.regressionTests) && proof.regressionTests >= 100

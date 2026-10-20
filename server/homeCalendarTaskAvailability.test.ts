@@ -3,6 +3,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Read React children as text for assertions; rendered HTML is never sanitized or reinjected.
+function childText(node: React.ReactNode): string {
+  return React.Children.toArray(node).map(child => React.isValidElement<{ children?: React.ReactNode }>(child)
+    ? childText(child.props.children) : String(child)).join("");
+}
+
 const mocks = vi.hoisted(() => ({
   states: [] as any[], refs: [] as any[], stateIndex: 0, refIndex: 0,
   effects: [] as Array<() => unknown>,
@@ -44,7 +50,7 @@ vi.mock("sonner", () => ({ toast: mocks.toast }));
 vi.mock("@/lib/taskCache", () => ({ taskCache: mocks.cache, CACHE_KEYS: { TIMELINE_TASKS: "timeline-tasks" } }));
 vi.mock("wouter", () => ({ Link: ({ href, children }: any) => React.createElement("a", { href }, children) }));
 vi.mock("@/components/ui/button", () => ({ Button: ({ children, onClick, disabled }: any) => {
-  mocks.buttons.push({ label: renderToStaticMarkup(React.createElement(React.Fragment, null, children)).replace(/<[^>]*>/g, "").trim(), onClick, disabled });
+  mocks.buttons.push({ label: childText(children).trim(), onClick, disabled });
   return React.createElement("button", { disabled }, children);
 } }));
 vi.mock("@/components/ui/input", () => ({ Input: () => null }));

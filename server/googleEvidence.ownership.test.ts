@@ -219,6 +219,18 @@ describe("Google scheduled ownership", () => {
     expect(sends).toBe(1);
   });
 
+  it("preserves formatted Google mail but removes active HTML and unsafe links", async () => {
+    mailFixture(); provider();
+    const sendMail = vi.fn().mockResolvedValue({ message: Buffer.from("fixture") });
+    vi.spyOn(nodemailer, "createTransport").mockReturnValue({ sendMail } as never);
+    await sendGoogleMail({ ...message, html: '<p onclick="steal()">Hello <strong>worker</strong></p><table><tr><td>Due soon</td></tr></table><a href="https://example.test/task">Task</a><a href="javascript:steal()">Unsafe</a><a href="//tracker.invalid">Relative</a><img src="https://tracker.invalid/pixel"><script>steal()</script><iframe src="https://tracker.invalid"></iframe><style>p{display:none}</style>' });
+    const html = sendMail.mock.calls[0][0].html;
+    expect(html).toContain('<p>Hello <strong>worker</strong></p>');
+    expect(html).toContain('<table><tr><td>Due soon</td></tr></table>');
+    expect(html).toContain('<a href="https://example.test/task">Task</a>');
+    expect(html).not.toMatch(/onclick|javascript:|tracker|<script|<iframe|<style|steal/);
+  });
+
   it("preserves manual Google mail delivery without a scheduled context", async () => {
     mailFixture(); let sends = 0;
     vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockImplementation(async input => {

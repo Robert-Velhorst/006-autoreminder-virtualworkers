@@ -225,7 +225,7 @@ async function registerWebhookForBoard(
 
     return { boardId, success: true, webhookId: data.id };
   } catch (error) {
-    console.error(`[TrelloWebhookBulk] Registration failed for ${boardId}:`, error);
+    console.error('[TrelloWebhookBulk] Registration failed for %s:', boardId, error);
     return {
       boardId,
       success: false,

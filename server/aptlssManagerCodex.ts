@@ -1,8 +1,10 @@
+import { confinedLocalPath } from "../shared/local-filesystem-policy.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
+const localPath = (...segments: string[]) => confinedLocalPath(join(...segments));
 
 export const CODEX_MANAGER_MODEL = "gpt-5.6-luna";
 export const CODEX_MANAGER_EFFORTS = ["low", "medium", "high"] as const;
@@ -54,8 +56,8 @@ export async function requestManagerCodexReview(input: string, signal: AbortSign
   signal.throwIfAborted();
   const directory = process.env.APTLSS_CODEX_QUEUE_DIR;
   if (!directory) throw new Error("Codex subscription bridge is not configured");
-  const root = resolve(directory);
-  const heartbeat = JSON.parse(await readFile(join(root, "heartbeat.json"), "utf8"));
+  const root = confinedLocalPath(directory);
+  const heartbeat = JSON.parse(await readFile(localPath(root, "heartbeat.json"), "utf8"));
   if (heartbeat.model !== CODEX_MANAGER_MODEL || heartbeat.route !== CODEX_MANAGER_ROUTE ||
       JSON.stringify(heartbeat.efforts) !== JSON.stringify(CODEX_MANAGER_EFFORTS) ||
       !Number.isFinite(Date.parse(heartbeat.at)) || Math.abs(Date.now() - Date.parse(heartbeat.at)) > 15_000) {
@@ -65,19 +67,19 @@ export async function requestManagerCodexReview(input: string, signal: AbortSign
   const createdAt = Date.now();
   const request = codexRequestSchema.parse({ version: 2, id, inputHash, input,
     createdAt: new Date(createdAt).toISOString(), expiresAt: new Date(createdAt + 420_000).toISOString() });
-  const requests = join(root, "requests"), replies = join(root, "replies");
-  await mkdir(requests, { recursive: true });
-  await mkdir(replies, { recursive: true });
-  const pending = join(requests, `${id}.pending`), path = join(requests, `${id}.json`), replyPath = join(replies, `${id}.json`);
+  const requests = localPath(root, "requests"), replies = localPath(root, "replies");
+  await mkdir(confinedLocalPath(requests), { recursive: true });
+  await mkdir(confinedLocalPath(replies), { recursive: true });
+  const pending = localPath(requests, `${id}.pending`), path = localPath(requests, `${id}.json`), replyPath = localPath(replies, `${id}.json`);
   try {
     signal.throwIfAborted();
-    await writeFile(pending, JSON.stringify(request), { flag: "wx", mode: 0o600 });
+    await writeFile(confinedLocalPath(pending), JSON.stringify(request), { flag: "wx", mode: 0o600 });
     signal.throwIfAborted();
-    await rename(pending, path);
+    await rename(confinedLocalPath(pending), confinedLocalPath(path));
     while (!signal.aborted && Date.now() < Date.parse(request.expiresAt)) {
       try {
-        if ((await stat(replyPath)).size > 200_000) throw new Error("Oversized Codex reply");
-        const reply = codexReplySchema.parse(JSON.parse(await readFile(replyPath, "utf8")));
+        if ((await stat(confinedLocalPath(replyPath))).size > 200_000) throw new Error("Oversized Codex reply");
+        const reply = codexReplySchema.parse(JSON.parse(await readFile(confinedLocalPath(replyPath), "utf8")));
         if (reply.id !== id || reply.inputHash !== inputHash) throw new Error("Codex reply scope mismatch");
         signal.throwIfAborted();
         onAttempts?.(reply.attempts);
@@ -96,6 +98,6 @@ export async function requestManagerCodexReview(input: string, signal: AbortSign
     throw new Error("Codex review timed out");
   } finally {
     // Only this request's temporary transport files; never application history.
-    await Promise.all([pending, path, replyPath].map(file => unlink(file).catch(() => {})));
+    await Promise.all([pending, path, replyPath].map(async file => { try { await unlink(confinedLocalPath(file)); } catch { /* Never follow a replaced transport link during cleanup. */ } }));
   }
 }

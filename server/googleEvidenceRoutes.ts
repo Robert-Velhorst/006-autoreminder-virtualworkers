@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { createHash, createHmac, createSecretKey, randomBytes, timingSafeEqual } from "crypto";
 import { parse as parseCookies } from "cookie";
 import express, { type Request, type Response } from "express";
 import { getSessionCookieOptions } from "./_core/cookies";
@@ -54,7 +54,15 @@ function secret() {
 }
 
 function sign(value: string) {
-  return createHmac("sha256", secret()).update(value).digest("base64url");
+  return createHmac("sha256", createSecretKey(Buffer.from(secret(), "utf8"))).update(value).digest("base64url");
+}
+
+// PKCE hashes a canonical, high-entropy protocol nonce, never a user password.
+export function googlePkceChallenge(nonce: string) {
+  if (!/^[A-Za-z0-9_-]{43,128}$/.test(nonce)) throw new Error("Invalid PKCE nonce");
+  const bytes = Buffer.from(nonce, "base64url");
+  if (bytes.length < 32 || bytes.toString("base64url") !== nonce) throw new Error("Invalid PKCE nonce");
+  return createHash("sha256").update(nonce).digest("base64url");
 }
 
 function encodeSignedJson(value: object) {
@@ -177,7 +185,7 @@ router.get("/connect", async (req: Request & { user?: { id: number; role: string
     };
     const state = encodeSignedJson(statePayload);
     const codeVerifier = randomBytes(48).toString("base64url");
-    const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
+    const codeChallenge = googlePkceChallenge(codeVerifier);
     const cookie: OAuthCookie = { ...statePayload, state, codeVerifier };
     await saveGoogleOAuthState("worker", statePayload.vaId, statePayload.nonce, statePayload.expiresAt);
     res.cookie(OAUTH_COOKIE, encodeSignedJson(cookie), { ...getSessionCookieOptions(req), maxAge: OAUTH_MAX_AGE_MS });
@@ -259,7 +267,7 @@ router.get("/mail-delivery/connect", async (req: Request & { user?: { id: number
     };
     const state = encodeSignedJson(statePayload);
     const codeVerifier = randomBytes(48).toString("base64url");
-    const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
+    const codeChallenge = googlePkceChallenge(codeVerifier);
     const cookie: MailDeliveryOAuthCookie = { ...statePayload, state, codeVerifier };
     await saveGoogleOAuthState("mail-delivery", statePayload.userId, statePayload.nonce, statePayload.expiresAt);
     res.cookie(MAIL_DELIVERY_OAUTH_COOKIE, encodeSignedJson(cookie), { ...getSessionCookieOptions(req), maxAge: OAUTH_MAX_AGE_MS });
