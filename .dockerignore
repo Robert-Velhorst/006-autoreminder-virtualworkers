@@ -44,7 +44,10 @@ docs
 tmp
 temp
 *.tmp
+
 *.zip
+# Reviewed distributable required by the production build seal.
+!client/public/downloads/worker-browser-collector.zip
 *.tgz
 .vscode
 .idea

@@ -1,4 +1,5 @@
-import { expect, test, type ConsoleMessage, type Page } from "@playwright/test";
+import { expect, type ConsoleMessage, type Page } from "@playwright/test";
+import { test } from "./aptlss-browser-fixtures";
 import { createHash, randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { openFixtureDatabase, fixtureInsert, type FixtureDatabase } from "./isolated-postgres-fixtures";

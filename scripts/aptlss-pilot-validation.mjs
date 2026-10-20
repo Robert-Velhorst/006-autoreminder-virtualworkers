@@ -83,7 +83,7 @@ export function isAptlssImageSafetyProofValid(proof, verified) {
     proof?.success === true &&
       proof.scope === "shadow-pilot" &&
       proof.activeModeVerified === false &&
-      proof.mysqlIntegration === true &&
+      proof.postgresIntegration === true &&
       proof.browserIntegration === true &&
       Number.isSafeInteger(proof.regressionTests) &&
       proof.regressionTests >= 100 &&

@@ -57,7 +57,7 @@ function validImageProof() {
       success: true,
       scope: "shadow-pilot",
       activeModeVerified: false,
-      mysqlIntegration: true,
+      postgresIntegration: true,
       browserIntegration: true,
       regressionTests: 100,
       version: verified.version,
@@ -180,6 +180,18 @@ describe("APTLSS image safety proof validation", () => {
   it("accepts an integer regression count and matching build version", () => {
     const { proof, verified } = validImageProof();
     expect(isAptlssImageSafetyProofValid(proof, verified)).toBe(true);
+  });
+
+  it("rejects legacy MySQL-only acceptance proof", () => {
+    const { proof, verified } = validImageProof();
+    const { postgresIntegration, ...legacyProof } = proof;
+    expect(postgresIntegration).toBe(true);
+    expect(isAptlssImageSafetyProofValid({ ...legacyProof, mysqlIntegration: true }, verified)).toBe(false);
+  });
+
+  it.each([false, undefined, "true", 1])("requires explicit PostgreSQL acceptance, not %s or a legacy fallback", postgresIntegration => {
+    const { proof, verified } = validImageProof();
+    expect(isAptlssImageSafetyProofValid({ ...proof, postgresIntegration, mysqlIntegration: true }, verified)).toBe(false);
   });
 
   it("rejects proof from a different build version", () => {

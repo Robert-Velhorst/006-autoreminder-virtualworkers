@@ -27,6 +27,7 @@
     "operator:data:export": "node scripts/operator-data-transfer.mjs export",
     "operator:data:import": "node scripts/operator-data-transfer.mjs import",
     "operator:data:reconcile": "node scripts/operator-data-transfer.mjs reconcile",
+    "owner:provision": "tsx scripts/provision-owner.ts",
     "docker:build": "docker build -t va-dashboard:latest .",
     "docker:run": "docker compose --env-file .env up -d",
     "docker:stop": "docker compose --env-file .env down",

@@ -18,6 +18,8 @@ export default defineConfig({
     hookTimeout: 125_000,
     environment: "node",
     include: [
+      "client/src/pages/worker/WorkerOperator.presentation.test.tsx",
+      "client/src/_core/hooks/useAuth.test.tsx",
       "server/**/*.test.ts",
       "server/**/*.spec.ts",
       "scripts/operator-data-transfer-ownership.test.mjs",

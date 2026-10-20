@@ -35,7 +35,7 @@ for (const key of Object.keys(env)) if (/KEY|TOKEN|SECRET|PASSWORD|REDIS|SMTP|OA
 Object.assign(env, { NODE_ENV: "development", DATABASE_URL: url, PORT: port, HOST: "127.0.0.1", LOCAL_AUTH_BYPASS: "false", APTLSS_MANAGER_SCHEDULER: "false", APTLSS_TEST_DISABLE_BACKGROUND_JOBS: "true", NOTIFICATIONS_ENABLED: "false", JWT_SECRET: "aptlss-isolated-browser-tests-only-not-for-production", VITE_APP_ID: "aptlss-test" });
 // Cookie-authenticated browser sockets need the exact isolated dashboard origin.
 // Never inherit the operator's production origins or outbound webhook base URL.
-Object.assign(env, { LOCAL_ACCESS_ORIGINS: `http://127.0.0.1:${port}`, PUBLIC_URL: "", APP_URL: "", VITE_FRONTEND_URL: "", WEBHOOK_BASE_URL: "" });
+Object.assign(env, { TRUST_PROXY_HOPS: "1", LOCAL_ACCESS_ORIGINS: `http://127.0.0.1:${port}`, PUBLIC_URL: "", APP_URL: "", VITE_FRONTEND_URL: "", WEBHOOK_BASE_URL: "" });
 Object.assign(env, { APTLSS_MANAGER_PILOT_WORKER_IDS: fixtureIds.join(","), APTLSS_MANAGER_SHADOW_ONLY: "true" });
 const child = spawn(process.execPath, [resolve("node_modules/tsx/dist/cli.mjs"), "server/_core/index.ts"], { env, stdio: "inherit" });
 for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => child.kill(signal));

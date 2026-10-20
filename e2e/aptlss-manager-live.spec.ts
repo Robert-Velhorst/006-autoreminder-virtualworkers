@@ -1,4 +1,5 @@
-import { expect, test, type ConsoleMessage, type Locator, type Page, type TestInfo } from "@playwright/test";
+import { expect, type ConsoleMessage, type Locator, type Page, type TestInfo } from "@playwright/test";
+import { test } from "./aptlss-browser-fixtures";
 import AxeBuilder from "@axe-core/playwright";
 import { isDisabledProviderResponse, TRELLO_CREDENTIALS_MISSING_MESSAGE, UNLINKED_TRELLO_MESSAGE, UNLINKED_TRELLO_PATH } from "./disabled-provider-response.mjs";
 import { createHash, randomUUID } from "node:crypto";
