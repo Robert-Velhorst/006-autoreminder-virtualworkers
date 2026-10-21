@@ -95,6 +95,8 @@ jobs:
             assert.equal(app.environment.APP_URL, "https://dashboard.example.com");
             assert.equal(app.environment.VITE_FRONTEND_URL, "https://dashboard.example.com");
           '
+      - name: Require isolated native PostgreSQL fixture
+        run: node scripts/verify-native-test-fixture.mjs
       - name: Apply PostgreSQL migrations
         run: pnpm exec drizzle-kit migrate
       - name: Verify PostgreSQL schema parity
@@ -188,6 +190,8 @@ jobs:
               import.meta.resolve(dependency);
             }
           '
+      - name: Verify configured PostgreSQL production image
+        run: node scripts/verify-postgres-production-image.mjs va-dashboard:ci
       - name: Validate Hetzner deployment script syntax
         run: bash -n deployment/hetzner/deploy.sh
       - name: Verify migration metadata matches the schema

@@ -33,6 +33,15 @@ secret, or a signing secret configured without the callback.
 
 ## Release and Deployment Gate
 
+Both CI and release verification require explicit native PostgreSQL fixtures;
+`scripts/verify-native-test-fixture.mjs` rejects missing, mismatched, or unsafe
+test URLs rather than allowing database suites to silently skip. A separate
+[configured PostgreSQL image gate](POSTGRES_IMAGE_ACCEPTANCE.md) checks the
+compiled production runtime with verified database TLS and synthetic accounts.
+That isolated gate does not prove Hetzner, real provider access, live data
+recovery, or worker acceptance. Do not substitute historical MySQL rehearsal
+reports for current PostgreSQL container evidence.
+
 Production deployment is started manually from protected `main`. The selected
 release must be a published stable `vMAJOR.MINOR.PATCH` tag whose commit is
 contained in `main`. The workflow verifies the GHCR image's provenance against
