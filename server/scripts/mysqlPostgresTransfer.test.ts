@@ -10,6 +10,26 @@ import {
 } from "./mysqlPostgresTransferCore";
 
 describe("MySQL to PostgreSQL transfer safeguards", () => {
+  it('allows only the two nullable canonical timer additions, never arbitrary parity drift', () => {
+    const source = new Map([['time_entries', [{ name: 'vaId', dataType: 'int' }]]]);
+    const canonical = [
+      { name: 'vaId', dataType: 'integer' },
+      { name: 'trackedUserId', dataType: 'integer', nullable: true },
+      { name: 'trackedProfileId', dataType: 'integer', nullable: true },
+    ];
+    expect(getSchemaDifferences(source, new Map([['time_entries', canonical]]), new Set())).toEqual([]);
+    for (const change of [
+      { name: 'trackedUserId', dataType: 'integer', nullable: false },
+      { name: 'trackedUserId', dataType: 'text', nullable: true },
+      { name: 'unexpectedOwner', dataType: 'integer', nullable: true },
+    ]) {
+      expect(getSchemaDifferences(source, new Map([['time_entries', [canonical[0], change]]]), new Set()))
+        .toContain(`PostgreSQL has unexpected column time_entries.${change.name}`);
+    }
+    expect(getSchemaDifferences(new Map([['other_table', []]]),
+      new Map([['other_table', [canonical[1]]]]), new Set()))
+      .toContain('PostgreSQL has unexpected column other_table.trackedUserId');
+  });
   it("quotes only simple identifiers", () => {
     expect(quoteMySqlIdentifier("task_items")).toBe("`task_items`");
     expect(quotePostgresIdentifier("task_items")).toBe('"task_items"');

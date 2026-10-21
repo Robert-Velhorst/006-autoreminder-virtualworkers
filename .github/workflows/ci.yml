@@ -123,6 +123,8 @@ jobs:
       - run: pnpm build
       - name: Install Chromium for browser smoke tests
         run: pnpm exec playwright install --with-deps chromium
+      - name: Verify exact timer identity browser contracts
+        run: node --test client/src/components/timer.identity.test.mjs
       - name: Verify administrator async-operation browser contracts
         env:
           APTLSS_UI_ONLY: "true"

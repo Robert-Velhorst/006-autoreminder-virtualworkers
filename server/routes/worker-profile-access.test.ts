@@ -1,3 +1,4 @@
+import { matchesTimerWhere } from '../test/timerDatabase';
 import type { Request, Router } from "express";
 import express from "express";
 import request from "supertest";
@@ -55,13 +56,24 @@ function matchesWhere(row: Row, condition: unknown) {
 }
 
 function database(profiles: Row[], tasks: Row[] = [], times: Row[] = []) {
+  // These fixtures explicitly model reviewed ownership. Colliding fixture
+  // identities remain unresolved; production code performs no such inference.
+  times.forEach(row => {
+    if (Object.prototype.hasOwnProperty.call(row, 'trackedUserId')) return;
+    const owners = profiles.filter(profile => profile.founderId === row.founderId &&
+      (profile.id === row.vaId || profile.userId === row.vaId));
+    const unique = [...new Map(owners.map(profile => [profile.id, profile])).values()];
+    row.trackedUserId = unique.length === 1 ? unique[0].userId : null;
+    row.trackedProfileId = unique.length === 1 ? unique[0].id : null;
+  });
   const db = {
-    select: vi.fn(() => {
+    select: vi.fn((selection?: Row) => {
       let table: unknown;
       let condition: unknown;
       const rows = () => {
         const source = table === vaProfiles ? profiles : table === taskAssignments ? tasks : table === timeEntries ? times : [];
-        return condition ? source.filter(row => matchesWhere(row, condition)) : source;
+        const found = condition ? source.filter(row => matchesTimerWhere(row, condition)) : source;
+        return selection?.count ? [{ count: found.length }] : found;
       };
       const query: any = {
         from: (value: unknown) => { table = value; return query; },
@@ -89,8 +101,8 @@ const tasks = [
   { id: 41, taskId: "inactive-task", vaId: 4, founderId: 7, status: "assigned", assignedAt: new Date("2026-09-01T09:00:00Z"), updatedAt: new Date("2026-09-02T09:00:00Z") },
 ];
 const times = [
-  { id: 51, taskId: "active-task", vaId: 42, founderId: 7, startTime: new Date("2026-09-02T09:00:00Z"), endTime: new Date("2026-09-02T09:30:00Z"), durationMinutes: 30, durationSeconds: null, isVoided: false },
-  { id: 52, taskId: "active-task", vaId: 3, founderId: 7, startTime: new Date("2026-09-02T09:30:00Z"), endTime: new Date("2026-09-02T10:15:00Z"), durationMinutes: 45, durationSeconds: null, isVoided: false },
+  { id: 51, taskId: "active-task", vaId: 42, trackedUserId: 42, trackedProfileId: 3, founderId: 7, startTime: new Date("2026-09-02T09:00:00Z"), endTime: new Date("2026-09-02T09:30:00Z"), durationMinutes: 30, durationSeconds: null, isVoided: false },
+  { id: 52, taskId: "active-task", vaId: 3, trackedUserId: 42, trackedProfileId: 3, founderId: 7, startTime: new Date("2026-09-02T09:30:00Z"), endTime: new Date("2026-09-02T10:15:00Z"), durationMinutes: 45, durationSeconds: null, isVoided: false },
 ];
 
 function appFor(path: "/api/analytics" | "/api/reports", route: Router, user: User = worker) {
@@ -162,7 +174,7 @@ describe("worker profile API access", () => {
     ];
     const db = database([ownProfile, otherProfile], scopedTasks, [
       { ...times[0], id: 51, vaId: ownProfile.id, startTime: now, durationMinutes: 30 },
-      { ...times[0], id: 52, vaId: worker.id, startTime: now, durationMinutes: 240 },
+      { ...times[0], id: 52, vaId: worker.id, trackedUserId: 84, trackedProfileId: worker.id, startTime: now, durationMinutes: 240 },
     ]);
     mocks.getDb.mockResolvedValue(db);
 

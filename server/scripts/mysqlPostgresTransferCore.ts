@@ -5,6 +5,7 @@ export type ColumnShape = {
   dataType: string;
   columnType?: string;
   generated?: boolean;
+  nullable?: boolean;
 };
 
 export function getSequenceReset(maxValue: string | null, hasRows: boolean) {
@@ -79,7 +80,10 @@ export function getSchemaDifferences(
         errors.push(`PostgreSQL is missing ${table}.${column}`);
     }
     for (const column of targetSet) {
-      if (!sourceSet.has(column))
+      const reviewOnlyTimerColumn = table === 'time_entries' && ['trackedUserId', 'trackedProfileId'].includes(column)
+        && targetColumns.find(item => item.name === column)?.nullable === true
+        && targetColumns.find(item => item.name === column)?.dataType === 'integer';
+      if (!sourceSet.has(column) && !reviewOnlyTimerColumn)
         errors.push(`PostgreSQL has unexpected column ${table}.${column}`);
     }
     for (const column of sourceColumns) {

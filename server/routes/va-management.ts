@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import { recordedMinutes } from '../../shared/timerDuration';
+import { closeCanonicalTimer, insertCanonicalTimer, withTimerAccountTransaction, lockTimerAccount, timerFailure, timeCompleteness, TimerConflict } from '../canonicalTimer';
 import { getDb } from '../db';
 import { 
   vaProfiles, 
@@ -848,11 +850,22 @@ router.post('/time-entries/start', async (req: any, res) => {
     if (!worker[0]) {
       return res.status(404).json({ error: 'Worker profile not found' });
     }
+    const outcome = await withTimerAccountTransaction(db, user, async (tx, locked) => {
+      if (locked.profile?.id !== vaId) throw new TimerConflict(409, 'Worker profile changed');
+      const assignments = await tx.select().from(taskAssignments).where(and(
+        eq(taskAssignments.founderId, user.id),
+        inArray(taskAssignments.taskId, [...new Set([taskId, taskId.split(':')[0]])]),
+      )).for('update');
+      const exact = assignments.filter(row => row.taskId === taskId);
+      const relevant = exact.length ? exact : assignments.filter(row => row.taskId === taskId.split(':')[0]);
+      if (relevant.length !== 1 || relevant[0].vaId !== vaId || !['assigned', 'in_progress'].includes(relevant[0].status)) {
+        throw new TimerConflict(409, 'A single current unblocked worker assignment is required');
+      }
     if (isManagerPilotWorker(worker[0].userId)) {
       const cardId = taskId.split(':')[0];
       try {
-        const { snapshot } = await readCurrentManagerHistory(db, worker[0].userId);
-        if (!snapshot) return res.status(409).json({ error: WORKER_EXECUTION_HOLD_MESSAGE });
+        const { snapshot } = await readCurrentManagerHistory(tx as any, worker[0].userId);
+        if (!snapshot) throw new TimerConflict(409, WORKER_EXECUTION_HOLD_MESSAGE);
         const sourceRequirements = managerActionSourceRequirements(JSON.stringify(snapshot), cardId);
         let googleStatus: Awaited<ReturnType<typeof getGoogleEvidenceStatus>> | null = null;
         if (sourceRequirements.sourceKeys.some(key => key === 'gmail' || key === 'google_drive')) {
@@ -861,7 +874,7 @@ router.post('/time-entries/start', async (req: any, res) => {
         }
         let trelloCache: { cachedAt: string; expiresAt: string } | null = null;
         if (sourceRequirements.sourceKeys.includes('trello')) {
-          const [cached] = await db.select({ cachedAt: trelloCachedCards.cachedAt, expiresAt: trelloCachedCards.expiresAt })
+          const [cached] = await tx.select({ cachedAt: trelloCachedCards.cachedAt, expiresAt: trelloCachedCards.expiresAt })
             .from(trelloCachedCards)
             .where(and(eq(trelloCachedCards.userId, worker[0].userId), eq(trelloCachedCards.cardId, cardId)))
             .orderBy(desc(trelloCachedCards.cachedAt))
@@ -875,23 +888,28 @@ router.post('/time-entries/start', async (req: any, res) => {
           googleConnectionReady: googleStatus?.credentialsReady ?? null,
           now: Date.now(),
         })) {
-          return res.status(409).json({ error: 'A source required by the next step is out of date or not verified. Check that source before starting work.' });
+          throw new TimerConflict(409, 'A source required by the next step is out of date or not verified. Check that source before starting work.');
         }
-      } catch {
-        return res.status(409).json({ error: WORKER_EXECUTION_HOLD_MESSAGE });
+      } catch (error) {
+        if (error instanceof TimerConflict) throw error;
+        throw new TimerConflict(409, WORKER_EXECUTION_HOLD_MESSAGE);
       }
     }
-    const [result] = await db.insert(timeEntries).values({
+    const result = await insertCanonicalTimer(tx, {
       taskId,
-      vaId,
+      vaId: null, trackedUserId: locked.account.id, trackedProfileId: locked.profile!.id,
       founderId: user.id,
       startTime: new Date(),
-    }).returning({ id: timeEntries.id });
+    });
 
     if (!result) throw new Error("Failed to start timer");
-    res.json({ success: true, id: result.id });
+    return { success: true, id: result.id, entry: result };
+    }, worker[0].userId, user.id);
+    res.json(outcome);
   } catch (error) {
-    console.error('Error starting timer:', error);
+    const failure = timerFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error starting timer');
     res.status(500).json({ error: 'Failed to start timer' });
   }
 });
@@ -914,25 +932,12 @@ router.put('/time-entries/:id/stop', async (req: any, res) => {
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
     }
-    const existing = await db.select().from(timeEntries).where(
-      and(eq(timeEntries.id, entryId), eq(timeEntries.founderId, user.id))
-    );
-    
-    if (existing.length === 0) {
-      return res.status(404).json({ error: 'Time entry not found' });
-    }
-
-    const endTime = new Date();
-    const startTime = new Date(existing[0].startTime);
-    const durationMinutes = Math.max(0, Math.round((endTime.getTime() - startTime.getTime()) / 60000));
-
-    await db.update(timeEntries)
-      .set({ endTime, durationMinutes, notes })
-      .where(and(eq(timeEntries.id, entryId), eq(timeEntries.founderId, user.id)));
-
-    res.json({ success: true, durationMinutes });
+    const result = await closeCanonicalTimer(db, user, entryId, 'stop', { notes, founderManaged: true });
+    res.json({ ...result, durationMinutes: result.entry.durationMinutes });
   } catch (error) {
-    console.error('Error stopping timer:', error);
+    const failure = timerFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error stopping timer');
     res.status(500).json({ error: 'Failed to stop timer' });
   }
 });
@@ -956,11 +961,11 @@ router.get('/time-entries/:taskId', async (req: any, res) => {
       .orderBy(desc(timeEntries.startTime));
 
     // Calculate total time
-    const totalMinutes = entries.reduce((sum: number, e: typeof entries[0]) => sum + (e.durationMinutes || 0), 0);
+    const totalMinutes = entries.reduce((sum: number, e: typeof entries[0]) => sum + recordedMinutes(e), 0);
 
-    res.json({ entries, totalMinutes });
+    res.json({ entries, totalMinutes, ...await timeCompleteness(db, user.id) });
   } catch (error) {
-    console.error('Error fetching time entries:', error);
+    console.error('Error fetching time entries');
     res.status(500).json({ error: 'Failed to fetch entries' });
   }
 });

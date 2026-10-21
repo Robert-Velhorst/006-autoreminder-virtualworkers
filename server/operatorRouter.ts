@@ -233,6 +233,7 @@ export const operatorRouter = router({
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Database unavailable" });
     const vaId = Number(ctx.user.id);
+    const timerWorker = await resolveWorkerOperatorContext(ctx.user);
     const [plans, waitingReasons] = await Promise.all([
       db.select().from(aptlssPlans).where(eq(aptlssPlans.vaId, vaId)),
       getActiveWaitingReasons(vaId),
@@ -268,7 +269,8 @@ export const operatorRouter = router({
           db.select({ cardId: timeEntries.cardId })
             .from(timeEntries)
             .where(and(
-              eq(timeEntries.vaId, vaId),
+              eq(timeEntries.trackedUserId, vaId),
+              eq(timeEntries.founderId, timerWorker.founderId ?? ctx.user.id),
               eq(timeEntries.isVoided, false),
               isNotNull(timeEntries.endTime),
               inArray(timeEntries.cardId, cardIds),

@@ -1,3 +1,4 @@
+import { matchesTimerWhere } from '../test/timerDatabase';
 import type { Request } from 'express';
 import express from 'express';
 import request from 'supertest';
@@ -24,7 +25,7 @@ function equalityParameter(sql: string, params: unknown[], column: string) {
 function createDatabase(profiles: Row[], entries: Row[], tasks: Row[] = []) {
   const queries: Array<{ table: unknown; condition?: unknown }> = [];
   const db = {
-    select: vi.fn(() => {
+    select: vi.fn((selection?: Row) => {
       let table: unknown;
       let condition: unknown;
       const query: any = {
@@ -63,6 +64,8 @@ function createDatabase(profiles: Row[], entries: Row[], tasks: Row[] = []) {
               rows = rows.filter(row => vaIds.includes(row.vaId));
             }
           }
+          if (condition) rows = rows.filter(row => matchesTimerWhere(row, condition));
+          if (selection?.count) rows = [{ count: rows.length }];
           return Promise.resolve(rows).then(resolve, reject);
         },
       };
@@ -72,9 +75,9 @@ function createDatabase(profiles: Row[], entries: Row[], tasks: Row[] = []) {
   return { db, queries };
 }
 
-function timeEntry(id: number, vaId: number, founderId: number, source: string) {
+function timeEntry(id: number, vaId: number, founderId: number, source: string, trackedUserId: number | null = null, trackedProfileId: number | null = null) {
   return {
-    id,
+    id, trackedUserId, trackedProfileId, isVoided: false,
     vaId,
     founderId,
     taskId: `task-${id}`,
@@ -115,8 +118,8 @@ describe('reports CSV spreadsheet safety', () => {
     const encoded = /[\r\n]/.test(safe) ? `"${safe}"` : safe;
     expect(response.headers['content-type']).toMatch(/^text\/csv/);
     expect(response.headers['content-disposition']).toContain('time-entries.csv');
-    expect(response.text).toBe('id,vaId,founderId,taskId,durationMinutes,startTime,endTime,source\r\n'
-      + `51,3,7,task-51,20,2026-09-02T09:00:00.000Z,2026-09-02T09:20:00.000Z,${encoded}`);
+    expect(response.text).toBe('id,trackedUserId,trackedProfileId,legacyVaId,founderId,taskId,durationMinutes,startTime,endTime,source\r\n'
+      + `51,,,3,7,task-51,20,2026-09-02T09:00:00.000Z,2026-09-02T09:20:00.000Z,${encoded}`);
   });
 
   it.each(['=HYPERLINK("https://example.invalid","label")', ' \ufeff+1', '\t-1', '\u0000@SUM(1,2)',
@@ -148,8 +151,8 @@ describe('reports CSV spreadsheet safety', () => {
       .get('/api/reports/export?format=csv&type=time-entries')
       .expect(200);
 
-    expect(response.text).toBe('id,vaId,founderId,taskId,durationMinutes,startTime,endTime,source\r\n'
-      + '51,3,7,,-12.5,2026-09-02T09:00:00.000Z,,"ordinary, ""quoted""\r\nnext line"');
+    expect(response.text).toBe('id,trackedUserId,trackedProfileId,legacyVaId,founderId,taskId,durationMinutes,startTime,endTime,source\r\n'
+      + '51,,,3,7,,-12.5,2026-09-02T09:00:00.000Z,,"ordinary, ""quoted""\r\nnext line"');
   });
 
   it('neutralizes malicious task IDs and sources together in time-entry output', async () => {
@@ -160,8 +163,8 @@ describe('reports CSV spreadsheet safety', () => {
     const response = await request(appFor(admin))
       .get('/api/reports/export?format=csv&type=time-entries')
       .expect(200);
-    expect(response.text).toBe('id,vaId,founderId,taskId,durationMinutes,startTime,endTime,source\r\n'
-      + '51,3,7,"\'=HYPERLINK(""https://example.invalid"",""task"")",-20,2026-09-02T09:00:00.000Z,2026-09-02T09:20:00.000Z,"\'\ufeff@SUM(1,2)"');
+    expect(response.text).toBe('id,trackedUserId,trackedProfileId,legacyVaId,founderId,taskId,durationMinutes,startTime,endTime,source\r\n'
+      + '51,,,3,7,"\'=HYPERLINK(""https://example.invalid"",""task"")",-20,2026-09-02T09:00:00.000Z,2026-09-02T09:20:00.000Z,"\'\ufeff@SUM(1,2)"');
   });
 
   it('preserves ordinary strings containing non-leading formula characters', async () => {
@@ -177,15 +180,15 @@ describe('reports CSV spreadsheet safety', () => {
 describe('reports export authorization', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('limits worker time-entry CSV to the active profile and its unambiguous legacy entries', async () => {
+  it('limits worker time-entry CSV to its explicit canonical account within the active tenant', async () => {
     const profiles = [
       { id: 3, userId: 42, founderId: 7, status: 'active' },
       { id: 4, userId: 42, founderId: 8, status: 'inactive' },
       { id: 9, userId: 88, founderId: 7, status: 'active' },
     ];
     const { db, queries } = createDatabase(profiles, [
-      timeEntry(51, 42, 7, 'active-account-entry'),
-      timeEntry(52, 3, 7, 'active-profile-entry'),
+      timeEntry(51, 42, 7, 'active-account-entry', 42, 3),
+      timeEntry(52, 3, 7, 'active-profile-entry', 42, 3),
       timeEntry(53, 88, 7, 'other-worker-account-entry'),
       timeEntry(54, 9, 7, 'other-worker-profile-entry'),
       timeEntry(55, 42, 8, 'other-founder-entry'),
@@ -207,8 +210,8 @@ describe('reports export authorization', () => {
     const entryQuery = queries.find(query => query.table === timeEntries);
     const compiled = dialect.sqlToQuery(entryQuery?.condition as any);
     expect(compiled.sql).toContain('founderId');
-    expect(compiled.sql).toContain('vaId');
-    expect(compiled.params).toEqual([7, 3, 42, 9, 88]);
+    expect(compiled.sql).toContain('trackedUserId');
+    expect(compiled.params).toEqual([42, 7]);
   });
 
   it('omits legacy entries whose ID could belong to another profile', async () => {
@@ -217,7 +220,7 @@ describe('reports export authorization', () => {
       { id: 88, userId: 99, founderId: 7, status: 'active' },
     ];
     mocks.getDb.mockResolvedValue(createDatabase(profiles, [
-      timeEntry(61, 42, 7, 'unambiguous-profile-entry'),
+      timeEntry(61, 42, 7, 'unambiguous-profile-entry', 88, 42),
       timeEntry(62, 88, 7, 'ambiguous-worker-or-profile-entry'),
     ]).db);
     const collisionWorker = { id: 88, openId: 'worker-88', name: 'Worker', role: 'worker' } as User;

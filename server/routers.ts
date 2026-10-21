@@ -123,7 +123,7 @@ export const appRouter = router({
               .where(eq(vaProfiles.userId, workerUserId))
               .limit(1)
             : [];
-          const cardContext = await aggregateCardContext(input.taskId, workerProfile?.id);
+          const cardContext = await aggregateCardContext(input.taskId, workerUserId);
           const taskDescription = formatContextForAI(cardContext);
           const sessionId = await createAnalysisSession(input.taskId, String(ctx.user.id));
 

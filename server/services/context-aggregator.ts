@@ -1,3 +1,5 @@
+import { recordedMinutes } from '../../shared/timerDuration';
+import { timeCompleteness } from '../canonicalTimer';
 /**
  * Context Aggregator Service
  * 
@@ -59,6 +61,7 @@ interface CommentContext {
 }
 
 interface TimeTrackingContext {
+  complete: boolean;
   totalMinutesToday: number;
   totalMinutesAllTime: number;
   estimatedMinutes: number | null;
@@ -142,10 +145,11 @@ async function fetchListName(listId: string): Promise<string> {
 /**
  * Get time tracking data for a card
  */
-async function getTimeTrackingData(cardId: string): Promise<TimeTrackingContext> {
+async function getTimeTrackingData(cardId: string, trackedUserId?: number): Promise<TimeTrackingContext> {
   const db = await getDb();
-  if (!db) {
+  if (!db || !trackedUserId) {
     return {
+      complete: false,
       totalMinutesToday: 0,
       totalMinutesAllTime: 0,
       estimatedMinutes: null,
@@ -153,13 +157,16 @@ async function getTimeTrackingData(cardId: string): Promise<TimeTrackingContext>
     };
   }
   
+  const profiles = await db.select().from(vaProfiles).where(and(eq(vaProfiles.userId, trackedUserId), eq(vaProfiles.status, 'active')));
+  if (profiles.length !== 1) return { complete: false, totalMinutesToday: 0, totalMinutesAllTime: 0, estimatedMinutes: null, entries: [] };
+  const completeness = await timeCompleteness(db, profiles[0].founderId);
   // Use taskId field which stores the Trello card ID
   const entries = await db
     .select()
     .from(timeEntries)
-    .where(eq(timeEntries.taskId, cardId))
+    .where(and(eq(timeEntries.taskId, cardId), eq(timeEntries.trackedUserId, trackedUserId), eq(timeEntries.founderId, profiles[0].founderId), eq(timeEntries.isVoided, false)))
     .orderBy(desc(timeEntries.startTime))
-    .limit(20);
+    .limit(5001);
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -168,7 +175,7 @@ async function getTimeTrackingData(cardId: string): Promise<TimeTrackingContext>
   let totalMinutesAllTime = 0;
   
   const formattedEntries = entries.map((entry: any) => {
-    const minutes = entry.durationMinutes || 0;
+    const minutes = recordedMinutes(entry);
     totalMinutesAllTime += minutes;
     
     if (entry.startTime && new Date(entry.startTime) >= today) {
@@ -183,6 +190,7 @@ async function getTimeTrackingData(cardId: string): Promise<TimeTrackingContext>
   });
 
   return {
+    complete: completeness.complete && entries.length <= 5000,
     totalMinutesToday,
     totalMinutesAllTime,
     estimatedMinutes: null, // Will be filled from ATIS analysis
@@ -201,7 +209,7 @@ async function getWorkerInfo(vaId: number): Promise<WorkerContext | null> {
     const profiles = await db
       .select()
       .from(vaProfiles)
-      .where(eq(vaProfiles.id, vaId))
+      .where(eq(vaProfiles.userId, vaId))
       .limit(1);
 
     if (profiles.length > 0) {
@@ -292,7 +300,7 @@ export async function aggregateCardContext(cardId: string, vaId?: number): Promi
     }));
   
   // Get time tracking data
-  const timeTracking = await getTimeTrackingData(cardId);
+  const timeTracking = await getTimeTrackingData(cardId, vaId);
   
   // Get worker info if VA ID provided
   const workerInfo = vaId ? await getWorkerInfo(vaId) : null;
@@ -370,8 +378,8 @@ export function formatContextForAI(context: CardContext): string {
   
   // Time tracking
   sections.push('\n## Time Tracking');
-  sections.push(`Today: ${context.timeTracking.totalMinutesToday} minutes`);
-  sections.push(`Total: ${context.timeTracking.totalMinutesAllTime} minutes`);
+  sections.push(`Today: ${context.timeTracking.complete ? context.timeTracking.totalMinutesToday : 'Unavailable: ownership review required'} minutes`);
+  sections.push(`Total: ${context.timeTracking.complete ? context.timeTracking.totalMinutesAllTime : 'Unavailable: ownership review required'} minutes`);
   if (context.timeTracking.estimatedMinutes) {
     sections.push(`Estimated: ${context.timeTracking.estimatedMinutes} minutes`);
   }

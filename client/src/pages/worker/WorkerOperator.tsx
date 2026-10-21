@@ -27,6 +27,7 @@ import {
   PanelLeftOpen,
   Play,
   RefreshCw,
+  Square,
   Settings,
   ShieldCheck,
   Sun,
@@ -479,7 +480,7 @@ export default function WorkerOperator({ view = "today" }: { view?: "today" | "p
   );
 }
 
-function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string; onOpenPlan: () => void; onOpenDecisions: () => void }) {
+export function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string; onOpenPlan: () => void; onOpenDecisions: () => void }) {
   const utils = trpc.useUtils();
   const [orderingTime, setOrderingTime] = useState(Date.now);
   useEffect(() => {
@@ -494,9 +495,44 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
   const timerQuery = trpc.timer.getActive.useQuery(undefined, { staleTime: 15_000 });
   const planQuery = trpc.operator.getDailyPlan.useQuery(undefined, { staleTime: 60_000 });
   const browserQuery = trpc.operator.getBrowserTabStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
+  const startInFlight = useRef(false);
+  const [timerStopError, setTimerStopError] = useState<string | null>(null);
+  const stopTimer = trpc.timer.stop.useMutation({
+    retry: false,
+    onSuccess: async (result, submitted) => {
+      if (!result || result.id !== submitted.entryId) {
+        setTimerStopError("The timer stop was not confirmed. Reload status before trying again.");
+        await utils.timer.getActive.invalidate();
+        return;
+      }
+      utils.timer.getActive.setData(undefined, current => current?.id === submitted.entryId ? null : current);
+      await utils.timer.getActive.invalidate();
+      setTimerStopError(null);
+      toast.success("Timer stopped");
+    },
+    onError: async () => {
+      await utils.timer.getActive.invalidate();
+      setTimerStopError("The timer stop was not confirmed. Review and reload its status before trying again.");
+    },
+    onSettled: () => { startInFlight.current = false; },
+  });
   const startTimer = trpc.timer.start.useMutation({
-    onSuccess: () => { void utils.timer.getActive.invalidate(); toast.success("Timer started"); },
-    onError: () => toast.error("Timer could not be started. Refresh task status and try again."),
+    retry: false,
+    onSuccess: async (result) => {
+      await utils.timer.getActive.invalidate();
+      if (!Number.isSafeInteger(result?.id) || result.id <= 0) {
+        toast.error("Timer start was not confirmed. Reload timer status before trying again.");
+        return;
+      }
+      toast.success("Timer started");
+    },
+    onError: async (error) => {
+      await utils.timer.getActive.invalidate();
+      toast.error(error.data?.code === "CONFLICT"
+        ? "A timer is already running or its status changed. Stop the running timer before starting another."
+        : "Timer could not be started. Refresh task status and try again.");
+    },
+    onSettled: () => { startInFlight.current = false; },
   });
 
   const managerCoverageReady = managerExecutionCoverageReady(managerQuery.error, managerQuery.data?.snapshot?.executionReady);
@@ -552,20 +588,32 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
     && !(primary?.kind === "verification" && primary.cardId === card.cardId)
     && !isWaiting(card)
     && !sourceChecksFor(card).checks.some(check => check.linkedCount > 0 && check.status !== "current")
-    && !timerQuery.isLoading && !timerQuery.error && !startTimer.isPending && !timerQuery.data;
+    && !timerQuery.isLoading && !timerQuery.error && !startTimer.isPending && !stopTimer.isPending && !timerStopError && !timerQuery.data;
   const nowSources = now ? sourceChecksFor(now) : null;
   const nowManagerAction = now ? selectManagerActionForCard(managerActions, now.cardId) : null;
   const selectedManagerActions = selected
     ? managerActions.filter(action => action.cardId === selected.cardId)
     : [];
 
-  const begin = (card: OperatorCard) => { if (!canStart(card)) return; startTimer.mutate({
+  const begin = (card: OperatorCard) => { if (startInFlight.current || !canStart(card)) return;
+    startInFlight.current = true;
+    startTimer.mutate({
     cardId: card.cardId,
     cardName: card.cardName,
     cardUrl: card.cardUrl,
     boardName: card.boardName,
     listName: card.listName,
   }); };
+  const stopDisplayedTimer = () => {
+    if (startInFlight.current || stopTimer.isPending || startTimer.isPending || timerQuery.error || timerStopError) return;
+    const displayed = timerQuery.data;
+    if (!displayed || !Number.isSafeInteger(displayed.id) || displayed.id <= 0) {
+      setTimerStopError("This timer could not be identified. Reload its status before trying again.");
+      return;
+    }
+    startInFlight.current = true;
+    stopTimer.mutate({ entryId: displayed.id, cardId: displayed.cardId });
+  };
   const refreshEvidence = async () => {
     const [intelligenceResult, actionResult, googleResult] = await Promise.all([
       intelligenceQuery.refetch(),
@@ -583,6 +631,24 @@ function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone: string
     <div className="space-y-5">
       <PageHeading title="Today" description="" />
       <ManagerCoach />
+      {timerQuery.data && <div role="status" className="flex flex-wrap items-center justify-between gap-3 border-b pb-3 text-sm">
+        <span>Timer running for {timerQuery.data.cardName}. Stop it before starting another task.</span>
+        <Button variant="outline" size="sm" onClick={stopDisplayedTimer}
+          disabled={startTimer.isPending || stopTimer.isPending || Boolean(timerQuery.error) || Boolean(timerStopError)
+            || !Number.isSafeInteger(timerQuery.data.id) || timerQuery.data.id <= 0}>
+          <Square className="size-4" />Stop timer
+        </Button>
+      </div>}
+      {(timerStopError || timerQuery.error || timerQuery.data && (!Number.isSafeInteger(timerQuery.data.id) || timerQuery.data.id <= 0)) &&
+        <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span>{timerStopError || (timerQuery.error ? "Timer status could not be loaded. Reload it before changing timers."
+            : "This timer could not be identified. Reload its status before trying again.")}</span>
+          <Button variant="ghost" size="icon" title="Reload timer status" aria-label="Reload timer status"
+            disabled={stopTimer.isPending || startTimer.isPending || timerQuery.isFetching}
+            onClick={() => { void timerQuery.refetch().then(result => { if (!result.error) setTimerStopError(null); }); }}>
+            <RefreshCw className="size-4" />
+          </Button>
+        </div>}
       {(actionQuery.error || actionQuery.data?.available === false) && <Alert variant="destructive">
         <AlertTriangle className="size-4" />
         <AlertTitle>Trello task updates are unavailable</AlertTitle>

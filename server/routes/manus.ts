@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { closeCanonicalTimer, insertCanonicalTimer, withTimerAccountTransaction, lockTimerAccount, timerFailure, timeCompleteness, correctCanonicalTimer, assertTimerIdentityReady } from "../canonicalTimer";
+import { recordedSeconds } from "../../shared/timerDuration";
 import { TRPCError } from "@trpc/server";
 import { adminProcedure, operatorAccountProcedure, router, publicProcedure } from "../_core/trpc";
 import { getDb } from "../db";
@@ -30,7 +32,7 @@ import { eq, and, desc, asc, gte, lte, sql, isNull, isNotNull, inArray } from "d
 import { collectComplianceSnapshot } from "../services/manus-scheduler";
 import { parseDateKey } from "../utils/date-only";
 import { calculateCompliancePercentage } from "../complianceMetrics";
-import { dateKeyInTimeZone, dateWindowInTimeZone } from "../../shared/workerTime";
+import { dateKeyInTimeZone, dateWindowInTimeZone, weekDateKeys } from "../../shared/workerTime";
 import { resolveWorkerOperatorContext } from "../workerOperatorContext";
 import { canStartTimerForCard, managerActionNeedsSourceVerification, managerActionSourceRequirements, managerExecutionCoverageComplete, managerIntervenesOnCard, timerExecutionBlockReason } from "../timerAccess";
 import { isManagerPilotWorker } from "../aptlssManagerPilot";
@@ -501,8 +503,29 @@ export const sundayRouter = router({
     }),
 });
 
+async function requireTimerHistory(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, founderId: number) {
+  const status = await timeCompleteness(db, founderId);
+  if (!status.complete) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Historical time ownership requires operator review; totals are incomplete" });
+}
+
+async function timerRoute<T>(action: () => Promise<T>): Promise<T> {
+  try { return await action(); }
+  catch (error) {
+    const failure = timerFailure(error);
+    if (failure) throw new TRPCError({ code: failure.status === 409 ? "CONFLICT" : failure.status === 404 ? "NOT_FOUND" : failure.status === 400 ? "BAD_REQUEST" : "FORBIDDEN", message: failure.error });
+    if (error instanceof TRPCError) throw error;
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Timer operation could not be completed" });
+  }
+}
+
 // ─── Time Tracker Router ────────────────────────────────────────────────────
 export const timerRouter = router({
+  getDateContext: operatorAccountProcedure.query(async ({ ctx }) => {
+    const worker = await resolveWorkerOperatorContext(ctx.user);
+    const date = dateKeyInTimeZone(new Date(Date.now()), worker.timezone);
+    const week = weekDateKeys(date);
+    return { timezone: worker.timezone, date, startDate: week.startDateKey, endDate: week.endDateKey };
+  }),
   start: operatorAccountProcedure
     .input(z.object({
       cardId: z.string(),
@@ -515,10 +538,7 @@ export const timerRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const vaId = Number(ctx.user.id);
-      return db.transaction(async tx => {
-        // Serialize all timer transitions for this account before checking mutable work state.
-        const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, vaId)).for("update");
-        if (!account) throw new TRPCError({ code: "UNAUTHORIZED", message: "Account no longer exists" });
+      return timerRoute(() => withTimerAccountTransaction(db, ctx.user, async (tx, locked) => {
         const profiles = ctx.user.role === "worker"
           ? await tx.select({ id: vaProfiles.id, founderId: vaProfiles.founderId, status: vaProfiles.status }).from(vaProfiles)
             .where(eq(vaProfiles.userId, vaId)).orderBy(vaProfiles.id).for("update")
@@ -614,57 +634,36 @@ export const timerRouter = router({
           if (reason) throw new TRPCError({ code: "PRECONDITION_FAILED", message: reason });
         }
         const founderId = ctx.user.role === "worker" ? profile!.founderId : vaId;
-        const running = await tx.select().from(timeEntries).where(
-          and(eq(timeEntries.vaId, vaId), isNull(timeEntries.endTime))
-        ).orderBy(desc(timeEntries.startTime));
-        const sameCard = running.find(entry => entry.cardId === input.cardId);
-        if (sameCard && running.length === 1) {
-          return { id: sameCard.id, cardId: input.cardId, cardName: sameCard.cardName ?? input.cardName, startedAt: sameCard.startTime };
-        }
         const startTime = new Date();
-        for (const entry of running) {
-          const durationSeconds = Math.max(0, Math.round((startTime.getTime() - entry.startTime.getTime()) / 1000));
-          await tx.update(timeEntries).set({ endTime: startTime, durationSeconds,
-            durationMinutes: Math.round(durationSeconds / 60) }).where(eq(timeEntries.id, entry.id));
-        }
         const cardName = workerPlan?.cardName ?? input.cardName;
-        const [result] = await tx.insert(timeEntries).values({
-          taskId: input.cardId, vaId, founderId, cardId: input.cardId, cardName,
+        const result = await insertCanonicalTimer(tx, {
+          taskId: input.cardId, vaId: null, trackedUserId: vaId, trackedProfileId: locked.profile?.id ?? null, founderId, cardId: input.cardId, cardName,
           cardUrl: workerPlan?.cardUrl ?? input.cardUrl,
           boardName: workerPlan?.boardName ?? input.boardName,
           listName: workerPlan?.listName ?? input.listName,
           startTime,
-        }).returning({ id: timeEntries.id });
+        });
         const id = result.id;
         if (managerPilot) {
           await enqueueManagerTask(tx, { vaId, trigger: "timer_changed", eventKey: `timer-start:${id}` });
         }
-        return { id, cardId: input.cardId, cardName, startedAt: startTime };
-      });
+        return { ...result, id, cardId: input.cardId, cardName, startedAt: startTime };
+      }));
     }),
 
   stop: operatorAccountProcedure
-    .input(z.object({ cardId: z.string() }))
+    .input(z.object({ cardId: z.string(), entryId: z.number().int().positive() }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
-      const vaId = Number(ctx.user.id);
-      return db.transaction(async tx => {
-        const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, vaId)).for("update");
-        if (!account) throw new TRPCError({ code: "UNAUTHORIZED", message: "Account no longer exists" });
-        const [running] = await tx.select().from(timeEntries).where(
-          and(eq(timeEntries.cardId, input.cardId), eq(timeEntries.vaId, vaId), isNull(timeEntries.endTime))
-        ).limit(1);
-        if (!running) return null;
-        const now = new Date();
-        const durationSeconds = Math.max(0, Math.round((now.getTime() - running.startTime.getTime()) / 1000));
-        const durationMinutes = Math.round(durationSeconds / 60);
-        await tx.update(timeEntries).set({ endTime: now, durationSeconds, durationMinutes })
-          .where(and(eq(timeEntries.id, running.id), isNull(timeEntries.endTime)));
-        if (isManagerPilotWorker(vaId)) {
-          await enqueueManagerTask(tx, { vaId, trigger: "timer_changed", eventKey: `timer-stop:${running.id}:${now.toISOString()}` });
-        }
-        return { ...running, stoppedAt: now, durationSeconds };
+      return timerRoute(async () => {
+        const result = await closeCanonicalTimer(db, ctx.user, input.entryId, 'stop', { cardId: input.cardId,
+          afterClose: async (tx, entry) => {
+            if (isManagerPilotWorker(ctx.user.id)) await enqueueManagerTask(tx, { vaId: ctx.user.id,
+              trigger: "timer_changed", eventKey: `timer-closed:${entry.id}` });
+          },
+        });
+        return { ...result, ...result.entry, stoppedAt: result.entry.endTime, durationSeconds: recordedSeconds(result.entry) };
       });
     }),
 
@@ -672,10 +671,15 @@ export const timerRouter = router({
     const db = await getDb();
     if (!db) return null;
     const vaId = Number(ctx.user.id);
+    const worker = await resolveWorkerOperatorContext(ctx.user);
     const rows = await db.select().from(timeEntries).where(
-      and(eq(timeEntries.vaId, vaId), isNull(timeEntries.endTime))
+      and(eq(timeEntries.trackedUserId, vaId), isNull(timeEntries.endTime), eq(timeEntries.isVoided, false))
     ).orderBy(desc(timeEntries.startTime)).limit(1);
     const active = rows[0];
+    if (!active) await timerRoute(() => assertTimerIdentityReady(db));
+    if (active && active.founderId !== (worker.founderId ?? ctx.user.id)) {
+      throw new TRPCError({ code: "CONFLICT", message: "An active timer belongs to a previous founder. Ask that founder to close the exact entry before starting another timer." });
+    }
     return active
       ? {
           ...active,
@@ -691,10 +695,12 @@ export const timerRouter = router({
     .input(z.object({ cardId: z.string(), limit: z.number().optional() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable; timer history cannot be verified" });
       const vaId = Number(ctx.user.id);
+      const worker = await resolveWorkerOperatorContext(ctx.user);
+      await requireTimerHistory(db, worker.founderId ?? ctx.user.id);
       return db.select().from(timeEntries).where(
-        and(eq(timeEntries.cardId, input.cardId), eq(timeEntries.vaId, vaId), isNotNull(timeEntries.endTime))
+        and(eq(timeEntries.cardId, input.cardId), eq(timeEntries.trackedUserId, vaId), eq(timeEntries.founderId, worker.founderId ?? ctx.user.id), isNotNull(timeEntries.endTime), eq(timeEntries.isVoided, false))
       ).orderBy(desc(timeEntries.startTime)).limit(input.limit ?? 20);
     }),
 
@@ -702,16 +708,18 @@ export const timerRouter = router({
     .input(z.object({ date: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable; timer history cannot be verified" });
       const vaId = Number(ctx.user.id);
       const worker = await resolveWorkerOperatorContext(ctx.user);
+      await requireTimerHistory(db, worker.founderId ?? ctx.user.id);
       const window = dateWindowInTimeZone(input.date, worker.timezone);
       const endUTC = new Date(window.endExclusive.getTime() - 1);
 
       const rows = await db.select().from(timeEntries).where(
         and(
-          eq(timeEntries.vaId, vaId),
-          isNotNull(timeEntries.endTime),
+          eq(timeEntries.trackedUserId, vaId),
+          eq(timeEntries.founderId, worker.founderId ?? ctx.user.id),
+          isNotNull(timeEntries.endTime), eq(timeEntries.isVoided, false),
           gte(timeEntries.startTime, window.start),
           lte(timeEntries.startTime, endUTC)
         )
@@ -721,7 +729,7 @@ export const timerRouter = router({
       for (const row of rows) {
         const cardId = row.cardId || row.taskId;
         const existing = map.get(cardId);
-        const secs = row.durationSeconds ?? 0;
+        const secs = recordedSeconds(row);
         if (existing) {
           existing.totalSeconds += secs;
           existing.entryCount++;
@@ -744,23 +752,26 @@ export const timerRouter = router({
     .input(z.object({ startDate: z.string(), endDate: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) return { totalSeconds: 0, totalMinutes: 0, totalHours: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable; timer history cannot be verified" });
       const vaId = Number(ctx.user.id);
       const worker = await resolveWorkerOperatorContext(ctx.user);
+      await requireTimerHistory(db, worker.founderId ?? ctx.user.id);
       const startUTC = dateWindowInTimeZone(input.startDate, worker.timezone).start;
       const endUTC = new Date(dateWindowInTimeZone(input.endDate, worker.timezone).endExclusive.getTime() - 1);
 
-      const rows = await db.select({ durationSeconds: timeEntries.durationSeconds }).from(timeEntries).where(
+      const rows = await db.select().from(timeEntries).where(
         and(
-          eq(timeEntries.vaId, vaId),
-          isNotNull(timeEntries.endTime),
+          eq(timeEntries.trackedUserId, vaId),
+          eq(timeEntries.founderId, worker.founderId ?? ctx.user.id),
+          isNotNull(timeEntries.endTime), eq(timeEntries.isVoided, false),
           gte(timeEntries.startTime, startUTC),
           lte(timeEntries.startTime, endUTC)
         )
       );
 
-      const totalSeconds = rows.reduce((sum, r) => sum + (r.durationSeconds ?? 0), 0);
+      const totalSeconds = rows.reduce((sum, r) => sum + recordedSeconds(r), 0);
       return {
+        ...await timeCompleteness(db, worker.founderId ?? ctx.user.id),
         totalSeconds,
         totalMinutes: Math.floor(totalSeconds / 60),
         totalHours: Math.round((totalSeconds / 3600) * 10) / 10,
@@ -773,7 +784,7 @@ export const timerRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const vaId = Number(ctx.user.id);
-      await db.delete(timeEntries).where(and(eq(timeEntries.id, input.id), eq(timeEntries.vaId, vaId)));
+      await timerRoute(() => correctCanonicalTimer(db, ctx.user, input.id, { void: true }));
       return { success: true };
     }),
 
@@ -787,54 +798,27 @@ export const timerRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
       const vaId = Number(ctx.user.id);
 
-      const rows = await db.select().from(timeEntries).where(
-        and(eq(timeEntries.id, input.id), eq(timeEntries.vaId, vaId))
-      ).limit(1);
-
-      if (rows.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Time entry not found" });
-      const entry = rows[0];
-      const newStoppedAt = new Date(new Date(entry.startTime).getTime() + input.durationSeconds * 1000);
-
-      const updateResult = await db.update(timeEntries).set({
-        durationSeconds: input.durationSeconds,
-        durationMinutes: Math.round(input.durationSeconds / 60),
-        endTime: newStoppedAt,
-      }).where(and(eq(timeEntries.id, input.id), eq(timeEntries.vaId, vaId)));
-
-      const affectedRows = updateResult.rowCount ?? 0;
-      if (affectedRows === 0) {
-        const [stillOwned] = await db.select({
-          durationSeconds: timeEntries.durationSeconds,
-          endTime: timeEntries.endTime,
-        }).from(timeEntries).where(and(
-          eq(timeEntries.id, input.id),
-          eq(timeEntries.vaId, vaId),
-        )).limit(1);
-        if (!stillOwned) throw new TRPCError({ code: "NOT_FOUND", message: "Time entry not found" });
-        if (stillOwned.durationSeconds !== input.durationSeconds
-          || stillOwned.endTime?.getTime() !== newStoppedAt.getTime()) {
-          throw new TRPCError({ code: "CONFLICT", message: "Time entry changed while it was being updated" });
-        }
-      }
-
-      return { success: true, id: input.id, durationSeconds: input.durationSeconds, stoppedAt: newStoppedAt };
+      const entry = await timerRoute(() => correctCanonicalTimer(db, ctx.user, input.id, { durationSeconds: input.durationSeconds }));
+      return { success: true, id: entry.id, durationSeconds: entry.durationSeconds, stoppedAt: entry.endTime };
     }),
 
   getEntriesForCard: operatorAccountProcedure
     .input(z.object({ cardId: z.string(), date: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable; timer history cannot be verified" });
       const vaId = Number(ctx.user.id);
       const worker = await resolveWorkerOperatorContext(ctx.user);
+      await requireTimerHistory(db, worker.founderId ?? ctx.user.id);
       const window = dateWindowInTimeZone(input.date, worker.timezone);
       const endUTC = new Date(window.endExclusive.getTime() - 1);
 
       const rows = await db.select().from(timeEntries).where(
         and(
           eq(timeEntries.cardId, input.cardId),
-          eq(timeEntries.vaId, vaId),
-          isNotNull(timeEntries.endTime),
+          eq(timeEntries.trackedUserId, vaId),
+          eq(timeEntries.founderId, worker.founderId ?? ctx.user.id),
+          isNotNull(timeEntries.endTime), eq(timeEntries.isVoided, false),
           gte(timeEntries.startTime, window.start),
           lte(timeEntries.startTime, endUTC)
         )
@@ -853,9 +837,10 @@ export const timerRouter = router({
     .input(z.object({ startDate: z.string(), endDate: z.string() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable; timer history cannot be verified" });
       const vaId = Number(ctx.user.id);
       const worker = await resolveWorkerOperatorContext(ctx.user);
+      await requireTimerHistory(db, worker.founderId ?? ctx.user.id);
 
       const days: any[] = [];
       const start = new Date(input.startDate + "T00:00:00Z");
@@ -866,12 +851,13 @@ export const timerRouter = router({
       }
 
       const rows = await db.select({
-        startTime: timeEntries.startTime,
-        durationSeconds: timeEntries.durationSeconds,
+        startTime: timeEntries.startTime, endTime: timeEntries.endTime, isVoided: timeEntries.isVoided,
+        durationSeconds: timeEntries.durationSeconds, durationMinutes: timeEntries.durationMinutes,
       }).from(timeEntries).where(
         and(
-          eq(timeEntries.vaId, vaId),
-          isNotNull(timeEntries.endTime),
+          eq(timeEntries.trackedUserId, vaId),
+          eq(timeEntries.founderId, worker.founderId ?? ctx.user.id),
+          isNotNull(timeEntries.endTime), eq(timeEntries.isVoided, false),
           gte(timeEntries.startTime, dateWindowInTimeZone(input.startDate, worker.timezone).start),
           lte(timeEntries.startTime, new Date(dateWindowInTimeZone(input.endDate, worker.timezone).endExclusive.getTime() - 1))
         )
@@ -880,7 +866,7 @@ export const timerRouter = router({
       for (const row of rows) {
         const localDate = dateKeyInTimeZone(row.startTime, worker.timezone);
         const slot = days.find(d => d.date === localDate);
-        if (slot) slot.totalSeconds += row.durationSeconds ?? 0;
+        if (slot) slot.totalSeconds += recordedSeconds(row);
       }
       return days;
     }),

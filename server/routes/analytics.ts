@@ -1,3 +1,5 @@
+import { timeCompleteness } from '../canonicalTimer';
+import { recordedMinutes } from '../../shared/timerDuration';
 import { Router, type Request } from 'express';
 import { and, eq, inArray } from 'drizzle-orm';
 import { getDb } from '../db';
@@ -55,16 +57,11 @@ async function getScopedOperationalData(req: Request, db: Database) {
     : profiles;
   const times = await loadAccountTimeEntries(db, user);
 
-  return { profiles, attributionProfiles, tasks, times };
+  const completeness = await timeCompleteness(db, user.role === 'admin' ? undefined : activeProfile?.founderId ?? user.id);
+  return { profiles, attributionProfiles, tasks, times, completeness };
 }
 
-function trackedMinutes(entry: typeof timeEntries.$inferSelect) {
-  if (entry.isVoided) return 0;
-  if (entry.durationMinutes != null) return Math.max(0, entry.durationMinutes);
-  if (entry.durationSeconds != null) return Math.max(0, entry.durationSeconds / 60);
-  if (entry.endTime) return Math.max(0, (entry.endTime.getTime() - entry.startTime.getTime()) / 60_000);
-  return 0;
-}
+const trackedMinutes = recordedMinutes;
 
 function scheduledMinutes(profile: typeof vaProfiles.$inferSelect, start: Date, dayCount: number) {
   const workingDays = new Set(profile.workingDays.split(',').map(Number).filter(Number.isInteger));
@@ -100,8 +97,9 @@ router.get('/worker-productivity', async (req, res) => {
 
   try {
     const user = requestUser(req)!;
-    const { profiles, attributionProfiles, tasks, times } = await getScopedOperationalData(req, db);
+    const { profiles, attributionProfiles, tasks, times, completeness } = await getScopedOperationalData(req, db);
     const attribution = attributeTimeEntriesToProfiles(attributionProfiles, times);
+    if (attribution.unattributed.length) { completeness.complete = false; completeness.unresolvedEntryCount += attribution.unattributed.filter(entry => entry.trackedUserId !== null).length; }
     const productivity = profiles.map(profile => {
       const workerTasks = tasks.filter(task => task.vaId === profile.id);
       const completed = workerTasks.filter(task => task.status === 'completed').length;
@@ -120,7 +118,7 @@ router.get('/worker-productivity', async (req, res) => {
     });
 
     const unattributedMinutes = attribution.unattributed.reduce((sum, entry) => sum + trackedMinutes(entry), 0);
-    res.json({ success: true, productivity,
+    res.json({ ...completeness, success: true, productivity,
       ...(user.role === 'worker' ? {} : {
         unattributedTimeEntries: { count: attribution.unattributed.length, minutes: Math.round(unattributedMinutes) },
       }),
@@ -137,8 +135,9 @@ router.get('/team-capacity', async (req, res) => {
 
   try {
     const user = requestUser(req)!;
-    const { profiles, attributionProfiles, times } = await getScopedOperationalData(req, db);
+    const { profiles, attributionProfiles, times, completeness } = await getScopedOperationalData(req, db);
     const attribution = attributeTimeEntriesToProfiles(attributionProfiles, times);
+    if (attribution.unattributed.length) { completeness.complete = false; completeness.unresolvedEntryCount += attribution.unattributed.filter(entry => entry.trackedUserId !== null).length; }
     const attributedTimes = profiles.flatMap(profile => attribution.entriesByProfileId.get(profile.id) ?? []);
     const periodStart = startOfDay(new Date());
     periodStart.setDate(periodStart.getDate() - 6);
@@ -166,6 +165,7 @@ router.get('/team-capacity', async (req, res) => {
       .reduce((sum, entry) => sum + trackedMinutes(entry), 0);
 
     res.json({
+      ...completeness,
       success: true,
       period: { start: periodStart.toISOString(), end: periodEnd.toISOString(), days: 7 },
       utilization: expectedMinutes > 0 ? Math.round((actualMinutes / expectedMinutes) * 1000) / 10 : null,
@@ -193,8 +193,9 @@ router.get('/trends', async (req, res) => {
 
   try {
     const user = requestUser(req)!;
-    const { profiles, attributionProfiles, tasks, times } = await getScopedOperationalData(req, db);
+    const { profiles, attributionProfiles, tasks, times, completeness } = await getScopedOperationalData(req, db);
     const attribution = attributeTimeEntriesToProfiles(attributionProfiles, times);
+    if (attribution.unattributed.length) { completeness.complete = false; completeness.unresolvedEntryCount += attribution.unattributed.filter(entry => entry.trackedUserId !== null).length; }
     const attributedTimes = profiles.flatMap(profile => attribution.entriesByProfileId.get(profile.id) ?? []);
     const periodStart = startOfDay(new Date());
     periodStart.setDate(periodStart.getDate() - 13);
@@ -222,7 +223,7 @@ router.get('/trends', async (req, res) => {
       };
     });
 
-    res.json({ success: true, periodDays: 14, trends, source: 'task_assignments+time_entries' });
+    res.json({ ...completeness, success: true, periodDays: 14, trends, source: 'task_assignments+time_entries' });
   } catch (error) {
     console.error('[Analytics] Failed to get trends', error);
     res.status(500).json({ error: 'Failed to get trends' });

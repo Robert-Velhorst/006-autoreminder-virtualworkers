@@ -191,6 +191,7 @@ export function prepareTransferRow(source, columns, identity, table) {
   if (Object.keys(source).some(key => !metadata.has(key))) throw new Error(`Unmapped source columns: ${table}`);
   for (const [column, id] of [["vaId", identity.workerUserId], ["founderId", identity.founderUserId]]) {
     if (!metadata.has(column)) continue;
+    if (table === "time_entries" && column === "vaId") continue; // Retain raw provenance, never interpret it as ownership.
     if (column === "vaId") {
       if (!USER_SCOPED_TABLES.has(table)) throw new Error(`Unreviewed vaId semantics: ${table}`);
       if (table === "app_settings" && source.vaId === null && metadata.get(column).is_nullable === "YES") continue;
@@ -198,6 +199,14 @@ export function prepareTransferRow(source, columns, identity, table) {
     if (positiveId(source[column]) !== id) throw new Error(`Source ownership mismatch: ${table}.${column}`);
   }
   const row = { ...source };
+  if (table === 'time_entries') {
+    if (!metadata.has('trackedUserId') || !metadata.has('trackedProfileId')) throw new Error('Canonical timer migration must be installed before import');
+    if (source.trackedUserId != null && positiveId(source.trackedUserId) !== identity.workerUserId) throw new Error('Canonical timer owner mismatch');
+    if (source.trackedProfileId != null && positiveId(source.trackedProfileId) !== identity.workerProfileId) throw new Error('Canonical timer profile mismatch');
+    if (source.trackedUserId == null && source.trackedProfileId != null) throw new Error('Canonical profile without canonical account');
+    row.trackedUserId = source.trackedUserId ?? null;
+    row.trackedProfileId = source.trackedProfileId ?? null;
+  }
   for (const column of columns) {
     const name = column.column_name;
     if (!Object.hasOwn(row, name) && column.is_nullable === "NO" && !column.column_default && column.is_identity !== "YES") {
@@ -264,6 +273,9 @@ export async function transferOperatorRecords(connection, payload, definitions, 
     await connection.query("SET LOCAL lock_timeout = '10s'");
     await connection.query("SET LOCAL statement_timeout = '30s'");
     if (execute && !reconcile) {
+      // Operator-only import stages unresolved history. Runtime inserts never
+      // enable this transaction-local mode; readiness remains closed for open rows.
+      await connection.query("SELECT set_config('aptlss.legacy_timer_import', txid_current()::text, true)");
       const tables = [...new Set(["users", "va_profiles", ...definitions.map(item => item.name)])].sort();
       await connection.query(`LOCK TABLE ${tables.map(quoteIdentifier).join(", ")} IN ACCESS EXCLUSIVE MODE`);
     }
@@ -275,6 +287,7 @@ export async function transferOperatorRecords(connection, payload, definitions, 
       WHERE p."userId" = $1 AND p."founderId" = $2`, [identity.workerUserId, identity.founderUserId]);
     validateTargetIdentity(sourceIdentity, target.rows, identity);
     const sequences = [];
+    report.timerIdentityComplete = true;
     for (const { name, keys } of definitions) {
       const { rows: columns } = await connection.query(`
         SELECT column_name, data_type, is_nullable, column_default, is_identity
@@ -285,9 +298,13 @@ export async function transferOperatorRecords(connection, payload, definitions, 
       const ids = new Set();
       const counts = report.tables[name] = { source: payload.counts[name],
         credentialOmissions: name === "app_settings" ? payload.credentialOmissions.length : 0,
-        inserted: 0, identical: 0, wouldInsert: 0 };
+        inserted: 0, identical: 0, wouldInsert: 0, requiresIdentityReview: 0 };
       for (const source of payload.tables[name]) {
         const row = prepareTransferRow(source, columns, identity, name);
+        if (name === 'time_entries' && row.trackedUserId == null) {
+          counts.requiresIdentityReview++;
+          report.timerIdentityComplete = false;
+        }
         if (!keys.every(key => row[key] != null)) throw new Error(`Source natural key missing: ${name}`);
         if (columns.some(column => column.column_name === "id") && row.id == null) throw new Error(`Source record ID missing: ${name}`);
         const signature = JSON.stringify(keys.map(key => canonicalColumnValue(row[key], columns.find(column => column.column_name === key))));
@@ -321,6 +338,8 @@ export async function transferOperatorRecords(connection, payload, definitions, 
     for (const { name, columns } of sequences) await advanceTransferSequences(connection, name, columns);
     await connection.query(execute && !reconcile ? "COMMIT" : "ROLLBACK");
     report.success = payload.credentialOmissions.length === 0;
+    if (!report.timerIdentityComplete) report.completion = payload.credentialOmissions.length
+      ? 'private-credential-restoration-and-timer-identity-review-required' : 'timer-identity-review-required';
     report.dataCheckPassed = true;
     report.applied = execute && !reconcile;
     return report;

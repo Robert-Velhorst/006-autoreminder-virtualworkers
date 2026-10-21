@@ -62,7 +62,7 @@ export type ManagerInput = {
   timeSamples: ManagerTimeSample[];
   sourceGaps: string[];
   graphConflicts?: ManagerGraphConflict[];
-  timeSummary?: { waitingMinutes: number; interruptedMinutes: number };
+  timeSummary?: { waitingMinutes: number; interruptedMinutes: number; complete?: boolean; unresolvedEntryCount?: number };
   learning?: { stateHash: string; guidance: ManagerReviewedGuidance[]; withheld: Array<{ cardId: string; topic: string; actionKind: ManagerAction["kind"]; actionId?: string }> };
 };
 

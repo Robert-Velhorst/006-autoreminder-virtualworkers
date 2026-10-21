@@ -1,7 +1,7 @@
 export const REQUIRED_POSTGRES_MIGRATION = {
-  tag: "0006_worker_session_lifecycle",
-  createdAt: 1792546870847n,
-  hash: "b0e416ada6e8a19fce8fd8a073341d494ea4de8d47061ad3c2573f9f3539cd1d",
+  tag: "0007_canonical_timer_columns",
+  createdAt: 1792551653166n,
+  hash: "f8045e01e9ea4c0d596a061fb5f70d548fef47345f8807820250da7fb5b18037",
 } as const;
 
 export const READINESS_QUERY_TIMEOUT_MS = 2_000;
@@ -26,6 +26,17 @@ export async function hasRequiredPostgresSchema(
           SELECT 1
           FROM "drizzle"."__drizzle_migrations"
           WHERE created_at = $1 AND hash = $2
+        ) AND NOT EXISTS (
+          SELECT 1 FROM time_entries
+          WHERE "trackedUserId" IS NULL AND "endTime" IS NULL AND NOT "isVoided"
+        ) AND NOT EXISTS (
+          SELECT 1 FROM time_entries WHERE "endTime" IS NULL AND NOT "isVoided"
+          GROUP BY "trackedUserId" HAVING count(*) > 1
+        ) AND EXISTS (
+          SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
+          JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname='public' AND c.relname='time_entries_one_active_account_idx'
+            AND i.indisvalid AND i.indisunique
         ) AS required_migration_applied
       `,
       values: [

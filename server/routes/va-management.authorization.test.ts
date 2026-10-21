@@ -169,7 +169,9 @@ function founderTimerFixture() {
     cachedAt: new Date(now - 60_000), expiresAt: new Date(now + 5 * 60_000),
   };
   const rows = new Map<unknown, Row[]>([
-    [vaProfiles, [{ id: 8, userId: worker.id, founderId: admin.id }]],
+    [users, [admin, worker]],
+    [vaProfiles, [{ id: 8, userId: worker.id, founderId: admin.id, status: 'active' }]],
+    [taskAssignments, [{ id: 1, vaId: 8, founderId: admin.id, taskId: 'current-card', status: 'assigned' }]],
     [aptlssManagerState, [state]],
     [aptlssManagerRuns, [{ id: 1, vaId: worker.id, snapshotJson: JSON.stringify(base) }]],
     [aptlssManagerChecks, [check]],
@@ -611,7 +613,7 @@ describe("VA management authorization and profile scope", () => {
     const response = await request(appFor(admin)).post("/api/va/time-entries/start").send({ taskId: "current-card:checklist:item", vaId: 8 });
 
     expect(response.status).toBe(200);
-    expect(inserts).toEqual([{ table: timeEntries, values: expect.objectContaining({ taskId: "current-card:checklist:item", vaId: 8, founderId: admin.id }) }]);
+    expect(inserts).toEqual([{ table: timeEntries, values: expect.objectContaining({ taskId: "current-card:checklist:item", trackedUserId: worker.id, trackedProfileId: 8, vaId: null, founderId: admin.id }) }]);
     expect(mocks.isManagerPilotWorker).toHaveBeenCalledWith(worker.id);
   });
 

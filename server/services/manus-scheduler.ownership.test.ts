@@ -29,7 +29,7 @@ const worker = { id: 7, userId: 41, founderId: 9, name: "Synthetic worker", time
   status: "active", trelloMemberId: "synthetic-member" } as typeof vaProfiles.$inferSelect;
 
 function timer(id = 1, overrides: Partial<typeof timeEntries.$inferSelect> = {}): typeof timeEntries.$inferSelect {
-  return { id, taskId: `task-${id}`, vaId: worker.userId, founderId: worker.founderId,
+  return { id, taskId: `task-${id}`, vaId: null, trackedUserId: worker.userId, trackedProfileId: worker.id, founderId: worker.founderId,
     cardId: `card-${id}`, cardName: `Card ${id}`, cardUrl: null, boardName: "Board", listName: "DOING",
     startTime: new Date("2026-09-30T23:00:00Z"), endTime: null, durationSeconds: null,
     durationMinutes: null, notes: null, source: "manus", category: "client_work",
@@ -211,7 +211,7 @@ describe("Manus automatic timer stop ownership", () => {
   });
 
   it("stops only running, non-voided worker-account timers in this founder scope", async () => {
-    const { state } = database([timer(), timer(2, { vaId: worker.id }), timer(3, { founderId: 88 }),
+    const { state } = database([timer(), timer(2, { trackedUserId: worker.id }), timer(3, { founderId: 88 }),
       timer(4, { isVoided: true }), timer(5, { endTime: new Date("2026-09-30T23:30:00Z") })]);
     const lease = ownership();
     await expect(scheduledWork(lease.context)).resolves.toMatchObject({ recordsProcessed: 1 });

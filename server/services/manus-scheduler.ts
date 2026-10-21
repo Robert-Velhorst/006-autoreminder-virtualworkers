@@ -1,3 +1,5 @@
+import { recordedSeconds } from '../../shared/timerDuration';
+import { timeCompleteness } from '../canonicalTimer';
 import { getDb } from "../db";
 import {
   dailyComplianceSnapshots,
@@ -114,7 +116,7 @@ async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect, cont
   const maxSeconds = 12 * 3600;
   const now = new Date();
   const running = await db.select().from(timeEntries).where(
-    and(eq(timeEntries.vaId, worker.userId), eq(timeEntries.founderId, worker.founderId),
+    and(eq(timeEntries.trackedUserId, worker.userId), eq(timeEntries.founderId, worker.founderId),
       eq(timeEntries.isVoided, false), isNull(timeEntries.endTime)),
   );
 
@@ -133,7 +135,7 @@ async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect, cont
     const result = await db.update(timeEntries)
       .set({ endTime: now, durationSeconds, durationMinutes })
       .where(and(
-        eq(timeEntries.vaId, worker.userId), eq(timeEntries.founderId, worker.founderId),
+        eq(timeEntries.trackedUserId, worker.userId), eq(timeEntries.founderId, worker.founderId),
         eq(timeEntries.isVoided, false), isNull(timeEntries.endTime), unchangedTimer(entry),
       ));
     if (result.rowCount === 0) continue;
@@ -226,7 +228,7 @@ export async function collectComplianceSnapshot(
       lte(emailTasks.receivedAt, endInclusive),
     )),
     db.select().from(timeEntries).where(and(
-      eq(timeEntries.vaId, worker.userId),
+      eq(timeEntries.trackedUserId, worker.userId),
       eq(timeEntries.isVoided, false),
       isNotNull(timeEntries.endTime),
       gte(timeEntries.startTime, window.start),
@@ -260,7 +262,8 @@ export async function collectComplianceSnapshot(
     email.status === "pending" && !email.suggestedNextAction?.trim() && !email.llmSummary?.trim()
   ).length;
   const emailMissed = Math.max(0, emails.length - emailCompleted);
-  const trackedSeconds = trackedEntries.reduce((total, entry) => total + (entry.durationSeconds ?? 0), 0);
+  if (!(await timeCompleteness(db, worker.founderId)).complete) throw new Error('Historical time requires ownership review before compliance totals');
+  const trackedSeconds = trackedEntries.reduce((total, entry) => total + recordedSeconds(entry), 0);
   const scheduledTargetSeconds = calculateScheduledTargetSeconds(operatorContext, dateKey);
   const clarificationOpen = messageNeedsClarification + emailNeedsClarification;
   const evidenceCount = allCards.length + messages.length + emails.length + trackedEntries.length;

@@ -1,3 +1,5 @@
+import { recordedMinutes } from '../../shared/timerDuration';
+import { timeCompleteness } from '../canonicalTimer';
 /**
  * Trello Chatbot Service
  * 
@@ -206,12 +208,12 @@ export async function postTrelloComment(cardId: string, text: string): Promise<b
 /**
  * Get card progress information
  */
-async function getCardProgress(trelloCardId: string): Promise<{
+async function getCardProgress(trelloCardId: string, memberId?: string): Promise<{
   cardName: string;
   totalSteps: number;
   completedSteps: number;
-  timeTrackedToday: number;
-  timeTrackedTotal: number;
+  timeTrackedToday: number | null;
+  timeTrackedTotal: number | null;
   lastActivity: Date | null;
   checklist: Array<{ step: string; completed: boolean; type: string }>;
 } | null> {
@@ -268,39 +270,42 @@ async function getCardProgress(trelloCardId: string): Promise<{
       }
     }
 
+    const profiles = memberId ? await db.select().from(vaProfiles).where(and(eq(vaProfiles.trelloMemberId, memberId), eq(vaProfiles.status, 'active'))).limit(2) : [];
+    const profile = profiles.length === 1 ? profiles[0] : null;
+    const complete = profile ? (await timeCompleteness(db, profile.founderId)).complete : false;
     // Get time tracked today
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
     // Use taskId (varchar) for time entries lookup - match by trello card ID
-    const timeEntriesToday = await db
+    const timeEntriesToday = profile && complete ? await db
       .select()
       .from(timeEntries)
       .where(
         and(
-          eq(timeEntries.taskId, trelloCardId),
+          eq(timeEntries.taskId, trelloCardId), eq(timeEntries.trackedUserId, profile.userId), eq(timeEntries.founderId, profile.founderId), eq(timeEntries.isVoided, false),
           gte(timeEntries.startTime, today)
         )
-      );
+      ) : [];
 
     let timeTrackedToday = 0;
     for (const entry of timeEntriesToday) {
       if (entry.endTime) {
-        timeTrackedToday += (entry.endTime.getTime() - entry.startTime.getTime()) / 60000;
+        timeTrackedToday += recordedMinutes(entry);
       }
     }
 
     // Get total time tracked
-    const allTimeEntries = await db
+    const allTimeEntries = profile && complete ? await db
       .select()
       .from(timeEntries)
-      .where(eq(timeEntries.taskId, trelloCardId));
+      .where(and(eq(timeEntries.taskId, trelloCardId), eq(timeEntries.trackedUserId, profile.userId), eq(timeEntries.founderId, profile.founderId), eq(timeEntries.isVoided, false))) : [];
 
     let timeTrackedTotal = 0;
     let lastActivity: Date | null = null;
     for (const entry of allTimeEntries) {
       if (entry.endTime) {
-        timeTrackedTotal += (entry.endTime.getTime() - entry.startTime.getTime()) / 60000;
+        timeTrackedTotal += recordedMinutes(entry);
         if (!lastActivity || entry.endTime > lastActivity) {
           lastActivity = entry.endTime;
         }
@@ -311,8 +316,8 @@ async function getCardProgress(trelloCardId: string): Promise<{
       cardName: card.name,
       totalSteps,
       completedSteps,
-      timeTrackedToday: Math.round(timeTrackedToday),
-      timeTrackedTotal: Math.round(timeTrackedTotal),
+      timeTrackedToday: complete ? Math.round(timeTrackedToday) : null,
+      timeTrackedTotal: complete ? Math.round(timeTrackedTotal) : null,
       lastActivity,
       checklist,
     };
@@ -358,7 +363,8 @@ async function getWorkerByName(name: string): Promise<{
 /**
  * Format time in minutes to human-readable string
  */
-function formatTime(minutes: number): string {
+function formatTime(minutes: number | null): string {
+  if (minutes === null) return 'Unavailable: canonical worker context or ownership review required';
   if (minutes < 60) {
     return `${minutes}m`;
   }
@@ -372,7 +378,7 @@ function formatTime(minutes: number): string {
  * Shows current task progress
  */
 async function handleStatusCommand(cmd: BotCommand): Promise<BotResponse> {
-  const progress = await getCardProgress(cmd.cardId);
+  const progress = await getCardProgress(cmd.cardId, cmd.authorId);
   
   if (!progress) {
     return {
@@ -423,7 +429,7 @@ async function handleStatusCommand(cmd: BotCommand): Promise<BotResponse> {
  * Ask worker for progress update
  */
 async function handleCheckinCommand(cmd: BotCommand): Promise<BotResponse> {
-  const progress = await getCardProgress(cmd.cardId);
+  const progress = await getCardProgress(cmd.cardId, cmd.authorId);
   
   let text = `👋 **Progress Check-in**\n\n`;
   text += `Hi ${cmd.authorName}! How's this task going?\n\n`;
@@ -460,7 +466,7 @@ async function handleRemindCommand(cmd: BotCommand): Promise<BotResponse> {
   }
 
   const worker = await getWorkerByName(workerName);
-  const progress = await getCardProgress(cmd.cardId);
+  const progress = await getCardProgress(cmd.cardId, cmd.authorId);
 
   let text = `🔔 **Reminder**\n\n`;
   
@@ -500,7 +506,7 @@ async function handleRemindCommand(cmd: BotCommand): Promise<BotResponse> {
  * Show time tracked on this card
  */
 async function handleTimeCommand(cmd: BotCommand): Promise<BotResponse> {
-  const progress = await getCardProgress(cmd.cardId);
+  const progress = await getCardProgress(cmd.cardId, cmd.authorId);
   
   if (!progress) {
     return {
@@ -518,7 +524,7 @@ async function handleTimeCommand(cmd: BotCommand): Promise<BotResponse> {
   }
 
   // Calculate estimated remaining time based on progress
-  if (progress.totalSteps > 0 && progress.completedSteps > 0 && progress.completedSteps < progress.totalSteps) {
+  if (progress.timeTrackedTotal !== null && progress.totalSteps > 0 && progress.completedSteps > 0 && progress.completedSteps < progress.totalSteps) {
     const avgTimePerStep = progress.timeTrackedTotal / progress.completedSteps;
     const remainingSteps = progress.totalSteps - progress.completedSteps;
     const estimatedRemaining = Math.round(avgTimePerStep * remainingSteps);
@@ -533,7 +539,7 @@ async function handleTimeCommand(cmd: BotCommand): Promise<BotResponse> {
  * Show detailed progress breakdown
  */
 async function handleProgressCommand(cmd: BotCommand): Promise<BotResponse> {
-  const progress = await getCardProgress(cmd.cardId);
+  const progress = await getCardProgress(cmd.cardId, cmd.authorId);
   
   if (!progress) {
     return {
