@@ -20,6 +20,7 @@ import { gmailContentScope } from "../shared/gmailContentScope";
 import { mapWithConcurrency } from "./utils/concurrency";
 import { enqueueManagerTask, type ManagerQueueConnection, type ManagerQueueTransaction } from "./aptlssManagerQueue";
 import { ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader } from "./scheduledJobRuntime";
+import { assertEmailDispatchAllowed, EmailDispatchNotStartedError } from "./services/email-dispatch-guard";
 
 const SETTINGS_KEY = "googleEvidence";
 const TOKEN_KEY = "googleEvidenceRefreshToken";
@@ -758,7 +759,8 @@ export async function validateGoogleMailDeliveryConnection() {
   }
 }
 
-export async function sendGoogleMail(options: { to: string; subject: string; html: string; text: string }, context?: ScheduledJobContext) {
+export async function sendGoogleMail(options: { to: string; subject: string; html: string; text: string }, context?: ScheduledJobContext,
+  beforeDispatch?: () => Promise<boolean>) {
   await googleOwnershipCheckpoint(context);
   const [token, from] = await Promise.all([
     getGoogleMailDeliveryAccessToken(context),
@@ -779,19 +781,27 @@ export async function sendGoogleMail(options: { to: string; subject: string; htm
   });
   const raw = (composed.message as Buffer).toString("base64url");
   await googleOwnershipCheckpoint(context);
-  const response = await fetch(`${GMAIL_API_URL}/messages/send`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ raw }),
-    signal: googleRequestSignal(context),
-  }).catch(async error => { await rethrowGoogleOwnershipLoss(error, context); throw error; });
-  await googleOwnershipCheckpoint(context);
-  if (!response.ok) throw new Error(`Google Gmail send request failed (${response.status})`);
-  const payload = await response.json().catch(async error => {
-    await rethrowGoogleOwnershipLoss(error, context); throw error;
-  }) as { id?: unknown };
-  await googleOwnershipCheckpoint(context);
-  return { id: typeof payload.id === "string" ? payload.id : null };
+  await assertEmailDispatchAllowed(beforeDispatch, context);
+  if (context?.signal.aborted) throw new ScheduledJobLeaseLostError();
+  // From this point on, no error can establish that mail was definitely not sent.
+  try {
+    const response = await fetch(`${GMAIL_API_URL}/messages/send`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ raw }),
+      signal: googleRequestSignal(context),
+    }).catch(async error => { await rethrowGoogleOwnershipLoss(error, context); throw error; });
+    await googleOwnershipCheckpoint(context);
+    if (!response.ok) throw new Error(`Google Gmail send request failed (${response.status})`);
+    const payload = await response.json().catch(async error => {
+      await rethrowGoogleOwnershipLoss(error, context); throw error;
+    }) as { id?: unknown };
+    await googleOwnershipCheckpoint(context);
+    return { id: typeof payload.id === "string" ? payload.id : null };
+  } catch (error) {
+    if (error instanceof EmailDispatchNotStartedError) throw new Error('Gmail delivery outcome is unconfirmed');
+    throw error;
+  }
 }
 
 async function googleJson<T>(url: string, token: string, context?: ScheduledJobContext) {

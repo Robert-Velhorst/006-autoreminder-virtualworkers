@@ -41,6 +41,9 @@ rather than rebuilding unrelated source on the production host.
 4. Retry only idempotent jobs. Review external actions before retrying.
 5. Back up the database before a repair migration.
 
+For uncertain email outcomes, follow [notification delivery recovery](NOTIFICATION_DELIVERY.md).
+Do not interpret a timeout as permission to resend or erase a retained batch.
+
 ## Verification Output Safety
 
 Use the safety verifier's default `artifacts` and `test-results` destinations.

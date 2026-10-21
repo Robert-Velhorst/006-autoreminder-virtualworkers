@@ -184,4 +184,69 @@ describe("email scheduled-job lease fencing", () => {
     expect(await sendEmail(options, lease().context)).toBe(false);
     expectNoSend();
   });
+  it.each(['sendgrid', 'gmail_smtp'])("refuses %s after eligibility is revoked during paused provider readiness", async provider => {
+    vi.stubEnv('EMAIL_PROVIDER', '');
+    if (provider === 'gmail_smtp') { vi.stubEnv('SENDGRID_API_KEY', ''); vi.stubEnv('SENDGRID_FROM_EMAIL', ''); }
+    let release!: (value: { connected: boolean }) => void;
+    controls.status.mockReturnValue(new Promise(resolve => { release = resolve; }));
+    const { sendEmailWithOutcome } = await import('./email');
+    let eligible = true;
+    const guard = vi.fn(async () => eligible);
+    const pending = sendEmailWithOutcome(options, undefined, guard);
+    await vi.waitFor(() => expect(controls.status).toHaveBeenCalledOnce());
+    expect(guard).not.toHaveBeenCalled(); eligible = false; release({ connected: false });
+    expect(await pending).toMatchObject({ status: 'not_sent' });
+    expect(guard).toHaveBeenCalledOnce(); expectNoSend();
+  });
+  it.each(['sendgrid', 'gmail_smtp'])("maps %s final guard storage failure to definitely not_sent", async provider => {
+    vi.stubEnv('EMAIL_PROVIDER', provider);
+    const { sendEmailWithOutcome } = await import('./email');
+    const guard = vi.fn(async (): Promise<boolean> => { throw new Error('Guard read failed'); });
+    expect(await sendEmailWithOutcome(options, undefined, guard)).toMatchObject({ status: 'not_sent' });
+    expectNoSend();
+  });
+  it.each(['sendgrid', 'gmail_smtp'])("keeps %s post-dispatch failures uncertain and never rereads the guard", async provider => {
+    vi.stubEnv('EMAIL_PROVIDER', provider);
+    const { sendEmailWithOutcome } = await import('./email');
+    const { EmailDispatchNotStartedError } = await import('./email-dispatch-guard');
+    const guard = vi.fn(async () => true);
+    const send = provider === 'sendgrid' ? controls.sendgridSend : controls.smtpSend;
+    send.mockImplementation(async () => { guard.mockResolvedValue(false); throw new EmailDispatchNotStartedError(); });
+    expect(await sendEmailWithOutcome(options, undefined, guard)).toMatchObject({ status: 'uncertain' });
+    expect(send).toHaveBeenCalledOnce(); expect(guard).toHaveBeenCalledOnce();
+  });
+  it('honors a dynamic global opt-out at the final SMTP boundary', async () => {
+    vi.stubEnv('EMAIL_PROVIDER', 'gmail_smtp');
+    const { sendEmailWithOutcome } = await import('./email');
+    controls.createTransport.mockImplementation(() => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'false'); return { sendMail: controls.smtpSend };
+    });
+    expect(await sendEmailWithOutcome(options)).toMatchObject({ status: 'not_sent' }); expectNoSend();
+  });
+  it('propagates lease loss from the final callback without contacting the provider', async () => {
+    vi.stubEnv('EMAIL_PROVIDER', 'sendgrid');
+    const { sendEmailWithOutcome } = await import('./email');
+    const state = lease();
+    await expect(sendEmailWithOutcome(options, state.context, async () => { throw state.error; })).rejects.toBe(state.error);
+    expectNoSend();
+  });
+  it.each(['morning', 'eod'])("propagates the %s briefing final callback through the boolean wrappers", async kind => {
+    vi.stubEnv('EMAIL_PROVIDER', 'sendgrid');
+    const { sendMorningBriefing, sendEODReport } = await import('./email');
+    const state = lease(); const guard = vi.fn(async () => false);
+    const common = { workerName: 'Synthetic', date: '2026-10-21' };
+    const outcome = kind === 'morning'
+      ? await sendMorningBriefing(options.to, { ...common, tasks: [], totalHours: 0, highPriorityCount: 0 }, state.context, guard)
+      : await sendEODReport(options.to, { ...common, completedTasks: [], incompleteTasks: [], blockedTasks: [], totalHoursWorked: 0, completionRate: 0 }, state.context, guard);
+    expect(outcome).toBe(false); expect(guard).toHaveBeenCalledOnce(); expectNoSend();
+  });
+  it('forwards the optional Gmail guard without changing legacy call arity', async () => {
+    const { sendEmailWithOutcome } = await import('./email');
+    const state = lease(); const guard = vi.fn(async () => true);
+    await sendEmailWithOutcome(options, state.context, guard);
+    expect(controls.googleSend).toHaveBeenCalledWith(expect.objectContaining({ to: options.to }), state.context, guard);
+    controls.googleSend.mockClear();
+    await sendEmailWithOutcome(options);
+    expect(controls.googleSend.mock.calls[0]).toHaveLength(1);
+  });
 });

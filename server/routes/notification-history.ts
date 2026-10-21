@@ -10,9 +10,61 @@ import { notificationHistory, digestJobs } from '../../drizzle/schema.postgres';
 import { eq, and, desc, sql } from 'drizzle-orm';
 import { requireAdmin, requireAuthenticated } from '../middleware/auth';
 import { parseLimitOffset } from '../utils/pagination';
+import { z } from 'zod';
 
 const router = Router();
 router.use(requireAuthenticated);
+
+const digestReconciliation = z.object({
+  outcome: z.enum(['sent', 'retry']),
+  note: z.string().trim().min(10).max(2000),
+  evidenceReference: z.string().trim().min(3).max(1000),
+  acknowledgeDuplicateRisk: z.boolean().optional(),
+}).strict();
+
+function hasDatabaseCode(error: unknown, code: string): boolean {
+  let current = error;
+  for (let depth = 0; depth < 5 && current && typeof current === 'object'; depth++) {
+    if ('code' in current && current.code === code) return true;
+    current = 'cause' in current ? current.cause : undefined;
+  }
+  return false;
+}
+
+function sendDigestFailure(res: Response, error: unknown) {
+  const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+  if (code === 'NOT_FOUND') return res.status(404).json({ error: 'Digest job not found' });
+  if (code === 'FORBIDDEN') return res.status(403).json({ error: 'Digest administration is not permitted' });
+  if (code === 'CONFLICT') return res.status(409).json({ error: 'Digest cannot be reconciled in its current state. Review active work and delivery evidence.' });
+  if (code === 'BAD_REQUEST') return res.status(400).json({ error: 'Digest reconciliation requires valid delivery evidence and explicit duplicate-risk acknowledgement for retries.' });
+  return res.status(503).json({ error: 'Digest status or reconciliation is unavailable' });
+}
+
+router.get('/digest-jobs/attention', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { listDigestJobsNeedingAttention } = await import('../services/digest-outbox');
+    return res.json({ jobs: await listDigestJobsNeedingAttention((req as any).user.id) });
+  } catch (error) { return sendDigestFailure(res, error); }
+});
+
+router.get('/digest-jobs/:id', requireAdmin, async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: 'Invalid digest job ID' });
+  try {
+    const { getDigestJobForReview } = await import('../services/digest-outbox');
+    return res.json({ job: await getDigestJobForReview(id, (req as any).user.id) });
+  } catch (error) { return sendDigestFailure(res, error); }
+});
+
+router.post('/digest-jobs/:id/reconcile', requireAdmin, async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  const input = digestReconciliation.safeParse(req.body);
+  if (!Number.isSafeInteger(id) || id <= 0 || !input.success) return res.status(400).json({ error: 'Invalid digest reconciliation request' });
+  try {
+    const { reconcileDigestJob } = await import('../services/digest-outbox');
+    return res.json(await reconcileDigestJob(id, (req as any).user.id, input.data));
+  } catch (error) { return sendDigestFailure(res, error); }
+});
 
 /**
  * GET /api/notifications
@@ -190,6 +242,9 @@ router.delete('/:id', async (req: Request, res: Response) => {
     res.json({ success: true });
   } catch (error: unknown) {
     console.error('[NotificationHistory] Delete error:', error);
+    if (hasDatabaseCode(error, '23503')) {
+      return res.status(409).json({ error: 'This notification belongs to a retained digest. Reconcile its delivery before changing its audit history.' });
+    }
     res.status(500).json({ error: 'Unable to delete the notification' });
   }
 });
@@ -212,7 +267,14 @@ router.get('/digest-history', async (req: Request, res: Response) => {
 
     const { limit } = parseLimitOffset(req.query, { defaultLimit: 10 });
 
-    const jobs = await db.select()
+    const jobs = await db.select({
+      id: digestJobs.id, userOpenId: digestJobs.userOpenId,
+      scheduledFor: digestJobs.scheduledFor, status: digestJobs.status,
+      notificationCount: digestJobs.notificationCount, completedAt: digestJobs.completedAt,
+      createdAt: digestJobs.createdAt, deliveryPhase: digestJobs.deliveryPhase,
+      attemptCount: digestJobs.attemptCount, attemptedAt: digestJobs.attemptedAt,
+      nextAttemptAt: digestJobs.nextAttemptAt, reconciledAt: digestJobs.reconciledAt,
+    })
       .from(digestJobs)
       .where(eq(digestJobs.userOpenId, user.openId))
       .orderBy(desc(digestJobs.createdAt))

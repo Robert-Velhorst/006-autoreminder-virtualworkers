@@ -1,201 +1,125 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+const controls = vi.hoisted(() => ({ db: vi.fn(), deliver: vi.fn(), enqueue: vi.fn(), read: vi.fn() }));
+vi.mock('../../db', () => ({ getDb: controls.db }));
+vi.mock('../digest-outbox', () => ({ deliverDigestForUser: controls.deliver,
+  enqueueDigestNotification: controls.enqueue, readQueuedDigestNotifications: controls.read }));
+import { isDigestDue, processDigests, queueNotificationForDigest, sendDigestToUser,
+  startDigestScheduler, stopDigestScheduler } from '../digest-scheduler';
 
-// Mock dependencies
-vi.mock('../../db', () => ({
-  getDb: vi.fn(),
-}));
+const now = new Date('2026-10-21T12:00:00Z');
+const schedule = { digestTime: '08:00', digestTimezone: 'Europe/Amsterdam', lastDigestSent: null as Date | null };
+function database(rows: any[]) {
+  const where = vi.fn(async () => rows.map(row => ({ notificationMode: 'daily_digest', ...row })));
+  controls.db.mockResolvedValue({ select: () => ({ from: () => ({ where }) }) });
+  return where;
+}
+beforeEach(() => { vi.resetAllMocks(); vi.stubEnv('NOTIFICATIONS_ENABLED', 'true'); });
+afterEach(() => { stopDigestScheduler(); vi.useRealTimers(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
-vi.mock('../email', () => ({
-  sendEmail: vi.fn(),
-}));
-
-describe('Digest Scheduler Service', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+describe('recipient-local digest eligibility', () => {
+  it('does not send early, but catches up after restart later on the same day', () => {
+    expect(isDigestDue(schedule, new Date('2026-10-21T05:59:00Z'))).toBe(false);
+    expect(isDigestDue(schedule, now)).toBe(true);
+    expect(isDigestDue({ ...schedule, lastDigestSent: new Date('2026-10-21T06:00:00Z') }, now)).toBe(false);
   });
-
-  describe('isDigestTime helper logic', () => {
-    it('should correctly identify when it is digest time', () => {
-      // Simulate checking if current time matches target time
-      const targetTime = '08:00';
-      const [targetHour, targetMinute] = targetTime.split(':').map(Number);
-      
-      // Test exact match
-      const currentHour = 8;
-      const currentMinute = 0;
-      
-      const targetMinutes = targetHour * 60 + targetMinute;
-      const currentMinutes = currentHour * 60 + currentMinute;
-      
-      const isWithinWindow = Math.abs(targetMinutes - currentMinutes) <= 5;
-      expect(isWithinWindow).toBe(true);
-    });
-
-    it('should allow 5 minute window around digest time', () => {
-      const targetTime = '08:00';
-      const [targetHour, targetMinute] = targetTime.split(':').map(Number);
-      const targetMinutes = targetHour * 60 + targetMinute;
-      
-      // 3 minutes before target (7:57) - should be within window
-      const before = 7 * 60 + 57;
-      expect(Math.abs(targetMinutes - before) <= 5).toBe(true);
-      
-      // 3 minutes after target (8:03) - should be within window
-      const after = 8 * 60 + 3;
-      expect(Math.abs(targetMinutes - after) <= 5).toBe(true);
-      
-      // 10 minutes after target (8:10) - should NOT be within window
-      const outside = 8 * 60 + 10;
-      expect(Math.abs(targetMinutes - outside) <= 5).toBe(false);
-    });
-
-    it('should reject times outside the 5 minute window', () => {
-      const targetTime = '09:00';
-      const [targetHour, targetMinute] = targetTime.split(':').map(Number);
-      const targetMinutes = targetHour * 60 + targetMinute;
-      
-      // 8:30 - 30 minutes before
-      const currentMinutes = 8 * 60 + 30;
-      const isWithinWindow = Math.abs(targetMinutes - currentMinutes) <= 5;
-      
-      expect(isWithinWindow).toBe(false);
-    });
+  it('uses local days, not an elapsed-hour cooldown', () => {
+    expect(isDigestDue({ ...schedule, lastDigestSent: new Date('2026-10-20T21:00:00Z') }, new Date('2026-10-21T06:00:00Z'))).toBe(true);
+    expect(isDigestDue({ ...schedule, digestTime: '00:00', lastDigestSent: new Date('2026-10-20T22:05:00Z') }, new Date('2026-10-21T01:00:00Z'))).toBe(false);
   });
-
-  describe('Digest time parsing', () => {
-    it('should correctly parse HH:MM format', () => {
-      const times = ['00:00', '08:30', '12:00', '18:45', '23:59'];
-      
-      times.forEach(time => {
-        const [hour, minute] = time.split(':').map(Number);
-        expect(hour).toBeGreaterThanOrEqual(0);
-        expect(hour).toBeLessThanOrEqual(23);
-        expect(minute).toBeGreaterThanOrEqual(0);
-        expect(minute).toBeLessThanOrEqual(59);
-      });
-    });
-
-    it('should convert time to minutes correctly', () => {
-      expect(8 * 60 + 0).toBe(480);   // 08:00
-      expect(12 * 60 + 30).toBe(750); // 12:30
-      expect(23 * 60 + 59).toBe(1439); // 23:59
-    });
+  it('handles spring gaps and autumn repeated hours without creating two daily windows', () => {
+    const dst = { ...schedule, digestTime: '02:30' };
+    expect(isDigestDue(dst, new Date('2026-03-29T01:15:00Z'))).toBe(true);
+    expect(isDigestDue({ ...dst, lastDigestSent: new Date('2026-10-25T00:30:00Z') }, new Date('2026-10-25T01:30:00Z'))).toBe(false);
   });
-
-  describe('Digest frequency control', () => {
-    it('should prevent sending more than once per 20 hours', () => {
-      const lastSent = new Date(Date.now() - 10 * 60 * 60 * 1000); // 10 hours ago
-      const now = new Date();
-      const hoursSinceLastDigest = (now.getTime() - lastSent.getTime()) / (1000 * 60 * 60);
-      
-      const shouldSkip = hoursSinceLastDigest < 20;
-      expect(shouldSkip).toBe(true);
-    });
-
-    it('should allow sending after 20+ hours', () => {
-      const lastSent = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago
-      const now = new Date();
-      const hoursSinceLastDigest = (now.getTime() - lastSent.getTime()) / (1000 * 60 * 60);
-      
-      const shouldSkip = hoursSinceLastDigest < 20;
-      expect(shouldSkip).toBe(false);
-    });
+  it.each([{ digestTime: '25:00' }, { digestTime: '8:00' }, { digestTimezone: 'invalid/zone' },
+    { lastDigestSent: new Date(NaN) }])('fails closed for invalid schedule %j', change => {
+    expect(isDigestDue({ ...schedule, ...change }, now)).toBe(false);
   });
+});
 
-  describe('Notification grouping', () => {
-    it('should group notifications by type', () => {
-      const notifications = [
-        { notificationType: 'task_overdue', title: 'Task 1' },
-        { notificationType: 'task_due_soon', title: 'Task 2' },
-        { notificationType: 'task_overdue', title: 'Task 3' },
-        { notificationType: 'task_assigned', title: 'Task 4' },
-      ];
-
-      const byType: Record<string, typeof notifications> = {};
-      notifications.forEach(n => {
-        const type = n.notificationType;
-        if (!byType[type]) byType[type] = [];
-        byType[type].push(n);
-      });
-
-      expect(byType['task_overdue']).toHaveLength(2);
-      expect(byType['task_due_soon']).toHaveLength(1);
-      expect(byType['task_assigned']).toHaveLength(1);
-    });
-
-    it('should order notification types by priority', () => {
-      const typeOrder = ['task_overdue', 'task_due_soon', 'task_assigned', 'task_completed', 'general'];
-      
-      // Overdue should come first
-      expect(typeOrder.indexOf('task_overdue')).toBe(0);
-      // Completed should come near the end
-      expect(typeOrder.indexOf('task_completed')).toBe(3);
-    });
+describe('durable digest scheduler adapters', () => {
+  it('mounts exactly one lifecycle inside the shared background gate, independent of cache preparation', () => {
+    const source = readFileSync(new URL('../../_core/index.ts', import.meta.url), 'utf8');
+    const startup = source.slice(source.indexOf('if (backgroundWork.enabled)'), source.indexOf('const host ='));
+    const shutdown = source.slice(source.indexOf('const gracefulShutdown ='));
+    expect(startup.match(/startDigestScheduler\(\)/g)).toHaveLength(1);
+    expect(shutdown.match(/stopDigestScheduler\(\)/g)).toHaveLength(1);
+    expect(source.match(/startDigestScheduler\(\)/g)).toHaveLength(1);
+    expect(startup).not.toContain('warmUpCache');
+    expect(startup).not.toContain('scheduleCacheRefresh');
   });
-
-  describe('Digest HTML generation', () => {
-    it('should include correct type labels and emojis', () => {
-      const typeLabels: Record<string, { label: string; emoji: string }> = {
-        task_overdue: { label: 'Overdue Tasks', emoji: '🚨' },
-        task_due_soon: { label: 'Due Soon', emoji: '⏰' },
-        task_assigned: { label: 'New Assignments', emoji: '📋' },
-        task_completed: { label: 'Completed', emoji: '✅' },
-        general: { label: 'Updates', emoji: '📢' },
-      };
-
-      expect(typeLabels.task_overdue.emoji).toBe('🚨');
-      expect(typeLabels.task_due_soon.label).toBe('Due Soon');
-      expect(typeLabels.task_completed.emoji).toBe('✅');
-    });
+  it('has no database/provider/queue activity when globally disabled', async () => {
+    vi.stubEnv('NOTIFICATIONS_ENABLED', 'false');
+    expect(await sendDigestToUser('recipient')).toBe(false);
+    expect(await queueNotificationForDigest(2, 'recipient', { title: 'T', content: 'C', notificationType: 'general' })).toBeNull();
+    expect(await processDigests()).toMatchObject({ processed: 0, sent: 0 });
+    startDigestScheduler();
+    expect(controls.db).not.toHaveBeenCalled(); expect(controls.deliver).not.toHaveBeenCalled(); expect(controls.enqueue).not.toHaveBeenCalled();
   });
-
-  describe('24-hour notification window', () => {
-    it('should only include notifications from last 24 hours', () => {
-      const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-      const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
-      const now = new Date();
-
-      // Notification from 12 hours ago - should be included
-      const recent = new Date(Date.now() - 12 * 60 * 60 * 1000);
-      expect(recent >= oneDayAgo).toBe(true);
-
-      // Notification from 36 hours ago - should NOT be included
-      const old = new Date(Date.now() - 36 * 60 * 60 * 1000);
-      expect(old >= oneDayAgo).toBe(false);
-    });
+  it.each(['sent', 'not_sent', 'uncertain', 'empty', 'skipped'])('maps %s to an honest compatibility boolean', async state => {
+    controls.deliver.mockResolvedValue({ state, count: 1 });
+    expect(await sendDigestToUser('recipient')).toBe(state === 'sent');
+    expect(controls.deliver).toHaveBeenCalledWith('recipient', { trigger: 'manual' });
   });
-
-  describe('Delivery status tracking', () => {
-    const validStatuses = ['pending', 'sent', 'failed', 'queued_for_digest'];
-
-    it('should have valid delivery status values', () => {
-      validStatuses.forEach(status => {
-        expect(typeof status).toBe('string');
-        expect(status.length).toBeGreaterThan(0);
-      });
-    });
-
-    it('should track queued_for_digest status for digest mode users', () => {
-      const mode = 'daily_digest';
-      const expectedStatus = mode === 'daily_digest' ? 'queued_for_digest' : 'pending';
-      expect(expectedStatus).toBe('queued_for_digest');
-    });
+  it('delegates queue persistence without writing its own history or acknowledging rows', async () => {
+    const notice = { title: 'Title', content: 'Content', notificationType: 'general' as const };
+    controls.enqueue.mockResolvedValueOnce(18).mockResolvedValueOnce(null);
+    expect(await queueNotificationForDigest(2, 'recipient', notice)).toBe(18);
+    expect(await queueNotificationForDigest(2, 'recipient', notice)).toBeNull();
+    expect(controls.enqueue).toHaveBeenCalledWith({ userId: 2, userOpenId: 'recipient', ...notice });
+    expect(controls.db).not.toHaveBeenCalled();
   });
-
-  describe('Timezone handling', () => {
-    it('should support common timezones', () => {
-      const timezones = [
-        'Europe/Amsterdam',
-        'America/New_York',
-        'America/Los_Angeles',
-        'Asia/Tokyo',
-        'UTC',
-      ];
-
-      timezones.forEach(tz => {
-        // Verify timezone string is valid format
-        expect(tz).toMatch(/^[A-Za-z_\/]+$/);
-      });
-    });
+  it('scans only eligible consented recipients and separates uncertain/empty/skipped outcomes', async () => {
+    database(['sent', 'not_sent', 'uncertain', 'empty', 'skipped'].map(userOpenId => ({ ...schedule, userOpenId, emailEnabled: 1 }))
+      .concat([{ ...schedule, userOpenId: 'opted-out', emailEnabled: 0 }]));
+    controls.deliver.mockImplementation(async (state: string) => ({ state, count: 1 }));
+    expect(await processDigests({ now })).toEqual({ processed: 5, sent: 1, failed: 1, uncertain: 1, empty: 1, skipped: 1 });
+    expect(controls.deliver).not.toHaveBeenCalledWith('opted-out', expect.anything());
+    expect(controls.deliver).toHaveBeenCalledWith('sent', { now, trigger: 'cron' });
+  });
+  it('does not turn a persistence/status exception into confirmed non-delivery', async () => {
+    database([{ ...schedule, userOpenId: 'recipient', emailEnabled: 1 }]);
+    controls.deliver.mockRejectedValue(new Error('unavailable'));
+    expect(await processDigests({ now })).toMatchObject({ sent: 0, failed: 0, uncertain: 1 });
+  });
+  it('reports scan storage failure instead of idle success and clears the single-flight state', async () => {
+    controls.db.mockResolvedValue(null);
+    await expect(processDigests({ now })).rejects.toThrow('Database unavailable');
+    database([]);
+    expect(await processDigests({ now })).toMatchObject({ processed: 0 });
+  });
+  it('does not overlap scans across interval ticks and stop/start, and releases the shared promise', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const timer = vi.spyOn(globalThis, 'setInterval');
+    database([{ ...schedule, userOpenId: 'recipient', emailEnabled: 1 }]);
+    let release!: (value: unknown) => void;
+    controls.deliver.mockReturnValue(new Promise(resolve => { release = resolve; }));
+    startDigestScheduler(); startDigestScheduler();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    const pending = processDigests();
+    expect(processDigests()).toBe(pending);
+    stopDigestScheduler(); startDigestScheduler();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(controls.deliver).toHaveBeenCalledOnce();
+    expect(timer.mock.results[0].value.hasRef()).toBe(false);
+    release({ state: 'sent', count: 1 });
+    await pending;
+    stopDigestScheduler();
+    expect(vi.getTimerCount()).toBe(0);
+    controls.deliver.mockResolvedValue({ state: 'empty', count: 0 });
+    expect(await processDigests({ now })).toMatchObject({ empty: 1 });
+  });
+  it('catches background scan failures and cancels future ticks without invoking a provider', async () => {
+    vi.useFakeTimers();
+    controls.db.mockRejectedValue(new Error('Storage unavailable'));
+    startDigestScheduler();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controls.db).toHaveBeenCalledOnce();
+    stopDigestScheduler();
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(controls.db).toHaveBeenCalledOnce();
+    expect(controls.deliver).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

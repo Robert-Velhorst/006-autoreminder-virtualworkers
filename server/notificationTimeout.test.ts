@@ -7,6 +7,7 @@ describe("owner notification delivery", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     vi.resetModules();
     if (originalForgeApiUrl === undefined) delete process.env.BUILT_IN_FORGE_API_URL;
     else process.env.BUILT_IN_FORGE_API_URL = originalForgeApiUrl;
@@ -15,6 +16,7 @@ describe("owner notification delivery", () => {
   });
 
   it("passes a 15-second timeout signal to the upstream request", async () => {
+    vi.stubEnv("NOTIFICATIONS_ENABLED", "true");
     process.env.BUILT_IN_FORGE_API_URL = "https://forge.example.test";
     process.env.BUILT_IN_FORGE_API_KEY = "test-key";
     const timeoutSignal = new AbortController().signal;

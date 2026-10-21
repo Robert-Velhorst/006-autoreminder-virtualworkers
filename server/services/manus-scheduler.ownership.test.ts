@@ -1,19 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { dailyComplianceSnapshots, timeEntries, users, vaProfiles } from "../../drizzle/schema.postgres";
+import { dailyComplianceSnapshots, notificationHistory, userNotificationPreferences, timeEntries, users, vaProfiles } from "../../drizzle/schema.postgres";
 import type { ScheduledJobContext } from "../scheduledJobRuntime";
 
 const controls = vi.hoisted(() => ({
   getDb: vi.fn(), run: vi.fn(), notify: vi.fn(), cards: vi.fn(), comments: vi.fn(),
   operator: vi.fn(), target: vi.fn(),
+  ownerProvider: vi.fn(),
 }));
 vi.mock("../db", () => ({ getDb: controls.getDb }));
 vi.mock("../scheduledJobRuntime", async importOriginal => ({
   ...await importOriginal<typeof import("../scheduledJobRuntime")>(),
   runScheduledJob: controls.run,
 }));
-vi.mock("../_core/notification", () => ({ notifyOwner: controls.notify }));
+vi.mock("../_core/notification", () => ({ notifyOwner: controls.ownerProvider }));
 vi.mock("./trello-manus", () => ({
   getWorkerCards: controls.cards, getWorkerCommentedCardIdsToday: controls.comments,
   isDoingList: () => false, isOnHoldList: () => false,
@@ -56,7 +57,12 @@ function matches(condition: SQL, row: Record<string, unknown>) {
 
 function database(entries = [timer()]) {
   const state = { entries, conditions: [] as SQL[], afterRead: () => {}, beforeUpdate: () => {}, afterUpdate: () => {},
-    founderRead: () => {}, updateResult: null as unknown, snapshot: null as Record<string, unknown> | null };
+    founderRead: () => {}, afterNotificationInsert: () => {}, updateResult: null as unknown, snapshot: null as Record<string, unknown> | null,
+    founders: [{ id: worker.founderId, openId: "synthetic-founder" }],
+    preferences: [{ userId: worker.founderId, userOpenId: "synthetic-founder", inAppEnabled: 1, notificationMode: "priority_only", emailEnabled: 0 }],
+    notifications: [] as Record<string, unknown>[],
+    lockedTables: [] as unknown[],
+  };
   const update = vi.fn(() => ({ set: (values: Record<string, unknown>) => ({ where: async (condition: SQL) => {
     state.conditions.push(condition);
     state.beforeUpdate();
@@ -69,20 +75,36 @@ function database(entries = [timer()]) {
     state.afterUpdate();
     return state.updateResult ?? { rowCount: affectedRows };
   } }) }));
-  const insert = vi.fn(() => ({ values: (values: Record<string, unknown>) => ({
-    onConflictDoUpdate: async () => { state.snapshot = values; },
-  }) }));
+  const insert = vi.fn((table: unknown) => ({ values: (values: Record<string, unknown>) => {
+    if (table === notificationHistory) return (async () => {
+      await controls.notify(values);
+      state.notifications.push(values);
+      state.afterNotificationInsert();
+    })();
+    return { onConflictDoUpdate: async () => { state.snapshot = values; } };
+  } }));
   const db = { update, insert, select: () => ({ from: (table: unknown) => ({ where: (condition: SQL) => {
     const rows = table === vaProfiles ? [worker]
       : table === timeEntries ? state.entries.filter(entry => matches(condition, entry)).map(entry => ({ ...entry }))
-      : table === users ? [{ id: worker.founderId }]
+      : table === users ? state.founders.filter(row => row.id === new PgDialect().sqlToQuery(condition).params[0])
+      : table === userNotificationPreferences ? state.preferences.filter(row => {
+        const [id, openId] = new PgDialect().sqlToQuery(condition).params;
+        return row.userId === id && row.userOpenId === openId;
+      })
       : table === dailyComplianceSnapshots ? (state.snapshot ? [state.snapshot] : []) : [];
     if (table === timeEntries) state.afterRead();
     if (table === users) state.founderRead();
-    return Object.assign(Promise.resolve(rows), { limit: async () => rows });
+    const query = Object.assign(Promise.resolve(rows), { limit: () => query, for: () => { state.lockedTables.push(table); return query; } });
+    return query;
   } }) }) };
+  const transaction = vi.fn(async (work: (tx: typeof db) => Promise<unknown>) => {
+    const previous = [...state.notifications];
+    try { return await work(db); }
+    catch (error) { state.notifications = previous; throw error; }
+  });
+  Object.assign(db, { transaction });
   controls.getDb.mockResolvedValue(db);
-  return { state, db, update, insert };
+  return { state, db, update, insert, transaction };
 }
 
 function ownership() {
@@ -111,12 +133,81 @@ describe("Manus automatic timer stop ownership", () => {
     vi.setSystemTime(new Date("2026-10-01T00:00:00Z"));
     vi.spyOn(console, "log").mockImplementation(() => {});
     controls.notify.mockResolvedValue(true);
+    vi.stubEnv("NOTIFICATIONS_ENABLED", "true");
   });
   afterEach(() => {
+    expect(controls.ownerProvider).not.toHaveBeenCalled();
     stopManusScheduler();
     vi.useRealTimers();
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+  });
+
+  it.each([undefined, "false", "TRUE"])("still stops timers and reports counts when notifications are %j", async flag => {
+    vi.stubEnv("NOTIFICATIONS_ENABLED", flag);
+    const { state, transaction } = database();
+    await expect(scheduledWork(ownership().context)).resolves.toMatchObject({ recordsProcessed: 1 });
+    expect(state.entries[0]).toMatchObject({ endTime: new Date(), durationSeconds: 3600 });
+    expect(transaction).not.toHaveBeenCalled();
+    expect(state.notifications).toEqual([]);
+  });
+
+  it("stores received in-app history for only the canonical founder, without email consent", async () => {
+    const { state, db } = database();
+    state.founders.push({ id: 88, openId: "other-founder" });
+    state.preferences.push({ userId: 88, userOpenId: "other-founder", inAppEnabled: 1, notificationMode: "priority_only", emailEnabled: 1 });
+    const lease = ownership();
+    await expect(scheduledWork(lease.context)).resolves.toMatchObject({ recordsProcessed: 1 });
+    expect(state.notifications).toEqual([expect.objectContaining({
+      userId: 9, userOpenId: "synthetic-founder", notificationType: "general", channel: "in_app",
+      deliveryStatus: "sent", deliveredAt: new Date(),
+    })]);
+    expect(lease.assertOwnership).toHaveBeenCalledWith(db);
+    expect(state.lockedTables).toContain(users);
+    expect(state.lockedTables).toContain(userNotificationPreferences);
+  });
+
+  it.each(["missing founder", "missing preferences", "disabled mode", "disabled channel", "noncanonical channel", "wrong user id", "wrong open id"])(
+    "suppresses %s without affecting completed timers", async scenario => {
+      const { state } = database();
+      if (scenario === "missing founder") state.founders = [];
+      if (scenario === "missing preferences") state.preferences = [];
+      if (scenario === "disabled mode") state.preferences[0].notificationMode = "disabled";
+      if (scenario === "disabled channel") state.preferences[0].inAppEnabled = 0;
+      if (scenario === "noncanonical channel") state.preferences[0].inAppEnabled = 2;
+      if (scenario === "wrong user id") state.preferences[0].userId = 88;
+      if (scenario === "wrong open id") state.preferences[0].userOpenId = "other-founder";
+      await expect(scheduledWork(ownership().context)).resolves.toMatchObject({ recordsProcessed: 1 });
+      expect(state.entries[0].endTime).not.toBeNull();
+      expect(state.notifications).toEqual([]);
+    },
+  );
+
+  it("keeps successful timer counts when notification persistence fails and logs no raw SQL error", async () => {
+    const { state } = database();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    controls.notify.mockRejectedValue(new Error("PRIVATE SQL ERROR synthetic-secret"));
+    await expect(scheduledWork(ownership().context)).resolves.toMatchObject({ recordsProcessed: 1 });
+    expect(state.entries[0].endTime).not.toBeNull();
+    expect(state.notifications).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("synthetic-secret");
+  });
+
+  it("rolls back notification insertion when ownership is lost before transaction commit, retaining timer updates", async () => {
+    const { state } = database();
+    const lease = ownership();
+    state.afterNotificationInsert = () => { lease.controller.abort(); };
+    await expect(scheduledWork(lease.context)).rejects.toBeInstanceOf(ScheduledJobLeaseLostError);
+    expect(state.notifications).toEqual([]);
+    expect(state.entries[0].endTime).not.toBeNull();
+  });
+
+  it("rechecks global notification policy inside the transaction", async () => {
+    const { state } = database();
+    state.founderRead = () => { vi.stubEnv("NOTIFICATIONS_ENABLED", "false"); };
+    await expect(scheduledWork(ownership().context)).resolves.toMatchObject({ recordsProcessed: 1 });
+    expect(state.notifications).toEqual([]);
   });
 
   it("stops only running, non-voided worker-account timers in this founder scope", async () => {
@@ -127,7 +218,8 @@ describe("Manus automatic timer stop ownership", () => {
     expect(state.entries[0]).toMatchObject({ endTime: new Date(), durationSeconds: 3600, durationMinutes: 60 });
     expect(state.entries.slice(1, 4).map(entry => entry.endTime)).toEqual([null, null, null]);
     expect(controls.notify).toHaveBeenCalledWith(expect.objectContaining({ title: "Auto-stopped 1 timer(s) for Synthetic worker" }));
-    expect(lease.assertOwnership.mock.invocationCallOrder.at(-1)).toBeLessThan(controls.notify.mock.invocationCallOrder[0]);
+    expect(lease.assertOwnership.mock.invocationCallOrder.at(-2)).toBeLessThan(controls.notify.mock.invocationCallOrder[0]);
+    expect(lease.assertOwnership.mock.invocationCallOrder.at(-1)).toBeGreaterThan(controls.notify.mock.invocationCallOrder[0]);
   });
 
   it.each([
@@ -167,7 +259,7 @@ describe("Manus automatic timer stop ownership", () => {
     expect(controls.notify).not.toHaveBeenCalled();
   });
 
-  it("rechecks the lease after founder lookup and suppresses external notification", async () => {
+  it("rechecks the lease after founder lookup and suppresses in-app notification", async () => {
     const { state } = database();
     const lease = ownership();
     state.founderRead = () => { lease.assertOwnership.mockRejectedValue(new ScheduledJobLeaseLostError()); };

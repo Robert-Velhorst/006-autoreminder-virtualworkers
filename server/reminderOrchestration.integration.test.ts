@@ -590,6 +590,40 @@ describe.skipIf(!databaseUrl)(
       }
     });
 
+    it.each([
+      { priorState: "sent" as const, cooldown: false },
+      { priorState: "sending" as const, cooldown: false },
+      { priorState: "needs_review" as const, cooldown: false },
+      { priorState: "sent" as const, cooldown: true },
+    ])("enforces UTC quota timestamps for $priorState (cooldown=$cooldown) near midnight", async ({ priorState, cooldown }) => {
+      const now = new Date("2026-01-15T00:30:00.000Z");
+      const previousAt = new Date("2026-01-15T00:20:00.000Z");
+      const prior = await createFixture(priorState, previousAt);
+      const pending = await createFixture("scheduled", new Date(now.getTime() - 60_000));
+      await db.update(schema.reminderSchedules).set({
+        ...(priorState === "sent" ? { sentAt: previousAt } : { approvedAt: previousAt }),
+      }).where(eq(schema.reminderSchedules.id, prior.scheduleId));
+      await db.update(schema.commitments).set({ workspaceOwnerId: prior.ownerId, assignedUserId: prior.workerId })
+        .where(eq(schema.commitments.id, pending.commitmentId));
+      const [pendingSchedule] = await db.update(schema.reminderSchedules).set({ recipientUserId: prior.workerId })
+        .where(eq(schema.reminderSchedules.id, pending.scheduleId)).returning();
+      await db.update(schema.reminderRules).set({ workspaceOwnerId: prior.ownerId, requireApproval: false })
+        .where(eq(schema.reminderRules.id, pendingSchedule.ruleId));
+      await db.update(schema.reminderPolicies).set({ maxPerDay: cooldown ? 100 : 1, minIntervalMinutes: cooldown ? 60 : 0 })
+        .where(eq(schema.reminderPolicies.userId, prior.workerId));
+
+      await processDueRemindersInWorkspace(now, 2, prior.ownerId);
+      const [held] = await db.select().from(schema.reminderSchedules)
+        .where(eq(schema.reminderSchedules.id, pending.scheduleId));
+      expect(held.state).toBe("scheduled");
+      expect(held.policyReason).toMatch(cooldown ? /cooldown/i : /daily reminder limit/i);
+      expect(held.scheduledFor.getTime()).toBeGreaterThan(now.getTime());
+      const notifications = await db.select().from(schema.notificationHistory)
+        .where(and(eq(schema.notificationHistory.userId, prior.workerId), eq(schema.notificationHistory.taskId, pending.sourceId)));
+      expect(notifications).toHaveLength(0);
+      expect(controls.sendEmailWithOutcome).not.toHaveBeenCalled();
+    });
+
     it("processes due reminders only inside the requested workspace", async () => {
       const now = new Date();
       const scoped = await createFixture(

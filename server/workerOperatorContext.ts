@@ -96,7 +96,7 @@ export function selectWorkerProfile<T extends { status: string }>(profiles: read
 
 export async function getActiveWorkerProfileResolution(
   userId: number,
-  database?: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  database?: Pick<NonNullable<Awaited<ReturnType<typeof getDb>>>, "select">,
 ): Promise<{ profileId: number | null; ambiguous: boolean }> {
   const db = database ?? await getDb();
   if (!db) return { profileId: null, ambiguous: false };
@@ -120,7 +120,7 @@ export async function getActiveWorkerProfileResolution(
 
 export async function getActiveWorkerProfileId(
   userId: number,
-  database?: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  database?: Pick<NonNullable<Awaited<ReturnType<typeof getDb>>>, "select">,
 ): Promise<number | null> {
   return (await getActiveWorkerProfileResolution(userId, database)).profileId;
 }

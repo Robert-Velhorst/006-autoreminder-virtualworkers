@@ -3,6 +3,8 @@ import {
   dailyComplianceSnapshots,
   emailTasks,
   onHoldDailyChecks,
+  notificationHistory,
+  userNotificationPreferences,
   replyThreads,
   timeEntries,
   users,
@@ -15,20 +17,20 @@ import {
   isDoingList,
   isOnHoldList,
 } from "./trello-manus";
-import { notifyOwner } from "../_core/notification";
+import { areNotificationsEnabled } from "./notificationPolicy";
 import { parseDateKey } from "../utils/date-only";
 import { dateKeyInTimeZone, dateWindowInTimeZone } from "../../shared/workerTime";
 import { calculateScheduledTargetSeconds } from "../complianceMetrics";
 import { resolveWorkerOperatorContextById } from "../workerOperatorContext";
-import { runScheduledJob, ScheduledJobLeaseLostError, type ScheduledJobContext } from "../scheduledJobRuntime";
+import { runScheduledJob, ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader } from "../scheduledJobRuntime";
 import { createNonOverlappingRunner } from "./non-overlapping-runner";
 
 let schedulerInterval: NodeJS.Timeout | null = null;
 
-async function checkpointOwnership(context?: ScheduledJobContext) {
+async function checkpointOwnership(context?: ScheduledJobContext, transaction?: ScheduledJobOwnershipReader) {
   if (!context) return;
   if (context.signal.aborted) throw new ScheduledJobLeaseLostError();
-  await context.assertOwnership();
+  await context.assertOwnership(transaction);
   if (context.signal.aborted) throw new ScheduledJobLeaseLostError();
 }
 
@@ -141,8 +143,7 @@ async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect, cont
 
   await checkpointOwnership(context);
   if (stopped.length === 0) return 0;
-  const founder = await db.select().from(users).where(eq(users.id, worker.founderId)).limit(1);
-  if (founder.length === 0) return stopped.length;
+  if (!areNotificationsEnabled()) return stopped.length;
 
   const lines = stopped.map(entry => {
     const hours = Math.floor(entry.durationSeconds / 3600);
@@ -150,19 +151,44 @@ async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect, cont
     const capped = entry.wasCapped ? " (capped at 12h)" : "";
     return `- ${entry.cardName || "Unknown Card"}: ${hours}h ${minutes}m${capped}`;
   });
-  await checkpointOwnership(context);
-  await notifyOwner({
-    title: `Auto-stopped ${stopped.length} timer(s) for ${worker.name}`,
-    content: [
-      `The following timers for ${worker.name} were automatically stopped at midnight local time:`,
-      "",
-      ...lines,
-      "",
-      stopped.some(entry => entry.wasCapped)
-        ? "Entries marked capped were running for more than 12 hours and should be reviewed."
-        : "All durations are below the 12-hour safety cap.",
-    ].join("\n"),
-  });
+  const content = [
+    `The following timers for ${worker.name} were automatically stopped at midnight local time:`,
+    "",
+    ...lines,
+    "",
+    stopped.some(entry => entry.wasCapped)
+      ? "Entries marked capped were running for more than 12 hours and should be reviewed."
+      : "All durations are below the 12-hour safety cap.",
+  ].join("\n");
+  try {
+    // Notification failure must not invalidate the already completed timer CAS.
+    // Lock identity, consent and lease on this transaction's own connection.
+    await db.transaction(async tx => {
+      await checkpointOwnership(context, tx);
+      const [founder] = await tx.select({ id: users.id, openId: users.openId })
+        .from(users).where(eq(users.id, worker.founderId)).limit(1).for("share");
+      if (!founder || founder.id !== worker.founderId || !founder.openId) return;
+      const [prefs] = await tx.select().from(userNotificationPreferences)
+        .where(and(eq(userNotificationPreferences.userId, founder.id), eq(userNotificationPreferences.userOpenId, founder.openId)))
+        .limit(1).for("share");
+      await checkpointOwnership(context, tx);
+      if (!areNotificationsEnabled() || !prefs || prefs.inAppEnabled !== 1 || prefs.notificationMode === "disabled") return;
+      await tx.insert(notificationHistory).values({
+        userId: founder.id,
+        userOpenId: founder.openId,
+        title: `Auto-stopped ${stopped.length} timer(s) for ${worker.name}`.slice(0, 500),
+        content,
+        notificationType: "general",
+        channel: "in_app",
+        deliveryStatus: "sent",
+        deliveredAt: new Date(),
+      });
+      await checkpointOwnership(context, tx);
+    });
+  } catch (error) {
+    if (error instanceof ScheduledJobLeaseLostError) throw error;
+    console.warn("[ManusScheduler] Auto-stop completed; in-app notification could not be stored");
+  }
   return stopped.length;
 }
 

@@ -1594,7 +1594,31 @@ export const digestJobs = pgTable("digest_jobs", {
   error: text("error"),
   completedAt: timestamp("completedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+  windowKey: varchar("windowKey", { length: 96 }),
+  deliveryPhase: varchar("deliveryPhase", { length: 24 }),
+  recipientEmail: text("recipientEmail"),
+  subject: text("subject"),
+  html: text("html"),
+  payloadHash: varchar("payloadHash", { length: 64 }),
+  attemptId: varchar("attemptId", { length: 64 }),
+  attemptCount: integer("attemptCount").default(0).notNull(),
+  attemptedAt: timestamp("attemptedAt"),
+  nextAttemptAt: timestamp("nextAttemptAt"),
+  providerReceipt: text("providerReceipt"),
+  reconciledAt: timestamp("reconciledAt"),
+  reconciledBy: integer("reconciledBy"),
+  reconciliationNote: text("reconciliationNote"),
+}, table => [uniqueIndex("digest_jobs_window_key_unique").on(table.windowKey)]);
+
+export const digestJobItems = pgTable("digest_job_items", {
+  id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
+  jobId: integer("jobId").notNull().references(() => digestJobs.id, { onDelete: "restrict" }),
+  notificationId: integer("notificationId").notNull().references(() => notificationHistory.id, { onDelete: "restrict" }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, table => [
+  uniqueIndex("digest_job_items_notification_unique").on(table.notificationId),
+  index("digest_job_items_job_idx").on(table.jobId),
+]);
 
 export type DigestJob = typeof digestJobs.$inferSelect;
 export type InsertDigestJob = typeof digestJobs.$inferInsert;

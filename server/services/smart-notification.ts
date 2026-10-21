@@ -1,306 +1,161 @@
-/**
- * Smart Notification Service
- * 
- * Wraps the notification system to respect user preferences:
- * - disabled: Skip all notifications
- * - daily_digest: Queue for daily summary
- * - priority_only: Only send if task is urgent (due within threshold)
- */
-
+import { and, eq } from 'drizzle-orm';
+import { notificationHistory, userNotificationPreferences, users, vaProfiles } from '../../drizzle/schema.postgres';
 import { getDb } from '../db';
-import { userNotificationPreferences } from '../../drizzle/schema.postgres';
-import { eq } from 'drizzle-orm';
-import { notifyOwner, NotificationPayload } from '../_core/notification';
-import { sendEmail } from './email';
+import { getActiveWorkerProfileId } from '../workerOperatorContext';
+import { deliverDigestForUser, enqueueDigestNotification, readQueuedDigestNotifications } from './digest-outbox';
+import { sendEmailWithOutcome } from './email';
+import { areNotificationsEnabled } from './notificationPolicy';
+import { hasPersistedEmailConsent } from './recipientEmailConsent';
 
 export interface TaskNotification {
-  userOpenId: string;
-  userId: number;
-  title: string;
-  content: string;
-  taskId?: string;
-  dueDate?: Date | string | null;
+  userOpenId: string; userId: number; title: string; content: string;
+  taskId?: string; taskName?: string; dueDate?: Date | string | null;
   notificationType: 'task_assigned' | 'task_due_soon' | 'task_overdue' | 'task_completed' | 'general';
 }
 
 interface NotificationResult {
-  sent: boolean;
-  reason: string;
-  mode: string;
-  queuedForDigest?: boolean;
+  sent: boolean; reason: string; mode: string; queuedForDigest?: boolean;
+  deliveryState?: 'sent' | 'not_sent' | 'uncertain';
+  channels?: { inApp: 'stored' | 'disabled' | 'not_stored' | 'failed'; email: 'sent' | 'not_sent' | 'uncertain' | 'disabled' };
+  inAppNotificationId?: number;
 }
 
-// In-memory digest queue (in production, use Redis or database)
-const digestQueue: Map<string, TaskNotification[]> = new Map();
+function isUrgent(notification: TaskNotification, dueDate: Date | null, threshold: number) {
+  return Number.isFinite(threshold) && threshold >= 0 && (notification.notificationType === 'task_overdue'
+    || Boolean(dueDate && (dueDate.getTime() - Date.now()) / 3_600_000 <= threshold));
+}
 
-/**
- * Get user's notification preferences
- */
-async function getUserPreferences(userOpenId: string) {
+async function storeRecipientInbox(notification: TaskNotification, dueDate: Date | null): Promise<{
+  state: 'stored' | 'disabled' | 'not_stored' | 'failed'; id?: number;
+}> {
+  try {
+    const db = await getDb();
+    if (!db) return { state: 'failed' };
+    return await db.transaction(async tx => {
+      const [recipient] = await tx.select({ user: users, preferences: userNotificationPreferences }).from(users)
+        .innerJoin(userNotificationPreferences, and(eq(users.openId, userNotificationPreferences.userOpenId),
+          eq(users.id, userNotificationPreferences.userId)))
+        .where(and(eq(users.id, notification.userId), eq(users.openId, notification.userOpenId))).limit(1).for('update');
+      if (!recipient) return { state: 'not_stored' as const };
+      if (!['admin', 'worker'].includes(recipient.user.role)) return { state: 'not_stored' as const };
+      if (recipient.user.role === 'worker') {
+        // Hold existing profile rows through inbox commit; selection policy stays canonical.
+        await tx.select({ id: vaProfiles.id }).from(vaProfiles)
+          .where(eq(vaProfiles.userId, recipient.user.id)).for('share');
+        if (await getActiveWorkerProfileId(recipient.user.id, tx) === null) return { state: 'not_stored' as const };
+      }
+      const preferences = recipient.preferences;
+      if (preferences.inAppEnabled !== 1) return { state: 'disabled' as const };
+      if (!areNotificationsEnabled() || preferences.notificationMode !== 'priority_only'
+        || !isUrgent(notification, dueDate, preferences.urgentThresholdHours)) return { state: 'not_stored' as const };
+      const [record] = await tx.insert(notificationHistory).values({
+        userId: recipient.user.id, userOpenId: recipient.user.openId, title: notification.title, content: notification.content,
+        notificationType: notification.notificationType, taskId: notification.taskId ?? null,
+        taskName: notification.taskName ?? null, dueDate, channel: 'in_app', deliveryStatus: 'sent', deliveredAt: new Date(),
+      }).returning({ id: notificationHistory.id });
+      if (!record || !areNotificationsEnabled()) throw new Error('Inbox persistence not confirmed');
+      return { state: 'stored' as const, id: record.id };
+    });
+  } catch { return { state: 'failed' }; }
+}
+
+async function getRecipient(userOpenId: string, userId?: number) {
+  if (!userOpenId || (userId !== undefined && (!Number.isSafeInteger(userId) || userId <= 0))) return null;
   const db = await getDb();
   if (!db) return null;
-
-  const [prefs] = await db.select()
-    .from(userNotificationPreferences)
-    .where(eq(userNotificationPreferences.userOpenId, userOpenId))
-    .limit(1);
-
-  return prefs || {
-    notificationMode: 'priority_only' as const,
-    urgentThresholdHours: 24,
-    emailEnabled: 1,
-    inAppEnabled: 1,
-    emailAddress: null,
-  };
+  const [row] = await db.select({ user: users, preferences: userNotificationPreferences }).from(users)
+    .innerJoin(userNotificationPreferences, and(eq(users.openId, userNotificationPreferences.userOpenId),
+      eq(users.id, userNotificationPreferences.userId)))
+    .where(and(eq(users.openId, userOpenId), userId === undefined ? undefined : eq(users.id, userId))).limit(1);
+  if (row && !['admin', 'worker'].includes(row.user.role)) return null;
+  if (row?.user.role === 'worker' && await getActiveWorkerProfileId(row.user.id, db) === null) return null;
+  return row ?? null;
 }
 
-/**
- * Check if a task is urgent based on due date and threshold
- */
-function isTaskUrgent(dueDate: Date | string | null | undefined, thresholdHours: number): { urgent: boolean; hoursUntilDue: number | null } {
-  if (!dueDate) {
-    return { urgent: false, hoursUntilDue: null };
-  }
-
-  const due = new Date(dueDate);
-  const now = new Date();
-  const hoursUntilDue = (due.getTime() - now.getTime()) / (1000 * 60 * 60);
-
-  // Urgent if due within threshold or overdue
-  const urgent = hoursUntilDue <= thresholdHours;
-
-  return { urgent, hoursUntilDue };
+function escapeHtml(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
-/**
- * Add notification to digest queue
- */
-function queueForDigest(notification: TaskNotification) {
-  const queue = digestQueue.get(notification.userOpenId) || [];
-  queue.push(notification);
-  digestQueue.set(notification.userOpenId, queue);
-  console.log(`[SmartNotification] Queued notification for digest: ${notification.title} (user: ${notification.userOpenId})`);
+/** Nondestructive compatibility read: only the durable core acknowledges membership. */
+export async function getDigestQueue(userOpenId: string) {
+  return readQueuedDigestNotifications(userOpenId);
 }
 
-/**
- * Get and clear digest queue for a user
- */
-export function getDigestQueue(userOpenId: string): TaskNotification[] {
-  const queue = digestQueue.get(userOpenId) || [];
-  digestQueue.delete(userOpenId);
-  return queue;
-}
-
-/**
- * Send a notification respecting user preferences
- */
 export async function sendSmartNotification(notification: TaskNotification): Promise<NotificationResult> {
-  const prefs = await getUserPreferences(notification.userOpenId);
-
-  if (!prefs) {
-    // No preferences found, use default (priority_only)
-    console.log(`[SmartNotification] No preferences found for user ${notification.userOpenId}, using defaults`);
+  const skip = (reason: string, mode = 'unconfigured'): NotificationResult => ({ sent: false, reason, mode });
+  if (!areNotificationsEnabled()) return skip('Notifications are globally disabled', 'disabled');
+  if (!notification.title?.trim() || notification.title.length > 500 || !notification.content?.trim()) return skip('Invalid notification content');
+  const dueDate = notification.dueDate == null ? null : new Date(notification.dueDate);
+  if (dueDate && !Number.isFinite(dueDate.getTime())) return skip('Invalid due date');
+  let recipient;
+  try { recipient = await getRecipient(notification.userOpenId, notification.userId); }
+  catch { return skip('Recipient preferences unavailable'); }
+  if (!recipient) return skip('Canonical recipient and persisted preferences are required');
+  const { preferences } = recipient;
+  const mode = preferences.notificationMode;
+  if (mode === 'disabled') return skip('Notifications disabled by user preference', mode);
+  if (mode === 'daily_digest') {
+    try {
+      if (!areNotificationsEnabled()) return skip('Notifications are globally disabled', mode);
+      const id = await enqueueDigestNotification({ ...notification, dueDate });
+      return { sent: false, mode, queuedForDigest: id !== null,
+        reason: id === null ? 'Digest notification was not persisted' : 'Persisted for daily digest' };
+    } catch { return { ...skip('Digest notification was not persisted', mode), queuedForDigest: false }; }
   }
-
-  const mode = prefs?.notificationMode || 'priority_only';
-  const urgentThreshold = prefs?.urgentThresholdHours || 24;
-
-  // Check notification mode
-  switch (mode) {
-    case 'disabled':
-      console.log(`[SmartNotification] Notifications disabled for user ${notification.userOpenId}`);
-      return {
-        sent: false,
-        reason: 'Notifications disabled by user preference',
-        mode,
-      };
-
-    case 'daily_digest':
-      // Queue for daily digest instead of sending immediately
-      queueForDigest(notification);
-      return {
-        sent: false,
-        reason: 'Queued for daily digest',
-        mode,
-        queuedForDigest: true,
-      };
-
-    case 'priority_only':
-      const { urgent, hoursUntilDue } = isTaskUrgent(notification.dueDate, urgentThreshold);
-
-      // Always send overdue notifications
-      if (notification.notificationType === 'task_overdue') {
-        return await sendNotificationNow(notification, prefs, mode);
-      }
-
-      // Check if task is urgent
-      if (!urgent) {
-        console.log(`[SmartNotification] Task not urgent (due in ${hoursUntilDue?.toFixed(1)} hours, threshold: ${urgentThreshold}h)`);
-        return {
-          sent: false,
-          reason: `Task not urgent (due in ${hoursUntilDue?.toFixed(1) || 'unknown'} hours, threshold: ${urgentThreshold}h)`,
-          mode,
-        };
-      }
-
-      // Task is urgent, send notification
-      return await sendNotificationNow(notification, prefs, mode);
-
-    default:
-      console.warn(`[SmartNotification] Unknown notification mode: ${mode}`);
-      return {
-        sent: false,
-        reason: `Unknown notification mode: ${mode}`,
-        mode,
-      };
+  if (mode !== 'priority_only') return skip('Unsupported notification mode', mode);
+  const threshold = preferences.urgentThresholdHours;
+  if (!Number.isFinite(threshold) || threshold < 0) return skip('Invalid persisted urgency threshold', mode);
+  if (notification.notificationType !== 'task_overdue'
+    && (!dueDate || (dueDate.getTime() - Date.now()) / 3_600_000 > threshold)) return skip('Task is not urgent', mode);
+  const inbox = await storeRecipientInbox(notification, dueDate);
+  const channelResult = (email: NonNullable<NotificationResult['channels']>['email'], detail: string): NotificationResult => ({
+    sent: inbox.state === 'stored' || email === 'sent', mode, channels: { inApp: inbox.state, email },
+    ...(inbox.id === undefined ? {} : { inAppNotificationId: inbox.id }),
+    ...(email === 'disabled' ? {} : { deliveryState: email }),
+    reason: `${inbox.state === 'stored' ? 'Stored in recipient inbox (no push delivery claimed)' : `Recipient inbox ${inbox.state}`}; ${detail}`,
+  });
+  let current;
+  try { current = await getRecipient(notification.userOpenId, notification.userId); }
+  catch { return channelResult('not_sent', 'Recipient email preferences unavailable'); }
+  if (!current || current.preferences.notificationMode !== 'priority_only'
+    || !hasPersistedEmailConsent(current.preferences)) return channelResult('disabled', 'Recipient email consent is absent or changed');
+  const currentThreshold = current.preferences.urgentThresholdHours;
+  if (!Number.isFinite(currentThreshold) || currentThreshold < 0
+    || (notification.notificationType !== 'task_overdue'
+      && (!dueDate || (dueDate.getTime() - Date.now()) / 3_600_000 > currentThreshold))) {
+    return channelResult('not_sent', 'Task no longer meets the current urgency preference');
   }
+  const address = current.preferences.emailAddress || current.user.email;
+  if (!address) return channelResult('not_sent', 'Recipient email address is missing');
+  if (!areNotificationsEnabled()) return channelResult('disabled', 'Notifications are globally disabled');
+  try {
+    const outcome = await sendEmailWithOutcome({ to: address, subject: notification.title,
+      html: `<h2>${escapeHtml(notification.title)}</h2><p>${escapeHtml(notification.content)}</p>${dueDate ? `<p>Due: ${escapeHtml(dueDate.toISOString())}</p>` : ''}` }, undefined, async () => {
+        try {
+          if (!areNotificationsEnabled()) return false;
+          const latest = await getRecipient(notification.userOpenId, notification.userId);
+          return Boolean(areNotificationsEnabled() && latest && latest.preferences.notificationMode === 'priority_only'
+            && hasPersistedEmailConsent(latest.preferences)
+            && (latest.preferences.emailAddress || latest.user.email) === address
+            && isUrgent(notification, dueDate, latest.preferences.urgentThresholdHours));
+        } catch { return false; }
+      });
+    return channelResult(outcome.status, outcome.status === 'sent' ? 'Email delivery confirmed' : outcome.status === 'uncertain'
+      ? 'Email delivery is unconfirmed; do not retry automatically' : 'Email was not sent');
+  } catch { return channelResult('uncertain', 'Email delivery is unconfirmed; do not retry automatically'); }
 }
 
-/**
- * Actually send the notification through available channels
- */
-async function sendNotificationNow(
-  notification: TaskNotification,
-  prefs: any,
-  mode: string
-): Promise<NotificationResult> {
-  let sent = false;
-  const channels: string[] = [];
-
-  // Send in-app notification if enabled
-  if (prefs?.inAppEnabled !== 0) {
-    try {
-      const success = await notifyOwner({
-        title: notification.title,
-        content: notification.content,
-      });
-      if (success) {
-        sent = true;
-        channels.push('in-app');
-      }
-    } catch (error) {
-      console.error('[SmartNotification] Failed to send in-app notification:', error);
-    }
-  }
-
-  // Send email notification if enabled and email address available
-  if (prefs?.emailEnabled !== 0 && prefs?.emailAddress) {
-    try {
-      const success = await sendEmail({
-        to: prefs.emailAddress,
-        subject: notification.title,
-        html: `
-          <div style="font-family: system-ui, -apple-system, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #1a1a1a;">${notification.title}</h2>
-            <p style="color: #4a4a4a; line-height: 1.6;">${notification.content}</p>
-            ${notification.dueDate ? `<p style="color: #666; font-size: 14px;">Due: ${new Date(notification.dueDate).toLocaleString()}</p>` : ''}
-            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;" />
-            <p style="color: #888; font-size: 12px;">
-              You can adjust your notification preferences in the <a href="/settings">Settings</a> page.
-            </p>
-          </div>
-        `,
-      });
-      if (success) {
-        sent = true;
-        channels.push('email');
-      }
-    } catch (error) {
-      console.error('[SmartNotification] Failed to send email notification:', error);
-    }
-  }
-
-  console.log(`[SmartNotification] Notification ${sent ? 'sent' : 'failed'} via: ${channels.join(', ') || 'none'}`);
-
-  return {
-    sent,
-    reason: sent ? `Sent via ${channels.join(', ')}` : 'Failed to send through any channel',
-    mode,
-  };
-}
-
-/**
- * Send daily digest to a user
- */
 export async function sendDailyDigest(userOpenId: string): Promise<boolean> {
-  const queue = getDigestQueue(userOpenId);
-  
-  if (queue.length === 0) {
-    console.log(`[SmartNotification] No notifications in digest queue for user ${userOpenId}`);
-    return true;
-  }
-
-  const prefs = await getUserPreferences(userOpenId);
-  if (!prefs || prefs.notificationMode !== 'daily_digest') {
-    console.log(`[SmartNotification] User ${userOpenId} not in digest mode, skipping`);
-    return false;
-  }
-
-  // Group notifications by type
-  const byType = queue.reduce((acc, n) => {
-    const type = n.notificationType;
-    if (!acc[type]) acc[type] = [];
-    acc[type].push(n);
-    return acc;
-  }, {} as Record<string, TaskNotification[]>);
-
-  // Build digest content
-  const sections: string[] = [];
-  
-  if (byType.task_overdue?.length) {
-    sections.push(`**Overdue Tasks (${byType.task_overdue.length})**\n${byType.task_overdue.map(n => `- ${n.title}`).join('\n')}`);
-  }
-  if (byType.task_due_soon?.length) {
-    sections.push(`**Due Soon (${byType.task_due_soon.length})**\n${byType.task_due_soon.map(n => `- ${n.title}`).join('\n')}`);
-  }
-  if (byType.task_assigned?.length) {
-    sections.push(`**New Assignments (${byType.task_assigned.length})**\n${byType.task_assigned.map(n => `- ${n.title}`).join('\n')}`);
-  }
-  if (byType.task_completed?.length) {
-    sections.push(`**Completed (${byType.task_completed.length})**\n${byType.task_completed.map(n => `- ${n.title}`).join('\n')}`);
-  }
-  if (byType.general?.length) {
-    sections.push(`**Updates (${byType.general.length})**\n${byType.general.map(n => `- ${n.title}`).join('\n')}`);
-  }
-
-  const digestContent = sections.join('\n\n');
-  const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
-
-  // Send digest
-  const result = await sendNotificationNow({
-    userOpenId,
-    userId: queue[0]?.userId || 0,
-    title: `📋 Daily Task Digest - ${today}`,
-    content: digestContent,
-    notificationType: 'general',
-  }, prefs, 'daily_digest');
-
-  // Update last digest sent timestamp
-  if (result.sent) {
-    const db = await getDb();
-    if (db) {
-      await db.update(userNotificationPreferences)
-        .set({ lastDigestSent: new Date() })
-        .where(eq(userNotificationPreferences.userOpenId, userOpenId));
-    }
-  }
-
-  return result.sent;
+  if (!areNotificationsEnabled()) return false;
+  return (await deliverDigestForUser(userOpenId, { trigger: 'manual' })).state === 'sent';
 }
 
-/**
- * Get notification statistics for a user
- */
 export async function getNotificationStats(userOpenId: string) {
-  const prefs = await getUserPreferences(userOpenId);
-  const queuedCount = digestQueue.get(userOpenId)?.length || 0;
-
-  return {
-    mode: prefs?.notificationMode || 'priority_only',
-    urgentThreshold: prefs?.urgentThresholdHours || 24,
-    emailEnabled: prefs?.emailEnabled === 1,
-    inAppEnabled: prefs?.inAppEnabled === 1,
-    queuedForDigest: queuedCount,
-    lastDigestSent: prefs?.lastDigestSent || null,
-  };
+  const recipient = await getRecipient(userOpenId);
+  const preferences = recipient?.preferences;
+  const queued = await readQueuedDigestNotifications(userOpenId);
+  return { mode: preferences?.notificationMode ?? 'unconfigured', urgentThreshold: preferences?.urgentThresholdHours ?? null,
+    emailEnabled: hasPersistedEmailConsent(preferences), inAppEnabled: preferences?.inAppEnabled === 1,
+    queuedForDigest: queued.length, lastDigestSent: preferences?.lastDigestSent ?? null };
 }

@@ -1,6 +1,7 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { users, userNotificationPreferences } from "../../drizzle/schema.postgres";
 import { getDb } from "../db";
+import { getActiveWorkerProfileId } from "../workerOperatorContext";
 
 export function hasPersistedEmailConsent(preferences: {
   emailEnabled?: number | null;
@@ -10,15 +11,32 @@ export function hasPersistedEmailConsent(preferences: {
     && ["daily_digest", "priority_only"].includes(preferences.notificationMode ?? "");
 }
 
-export async function hasRecipientEmailConsent(userId: number): Promise<boolean> {
-  if (!Number.isSafeInteger(userId) || userId <= 0) return false;
+async function readConsentingRecipient(userId: number, requiredMode?: "daily_digest" | "priority_only") {
+  if (!Number.isSafeInteger(userId) || userId <= 0) return null;
   const db = await getDb();
-  if (!db) return false;
+  if (!db) return null;
   const [preferences] = await db.select({
     emailEnabled: userNotificationPreferences.emailEnabled,
     notificationMode: userNotificationPreferences.notificationMode,
+    role: users.role,
+    emailAddress: userNotificationPreferences.emailAddress,
+    userEmail: users.email,
   }).from(users).innerJoin(userNotificationPreferences,
-    eq(users.openId, userNotificationPreferences.userOpenId))
+    and(eq(users.openId, userNotificationPreferences.userOpenId), eq(users.id, userNotificationPreferences.userId)))
     .where(eq(users.id, userId)).limit(1);
-  return hasPersistedEmailConsent(preferences);
+  if (!hasPersistedEmailConsent(preferences)
+    || (requiredMode !== undefined && preferences?.notificationMode !== requiredMode)) return null;
+  if (preferences.role === "worker") {
+    if (await getActiveWorkerProfileId(userId, db) === null) return null;
+  } else if (preferences.role !== "admin") return null;
+  return preferences;
+}
+
+export async function hasRecipientEmailConsent(userId: number, requiredMode?: "daily_digest" | "priority_only"): Promise<boolean> {
+  return await readConsentingRecipient(userId, requiredMode) !== null;
+}
+
+export async function getConsentingRecipientEmail(userId: number, requiredMode?: "daily_digest" | "priority_only"): Promise<string | null> {
+  const recipient = await readConsentingRecipient(userId, requiredMode);
+  return recipient?.emailAddress || recipient?.userEmail || null;
 }
