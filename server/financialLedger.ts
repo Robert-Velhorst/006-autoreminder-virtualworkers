@@ -3,6 +3,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { financialLedgerEvents, paymentCycles, weeklyPayLog, timeDayReviews, users, vaProfiles, type User } from '../drizzle/schema.postgres';
 import type { getDb } from './db';
 import { parseDateKey } from './utils/date-only';
+import { weeklyPayRevision } from '../shared/financialRevision';
 
 type Database = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -28,6 +29,7 @@ export const PAY_COUNT_WEIGHTS_CENTS = {
 export type PayCountKey = keyof typeof PAY_COUNT_WEIGHTS_CENTS;
 export type WeeklyPayInput = Partial<Record<PayCountKey, number>> & {
   vaId?: number; weekStart: string; weekEnd: string; paymentCycleId?: number | null; notes?: string | null;
+  expectedRevision?: string | null;
 };
 const countKeys = Object.keys(PAY_COUNT_WEIGHTS_CENTS) as PayCountKey[];
 const MONEY_MAX_CENTS = 99_999_999;
@@ -189,9 +191,21 @@ async function saveInScope(tx: Transaction, scope: Scope, input: WeeklyPayInput,
 
 export async function saveWeeklyPayLog(db: Database, actor: FinancialActor, input: WeeklyPayInput): Promise<WeeklyLogResult> {
   admin(actor); positiveId(input.vaId);
+  if (!Object.prototype.hasOwnProperty.call(input, 'expectedRevision')
+    || (input.expectedRevision !== null && typeof input.expectedRevision !== 'string')) {
+    fail(400, 'A loaded weekly ledger revision is required; reload before saving');
+  }
   // Validate estimates before acquiring resources; no silent coercion of counters.
   countsAndEstimate(input);
-  return db.transaction(async tx => saveInScope(tx, await lockScope(tx, actor, input.vaId), input));
+  return db.transaction(async tx => {
+    const scope = await lockScope(tx, actor, input.vaId);
+    const weekStart = key(date(input.weekStart));
+    const existing = scope.logs.find(row => row.vaId === input.vaId && key(row.weekStart) === weekStart) ?? null;
+    if (input.expectedRevision !== weeklyPayRevision(existing)) {
+      fail(409, 'Weekly ledger changed since this form was loaded; reload and review before saving');
+    }
+    return saveInScope(tx, scope, input);
+  });
 }
 type ReadInput = { vaId?: number; weekStart?: string; limit?: number };
 export async function getWeeklyPayLogs(db: Database, actor: FinancialActor, input: ReadInput = {}): Promise<WeeklyLog[]> {
@@ -210,7 +224,8 @@ export async function getWeeklyPayLog(db: Database, actor: FinancialActor, input
   return (await getWeeklyPayLogs(db, actor, { ...input, limit: 1 }))[0] ?? null;
 }
 
-export async function incrementWeeklyD1(db: Database, workerUserId: number, dateKey: string, count: number, eventKey?: string): Promise<WeeklyLogResult> {
+export async function incrementWeeklyD1(db: Database, workerUserId: number, dateKey: string, count: number, eventKey?: string,
+  beforeIncrement?: (tx: Transaction) => Promise<void>): Promise<WeeklyLogResult> {
   positiveId(workerUserId); const day = date(dateKey);
   if (!Number.isSafeInteger(count) || count <= 0) fail(400, 'A positive integer D1 increment is required');
   if (eventKey !== undefined && (typeof eventKey !== 'string' || eventKey.trim() !== eventKey || eventKey.length < 3 || eventKey.length > 256)) fail(400, 'Invalid financial event key');
@@ -228,6 +243,9 @@ export async function incrementWeeklyD1(db: Database, workerUserId: number, date
     }
     const counts = Object.fromEntries(countKeys.map(field => [field, before ? Number(before[field]) : 0])) as Record<PayCountKey, number>;
     counts.demeritD1 += count;
+    // Source markers are committed with a new charge only, never repaired as a
+    // side effect of replaying an already committed ledger event.
+    await beforeIncrement?.(tx);
     return saveInScope(tx, scope, { vaId: workerUserId, weekStart: key(weekStart), weekEnd: key(addDays(weekStart, 6)), ...counts },
       'd1_incremented', eventKey === undefined ? undefined : { eventKey, requestHash });
   });

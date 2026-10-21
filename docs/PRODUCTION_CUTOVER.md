@@ -60,6 +60,11 @@ Before assignment migration 0008, follow
 founder/full-task identities deliberately abort migration unchanged. Review them
 privately; do not remove rows or history automatically to satisfy readiness.
 
+Before financial migration 0009, follow
+[Financial Ledger Cutover](FINANCIAL_LEDGER_CUTOVER.md). Duplicate financial
+identities abort unchanged. Existing ownership, settlement values and linked
+history require explicit review; the migration is not financial reconciliation.
+
 Production deployment is started manually from protected `main`. The selected
 release must be a published stable `vMAJOR.MINOR.PATCH` tag whose commit is
 contained in `main`. The workflow verifies the GHCR image's provenance against

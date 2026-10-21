@@ -13,17 +13,22 @@ to migrate an operational database, settle pay, deploy, or enable active mode.
 - Passive timeline reads: missing analysis is reported, not started by GET.
 - Isolated native PostgreSQL fixtures for financial concurrency and migration
   checks. These require a dedicated test URL, not an operational database URL.
+- Follow-up: atomic source-marker/D1 transactions, stable replay keys, fresh
+  payment-read ownership and required optimistic revisions for founder saves.
+  A stale form is rejected rather than overwriting a newer automatic charge.
 
 ## Outstanding Before Acceptance
 
 - Execute native financial tests against the guarded isolated PostgreSQL fixture.
-- Review automatic reply-monitor D1 event integration: the pre-existing callers
-  still swallow failures and are not yet atomically coupled to ledger events.
-- Finish payment-cycle read scoping and review locked-review ownership scope.
+- Verify the new atomic reply-monitor integration in native PostgreSQL, including
+  source-marker rollback and unchanged-history replay.
+- The historical `time_day_reviews` table is globally keyed by date, without
+  worker/founder ownership. Its conservative global lock is retained; do not
+  infer or invent historical ownership to bypass a locked day.
 - Complete explicit analysis preview/quota handling for the remaining legacy
   analysis entry points; passive timeline GET alone does not complete that work.
-- Run targeted browser acceptance for the financial editor, including changing
-  workers while a save is in flight. A successful build is not browser proof.
+- Repeat the dedicated financial browser gate in hosted CI; local intercepted
+  browser acceptance does not establish real provider or operational behavior.
 - Complete independent review and exact-head hosted checks before merging.
 
 ## Local Verification
@@ -35,8 +40,32 @@ database-transfer TypeScript checks, production frontend/backend builds, build
 seal, staged Gitleaks and whitespace checks passed. Browser acceptance and live
 provider/deployment behavior were not verified in this checkpoint.
 
-The checkpoint is published as draft PR #144, stacked on assignment PR #143.
-No production merge, operational migration, or deployment was performed.
+The checkpoint is published as draft PR #144, now targeting main after accepted
+assignment PR #143 merged. No financial merge, operational migration, or
+deployment was performed.
+
+Hosted quality `39553061106` at `02ba5a8` applied migrations and passed the
+configured PostgreSQL image stage. It then reported 4,872 tests passed, one
+failed and 22 skipped: the native concurrent-increment assertion expected a
+numeric string from PostgreSQL JSON, whose actual value was numeric `5`.
+The assertion is corrected without removing the retained-increment check.
+The failed receipt is not acceptance of this follow-up source.
+
+The follow-up adds fresh payment-read authority, transactional flag/charge
+markers, required form revisions, real native rollback/queued-stale-save cases
+and a dedicated isolated browser gate in CI. Eight intercepted Chromium tests
+passed locally, including worker switching during a save, refusing saves before
+loading, stale-form conflict/reload, read-only worker access and no Home writes.
+An earlier concurrent browser execution had seven passes and one timeout after
+functional assertions; the unchanged quiet run passed all eight in 11.9 seconds.
+
+A broad local follow-up run reported 4,538 passes, three timeouts and 422 skips.
+The timeouts were in existing Codex runner process/junction cases and a Trello
+shadow status-route case, not financial assertions. That run remains failed;
+focused reruns and fresh hosted checks are separate evidence, not a relabeling.
+The two unchanged files then passed all 61 tests in a quiet one-worker rerun
+(11.24 seconds), without changing assertions or timeouts. This narrows the local
+diagnostic but does not turn the earlier full run into a passing receipt.
 
 ## Cleanup Boundaries
 

@@ -2,6 +2,10 @@ import type { Pool, PoolClient } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createFinancialDatabase, type FinancialDatabase } from './test/financialDatabase';
 import { settlePaymentCycle, saveWeeklyPayLog, getWeeklyPayLogs, getWeeklyPayLog, incrementWeeklyD1 } from './financialLedger';
+import { readPaymentCycles } from './financialReadService';
+import { and, eq } from 'drizzle-orm';
+import { vagueReplyFlags, weeklyPayLog } from '../drizzle/schema.postgres';
+import { weeklyPayRevision } from '../shared/financialRevision';
 
 const baseUrl = process.env.APTLSS_TEST_DATABASE_URL;
 const founder = { id: 6101, role: 'admin' as const, openId: 'financial-founder' };
@@ -55,13 +59,17 @@ describe.skipIf(!baseUrl)('financial ledger native acceptance', { timeout: 30000
   let fixture: FinancialDatabase;
   beforeAll(async () => { fixture = await createFinancialDatabase(baseUrl); },120000);
   beforeEach(async () => {
-    await fixture.pool.query('TRUNCATE financial_ledger_events,payment_cycles,weekly_pay_log,time_day_reviews,va_profiles,users RESTART IDENTITY CASCADE');
+    await fixture.pool.query('TRUNCATE vague_reply_flags,financial_ledger_events,payment_cycles,weekly_pay_log,time_day_reviews,va_profiles,users RESTART IDENTITY CASCADE');
     await seed(fixture.pool);
   });
   afterAll(async () => { if (fixture) await fixture.close(); });
   const cycle = async (founderId = founder.id) => (await fixture.pool.query(`INSERT INTO payment_cycles
     ("founderId","cycleStart","cycleEnd",notes) VALUES ($1,'2026-10-01','2026-10-16','Original financial record') RETURNING id`,[founderId])).rows[0].id as number;
-  const save = (values: Partial<Parameters<typeof saveWeeklyPayLog>[2]> = {}) => saveWeeklyPayLog(fixture.db,founder,{ ...week,...values });
+  const save = async (values: Partial<Parameters<typeof saveWeeklyPayLog>[2]> = {}) => {
+    const [existing] = await fixture.db.select().from(weeklyPayLog).where(and(eq(weeklyPayLog.founderId,founder.id),
+      eq(weeklyPayLog.vaId,values.vaId ?? worker.id),eq(weeklyPayLog.weekStart,new Date(week.weekStart))));
+    return saveWeeklyPayLog(fixture.db,founder,{ ...week,expectedRevision: weeklyPayRevision(existing ?? null),...values });
+  };
   async function accountGate(client: PoolClient, id = founder.id) {
     await client.query('BEGIN');
     const pid = (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
@@ -133,7 +141,7 @@ describe.skipIf(!baseUrl)('financial ledger native acceptance', { timeout: 30000
     } finally { await fixture.pool.query('DROP TRIGGER reject_financial_successor ON payment_cycles; DROP FUNCTION reject_financial_successor()'); }
   });
 
-  it('serializes concurrent first weekly upserts into one stable identity without losing the final write', async () => {
+  it('serializes concurrent first weekly saves and rejects the stale absent-record form', async () => {
     const gate = await fixture.pool.connect(); const pending: Promise<any>[] = [];
     try {
       const pid = await accountGate(gate);
@@ -141,14 +149,16 @@ describe.skipIf(!baseUrl)('financial ledger native acceptance', { timeout: 30000
       pending.push(settled(save({ notes: 'Second operator write' }))); await waitForOwnedWaiters(fixture.pool,pid,2);
       expect(await raw(fixture.pool,'weekly_pay_log')).toEqual([]);
       await gate.query('COMMIT');
-      for (const result of await Promise.all(pending)) if (result.error) throw result.error;
+      const results = await Promise.all(pending);
+      expect(results.filter(result => !result.error)).toHaveLength(1);
+      expect(results.filter(result => result.error)[0].error).toMatchObject({ status: 409 });
       const rows = await raw(fixture.pool,'weekly_pay_log'); expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ vaId: worker.id,founderId: founder.id,notes: 'Second operator write' });
+      expect(rows[0]).toMatchObject({ vaId: worker.id,founderId: founder.id,notes: 'First operator write' });
       const id = rows[0].id; await save({ notes: 'Third operator write' });
       expect(await raw(fixture.pool,'weekly_pay_log')).toMatchObject([{ id,notes: 'Third operator write' }]);
       const events = await raw(fixture.pool,'financial_ledger_events');
-      expect(events.map(event => event.weeklyLogId)).toEqual([id,id,id]);
-      expect(events.map(event => event.kind)).toEqual(['weekly_saved','weekly_saved','weekly_saved']);
+      expect(events.map(event => event.weeklyLogId)).toEqual([id,id]);
+      expect(events.map(event => event.kind)).toEqual(['weekly_saved','weekly_saved']);
     } finally { await gate.query('ROLLBACK'); gate.release(true); await Promise.allSettled(pending); }
   });
 
@@ -161,15 +171,33 @@ describe.skipIf(!baseUrl)('financial ledger native acceptance', { timeout: 30000
       await gate.query('COMMIT');
       for (const result of await Promise.all(pending)) if (result.error) throw result.error;
       const rows = await raw(fixture.pool,'weekly_pay_log'); expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ vaId: worker.id,founderId: founder.id,weekStart: week.weekStart,demeritD1: '5.00' });
+      expect(rows[0]).toMatchObject({ vaId: worker.id,founderId: founder.id,weekStart: week.weekStart,demeritD1: 5 });
       expect(await raw(fixture.pool,'financial_ledger_events')).toHaveLength(2);
       expect((await raw(fixture.pool,'financial_ledger_events')).map(row => row.kind)).toEqual(['d1_incremented','d1_incremented']);
     } finally { await gate.query('ROLLBACK'); gate.release(true); await Promise.allSettled(pending); }
   });
 
+  it('rejects a stale founder form queued behind a committed automatic D1 increment', async () => {
+    const initial = await save(); const revision = weeklyPayRevision(initial.log);
+    const gate = await fixture.pool.connect(); const pending: Promise<any>[] = [];
+    try {
+      const pid = await accountGate(gate);
+      pending.push(settled(incrementWeeklyD1(fixture.db,worker.id,'2026-10-07',1,'fixture:stale:d1')));
+      await waitForOwnedWaiters(fixture.pool,pid,1);
+      pending.push(settled(save({ expectedRevision: revision,meritM1: 2,demeritD1: 0,notes: 'Stale form' })));
+      await waitForOwnedWaiters(fixture.pool,pid,2);
+      await gate.query('COMMIT');
+      const [increment,staleSave] = await Promise.all(pending);
+      expect(increment.error).toBeUndefined();
+      expect(staleSave.error).toMatchObject({ status: 409 });
+      expect(await raw(fixture.pool,'weekly_pay_log')).toMatchObject([{ id: initial.log.id,demeritD1: 1,meritM1: 0,notes: null }]);
+      expect((await raw(fixture.pool,'financial_ledger_events')).map(row => row.kind)).toEqual(['weekly_saved','d1_incremented']);
+    } finally { await gate.query('ROLLBACK'); gate.release(true); await Promise.allSettled(pending); }
+  });
+
   it('scopes real financial reads to authorized founder and worker identities', async () => {
     await save();
-    await saveWeeklyPayLog(fixture.db,foreignFounder,{ ...week,vaId: 6105,notes: 'Other tenant private pay' });
+    await saveWeeklyPayLog(fixture.db,foreignFounder,{ ...week,vaId: 6105,expectedRevision: null,notes: 'Other tenant private pay' });
     const own = await getWeeklyPayLogs(fixture.db,founder,{ vaId: worker.id,limit: 10 });
     expect(own).toHaveLength(1); expect(own[0]).toMatchObject({ vaId: worker.id,founderId: founder.id });
     expect(await getWeeklyPayLog(fixture.db,worker,{ weekStart: week.weekStart })).toMatchObject({ vaId: worker.id,founderId: founder.id });
@@ -177,6 +205,30 @@ describe.skipIf(!baseUrl)('financial ledger native acceptance', { timeout: 30000
     if (!foreign.error) expect(foreign.value).toEqual([]);
     const forged = await settled(getWeeklyPayLog(fixture.db,worker,{ vaId: 6105,weekStart: week.weekStart }));
     if (!forged.error && forged.value) expect(forged.value.vaId).toBe(worker.id);
+  });
+
+  it('reads only the persisted owner cycles for both founder and worker accounts', async () => {
+    const own = await cycle(); await cycle(foreignFounder.id);
+    expect((await readPaymentCycles(fixture.db,founder)).map(row => row.id)).toEqual([own]);
+    expect((await readPaymentCycles(fixture.db,worker)).map(row => row.id)).toEqual([own]);
+    expect((await readPaymentCycles(fixture.db,worker,true)).map(row => row.id)).toEqual([own]);
+    await fixture.pool.query(`UPDATE va_profiles SET status='inactive' WHERE id=61`);
+    await expect(readPaymentCycles(fixture.db,worker)).rejects.toBeDefined();
+  });
+
+  it('rechecks persisted authority after a real payment-read account lock wait', async () => {
+    await cycle(); const gate = await fixture.pool.connect(); let pending: Promise<any> | undefined;
+    try {
+      const pid = await accountGate(gate);
+      pending = settled(readPaymentCycles(fixture.db,founder));
+      await waitForOwnedWaiters(fixture.pool,pid,1);
+      await gate.query(`UPDATE users SET role='worker' WHERE id=$1`,[founder.id]);
+      await gate.query('COMMIT');
+      const result = await pending;
+      expect(result.error).toMatchObject({ code: 'FORBIDDEN' });
+      expect(result.value).toBeUndefined();
+      expect(await raw(fixture.pool,'financial_ledger_events')).toEqual([]);
+    } finally { await gate.query('ROLLBACK'); gate.release(true); if (pending) await pending; }
   });
 
   it.each([
@@ -239,6 +291,31 @@ describe.skipIf(!baseUrl)('financial ledger native acceptance', { timeout: 30000
     expect(await raw(fixture.pool,'weekly_pay_log')).toEqual(before);
     expect(await raw(fixture.pool,'financial_ledger_events')).toEqual(events);
     await expect(incrementWeeklyD1(fixture.db,worker.id,'2026-10-07',3,'fixture:d1:stable-event')).rejects.toBeDefined();
+    expect(await raw(fixture.pool,'weekly_pay_log')).toEqual(before);
+    expect(await raw(fixture.pool,'financial_ledger_events')).toEqual(events);
+  });
+
+  it('atomically rolls back a source marker on audit failure without rewriting markers on replay', async () => {
+    const [flag] = await fixture.db.insert(vagueReplyFlags).values({ vaId: worker.id,
+      cardId: 'synthetic-financial-card',cardName: 'Synthetic financial marker',cardUrl: 'https://example.invalid/card',
+      actionId: 'synthetic-financial-action',messageText: 'Synthetic fixture',flaggedAt: new Date('2026-10-07T08:00:00Z') }).returning();
+    const marker = async (tx: Parameters<NonNullable<Parameters<typeof incrementWeeklyD1>[5]>>[0]) => {
+      await tx.update(vagueReplyFlags).set({ demeritIssued: true }).where(eq(vagueReplyFlags.id,flag.id));
+    };
+    await fixture.pool.query(`CREATE FUNCTION reject_callback_financial_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'Synthetic marker audit rejection' USING ERRCODE='23514'; END $$;
+      CREATE TRIGGER reject_callback_financial_audit BEFORE INSERT ON financial_ledger_events FOR EACH ROW EXECUTE FUNCTION reject_callback_financial_audit()`);
+    try {
+      await expect(incrementWeeklyD1(fixture.db,worker.id,'2026-10-07',1,'fixture:marker:event',marker)).rejects.toBeDefined();
+      expect((await fixture.pool.query('SELECT "demeritIssued" FROM vague_reply_flags WHERE id=$1',[flag.id])).rows[0].demeritIssued).toBe(false);
+      expect(await raw(fixture.pool,'weekly_pay_log')).toEqual([]);
+      expect(await raw(fixture.pool,'financial_ledger_events')).toEqual([]);
+    } finally { await fixture.pool.query('DROP TRIGGER reject_callback_financial_audit ON financial_ledger_events; DROP FUNCTION reject_callback_financial_audit()'); }
+    await incrementWeeklyD1(fixture.db,worker.id,'2026-10-07',1,'fixture:marker:event',marker);
+    const before = await raw(fixture.pool,'weekly_pay_log'); const events = await raw(fixture.pool,'financial_ledger_events');
+    await fixture.pool.query('UPDATE vague_reply_flags SET "demeritIssued"=false WHERE id=$1',[flag.id]);
+    await incrementWeeklyD1(fixture.db,worker.id,'2026-10-07',1,'fixture:marker:event',marker);
+    expect((await fixture.pool.query('SELECT "demeritIssued" FROM vague_reply_flags WHERE id=$1',[flag.id])).rows[0].demeritIssued).toBe(false);
     expect(await raw(fixture.pool,'weekly_pay_log')).toEqual(before);
     expect(await raw(fixture.pool,'financial_ledger_events')).toEqual(events);
   });

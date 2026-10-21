@@ -10,7 +10,7 @@ describe("financial mutation authorization", () => {
 
     expect(payment).toMatch(/markPaid:\s*adminProcedure/);
     expect(payLog).toMatch(/upsert:\s*adminProcedure/);
-    expect(payment).toContain("eq(paymentCycles.founderId, founderId)");
+    expect(payment).toContain('return readPaymentCycles(db, ctx.user)');
     expect(payment).toContain('await settlePaymentCycle(db, ctx.user, input)');
     expect(payLog).toContain('await saveWeeklyPayLog(db, ctx.user, input)');
     expect(payLog).toContain('await getWeeklyPayLogs(db, ctx.user, input)');

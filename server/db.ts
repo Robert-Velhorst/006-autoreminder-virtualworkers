@@ -165,9 +165,12 @@ export async function incrementPayLogD1(
   dateKey: string,
   d1Count: number,
   eventKey?: string,
+  beforeIncrement?: (tx: Parameters<Parameters<NonNullable<Awaited<ReturnType<typeof getDb>>>['transaction']>[0]>[0]) => Promise<void>,
 ): Promise<{ id: number; projectedPay: number }> {
   const db = await getDb();
   if (!db) throw new DatabaseUnavailableError();
-  const { log } = await incrementWeeklyD1(db, workerUserId, dateKey, d1Count, eventKey);
+  const { log } = beforeIncrement
+    ? await incrementWeeklyD1(db, workerUserId, dateKey, d1Count, eventKey, beforeIncrement)
+    : await incrementWeeklyD1(db, workerUserId, dateKey, d1Count, eventKey);
   return { id: log.id, projectedPay: Number(log.projectedPay) };
 }

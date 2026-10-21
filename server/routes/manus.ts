@@ -6,7 +6,6 @@ import { adminProcedure, operatorAccountProcedure, router, publicProcedure } fro
 import { getDb } from "../db";
 import {
   timeEntries,
-  paymentCycles,
   weeklyPayLog,
   dailyTriageState,
   sundayChecklist,
@@ -28,7 +27,7 @@ import {
   trelloCachedCards,
   users,
 } from "../../drizzle/schema.postgres";
-import { eq, and, desc, asc, gte, lte, sql, isNull, isNotNull, inArray } from "drizzle-orm";
+import { eq, and, desc, gte, lte, sql, isNull, isNotNull, inArray } from "drizzle-orm";
 import { collectComplianceSnapshot } from "../services/manus-scheduler";
 import { parseDateKey } from "../utils/date-only";
 import { calculateCompliancePercentage } from "../complianceMetrics";
@@ -44,6 +43,7 @@ import { getGoogleEvidenceStatus } from "../googleEvidence";
 import { readCurrentManagerHistory } from "../aptlssManagerHistoryDb";
 import { assertCanonicalAssignmentRows, readCanonicalAssignments, assignmentFailure, MAX_ASSIGNMENT_TASKS } from "../taskAssignmentMutation";
 import { financialFailure, settlePaymentCycle, saveWeeklyPayLog, getWeeklyPayLogs, getWeeklyPayLog } from '../financialLedger';
+import { readPaymentCycles } from '../financialReadService';
 
 // ─── Payment Cycles Router ──────────────────────────────────────────────────
 const financialId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -62,23 +62,14 @@ function throwFinancialRouteError(error: unknown): never {
 export const paymentRouter = router({
   getAllCycles: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
-    const founderId = Number(ctx.user.id);
-    return db.select().from(paymentCycles)
-      .where(eq(paymentCycles.founderId, founderId))
-      .orderBy(asc(paymentCycles.cycleStart));
+    if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB not available' });
+    return readPaymentCycles(db, ctx.user);
   }),
 
   getCurrentCycle: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return null;
-    const founderId = Number(ctx.user.id);
-    const all = await db
-      .select()
-      .from(paymentCycles)
-      .where(and(eq(paymentCycles.isPaid, false), eq(paymentCycles.founderId, founderId)))
-      .orderBy(asc(paymentCycles.cycleStart))
-      .limit(1);
+    if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB not available' });
+    const all = await readPaymentCycles(db, ctx.user, true);
     return all[0] ?? null;
   }),
 
@@ -131,6 +122,7 @@ export const payLogRouter = router({
       vaId: financialId,
       weekStart: financialDateKey,
       weekEnd: financialDateKey,
+      expectedRevision: z.string().max(100_000).nullable(),
       paymentCycleId: financialId.optional(),
       meritM1: financialCount.default(0),
       meritM2: financialCount.default(0),
