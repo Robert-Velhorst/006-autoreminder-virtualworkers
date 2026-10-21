@@ -26,6 +26,14 @@ link rules, regression scope and the remaining spreadsheet/mail-client
 acceptance boundary. Rendering safety does not replace recipient consent or
 authorization checks.
 
+## Worker Session Lifecycle
+
+See [Worker Session Lifecycle](docs/WORKER_SESSION_LIFECYCLE.md) for persisted
+session invalidation, atomic offboarding, guarded realtime delivery and the
+required migration/cutover acceptance. Older binaries must be drained, not left
+serving alongside this security contract. Database restoration also requires
+session-invalidation review.
+
 ## Response and disclosure
 
 Reports are reviewed on a best-effort basis. No response or remediation timeframe is guaranteed. Coordinate any public disclosure with the maintainers so users have a reasonable opportunity to receive a fix.

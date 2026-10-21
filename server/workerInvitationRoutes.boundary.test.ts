@@ -98,6 +98,7 @@ describe("worker invitation HTTP boundaries", () => {
   it("creates the acceptance session only for the identity returned by the token-bound service", async () => {
     mocks.acceptInvitation.mockResolvedValue({
       userId: 42,
+      sessionEpoch: "4",
       openId: "worker@example.com",
       name: "Invited Worker",
     });
@@ -125,7 +126,7 @@ describe("worker invitation HTTP boundaries", () => {
     );
     expect(mocks.createSessionToken).toHaveBeenCalledWith(
       "worker@example.com",
-      expect.objectContaining({ name: "Invited Worker" })
+      expect.objectContaining({ name: "Invited Worker", expectedIdentity: { userId: 42, sessionEpoch: "4" } })
     );
     expect(mocks.createSessionToken).not.toHaveBeenCalledWith(
       "attacker@example.com",

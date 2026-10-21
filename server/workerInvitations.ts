@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "crypto";
 import bcrypt from "bcryptjs";
 import { PASSWORD_MIN_LENGTH, validatePassword } from "./passwordPolicy";
 import { and, eq, gt, isNull } from "drizzle-orm";
-import { users, vaProfiles, workerInvitations } from "../drizzle/schema.postgres";
+import { users, vaProfiles, workerInvitations, workerLifecycleAudit } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 
 export const WORKER_INVITATION_TTL_MS = 48 * 60 * 60 * 1_000;
@@ -131,6 +131,11 @@ export async function createWorkerInvitation(founderId: number, input: WorkerInv
       expiresAt,
     }).returning({ id: workerInvitations.id });
 
+    await tx.insert(workerLifecycleAudit).values({
+      actorUserId: founderId, founderId, userId: user.id, workerProfileId: profile.id,
+      action: "create", previousStatus: null, nextStatus: "inactive",
+    });
+
     return { userId: user.id, vaId: profile.id, invitationId: invitation.id };
   });
 
@@ -204,7 +209,7 @@ export async function acceptWorkerInvitation(token: string, password: string) {
         ),
       )
       .limit(1)
-      .for("update");
+      .for("update", { of: users });
 
     if (!row || row.expiresAt.getTime() <= Date.now()) {
       throw new WorkerInvitationError("This invitation is invalid, expired, or already used.", "invalid");
@@ -270,8 +275,17 @@ export async function acceptWorkerInvitation(token: string, password: string) {
     if (profileAffectedRows !== 1)
       throw new WorkerInvitationError("This invitation no longer matches its worker account.", "invalid");
 
+    const [identity] = await tx.select({ id: users.id, sessionEpoch: users.sessionEpoch })
+      .from(users).where(eq(users.id, row.userId)).limit(1);
+    if (!identity) throw new WorkerInvitationError("Worker account unavailable.", "invalid");
+    await tx.insert(workerLifecycleAudit).values({
+      actorUserId: row.userId, founderId: row.invitationFounderId, userId: row.userId,
+      workerProfileId: row.vaId, action: "reactivate", previousStatus: "inactive", nextStatus: "active",
+    });
+
     return {
       userId: row.userId,
+      sessionEpoch: identity.sessionEpoch,
       openId: row.openId,
       name: row.name || "Worker",
     };

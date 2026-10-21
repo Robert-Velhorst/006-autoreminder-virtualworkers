@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   isSessionRevoked: vi.fn(),
   getUserByOpenId: vi.fn(),
   upsertUser: vi.fn(),
+  getDb: vi.fn(),
 }));
 
 vi.mock("./db", () => mocks);
@@ -19,6 +20,16 @@ beforeEach(async () => {
   mocks.isSessionRevoked.mockReset();
   mocks.getUserByOpenId.mockReset();
   mocks.upsertUser.mockReset();
+  mocks.getUserByOpenId.mockResolvedValue({ id: 1, openId: "worker-1", role: "worker", sessionEpoch: "1" });
+  mocks.getDb.mockResolvedValue({ transaction: async (run: (tx: unknown) => unknown) => run({ select: () => {
+    let profile = false;
+    const query: any = { from: (table: { [key: string]: unknown }) => { profile = "founderId" in table; return query; },
+      where: () => query, limit: () => query, orderBy: () => query, for: () => query,
+      then: (resolve: (rows: unknown[]) => unknown) => profile
+        ? Promise.resolve([{ id: 21, status: "active" }]).then(resolve)
+        : mocks.getUserByOpenId("worker-1").then((user: unknown) => resolve([user])) };
+    return query;
+  } }) });
   ({ sdk } = await import("./_core/sdk"));
 });
 
@@ -31,6 +42,7 @@ describe("session revocation", () => {
   it("rejects a valid signed cookie after its session id has been revoked", async () => {
     const token = await sdk.createSessionToken("worker-1", { name: "Worker", expiresInMs: 60_000 });
     const session = await sdk.verifySession(token);
+    mocks.getUserByOpenId.mockClear();
     expect(session).not.toBeNull();
     mocks.isSessionRevoked.mockResolvedValue(true);
     const request = {
@@ -54,6 +66,7 @@ describe("session revocation", () => {
       email: null,
       loginMethod: "local",
       role: "worker",
+      sessionEpoch: "1",
       createdAt: new Date(),
       updatedAt: new Date(),
       lastSignedIn: new Date(),

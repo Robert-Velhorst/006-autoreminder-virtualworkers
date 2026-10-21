@@ -1,7 +1,7 @@
 import type { Request } from "express";
 import type { Server as HTTPServer } from "http";
 import { and, eq, or } from "drizzle-orm";
-import { Server as SocketIOServer, type Socket } from "socket.io";
+import { Server as SocketIOServer, type Namespace, type Socket } from "socket.io";
 import { createAdapter } from "@socket.io/redis-adapter";
 import { atisAnalysisSessions, type User } from "../../drizzle/schema.postgres";
 import { sdk } from "../_core/sdk";
@@ -11,6 +11,16 @@ import { getRedisPubClient, getRedisSubClient, isRedisAvailable } from "./redis"
 type SocketUser = Pick<User, "id" | "openId" | "name" | "role">;
 type SocketAuthenticator = (socket: Socket) => Promise<SocketUser>;
 type SessionAuthorizer = (user: SocketUser, sessionId: string) => Promise<boolean>;
+
+const GUARDED_DELIVERY_EVENT = 'guarded-delivery:v1';
+const DELIVERY_NAMESPACE = '/_guarded-delivery';
+type GuardedDelivery = {
+  target: 'user' | 'session' | 'all';
+  targetId?: string;
+  event: string;
+  data: unknown;
+  excludeSocketId?: string;
+};
 
 export interface WebSocketServiceOptions {
   authenticate?: SocketAuthenticator;
@@ -86,6 +96,7 @@ export class WebSocketService {
   private readonly authenticate: SocketAuthenticator;
   private readonly authorizeSession: SessionAuthorizer;
   private readonly allowedOrigins: string[];
+  private deliveryNamespace: Namespace | null = null;
 
   constructor(options: WebSocketServiceOptions = {}) {
     this.authenticate = options.authenticate ?? authenticateSocket;
@@ -112,7 +123,8 @@ export class WebSocketService {
 
     this.io.use(async (socket, next) => {
       try {
-        socket.data.user = await this.authenticate(socket);
+        const user = await this.authenticate(socket);
+        socket.data.user = Object.freeze({ id: user.id, openId: user.openId, name: user.name, role: user.role });
         next();
       } catch {
         next(new Error("Authentication required"));
@@ -137,14 +149,25 @@ export class WebSocketService {
           return typeof value === "function" ? value.bind(target) : value;
         },
       });
-      // Install once before sockets join. The dedicated subscriber retains
-      // channel subscriptions across delayed startup and reconnects.
-      this.io.adapter(createAdapter(adapterPublisher, subClient));
-      console.log("[WebSocket] Redis adapter configured");
+      // Keep Redis off the client namespace entirely: raw adapter broadcasts
+      // (including legacy nodes) must never deliver to unchecked recipients.
+      this.deliveryNamespace = this.io.of(DELIVERY_NAMESPACE);
+      this.deliveryNamespace.use((_socket, next) => next(new Error('Server-only namespace')));
+      this.deliveryNamespace.adapter = createAdapter(adapterPublisher, subClient)(this.deliveryNamespace);
+      console.log("[WebSocket] Guarded Redis delivery configured");
     }
     if (!isRedisAvailable()) {
       console.log("[WebSocket] Redis not ready - cross-instance delivery unavailable");
     }
+
+    // Redis distributes only a server-side envelope. The receiving node must
+    // authorize each local recipient; adapter room broadcasts bypass that check.
+    this.deliveryNamespace?.on(GUARDED_DELIVERY_EVENT, (delivery: GuardedDelivery) => {
+      if (!delivery || !['user', 'session', 'all'].includes(delivery.target)
+        || typeof delivery.event !== 'string'
+        || (delivery.target !== 'all' && typeof delivery.targetId !== 'string')) return;
+      this.deliverLocally(delivery);
+    });
 
     this.io.on("connection", socket => {
       const user = socket.data.user as SocketUser;
@@ -156,19 +179,32 @@ export class WebSocketService {
         connectedClients: this.getConnectedClientsCount(),
       });
 
+      socket.use((_packet, next) => {
+        void this.reauthenticate(this.clients.get(socket.id)).then(valid => {
+          if (valid) next();
+        }).catch(() => socket.disconnect(true));
+      });
+
       socket.on("join-session", async (sessionId: unknown) => {
         if (typeof sessionId !== "string" || !sessionId.trim()) return;
 
         try {
           if (!(await this.authorizeSession(user, sessionId))) {
-            socket.emit("session-error", { sessionId, error: "Session access denied" });
+            if (await this.reauthenticate(this.clients.get(socket.id))) {
+              socket.emit("session-error", { sessionId, error: "Session access denied" });
+            }
             return;
           }
 
+          if (!(await this.reauthenticate(this.clients.get(socket.id)))) return;
           await socket.join(this.sessionRoom(sessionId));
-          socket.emit("session-joined", { sessionId, socketId: socket.id });
+          if (await this.reauthenticate(this.clients.get(socket.id))) {
+            socket.emit("session-joined", { sessionId, socketId: socket.id });
+          }
         } catch {
-          socket.emit("session-error", { sessionId, error: "Unable to verify session access" });
+          if (await this.reauthenticate(this.clients.get(socket.id))) {
+            socket.emit("session-error", { sessionId, error: "Unable to verify session access" });
+          }
         }
       });
 
@@ -195,14 +231,66 @@ export class WebSocketService {
     return `session:${sessionId}`;
   }
 
+  private async reauthenticate(client: ConnectedClient | undefined): Promise<boolean> {
+    if (!client || !client.socket.connected || this.clients.get(client.socket.id) !== client) return false;
+    try {
+      const current = await this.authenticate(client.socket);
+      // Never upgrade or replace the claims established by the original handshake.
+      if (current.id !== client.user.id || current.openId !== client.user.openId || current.role !== client.user.role) {
+        client.socket.disconnect(true);
+        return false;
+      }
+      return client.socket.connected && this.clients.get(client.socket.id) === client;
+    } catch {
+      client.socket.disconnect(true);
+      return false;
+    }
+  }
+
+  private deliverLocally(delivery: GuardedDelivery): void {
+    for (const client of this.clients.values()) {
+      if (client.socket.id === delivery.excludeSocketId) continue;
+      if (delivery.target === 'user' && client.user.openId !== delivery.targetId) continue;
+      if (delivery.target === 'session' && !client.socket.rooms.has(this.sessionRoom(delivery.targetId!))) continue;
+      void (async () => {
+        if (!(await this.reauthenticate(client))) return;
+        if (delivery.target === 'session') {
+          if (!(await this.authorizeSession(client.user, delivery.targetId!))) {
+            await client.socket.leave(this.sessionRoom(delivery.targetId!));
+            return;
+          }
+          if (!(await this.reauthenticate(client))
+            || !client.socket.rooms.has(this.sessionRoom(delivery.targetId!))) return;
+        }
+        if (client.socket.connected) client.socket.emit(delivery.event, delivery.data);
+      })().catch(() => {
+        client.socket.disconnect(true);
+        console.warn('[WebSocket] Recipient authorization unavailable; delivery withheld');
+      });
+    }
+  }
+
+  private dispatch(delivery: GuardedDelivery): void {
+    this.deliverLocally(delivery);
+    if (!this.deliveryNamespace || !isRedisAvailable()) return;
+    try {
+      this.deliveryNamespace.serverSideEmit(GUARDED_DELIVERY_EVENT, delivery);
+    } catch {
+      console.warn('[WebSocket] Cross-instance delivery unavailable; local delivery retained');
+    }
+  }
+
   private broadcastTaskUpdate(socket: Socket, event: string, data: unknown): void {
     const client = this.clients.get(socket.id);
     if (!client) return;
 
-    socket.to(this.userRoom(client.user.openId)).emit(event, {
-      ...(typeof data === "object" && data ? data : {}),
-      timestamp: new Date().toISOString(),
-      sourceSocketId: socket.id,
+    this.dispatch({
+      target: 'user', targetId: client.user.openId, event, excludeSocketId: socket.id,
+      data: {
+        ...(typeof data === "object" && data ? data : {}),
+        timestamp: new Date().toISOString(),
+        sourceSocketId: socket.id,
+      },
     });
   }
 
@@ -210,21 +298,22 @@ export class WebSocketService {
     const client = this.clients.get(socket.id);
     if (!client) return;
 
-    socket.to(this.userRoom(client.user.openId)).emit("cache:invalidated", {
-      timestamp: new Date().toISOString(),
+    this.dispatch({
+      target: 'user', targetId: client.user.openId, event: 'cache:invalidated', excludeSocketId: socket.id,
+      data: { timestamp: new Date().toISOString() },
     });
   }
 
   emitToUser(userOpenId: string, event: string, data: unknown): void {
-    this.io?.to(this.userRoom(userOpenId)).emit(event, data);
+    this.dispatch({ target: 'user', targetId: userOpenId, event, data });
   }
 
   emitToAll(event: string, data: unknown): void {
-    this.io?.emit(event, data);
+    this.dispatch({ target: 'all', event, data });
   }
 
   emitToSession(sessionId: string, event: string, data: unknown): void {
-    this.io?.to(this.sessionRoom(sessionId)).emit(event, data);
+    this.dispatch({ target: 'session', targetId: sessionId, event, data });
   }
 
   emitATISProgress(

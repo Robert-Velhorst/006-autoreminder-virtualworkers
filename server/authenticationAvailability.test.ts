@@ -114,7 +114,7 @@ describe("authentication during infrastructure outages", () => {
   });
   it("does not issue a session when the database fails after correct password verification", async () => {
     mocks.authenticate.mockRejectedValue(ForbiddenError("Invalid session cookie"));
-    mocks.getUser.mockResolvedValue({ openId: "fixture", name: "Fixture", passwordHash: bcrypt.hashSync("fixture-password-only", 4) });
+    mocks.getUser.mockResolvedValue({ id: 7, sessionEpoch: "1", openId: "fixture", name: "Fixture", passwordHash: bcrypt.hashSync("fixture-password-only", 4) });
     mocks.upsert.mockRejectedValue(unavailable());
     await serve(async base => {
       const response = await fetch(base + "/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "fixture", password: "fixture-password-only" }) });
