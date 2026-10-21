@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import {
   afterAll,
   afterEach,
@@ -11,7 +12,8 @@ import {
 } from "vitest";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { Pool, type PoolClient } from "pg";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { Pool, escapeIdentifier, type PoolClient } from "pg";
 import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
 import * as schema from "../drizzle/schema.postgres";
 import {
@@ -37,17 +39,37 @@ describe.skipIf(!url)(
   { timeout: 30000 },
   () => {
     let pool: Pool;
+    let admin: Pool;
+    let created = false;
+    const privateName = `manager_queue_${randomUUID().replaceAll('-', '')}`;
+    const assertOwnedName = () => {
+      if (!/^manager_queue_[a-f0-9]{32}$/.test(privateName)) throw new Error('Invalid private queue fixture identity');
+    };
     let db: ReturnType<typeof drizzle<typeof schema>>;
     let lock: PoolClient;
     let owned: number[] = [];
     beforeAll(async () => {
-      requireIsolatedPostgresTestDatabase(url, process.env.NODE_ENV === "production");
+      const base = new URL(requireIsolatedPostgresTestDatabase(url, process.env.NODE_ENV === "production"));
+      assertOwnedName();
+      admin = new Pool({ connectionString: base.href, max: 1, connectionTimeoutMillis: 10000 });
+      // Periodic scans enumerate all workers: row-prefix isolation is insufficient.
+      created = true;
+      try {
+        await admin.query(`CREATE DATABASE ${escapeIdentifier(privateName)}`);
+      } catch (error) {
+        // A lost reply may hide successful creation; never delete a pre-existing collision.
+        if ((error as { code?: string }).code === '42P04') created = false;
+        throw error;
+      }
+      const isolated = new URL(base.href);
+      isolated.pathname = `/${privateName}`;
       pool = new Pool({
-        connectionString: url!,
+        connectionString: isolated.href,
         max: 12,
         connectionTimeoutMillis: 10000,
       });
       db = drizzle(pool, { schema });
+      await migrate(db, { migrationsFolder: path.resolve('drizzle-postgres-v1') });
       lock = await pool.connect();
       await lock.query(
         "SELECT pg_advisory_lock(hashtext('aptlss-manager-integration-fixtures'))"
@@ -80,7 +102,7 @@ describe.skipIf(!url)(
         throw new Error(
           "Periodic queue fixtures require no unowned workers; refusing to enqueue unrelated work."
         );
-    });
+    }, 125000);
     async function worker(enabled = true) {
       const [row] = await db
         .insert(schema.users)
@@ -124,13 +146,22 @@ describe.skipIf(!url)(
       });
     });
     afterAll(async () => {
-      if (lock) {
-        await lock.query(
-          "SELECT pg_advisory_unlock(hashtext('aptlss-manager-integration-fixtures'))"
-        );
-        lock.release();
+      try {
+        if (lock) {
+          try {
+            await lock.query("SELECT pg_advisory_unlock(hashtext('aptlss-manager-integration-fixtures'))");
+          } finally { lock.release(); }
+        }
+      } finally {
+        try { if (pool) await pool.end(); }
+        finally {
+          if (admin) {
+            try {
+              if (created) { assertOwnedName(); await admin.query(`DROP DATABASE IF EXISTS ${escapeIdentifier(privateName)}`); }
+            } finally { await admin.end(); }
+          }
+        }
       }
-      if (pool) await pool.end();
     });
     const enqueue = (vaId: number, key: string, urgent = false) =>
       db.transaction(tx =>
