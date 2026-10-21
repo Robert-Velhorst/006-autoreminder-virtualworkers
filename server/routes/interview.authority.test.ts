@@ -27,6 +27,7 @@ vi.mock('../services/pre-interview-analysis', () => ({ analyzeCardBeforeIntervie
 import { interviewRouter } from './interview';
 import enhancedRoutes from './interview-enhanced';
 import { TrelloAccessError } from '../trelloCardAccess';
+import * as conversation from '../services/conversational-interview';
 
 const fixtures: Array<Awaited<ReturnType<typeof codexLlmFixture>>> = [];
 afterEach(async () => {
@@ -86,6 +87,107 @@ async function setup(plan: Parameters<typeof codexLlmFixture>[0] = {}, role: 'wo
 }
 
 describe('interview authority across real subscription queue boundaries', () => {
+  it.each(['start','respond','complete'] as const)(
+    '%s acknowledges a committed mutation without a new external check even if Trello becomes unavailable',
+    async mode => {
+      const f = await setup({ turns: mode === 'complete' ? [
+        { answer: 'INTERVIEW_COMPLETE Goal agreed.' },
+        { answer: JSON.stringify({ goal: 'Revenue reaches 20',successCriteria: ['20 measured'],confidence: 90 }) },
+      ] : [{ answer: 'Which evidence confirms that outcome?' }] });
+      let committed = false, postCommitReads = 0;
+      const transaction = f.db.transaction;
+      f.db.transaction = vi.fn(async (work: any) => {
+        const before = f.inserts.length;
+        const value = await transaction(work);
+        if (f.inserts.length > before) committed = true;
+        return value;
+      });
+      mocks.card.mockImplementation(async () => {
+        if (committed) {
+          postCommitReads++;
+          throw new TrelloAccessError(502,'Synthetic Trello outage after commit');
+        }
+        return { id: f.cardId,name: 'Synthetic goal',idMembers: ['member-42'] };
+      });
+      const cardId = mode === 'start' ? randomUUID() : f.cardId;
+      const result = mode === 'start' ? await f.caller.start({ cardId }) : await f.respond();
+      expect(committed).toBe(true); expect(postCommitReads).toBe(0);
+      if (mode === 'start') {
+        expect(result).toMatchObject({ sessionId: expect.any(String),firstMessage: expect.any(String) });
+        expect(f.rows.get(interviewSessions)).toHaveLength(2);
+        expect(f.rows.get(interviewHistory)).toEqual([]);
+        expect(await f.fixture.calls()).toEqual([]);
+      } else {
+        expect(result).toMatchObject({ isComplete: mode === 'complete',nextMessage: expect.any(String) });
+        expect(f.rows.get(interviewHistory)).toHaveLength(1);
+        expect(f.rows.get(interviewResults)).toHaveLength(mode === 'complete' ? 1 : 0);
+        expect(f.rows.get(interviewSessions)![0].status).toBe(mode === 'complete' ? 'completed' : 'active');
+        expect(await f.fixture.calls()).toHaveLength(mode === 'complete' ? 2 : 1);
+      }
+      const state = await f.caller.getState({ cardId });
+      expect(state?.messages.length).toBeGreaterThan(0);
+      expect(postCommitReads).toBe(0);
+      expect(f.req.listenerCount('aborted')).toBe(0); expect(f.res.listenerCount('close')).toBe(0);
+    },
+  );
+
+  it('fails a transient external check immediately before the response transaction without advancing history or state', async () => {
+    const f = await setup({ turns: [{ answer: 'Which evidence confirms that outcome?' }] });
+    const before = structuredClone(f.rows.get(interviewSessions));
+    const cachedBefore = structuredClone(await f.caller.getState({ cardId: f.cardId }));
+    let responseReady = false;
+    const process = conversation.processResponse;
+    vi.spyOn(conversation,'processResponse').mockImplementation(async (...args) => {
+      const result = await process(...args); responseReady = true; return result;
+    });
+    mocks.card.mockImplementation(async () => {
+      if (responseReady) throw new TrelloAccessError(502,'Synthetic outage before response commit');
+      return { id: f.cardId,name: 'Synthetic goal',idMembers: ['member-42'] };
+    });
+    await expect(f.respond()).rejects.toMatchObject({ code: 'BAD_GATEWAY' });
+    expect(responseReady).toBe(true);
+    expect(await f.fixture.calls()).toHaveLength(1);
+    expect(f.rows.get(interviewSessions)).toEqual(before);
+    expect(f.rows.get(interviewHistory)).toEqual([]); expect(f.rows.get(interviewResults)).toEqual([]);
+    expect(await f.caller.getState({ cardId: f.cardId })).toEqual(cachedBefore);
+  });
+
+  it.each(['epoch','role'] as const)('still fences a fresh %s change during the final pre-commit external read', async change => {
+    const f = await setup({ turns: [{ answer: 'Which evidence confirms that outcome?' }] });
+    const before = structuredClone(f.rows.get(interviewSessions));
+    let responseReady = false;
+    const process = conversation.processResponse;
+    vi.spyOn(conversation,'processResponse').mockImplementation(async (...args) => {
+      const result = await process(...args); responseReady = true; return result;
+    });
+    mocks.card.mockImplementation(async () => {
+      if (responseReady) Object.assign(f.rows.get(users)![0],change === 'epoch' ? { sessionEpoch: '2' } : { role: 'user' });
+      return { id: f.cardId,name: 'Synthetic goal',idMembers: ['member-42'] };
+    });
+    await expect(f.respond()).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(responseReady).toBe(true); expect(await f.fixture.calls()).toHaveLength(1);
+    expect(f.rows.get(interviewSessions)).toEqual(before);
+    expect(f.rows.get(interviewHistory)).toEqual([]); expect(f.rows.get(interviewResults)).toEqual([]);
+  });
+
+  it('fails the final external check before start persistence without creating an orphan session', async () => {
+    const f = await setup(), before = structuredClone(f.rows.get(interviewSessions));
+    const start = conversation.startInterview;
+    let openingReady = false;
+    vi.spyOn(conversation,'startInterview').mockImplementation(async (...args) => {
+      const result = await start(...args); openingReady = true; return result;
+    });
+    mocks.card.mockImplementation(async () => {
+      if (openingReady) throw new TrelloAccessError(502,'Synthetic outage before start commit');
+      return { id: f.cardId,name: 'Synthetic goal',idMembers: ['member-42'] };
+    });
+    await expect(f.caller.start({ cardId: randomUUID() })).rejects.toMatchObject({ code: 'BAD_GATEWAY' });
+    expect(openingReady).toBe(true);
+    expect(f.rows.get(interviewSessions)).toEqual(before);
+    expect(f.rows.get(interviewHistory)).toEqual([]); expect(f.rows.get(interviewResults)).toEqual([]);
+    expect(await f.fixture.calls()).toEqual([]);
+  });
+
   it.each(['epoch', 'role', 'inactive', 'ambiguous', 'founder', 'member'] as const)(
     'revocation while queued (%s) prevents CLI inference and all response writes',
     async (change) => {

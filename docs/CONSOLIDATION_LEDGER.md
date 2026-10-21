@@ -14,8 +14,24 @@ All six registered local worktrees were inspected: no tracked changes or
 untracked application source were found at that checkpoint. Detached candidate
 heads remain preserved by remote archive tags. Runtime/evidence artifacts are
 not a claim that operational data or credentials were uploaded to GitHub.
-PR #148 still needs its complete exact-head quality result and resolution of
-the two open CodeQL findings before normal consolidation into `main`.
+PR #148 head `888670944860a9af9da3ef106d3a5f8c97465f63` passed complete quality
+run `39583874282`. The owner explicitly approved dismissing only CodeQL alerts
+135 and 136 as false positives. Both dismissals were verified and the aggregate
+CodeQL check became successful; no unrelated alerts or security policy changed.
+
+A separate unresolved P1 review identified a post-commit Trello check in interview
+start/respond that could return failure after saving an answer. The follow-up
+retains the final external check before the identity-locked transaction and
+returns the successful commit without another external read. Native PostgreSQL
+verification passed the same 51 cases on PostgreSQL 18.6 and 17.11 across five suites, including provider failure
+before commit, provider loss after commit and final-goal role/epoch revocation.
+Temporary fixtures were removed without persistent volumes; the newly downloaded
+PostgreSQL 17 image was also removed and image-ID absence verified. Local broad
+checks passed 5,010 Vitest cases (473 skipped) and 315 Node cases (three skipped),
+with build and type checks passing. Skips are not acceptance. The updated head
+requires its own full hosted gates; the earlier green head does not accept these
+later edits. This closes a specific post-commit failure path, not every possible
+transport-loss or replay scenario.
 
 ## Superseded Candidate Archive: October 21, 2026
 

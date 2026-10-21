@@ -185,8 +185,7 @@ export const interviewRouter = router({
             status: 'active',
           });
         });
-        await authority.beforeDispatch();
-
+        // Commit succeeded: publish the acknowledgement without another fallible external read.
         // Store state
         interviewStates.set(cardId, { sessionId, userId: user.id, state, preAnalysis });
 
@@ -339,7 +338,7 @@ export const interviewRouter = router({
             }
           }
         });
-        await authority.beforeDispatch();
+        // The pre-commit external check and identity-locked transaction are the final authority boundary.
         interviewStates.set(cardId, { sessionId: session.id, userId: user.id, state, preAnalysis });
         if (result.isComplete)
           setTimeout(() => {

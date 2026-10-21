@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { eq } from 'drizzle-orm';
 import { users, type User } from '../../drizzle/schema.postgres';
 import { createFinancialDatabase, type FinancialDatabase } from '../test/financialDatabase';
+import { TrelloAccessError } from '../trelloCardAccess';
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),
@@ -127,6 +128,129 @@ describe.skipIf(!baseUrl)(
         ).rows,
       };
     }
+
+    const finalGoal = {
+      goal: 'Native commit-boundary goal',
+      successCriteria: ['20 measured'],
+      priority: 'normal',
+      constraints: [],
+      people: [],
+      confidence: 90,
+    };
+    function completeInterview(afterFinal?: () => Promise<void> | void) {
+      let turn = 0;
+      mocks.llm.mockImplementation(async (options) => {
+        options.signal.throwIfAborted();
+        await options.beforeDispatch();
+        mocks.provider();
+        if (++turn === 1) return completion('INTERVIEW_COMPLETE Goal agreed.');
+        await afterFinal?.();
+        return completion(JSON.stringify(finalGoal));
+      });
+    }
+
+    it.each(['start', 'respond'] as const)(
+      '%s refuses unavailable final pre-commit card access without adding or changing interview rows',
+      async mode => {
+        const cardId = `native-precommit-provider-${mode}`;
+        const sessionId = mode === 'respond' ? await start(cardId) : undefined;
+        const before = sessionId ? await snapshot(sessionId) : undefined;
+        let providerUnavailable = false;
+        const readCard = mocks.card.getMockImplementation()!;
+        mocks.card.mockImplementation(async (...args) => {
+          if (providerUnavailable) throw new TrelloAccessError(503, 'Synthetic card provider unavailable');
+          return readCard(...args);
+        });
+        if (mode === 'start') {
+          const analysis = mocks.analysis.getMockImplementation()!;
+          mocks.analysis.mockImplementation(async (...args) => {
+            const value = await analysis(...args);
+            providerUnavailable = true;
+            return value;
+          });
+        } else completeInterview(() => { providerUnavailable = true; });
+        const response = mode === 'start'
+          ? await request(app).post('/trpc/start').send({ json: { cardId } })
+          : await respond(cardId, sessionId!);
+        expect(providerUnavailable).toBe(true);
+        expect(response.status).toBe(502);
+        expect(response.body.error.json.data.code).toBe('BAD_GATEWAY');
+        if (sessionId) expect(await snapshot(sessionId)).toEqual(before);
+        else {
+          for (const table of ['interview_sessions', 'interview_history', 'interview_results']) {
+            expect((await fixture.pool.query(`SELECT id FROM ${table}`)).rows).toEqual([]);
+          }
+        }
+        expect(mocks.provider).toHaveBeenCalledTimes(mode === 'respond' ? 2 : 0);
+      },
+    );
+
+    it.each(['start', 'respond'] as const)(
+      '%s returns its committed success without requesting a now-unavailable provider after real PG COMMIT',
+      async mode => {
+        const cardId = `native-postcommit-provider-${mode}`;
+        const sessionId = mode === 'respond' ? await start(cardId) : undefined;
+        if (mode === 'respond') completeInterview();
+        let committed = false, postCommitCardReads = 0;
+        const readCard = mocks.card.getMockImplementation()!;
+        mocks.card.mockImplementation(async (...args) => {
+          if (committed) {
+            postCommitCardReads++;
+            throw new TrelloAccessError(503, 'Synthetic provider unavailable after commit');
+          }
+          return readCard(...args);
+        });
+        const transaction = fixture.db.transaction.bind(fixture.db);
+        // Keep the actual PG transaction/COMMIT; fail the provider only once an
+        // independent pooled reader can observe the route's committed write.
+        const transactionSpy = vi.spyOn(fixture.db, 'transaction').mockImplementation(async (work, config) => {
+          const result = await transaction(work, config);
+          const visible = await fixture.pool.query(
+            `SELECT id FROM interview_sessions WHERE "cardId"=$1 AND status=$2`,
+            [cardId, mode === 'respond' ? 'completed' : 'active'],
+          );
+          if (visible.rows.length) committed = true;
+          return result;
+        });
+        try {
+          const response = mode === 'start'
+            ? await request(app).post('/trpc/start').send({ json: { cardId } })
+            : await respond(cardId, sessionId!);
+          expect(committed).toBe(true);
+          expect(response.status).toBe(200);
+          expect(response.body.error).toBeUndefined();
+          expect(routeErrors).toEqual([]);
+          expect(postCommitCardReads).toBe(0);
+          if (mode === 'respond') {
+            expect(response.body.result.data.json).toMatchObject({ isComplete: true, finalGoal });
+          } else expect(response.body.result.data.json).toMatchObject({ sessionId: expect.any(String), firstMessage: expect.any(String) });
+          const saved = await snapshot(sessionId ?? response.body.result.data.json.sessionId);
+          expect(saved.session).toHaveLength(1);
+          expect(saved.session[0].row).toMatchObject({ userId: actor.id, cardId, status: mode === 'respond' ? 'completed' : 'active' });
+          expect(saved.history).toHaveLength(mode === 'respond' ? 1 : 0);
+          expect(saved.results).toHaveLength(mode === 'respond' ? 1 : 0);
+          if (mode === 'respond') expect(saved.results[0].row.finalGoal).toBe(finalGoal.goal);
+          expect(mocks.provider).toHaveBeenCalledTimes(mode === 'respond' ? 2 : 0);
+        } finally { transactionSpy.mockRestore(); }
+      },
+    );
+
+    it.each(['role', 'epoch'] as const)(
+      'still refuses %s revocation after generation and before final-goal commit',
+      async change => {
+        const cardId = `native-final-commit-${change}`, sessionId = await start(cardId);
+        const before = await snapshot(sessionId);
+        completeInterview(async () => {
+          if (change === 'role') await fixture.pool.query(`UPDATE users SET role='user' WHERE id=$1`, [actor.id]);
+          else await fixture.pool.query(`UPDATE users SET "sessionEpoch"="sessionEpoch"+1 WHERE id=$1`, [actor.id]);
+        });
+        const response = await respond(cardId, sessionId);
+        expect(response.status).toBe(403);
+        expect(response.body.error.json.data.code).toBe('FORBIDDEN');
+        expect(mocks.provider).toHaveBeenCalledTimes(2);
+        expect(await snapshot(sessionId)).toEqual(before);
+      },
+    );
 
     it('rejects queued approval after real profile offboarding/reactivation increments the epoch, with no generation or interview writes', async () => {
       const cardId = 'native-interview-queued',
