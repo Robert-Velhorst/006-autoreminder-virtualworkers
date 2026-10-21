@@ -37,6 +37,7 @@ function makeDb(initialRows: EmailRow[], beforeInsert?: (rows: EmailRow[], value
   const rows = initialRows.map(row => ({ ...row }));
   let nextId = rows.reduce((max, row) => Math.max(max, row.id), 0) + 1;
   const tx: any = {
+    execute: vi.fn(async () => ({ rows: [] })),
     select: vi.fn(() => {
       let table: unknown;
       let rowLimit = Number.POSITIVE_INFINITY;

@@ -1,6 +1,9 @@
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../db';
+import { AssignmentError, assignmentFailure, assertCanonicalAssignmentRows, readCanonicalAssignment } from '../taskAssignmentMutation';
+import { withLockedAssignment } from '../taskAssignmentService';
+import { selectWorkerProfile } from '../workerOperatorContext';
 import {
   batchOperations,
   keyboardShortcuts,
@@ -8,6 +11,7 @@ import {
   taskScheduleHistory,
   users,
   vaProfiles,
+  type User,
 } from '../../drizzle/schema.postgres';
 
 // ============================================
@@ -35,7 +39,7 @@ export interface ScheduleHistoryRecord {
 export interface ScheduleActor {
   id: number;
   openId: string;
-  role: string;
+  role: User['role'];
 }
 
 export interface ScheduledTaskRecord {
@@ -94,17 +98,18 @@ function mapScheduleHistory(row: typeof taskScheduleHistory.$inferSelect): Sched
   };
 }
 
-function assignmentForActor(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, taskId: string, actor: ScheduleActor) {
-  const scope = actor.role === 'worker'
-    ? inArray(
-        taskAssignments.vaId,
-        db.select({ id: vaProfiles.id }).from(vaProfiles).where(eq(vaProfiles.userId, actor.id)),
-      )
-    : eq(taskAssignments.founderId, actor.id);
+async function scheduleScope(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, actor: ScheduleActor) {
+  if (actor.role !== 'worker') return { founderId: actor.id, profileId: null };
+  const profiles = await db.select().from(vaProfiles).where(eq(vaProfiles.userId, actor.id));
+  const profile = selectWorkerProfile(profiles);
+  if (!profile) throw new AssignmentError(409, 'Worker must have exactly one active profile; reload before trying again');
+  return { founderId: profile.founderId, profileId: profile.id };
+}
 
-  return db.select().from(taskAssignments)
-    .where(and(eq(taskAssignments.taskId, taskId), scope))
-    .limit(1);
+async function assignmentForActor(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, taskId: string, actor: ScheduleActor) {
+  const scope = await scheduleScope(db, actor);
+  const assignment = await readCanonicalAssignment(db, scope.founderId, taskId);
+  return assignment && (scope.profileId === null || assignment.vaId === scope.profileId) ? assignment : null;
 }
 
 export async function insertScheduleHistory(record: Omit<ScheduleHistoryRecord, 'id' | 'createdAt'>): Promise<string> {
@@ -149,7 +154,7 @@ export async function getScheduledTaskForActor(
 ): Promise<ScheduledTaskRecord | null> {
   const db = await getDb();
   if (!db) return null;
-  const [row] = await assignmentForActor(db, taskId, actor);
+  const row = await assignmentForActor(db, taskId, actor);
   return row ? mapScheduledTask(row) : null;
 }
 
@@ -169,11 +174,12 @@ export async function getScheduleHistoryForActor(
   const db = await getDb();
   if (!db) throw new Error('Database not available');
 
-  const [ownedTask] = await assignmentForActor(db, taskId, actor);
+  const ownedTask = await assignmentForActor(db, taskId, actor);
   if (!ownedTask) return null;
   const safeLimit = Math.max(1, Math.min(Number.parseInt(String(limit), 10) || 50, 200));
   const rows = await db.select().from(taskScheduleHistory)
-    .where(and(eq(taskScheduleHistory.taskId, taskId), eq(taskScheduleHistory.assignmentId, ownedTask.id)))
+    .where(and(eq(taskScheduleHistory.taskId, taskId), eq(taskScheduleHistory.assignmentId, ownedTask.id),
+      eq(taskScheduleHistory.founderId, ownedTask.founderId)))
     .orderBy(desc(taskScheduleHistory.createdAt))
     .limit(safeLimit);
   return rows.map(mapScheduleHistory);
@@ -195,19 +201,8 @@ export async function rescheduleTaskForActor(
   const db = await getDb();
   if (!db) throw new Error('Database not available');
 
-  return db.transaction(async (tx) => {
-    const scope = actor.role === 'worker'
-      ? inArray(
-          taskAssignments.vaId,
-          tx.select({ id: vaProfiles.id }).from(vaProfiles).where(eq(vaProfiles.userId, actor.id)),
-        )
-      : eq(taskAssignments.founderId, actor.id);
-    const [row] = await tx.select().from(taskAssignments)
-      .where(and(eq(taskAssignments.taskId, taskId), scope))
-      .limit(1)
-      .for('update');
-    if (!row) return null;
-
+  try {
+  return await withLockedAssignment(db, actor, taskId, async (tx, row) => {
     const assignment = mapScheduledTask(row);
     await tx.update(taskAssignments).set({ startTime: newStartTime, endTime: newEndTime, updatedAt: new Date() })
       .where(eq(taskAssignments.id, assignment.id));
@@ -242,6 +237,10 @@ export async function rescheduleTaskForActor(
       vaId: assignment.vaId,
     };
   });
+  } catch (error) {
+    if (assignmentFailure(error)?.status === 404) return null;
+    throw error;
+  }
 }
 
 export async function undoLastRescheduleForActor(
@@ -251,22 +250,13 @@ export async function undoLastRescheduleForActor(
   const db = await getDb();
   if (!db) throw new Error('Database not available');
 
-  return db.transaction(async (tx) => {
-    const scope = actor.role === 'worker'
-      ? inArray(
-          taskAssignments.vaId,
-          tx.select({ id: vaProfiles.id }).from(vaProfiles).where(eq(vaProfiles.userId, actor.id)),
-        )
-      : eq(taskAssignments.founderId, actor.id);
-    const [row] = await tx.select().from(taskAssignments)
-      .where(and(eq(taskAssignments.taskId, taskId), scope))
-      .limit(1)
-      .for('update');
-    if (!row) return null;
+  try {
+  return await withLockedAssignment(db, actor, taskId, async (tx, row) => {
     const assignment = mapScheduledTask(row);
 
     const [previous] = await tx.select().from(taskScheduleHistory)
-      .where(and(eq(taskScheduleHistory.taskId, assignment.taskId), eq(taskScheduleHistory.assignmentId, assignment.id)))
+      .where(and(eq(taskScheduleHistory.taskId, assignment.taskId), eq(taskScheduleHistory.assignmentId, assignment.id),
+        eq(taskScheduleHistory.founderId, assignment.founderId)))
       .orderBy(desc(taskScheduleHistory.createdAt))
       .limit(1)
       .for('update');
@@ -310,6 +300,10 @@ export async function undoLastRescheduleForActor(
       vaId: assignment.vaId,
     };
   });
+  } catch (error) {
+    if (assignmentFailure(error)?.status === 404) return null;
+    throw error;
+  }
 }
 
 // ============================================
@@ -619,14 +613,10 @@ export async function seedDefaultKeyboardShortcuts(userId: string): Promise<void
 export async function getUserTasks(actor: ScheduleActor): Promise<ScheduledTaskRecord[]> {
   const db = await getDb();
   if (!db) return [];
-  const scope = actor.role === 'worker'
-    ? inArray(
-        taskAssignments.vaId,
-        db.select({ id: vaProfiles.id }).from(vaProfiles).where(eq(vaProfiles.userId, actor.id)),
-      )
-    : eq(taskAssignments.founderId, actor.id);
-  const rows = await db.select().from(taskAssignments).where(scope);
-  return rows.map(mapScheduledTask);
+  const scope = await scheduleScope(db, actor);
+  const rows = await db.select().from(taskAssignments).where(eq(taskAssignments.founderId, scope.founderId));
+  assertCanonicalAssignmentRows(rows);
+  return rows.filter(row => scope.profileId === null || row.vaId === scope.profileId).map(mapScheduledTask);
 }
 
 export async function getTasksByAssignee(
@@ -637,13 +627,5 @@ export async function getTasksByAssignee(
   if (!db) return [];
   const vaId = Number.parseInt(String(assignedTo), 10);
   if (Number.isNaN(vaId)) return [];
-  const scope = actor.role === 'worker'
-    ? inArray(
-        taskAssignments.vaId,
-        db.select({ id: vaProfiles.id }).from(vaProfiles).where(eq(vaProfiles.userId, actor.id)),
-      )
-    : eq(taskAssignments.founderId, actor.id);
-  const rows = await db.select().from(taskAssignments)
-    .where(and(eq(taskAssignments.vaId, vaId), scope));
-  return rows.map(mapScheduledTask);
+  return (await getUserTasks(actor)).filter(row => row.vaId === vaId);
 }

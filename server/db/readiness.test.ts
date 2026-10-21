@@ -88,6 +88,27 @@ describe("PostgreSQL readiness probe", () => {
     );
   });
 
+  it("checks the full assignment unique constraint and duplicate guard without dropping timer checks", async () => {
+    const pool = poolReturning(true);
+    await hasRequiredPostgresSchema(pool);
+    const query = vi.mocked(pool.query).mock.calls[0][0].text;
+    expect(query).toContain('GROUP BY "founderId", "taskId" HAVING count(*) > 1');
+    expect(query).toContain("co.conname='task_assignments_founder_task_unique'");
+    expect(query).toContain("co.contype='u' AND co.convalidated AND NOT co.condeferrable");
+    expect(query).toContain('i.indpred IS NULL AND i.indexprs IS NULL');
+    expect(query).toContain("ARRAY['founderId', 'taskId']::text[]");
+    expect(query).toContain('time_entries_one_active_account_idx');
+    expect(query).toContain('"trackedUserId" IS NULL AND "endTime" IS NULL');
+  });
+
+  it("preflights duplicates under a writer lock before additive DDL, without rewriting history", async () => {
+    const migration = await readFile(new URL('../../drizzle-postgres-v1/0008_assignment_identity.sql', import.meta.url), 'utf8');
+    expect(migration.indexOf('LOCK TABLE')).toBeLessThan(migration.indexOf('IF EXISTS'));
+    expect(migration.indexOf('RAISE EXCEPTION')).toBeLessThan(migration.indexOf('CREATE TABLE'));
+    expect(migration).toContain('UNIQUE("founderId","taskId")');
+    expect(migration).not.toMatch(/\b(?:UPDATE|DELETE|TRUNCATE)\s+"?(?:task_assignments|task_schedule_history)\b/i);
+  });
+
   it.skipIf(!process.env.DATABASE_URL)(
     "recognizes the migrated CI PostgreSQL database",
     async () => {

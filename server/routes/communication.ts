@@ -10,6 +10,8 @@ import {
   TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE,
 } from "../services/trello-chatbot";
 import { fetchAuthorizedTrelloCard, TrelloAccessError } from "../trelloCardAccess";
+import { AssignmentError, assignmentFailure } from "../taskAssignmentMutation";
+import { withLockedAssignment } from "../taskAssignmentService";
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -45,21 +47,12 @@ router.post("/ask-founder", async (req, res) => {
   if (!db) return res.status(503).json({ error: "Database unavailable" });
 
   try {
-    const [worker] = await db.select().from(vaProfiles).where(eq(vaProfiles.id, workerId)).limit(1);
-    if (!worker) return res.status(404).json({ error: "Worker profile not found" });
-
-    const [assignment] = await db.select({ id: taskAssignments.id })
-      .from(taskAssignments)
-      .where(and(
-        eq(taskAssignments.taskId, taskId),
-        eq(taskAssignments.vaId, workerId),
-      ))
-      .limit(1);
-    if (!assignment) {
-      return res.status(404).json({ error: "Task is not assigned to this worker" });
-    }
-
-    await fetchAuthorizedTrelloCard(user, taskId, { fields: 'idMembers' });
+    const worker = await withLockedAssignment(db, user, taskId, async (_tx, _assignment, context) => {
+      if (context.profile.id !== workerId) throw new AssignmentError(409, "Worker ownership changed");
+      return context.profile;
+    });
+    const cardId = taskId.split(':')[0];
+    await fetchAuthorizedTrelloCard(user, cardId, { fields: 'idMembers' });
 
     const normalizedQuestion = question.trim();
     const commentText = `**[Worker Question]**\n${worker.name} asked:\n"${normalizedQuestion}"`;
@@ -70,17 +63,8 @@ router.post("/ask-founder", async (req, res) => {
     const requestKey = workerQuestionKey(user.id, workerId, taskId, normalizedQuestion);
     const requestArgs = JSON.stringify([WORKER_QUESTION_IDEMPOTENCY_VERSION, requestKey]);
     const receivedAt = new Date();
-    const reservation = await db.transaction(async (tx) => {
-      const currentAssignments = await tx.select({ id: taskAssignments.id })
-        .from(taskAssignments)
-        .where(and(
-          eq(taskAssignments.taskId, taskId),
-          eq(taskAssignments.vaId, workerId),
-        ))
-        .orderBy(taskAssignments.id)
-        .for("update");
-      if (currentAssignments.length === 0) return { kind: "unassigned" as const };
-
+    const reservation = await withLockedAssignment(db, user, taskId, async (tx, _assignment, context) => {
+      if (context.profile.id !== workerId) throw new AssignmentError(409, "Worker ownership changed");
       const [existing] = await tx.select({
         id: chatbotConversations.id,
         responseStatus: chatbotConversations.responseStatus,
@@ -88,7 +72,7 @@ router.post("/ask-founder", async (req, res) => {
       })
         .from(chatbotConversations)
         .where(and(
-          eq(chatbotConversations.cardTrelloId, taskId),
+          eq(chatbotConversations.cardTrelloId, cardId),
           eq(chatbotConversations.command, "ask_founder"),
           eq(chatbotConversations.commandArgs, requestArgs),
         ))
@@ -102,10 +86,10 @@ router.post("/ask-founder", async (req, res) => {
       }
 
       const [created] = await tx.insert(chatbotConversations).values({
-        cardTrelloId: taskId,
+        cardTrelloId: cardId,
         command: "ask_founder",
         commandArgs: requestArgs,
-        authorName: worker.name,
+        authorName: context.profile.name,
         responseText: normalizedQuestion,
         responseStatus: "pending",
         receivedAt,
@@ -115,9 +99,6 @@ router.post("/ask-founder", async (req, res) => {
       return { kind: "reserved" as const, conversationId: created.id };
     });
 
-    if (reservation.kind === "unassigned") {
-      return res.status(404).json({ error: "Task is not assigned to this worker" });
-    }
     if (reservation.kind === "key-conflict") {
       return res.status(409).json({ success: false, error: "This question request conflicts with an existing send record." });
     }
@@ -134,7 +115,7 @@ router.post("/ask-founder", async (req, res) => {
 
     let posted = false;
     try {
-      posted = await postTrelloComment(taskId, commentText);
+      posted = await postTrelloComment(cardId, commentText);
     } catch (error) {
       console.error("[Communication] Trello question delivery could not be confirmed:", error);
     }
@@ -167,6 +148,8 @@ router.post("/ask-founder", async (req, res) => {
 
     return res.json({ success: true });
   } catch (error) {
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
     console.error("[Communication] Error processing ask-founder:", error);
     if (error instanceof TrelloAccessError) {
       return res.status(error.status).json({ error: error.message });
@@ -186,17 +169,7 @@ router.post("/decision-log", async (req, res) => {
 
   try {
     const user = requestUser(req)!;
-    const workerId = user.role === "admin" ? null : await resolveWorkerProfileId(req);
-    if (user.role !== "admin" && !workerId) {
-      return res.status(403).json({ error: "Worker profile not found" });
-    }
-
-    const logs = await db.transaction(async (tx) => {
-      const [task] = await tx.select().from(taskAssignments).where(workerId
-        ? and(eq(taskAssignments.taskId, taskId), eq(taskAssignments.vaId, workerId))
-        : eq(taskAssignments.taskId, taskId)).limit(1).for("update");
-      if (!task) return null;
-
+    const logs = await withLockedAssignment(db, user, taskId, async (tx, task, context) => {
       let currentLogs: Array<Record<string, unknown>> = [];
       try {
         currentLogs = task.decisionLog ? JSON.parse(task.decisionLog) : [];
@@ -208,7 +181,7 @@ router.post("/decision-log", async (req, res) => {
       currentLogs.push({
         decision: decision.trim(),
         reasoning: typeof reasoning === "string" ? reasoning.trim() : "",
-        author: user.name || user.openId,
+        author: context.actor.name || context.actor.openId,
         timestamp: new Date().toISOString(),
       });
 
@@ -221,6 +194,8 @@ router.post("/decision-log", async (req, res) => {
 
     return res.json({ success: true, logs });
   } catch (error) {
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
     console.error("Failed to save decision log:", error);
     return res.status(500).json({ error: "Failed to save decision log" });
   }
@@ -232,25 +207,16 @@ router.get("/decision-log/:taskId", async (req, res) => {
 
   try {
     const user = requestUser(req)!;
-    const workerId = user.role === "admin" ? null : await resolveWorkerProfileId(req);
-    if (user.role !== "admin" && !workerId) {
-      return res.status(403).json({ error: "Worker profile not found" });
-    }
-
-    const [task] = await db.select().from(taskAssignments).where(workerId
-      ? and(eq(taskAssignments.taskId, req.params.taskId), eq(taskAssignments.vaId, workerId))
-      : eq(taskAssignments.taskId, req.params.taskId)).limit(1);
-    if (!task) return res.status(404).json({ error: "Task not found" });
-
-    let logs: unknown[] = [];
-    try {
-      const parsed = task.decisionLog ? JSON.parse(task.decisionLog) : [];
-      logs = Array.isArray(parsed) ? parsed : [];
-    } catch {
-      logs = [];
-    }
+    const logs = await withLockedAssignment(db, user, req.params.taskId, async (_tx, task) => {
+      try {
+        const parsed = task.decisionLog ? JSON.parse(task.decisionLog) : [];
+        return Array.isArray(parsed) ? parsed : [];
+      } catch { return []; }
+    });
     return res.json({ logs });
-  } catch {
+  } catch (error) {
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
     return res.status(500).json({ error: "Failed to get decision log" });
   }
 });

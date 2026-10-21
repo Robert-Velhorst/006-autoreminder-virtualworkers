@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { saveHandoffNote, getHandoffContext, generateShiftSummary } from '../services/handoff-service';
 import { requireAuthenticated, requestUser, resolveWorkerProfileId } from '../middleware/auth';
+import { assignmentFailure } from '../taskAssignmentMutation';
+import { timerFailure } from '../canonicalTimer';
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -13,11 +15,16 @@ router.post('/notes', async (req, res) => {
     return res.status(400).json({ error: 'Invalid payload' });
   }
 
-  const success = await saveHandoffNote(taskId, workerId, notes);
+  try {
+  const success = await saveHandoffNote(taskId, workerId, notes, requestUser(req)!);
   if (success) {
     res.json({ success: true });
   } else {
     res.status(500).json({ error: 'Failed to save handoff note' });
+  }
+  } catch (error) {
+    const failure = assignmentFailure(error) ?? timerFailure(error);
+    res.status(failure?.status ?? 500).json({ error: failure?.error ?? 'Failed to save handoff note' });
   }
 });
 
@@ -27,11 +34,16 @@ router.get('/:taskId', async (req, res) => {
   const user = requestUser(req)!;
   const workerId = user.role === 'admin' ? undefined : await resolveWorkerProfileId(req);
   if (user.role !== 'admin' && !workerId) return res.status(403).json({ error: 'Worker profile not found' });
-  const context = await getHandoffContext(taskId, workerId ?? undefined);
+  try {
+  const context = await getHandoffContext(taskId, user, workerId ?? undefined);
   if (context) {
     res.json(context);
   } else {
     res.status(404).json({ error: 'Context not found' });
+  }
+  } catch (error) {
+    const failure = assignmentFailure(error) ?? timerFailure(error);
+    res.status(failure?.status ?? 500).json({ error: failure?.error ?? 'Failed to get handoff context' });
   }
 });
 
@@ -42,11 +54,16 @@ router.post('/shift-summary', async (req, res) => {
     return res.status(400).json({ error: 'Missing workerId' });
   }
 
-  const success = await generateShiftSummary(workerId);
+  try {
+  const success = await generateShiftSummary(workerId, requestUser(req)!);
   if (success) {
     res.json({ success: true });
   } else {
     res.status(500).json({ error: 'Failed to generate summary' });
+  }
+  } catch (error) {
+    const failure = assignmentFailure(error) ?? timerFailure(error);
+    res.status(failure?.status ?? 500).json({ error: failure?.error ?? 'Failed to generate summary' });
   }
 });
 

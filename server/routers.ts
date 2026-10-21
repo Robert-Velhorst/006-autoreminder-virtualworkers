@@ -25,8 +25,8 @@ import { trelloRouter, aptlssRouter, replyMonitorRouter } from "./routes/manus-t
 import { aggregateCardContext, formatContextForAI } from "./services/context-aggregator";
 import { websocketService } from "./services/websocket";
 import { getDb } from "./db";
-import { taskAssignments, vaProfiles } from "../drizzle/schema.postgres";
-import { eq, inArray, and } from "drizzle-orm";
+import { vaProfiles } from "../drizzle/schema.postgres";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { operatorRouter } from "./operatorRouter";
@@ -34,6 +34,22 @@ import { reminderRouter } from "./reminderRouter";
 import { haiConnectorRouter } from "./haiConnectorRouter";
 import { maintenanceRouter } from "./maintenanceRouter";
 import { fetchAuthorizedTrelloCard, TrelloAccessError } from "./trelloCardAccess";
+import { assignmentFailure, type AssignmentActor } from "./taskAssignmentMutation";
+import { changeAssignmentStatuses, type AssignmentStatus } from "./taskAssignmentService";
+
+async function changeSchedulingStatuses(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, actor: AssignmentActor,
+  input: { taskIds: string[]; status: AssignmentStatus }) {
+  try { return await changeAssignmentStatuses(db, actor, input); }
+  catch (error) {
+    const failure = assignmentFailure(error);
+    if (failure) throw new TRPCError({
+      code: failure.status === 409 ? "CONFLICT" : failure.status === 404 ? "NOT_FOUND"
+        : failure.status === 403 ? "FORBIDDEN" : failure.status === 400 ? "BAD_REQUEST" : "SERVICE_UNAVAILABLE",
+      message: failure.error,
+    });
+    throw error;
+  }
+}
 
 export const appRouter = router({
     // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
@@ -170,36 +186,8 @@ export const appRouter = router({
         }
 
         const userId = Number(ctx.user.id);
-        const matchingAssignments = await db
-          .select()
-          .from(taskAssignments)
-          .where(
-            and(
-              eq(taskAssignments.founderId, userId),
-              inArray(taskAssignments.taskId, input.taskIds)
-            )
-          );
-
-        if (matchingAssignments.length === 0) {
-          return {
-            success: false,
-            completed: 0,
-            notFound: input.taskIds.length,
-            completedTasks: [],
-            timestamp: new Date().toISOString(),
-            message: "No matching assignments found for the selected tasks",
-          };
-        }
-
-        const updatedTaskIds: string[] = [];
-        for (const assignment of matchingAssignments) {
-          await db
-            .update(taskAssignments)
-            .set({ status: "completed" })
-            .where(eq(taskAssignments.id, assignment.id));
-
-          updatedTaskIds.push(assignment.taskId);
-        }
+        const results = await changeSchedulingStatuses(db, ctx.user, { taskIds: input.taskIds, status: "completed" });
+        const updatedTaskIds = results.map(result => result.assignment.taskId);
 
         await invalidateCache(userId, String(ctx.user.openId), 'tasks');
         websocketService.emitToUser(String(ctx.user.openId), "task:completed", {
@@ -212,7 +200,7 @@ export const appRouter = router({
         return {
           success: true,
           completed: updatedTaskIds.length,
-          notFound: input.taskIds.length - updatedTaskIds.length,
+          notFound: 0,
           completedTasks: updatedTaskIds.map((id) => ({ taskId: id, status: 'completed' })),
           timestamp: new Date().toISOString()
         };
@@ -233,36 +221,8 @@ export const appRouter = router({
         }
 
         const userId = Number(ctx.user.id);
-        const matchingAssignments = await db
-          .select()
-          .from(taskAssignments)
-          .where(
-            and(
-              eq(taskAssignments.founderId, userId),
-              inArray(taskAssignments.taskId, input.taskIds)
-            )
-          );
-
-        if (matchingAssignments.length === 0) {
-          return {
-            success: false,
-            incompleted: 0,
-            notFound: input.taskIds.length,
-            incompletedTasks: [],
-            timestamp: new Date().toISOString(),
-            message: "No matching assignments found for the selected tasks",
-          };
-        }
-
-        const updatedTaskIds: string[] = [];
-        for (const assignment of matchingAssignments) {
-          await db
-            .update(taskAssignments)
-            .set({ status: "in_progress" })
-            .where(eq(taskAssignments.id, assignment.id));
-
-          updatedTaskIds.push(assignment.taskId);
-        }
+        const results = await changeSchedulingStatuses(db, ctx.user, { taskIds: input.taskIds, status: "in_progress" });
+        const updatedTaskIds = results.map(result => result.assignment.taskId);
 
         await invalidateCache(userId, String(ctx.user.openId), 'tasks');
         websocketService.emitToUser(String(ctx.user.openId), "task:completed", {
@@ -275,7 +235,7 @@ export const appRouter = router({
         return {
           success: true,
           incompleted: updatedTaskIds.length,
-          notFound: input.taskIds.length - updatedTaskIds.length,
+          notFound: 0,
           incompletedTasks: updatedTaskIds.map((id) => ({ taskId: id, status: 'in_progress' })),
           timestamp: new Date().toISOString()
         };

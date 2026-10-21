@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { and, eq, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { taskAssignments, vaProfiles } from "../drizzle/schema.postgres";
 import type { getDb } from "./db";
+import { assertCanonicalAssignmentRows, assignmentFailure } from "./taskAssignmentMutation";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 const ASSIGNMENT_LIMIT = 250;
@@ -29,25 +30,31 @@ export async function readManagerAssignmentState(db: Db, userId: number) {
     .from(vaProfiles).where(eq(vaProfiles.userId, userId)).orderBy(vaProfiles.id);
   const activeProfiles = profiles.filter(candidate => candidate.status === "active");
   const profile = activeProfiles.length === 1 ? activeProfiles[0] : null;
-  const assignments = profile
-    ? await db.select({ taskId: taskAssignments.taskId, status: taskAssignments.status })
+  const founderAssignments = profile
+    ? await db.select()
       .from(taskAssignments)
-      .where(and(
-        eq(taskAssignments.vaId, profile.id),
-        eq(taskAssignments.founderId, profile.founderId),
-        inArray(taskAssignments.status, [...ACTIVE_STATUSES]),
-      ))
-      .orderBy(taskAssignments.taskId)
-      .limit(ASSIGNMENT_LIMIT + 1)
+      .where(eq(taskAssignments.founderId, profile.founderId))
+      .orderBy(taskAssignments.taskId, taskAssignments.id)
     : [];
+  const workerKeys = new Set(founderAssignments.filter(row => row.vaId === profile?.id).map(row => row.taskId));
+  const relevantRows = founderAssignments.filter(row => workerKeys.has(row.taskId));
+  let ambiguous = false;
+  try { assertCanonicalAssignmentRows(relevantRows); }
+  catch (error) {
+    if (assignmentFailure(error)?.status !== 409) throw error;
+    ambiguous = true;
+  }
+  const assignments = relevantRows.filter(row => row.vaId === profile?.id && ACTIVE_STATUSES.some(status => status === row.status));
   const identity = profiles.map(({ id, founderId, status }) => ({ id, founderId, status }));
   const assignmentIdentity = assignments.slice(0, ASSIGNMENT_LIMIT).map(({ taskId, status }) => ({ taskId, status }));
-  const fingerprint = createHash("sha256").update(JSON.stringify({ identity, assignmentIdentity })).digest("hex");
+  const cardinalityIdentity = relevantRows.map(({ id, taskId, founderId, vaId, status }) => ({ id, taskId, founderId, vaId, status }));
+  const fingerprint = createHash("sha256").update(JSON.stringify({ identity, assignmentIdentity, cardinalityIdentity, ambiguous })).digest("hex");
   return {
     profile,
     assignments: assignments.slice(0, ASSIGNMENT_LIMIT),
     truncated: assignments.length > ASSIGNMENT_LIMIT,
-    complete: !!profile && assignments.length <= ASSIGNMENT_LIMIT,
+    complete: !!profile && !ambiguous && assignments.length <= ASSIGNMENT_LIMIT,
+    ambiguous,
     fingerprint,
   };
 }

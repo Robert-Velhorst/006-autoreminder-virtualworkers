@@ -6,6 +6,8 @@ import {
   timestamp,
   varchar,
   numeric,
+  jsonb,
+  unique,
   boolean,
   date,
   uniqueIndex,
@@ -682,7 +684,29 @@ export const taskAssignments = pgTable("task_assignments", {
     .defaultNow()
     .$onUpdateFn(() => new Date())
     .notNull(),
-});
+}, table => [
+  unique("task_assignments_founder_task_unique").on(table.founderId, table.taskId),
+]);
+
+export const assignmentEvents = pgTable("assignment_events", {
+  id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
+  assignmentId: integer("assignmentId").notNull().references(() => taskAssignments.id, { onDelete: "restrict" }),
+  founderId: integer("founderId").notNull(),
+  taskId: varchar("taskId", { length: 128 }).notNull(),
+  actorUserId: integer("actorUserId").notNull().references(() => users.id, { onDelete: "restrict" }),
+  kind: varchar("kind", { length: 32 }).notNull(),
+  previousWorkerProfileId: integer("previousWorkerProfileId"),
+  nextWorkerProfileId: integer("nextWorkerProfileId").notNull(),
+  previousStatus: varchar("previousStatus", { length: 20 }),
+  nextStatus: varchar("nextStatus", { length: 20 }).notNull(),
+  beforeJson: jsonb("beforeJson").$type<Record<string, unknown> | null>(),
+  afterJson: jsonb("afterJson").$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, table => [
+  index("assignment_events_assignment_created_idx").on(table.assignmentId, table.createdAt),
+  index("assignment_events_founder_task_idx").on(table.founderId, table.taskId),
+  check("assignment_events_kind_check", sql`${table.kind} IN ('created', 'reassigned', 'status_changed', 'notes_changed')`),
+]);
 
 // Shift schedules for handoffs
 export const shiftSchedules = pgTable("shift_schedules", {

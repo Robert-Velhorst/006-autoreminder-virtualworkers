@@ -13,6 +13,7 @@ vi.mock("../aptlssManagerPilot", () => ({ isManagerPilotWorker: mocks.isManagerP
 vi.mock("../aptlssManagerQueue", () => ({ enqueueManagerTask: vi.fn() }));
 
 import timeTrackingRoutes from "./time-tracking";
+import { matchesTimerWhere } from '../test/timerDatabase';
 
 type Assignment = { id: number; taskId: string; vaId: number; founderId: number; status: string };
 
@@ -32,8 +33,10 @@ function makeDb(options: {
   const profile = { id: 7, userId: 42, founderId: 8, trelloMemberId: "member-7", status: "active" };
   const assignment = options.assignment;
   const tx = {
+    execute: vi.fn(async () => ({ rows: [] })),
     select: vi.fn(() => {
       let table: unknown;
+      let condition: unknown;
       const rows = () => {
         if (table === users) return [{ id: 42, role: "worker" }, ...(options.otherAccountIds ?? []).map(id => ({ id }))];
         if (table === vaProfiles) {
@@ -42,9 +45,7 @@ function makeDb(options: {
           return [options.profileAfterMiddleware ?? profile];
         }
         if (table === taskAssignments) {
-          const read = taskAssignmentReads++;
-          if (read === 0) return assignment?.vaId === profile.id ? [assignment] : [];
-          return assignment?.founderId === profile.founderId ? [assignment] : [];
+          return assignment && matchesTimerWhere(assignment, condition) ? [assignment] : [];
         }
         if (table === atisCards) return options.cardMember
           ? [{ listName: "To Do", memberIds: JSON.stringify([profile.trelloMemberId]), isArchived: false }]
@@ -54,13 +55,13 @@ function makeDb(options: {
       };
       const query: any = {
         from: vi.fn((value: unknown) => { table = value; return query; }),
-        where: vi.fn(() => query),
+        where: vi.fn((value: unknown) => { condition = value; return query; }),
         orderBy: vi.fn(() => query),
         limit: vi.fn(() => query),
         for: vi.fn(async () => {
           if (table === taskAssignments) {
             await options.beforeAssignmentLock?.();
-            return assignment?.vaId === profile.id && assignment.taskId === "assigned-card" ? [assignment] : [];
+            return rows();
           }
           return rows();
         }),
@@ -203,9 +204,9 @@ describe("worker timer-start authorization", () => {
     assignment!.vaId = 9;
     releaseLock();
 
-    expect((await response).status).toBe(409);
+    expect((await response).status).toBe(403);
     expect((await response).body).toEqual({
-      error: "This task assignment changed while the timer was starting. Refresh your task list before trying again.",
+      error: "This task is assigned to a different worker. Ask the founder to update the assignment before tracking time.",
     });
     expect(inserted).not.toHaveBeenCalled();
   });
