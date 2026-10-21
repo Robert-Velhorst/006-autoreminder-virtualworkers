@@ -5,15 +5,11 @@ import { taskAssignments, timeEntries, vaProfiles } from '../../drizzle/schema.p
 import { requireActiveWorkerProfile, requireAuthenticated, requestUser } from '../middleware/auth';
 import { attributeTimeEntriesToProfiles, loadAccountTimeEntries } from '../timeEntryOwnership';
 import { selectWorkerProfile } from '../workerOperatorContext';
+import { serializeCsv } from '../utils/csv';
 
 const router = Router();
 router.use(requireAuthenticated);
 router.use(requireActiveWorkerProfile);
-
-function csvCell(value: unknown) {
-  const text = value == null ? '' : String(value);
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
 
 async function loadWorkerProfileTimeEntries(
   db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
@@ -84,7 +80,7 @@ router.get('/export', async (req, res) => {
           entry.startTime.toISOString(), entry.endTime?.toISOString(), entry.source]),
       ];
       res.type('text/csv').attachment('time-entries.csv');
-      return res.send(rows.map(row => row.map(csvCell).join(',')).join('\r\n'));
+      return res.send(serializeCsv(rows));
     }
 
     const tasks = user.role === 'admin'
@@ -101,7 +97,7 @@ router.get('/export', async (req, res) => {
         task.assignedAt.toISOString(), task.updatedAt.toISOString()]),
     ];
     res.type('text/csv').attachment('task-summary.csv');
-    return res.send(rows.map(row => row.map(csvCell).join(',')).join('\r\n'));
+    return res.send(serializeCsv(rows));
   } catch (error) {
     console.error('[Reports] Failed to generate report', error);
     res.status(500).json({ error: 'Failed to generate report' });
