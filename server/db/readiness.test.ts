@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
+import { scheduledJobs } from "../../drizzle/schema.postgres";
 import {
   hasRequiredPostgresSchema,
   READINESS_QUERY_TIMEOUT_MS,
@@ -18,6 +19,59 @@ function poolReturning(requiredMigrationApplied: boolean): ReadinessPool {
 }
 
 describe("PostgreSQL readiness probe", () => {
+  it('adds nullable approval evidence with explicit all-null or all-present guards and no historical row rewrite', async () => {
+    const migration = await readFile(new URL('../../drizzle-postgres-v1/0012_scheduled_generation_approval.sql', import.meta.url), 'utf8');
+    expect(migration).not.toContain('\r');
+    expect(migration).not.toMatch(/\b(?:UPDATE|DELETE|TRUNCATE|DROP|DEFAULT|REFERENCES)\b/i);
+    expect(migration.match(/ALTER TABLE/g)).toHaveLength(5);
+    for (const [name, type] of Object.entries({ approvedByUserId: 'integer', approvedSessionEpoch: 'bigint',
+      approvedAt: 'timestamp', approvalHash: 'varchar(64)' })) {
+      expect(migration).toContain(`ALTER TABLE "scheduled_jobs" ADD COLUMN "${name}" ${type};`);
+      expect(migration).toContain(`"scheduled_jobs"."${name}" IS NULL`);
+      expect(migration).toContain(`"scheduled_jobs"."${name}" IS NOT NULL`);
+    }
+    expect(migration).toContain('ADD CONSTRAINT "scheduled_jobs_approval_complete" CHECK');
+    expect(migration).toContain(') OR (');
+    expect(migration).toContain('"approvedByUserId" > 0');
+    expect(migration).toContain('"approvedSessionEpoch" >= 0');
+    expect(migration).toContain("\"approvalHash\" ~ '^[0-9a-fA-F]{64}$'");
+  });
+
+  it('changes only scheduled approval metadata relative to the previous snapshot and retains the historical migration hash', async () => {
+    const previous = JSON.parse(await readFile(new URL('../../drizzle-postgres-v1/meta/0011_snapshot.json', import.meta.url), 'utf8'));
+    const next = JSON.parse(await readFile(new URL('../../drizzle-postgres-v1/meta/0012_snapshot.json', import.meta.url), 'utf8'));
+    expect(next.prevId).toBe(previous.id);
+    expect(Object.keys(next.tables)).toEqual(Object.keys(previous.tables));
+    for (const [name, table] of Object.entries(previous.tables)) {
+      if (name !== 'public.scheduled_jobs') expect(next.tables[name]).toEqual(table);
+    }
+    const scheduled = structuredClone(next.tables['public.scheduled_jobs']);
+    for (const [name, type] of Object.entries({ approvedByUserId: 'integer', approvedSessionEpoch: 'bigint',
+      approvedAt: 'timestamp', approvalHash: 'varchar(64)' })) {
+      expect(scheduled.columns[name]).toMatchObject({ type, notNull: false });
+      expect(scheduled.columns[name].default).toBeUndefined();
+      delete scheduled.columns[name];
+    }
+    expect(scheduled.checkConstraints.scheduled_jobs_approval_complete).toBeDefined();
+    delete scheduled.checkConstraints.scheduled_jobs_approval_complete;
+    expect(scheduled).toEqual(previous.tables['public.scheduled_jobs']);
+    const previousSql = await readFile(new URL('../../drizzle-postgres-v1/0011_generation_status_width.sql', import.meta.url), 'utf8');
+    expect(createHash('sha256').update(previousSql.replace(/\r\n/g, '\n')).digest('hex'))
+      .toBe('e2afb582f3efee81a95f5fffadbe6a4929a94aa176d90f24d9bee0b373a64a1e');
+  });
+
+  it('reuses exact string bigint epoch encoding without JavaScript number rounding', () => {
+    const epoch = scheduledJobs.approvedSessionEpoch;
+    for (const value of ['0', '9007199254740993', '9223372036854775807']) {
+      expect(epoch.mapToDriverValue(value)).toBe(value);
+      expect(epoch.mapFromDriverValue(value)).toBe(value);
+    }
+    for (const value of ['-1', '01', '1.5', '9223372036854775808']) {
+      expect(() => epoch.mapToDriverValue(value)).toThrow('Invalid session epoch');
+    }
+    expect(epoch.notNull).toBe(false);
+  });
+
   it('widens generation terminal status columns additively without rewriting history', async () => {
     const migration = await readFile(new URL('../../drizzle-postgres-v1/0011_generation_status_width.sql', import.meta.url), 'utf8');
     for (const table of ['generation_jobs', 'scheduled_jobs']) {

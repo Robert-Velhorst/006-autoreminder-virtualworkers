@@ -158,6 +158,8 @@ jobs:
         run: node --test client/src/components/timer.identity.test.mjs
       - name: Verify generation-history retry browser contracts
         run: node --test e2e/aptlss-history-retry.test.mjs
+      - name: Verify scheduled generation approval browser contracts
+        run: node --test e2e/aptlss-scheduled-generation.test.mjs
       - name: Verify administrator async-operation browser contracts
         env:
           APTLSS_UI_ONLY: "true"

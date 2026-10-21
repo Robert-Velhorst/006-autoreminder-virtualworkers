@@ -1,10 +1,10 @@
 import { encodeTrelloPathSegment } from '../utils/trello-path';
 import { Router } from 'express';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
 import { getDb } from '../db';
 import { generationJobs, generationItems, scheduledJobs, userWorkingHours, holidays, vaProfiles, taskAssignments, taskDependencies, clients, users } from '../../drizzle/schema.postgres';
-import { eq, desc, and, inArray } from 'drizzle-orm';
+import { eq, desc, and, inArray, or, isNull } from 'drizzle-orm';
 import { fetchWithRetry } from '../utils/retry';
 import { getCachedTasks, setCachedTasks, invalidateCache } from '../services/trello-cache';
 import { requestQueue } from '../services/request-queue';
@@ -14,12 +14,14 @@ import {
   fetchAptlssSourceCard,
   generateAptlssForCard,
 } from '../services/aptlss-generation';
-import { executeAptlssGenerationBatch } from '../services/aptlss-scheduled-generation';
+import { approvalSnapshotHash, executeAptlssGenerationBatch } from '../services/aptlss-scheduled-generation';
 import { AssignmentError, MAX_ASSIGNMENT_TASKS, assignmentFailure, readCanonicalAssignments } from '../taskAssignmentMutation';
 import { withSessionIdentity } from '../sessionLifecycle';
 import { sessionIdentityProof } from '../_core/sessionIdentity';
 import { ForbiddenError, HttpError } from '../../shared/_core/errors';
 import { runScheduledJob, ScheduledJobLeaseLostError, type ScheduledJobContext } from '../scheduledJobRuntime';
+import { isDatabaseUnavailable } from '../databaseAvailability';
+import { z } from 'zod';
 
 function canonicalRetryJson(value: unknown): string {
   return JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
@@ -1620,108 +1622,223 @@ router.get('/trello/tasks', async (req: any, res: Response) => {
   }
 });
 
-// Schedule generation endpoint
+type ScheduleRow = typeof scheduledJobs.$inferSelect;
+type ScheduleTransaction = Parameters<Parameters<NonNullable<Awaited<ReturnType<typeof getDb>>>['transaction']>[0]>[0];
+
+function scheduleSelection(value: unknown, status = 400): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 250
+    || value.some(cardId => typeof cardId !== 'string' || !encodeTrelloPathSegment(cardId.trim()))) {
+    throw new HttpError(status, 'Select between 1 and 250 valid Trello card IDs');
+  }
+  const cards = value.map(cardId => cardId.trim());
+  if (new Set(cards).size !== cards.length) throw new HttpError(status, 'Duplicate Trello card IDs are not allowed');
+  return cards;
+}
+
+const scheduleTimestamp = z.string().datetime({ offset: true });
+function futureScheduleTime(value: unknown, requireFuture = true): Date {
+  if (typeof value !== 'string' || !scheduleTimestamp.safeParse(value).success) {
+    throw new HttpError(400, 'A future scheduledTime with an explicit timezone is required');
+  }
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime()) || (requireFuture && date.getTime() <= Date.now())) throw new HttpError(400, 'scheduledTime must be in the future');
+  return date;
+}
+
+function newScheduleSettings(value: unknown): Record<string, unknown> {
+  if (value !== undefined && (!value || typeof value !== 'object' || Array.isArray(value))) {
+    throw new HttpError(400, 'Generation settings must be an object');
+  }
+  const input = (value ?? {}) as Record<string, unknown>, settings: Record<string, unknown> = {};
+  for (const key of ['applyToTrello','skipExisting','replaceExisting','validateBeforeGenerate']) {
+    if (input[key] !== undefined) {
+      if (typeof input[key] !== 'boolean') throw new HttpError(400, `Invalid generation setting: ${key}`);
+      settings[key] = input[key];
+    }
+  }
+  for (const [key,min,max] of [['minimumConfidence',0,100],['maxRetries',1,3]] as const) {
+    if (input[key] !== undefined) {
+      if (typeof input[key] !== 'number' || !Number.isInteger(input[key]) || input[key] < min || input[key] > max) {
+        throw new HttpError(400, `Invalid generation setting: ${key}`);
+      }
+      settings[key] = input[key];
+    }
+  }
+  if (input.clarifiedGoal !== undefined) {
+    if (input.clarifiedGoal !== null && typeof input.clarifiedGoal !== 'string' && typeof input.clarifiedGoal !== 'object') {
+      throw new HttpError(400, 'clarifiedGoal must be text or structured JSON');
+    }
+    const pending: Array<{ value: unknown; depth: number }> = [{ value: input.clarifiedGoal,depth: 0 }];
+    let nodes = 0;
+    while (pending.length) {
+      const current = pending.pop()!;
+      if (++nodes > 5000 || current.depth > 16) throw new HttpError(400, 'clarifiedGoal exceeds its structure limit');
+      if (current.value === null || typeof current.value === 'string' || typeof current.value === 'boolean'
+        || (typeof current.value === 'number' && Number.isFinite(current.value))) continue;
+      if (typeof current.value !== 'object' || (!Array.isArray(current.value)
+        && Object.getPrototypeOf(current.value) !== Object.prototype && Object.getPrototypeOf(current.value) !== null)) {
+        throw new HttpError(400, 'clarifiedGoal must contain only JSON data');
+      }
+      const children = Object.values(current.value);
+      if (children.length + nodes + pending.length > 5000) throw new HttpError(400, 'clarifiedGoal exceeds its structure limit');
+      for (const child of children) pending.push({ value: child,depth: current.depth+1 });
+    }
+    settings.clarifiedGoal = input.clarifiedGoal;
+  }
+  if (Buffer.byteLength(JSON.stringify(settings)) > 65_536) throw new HttpError(400, 'Generation settings exceed 64 KiB');
+  return settings;
+}
+
+async function withScheduleIdentity<T>(req: Request, work: (user: typeof users.$inferSelect, tx: ScheduleTransaction) => Promise<T>) {
+  const user = requestUser(req);
+  if (!user) throw new HttpError(401, 'Unauthorized');
+  return withSessionIdentity(user.openId,sessionIdentityProof(user),async (fresh,tx) => {
+    if (fresh.role !== 'admin') throw ForbiddenError('An active administrator account is required');
+    return work(fresh,tx);
+  });
+}
+
+function scheduleOwnerWhere(id: string, user: typeof users.$inferSelect) {
+  return and(eq(scheduledJobs.id,id),eq(scheduledJobs.createdBy,user.openId),
+    or(isNull(scheduledJobs.approvedByUserId),eq(scheduledJobs.approvedByUserId,user.id)));
+}
+
+function scheduleRouteFailure(res: Response, error: unknown) {
+  if (error instanceof HttpError) return res.status(error.statusCode).json({ error: error.message });
+  if (isDatabaseUnavailable(error)) return res.status(503).json({ error: 'Database not available' });
+  // Do not expose stored business inputs, SQL, credentials or driver objects.
+  console.error('Scheduled generation request failed');
+  return res.status(500).json({ error: 'Scheduled generation request failed' });
+}
+
+// A review revision includes nullable legacy proof and status. It is not execution approval.
+function schedulePreviewRevisionHash(row: ScheduleRow) {
+  return createHash('sha256').update(canonicalRetryJson({ version: 1,id: row.id,createdBy: row.createdBy,
+    cardIds: row.cardIds,settings: row.settings,scheduledTime: row.scheduledTime.toISOString(),status: row.status,
+    approvedByUserId: row.approvedByUserId,approvedSessionEpoch: row.approvedSessionEpoch,
+    approvedAt: row.approvedAt?.toISOString() ?? null,approvalHash: row.approvalHash })).digest('hex');
+}
+
+async function approvalPreview(tx: ScheduleTransaction, row: ScheduleRow) {
+  let cardIds: string[], settings: Record<string, unknown>;
+  try {
+    cardIds = scheduleSelection(JSON.parse(row.cardIds),409);
+    const parsed: unknown = JSON.parse(row.settings);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid stored settings');
+    settings = parsed as Record<string, unknown>;
+  } catch { throw new HttpError(409, 'Stored generation inputs require review before approval'); }
+  const items = await tx.select({ status: generationItems.status }).from(generationItems).where(eq(generationItems.jobId,row.id));
+  const count = (status: string) => items.filter(item => item.status === status).length;
+  return { jobId: row.id,status: row.status,createdBy: row.createdBy,cardIds,settings,scheduledTime: row.scheduledTime,
+    approvedByUserId: row.approvedByUserId,approvedSessionEpoch: row.approvedSessionEpoch,approvedAt: row.approvedAt,
+    expectedSnapshotHash: schedulePreviewRevisionHash(row),
+    progress: { total: items.length,completed: count('completed'),needsReview: count('needs_review'),
+      outcomeUnknown: count('outcome_unknown'),failed: count('failed') } };
+}
+
+// Schedule generation endpoint. Proof is bound while the fresh account lock is held.
 router.post('/aptlss/schedule', async (req: any, res: Response) => {
   try {
-    const { cardIds, scheduledTime, settings } = req.body;
-    const user = req.user;
-
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    const { cardIds, scheduledTime, settings, requestKey } = req.body ?? {};
+    if (requestKey !== undefined && (typeof requestKey !== 'string'
+      || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestKey))) {
+      throw new HttpError(400, 'requestKey must be a UUID');
     }
-
-    const normalizedCardIds = Array.isArray(cardIds)
-      ? Array.from(new Set(cardIds.map((value: unknown) => typeof value === 'string' ? value.trim() : '').filter(Boolean))).slice(0, 250)
-      : [];
-    if (normalizedCardIds.length === 0) {
-      return res.status(400).json({ error: 'At least one valid Trello card ID is required' });
-    }
-    const runAt = new Date(scheduledTime);
-    if (!scheduledTime || Number.isNaN(runAt.getTime())) {
-      return res.status(400).json({ error: 'A valid scheduledTime is required' });
-    }
-    if (runAt.getTime() < Date.now() - 60_000) {
-      return res.status(400).json({ error: 'scheduledTime cannot be in the past' });
-    }
-
-    const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-
-    const jobId = `sched_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-    await db.insert(scheduledJobs).values({
-      id: jobId,
-      cardIds: JSON.stringify(normalizedCardIds),
-      scheduledTime: runAt,
-      status: 'pending',
-      settings: JSON.stringify(settings && typeof settings === 'object' ? settings : {}),
-      createdBy: user.openId
+    const cards = scheduleSelection(cardIds).sort(), serializedSettings = canonicalRetryJson(newScheduleSettings(settings));
+    const selectedTime = futureScheduleTime(scheduledTime,requestKey === undefined);
+    const result = await withScheduleIdentity(req,async (user,tx) => {
+      const id = requestKey === undefined ? `sched_${randomUUID()}`
+        : `sched_${createHash('sha256').update(String(user.id)).update('\0').update(requestKey.toLowerCase()).digest('hex').slice(0,58)}`;
+      const reuse = (existing: ScheduleRow) => {
+        if (existing.createdBy !== user.openId || existing.approvedByUserId !== user.id) throw new HttpError(404, 'Scheduled job not found');
+        let same = false;
+        try { same = canonicalRetryJson(scheduleSelection(JSON.parse(existing.cardIds),409).sort()) === canonicalRetryJson(cards)
+          && canonicalRetryJson(JSON.parse(existing.settings)) === serializedSettings && existing.scheduledTime.getTime() === selectedTime.getTime(); }
+        catch { /* Invalid persisted inputs cannot be accepted as an idempotent match. */ }
+        if (!same) throw new HttpError(409, 'requestKey was already used with different schedule inputs');
+        let reviewNeeded = existing.status === 'awaiting_approval' || existing.approvedSessionEpoch !== user.sessionEpoch;
+        try { reviewNeeded ||= existing.approvalHash !== approvalSnapshotHash(existing); }
+        catch { reviewNeeded = true; }
+        return { jobId: id,status: existing.status,replayed: true,reviewNeeded };
+      };
+      if (requestKey !== undefined) {
+        const [existing] = await tx.select().from(scheduledJobs).where(eq(scheduledJobs.id,id)).limit(1).for('update');
+        if (existing) return reuse(existing);
+      }
+      const approvedAt = new Date();
+      const row: ScheduleRow = { id,cardIds: JSON.stringify(cards),settings: serializedSettings,
+        scheduledTime: futureScheduleTime(scheduledTime),status: 'pending',createdBy: user.openId,
+        approvedByUserId: user.id,approvedSessionEpoch: user.sessionEpoch,approvedAt,approvalHash: null,
+        createdAt: approvedAt,completedAt: null,error: null };
+      row.approvalHash = approvalSnapshotHash(row);
+      const inserted = await tx.insert(scheduledJobs).values(row).onConflictDoNothing({ target: scheduledJobs.id }).returning({ id: scheduledJobs.id });
+      if (!inserted.length) {
+        const [existing] = await tx.select().from(scheduledJobs).where(eq(scheduledJobs.id,id)).limit(1).for('update');
+        if (!existing) throw new HttpError(409, 'Schedule creation conflicted; review the schedule list');
+        return reuse(existing);
+      }
+      return { jobId: id,status: row.status,replayed: false,reviewNeeded: false };
     });
-
-    res.json({ success: true, jobId });
-  } catch (error) {
-    console.error('Error scheduling generation:', error);
-    res.status(500).json({ error: 'Failed to schedule generation' });
-  }
+    res.status(result.reviewNeeded ? 409 : 200).json({ success: !result.reviewNeeded,...result,
+      ...(result.reviewNeeded ? { error: 'The existing schedule requires explicit approval review' } : {}) });
+  } catch (error) { scheduleRouteFailure(res,error); }
 });
 
 // Get scheduled jobs endpoint
 router.get('/aptlss/scheduled', async (req: any, res: Response) => {
   try {
-    const user = req.user;
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-
-    const jobs = await db.select().from(scheduledJobs)
-      .where(eq(scheduledJobs.createdBy, user.openId))
-      .orderBy(desc(scheduledJobs.createdAt));
-
+    const jobs = await withScheduleIdentity(req,async (user,tx) => tx.select().from(scheduledJobs)
+      .where(and(eq(scheduledJobs.createdBy,user.openId),or(isNull(scheduledJobs.approvedByUserId),eq(scheduledJobs.approvedByUserId,user.id))))
+      .orderBy(desc(scheduledJobs.createdAt)));
     res.json(jobs);
-  } catch (error) {
-    console.error('Error fetching scheduled jobs:', error);
-    res.status(500).json({ error: 'Failed to fetch scheduled jobs' });
-  }
+  } catch (error) { scheduleRouteFailure(res,error); }
 });
 
-// Ca// Cancel scheduled job endpoint
+router.get('/aptlss/scheduled/:id/approval', async (req: Request,res: Response) => {
+  try {
+    const approval = await withScheduleIdentity(req,async (user,tx) => {
+      const [row] = await tx.select().from(scheduledJobs).where(scheduleOwnerWhere(req.params.id,user)).limit(1).for('share');
+      if (!row) throw new HttpError(404, 'Scheduled job not found');
+      return approvalPreview(tx,row);
+    });
+    res.json({ approval });
+  } catch (error) { scheduleRouteFailure(res,error); }
+});
+
+router.post('/aptlss/scheduled/:id/approval', async (req: Request,res: Response) => {
+  try {
+    const { expectedSnapshotHash,scheduledTime } = req.body;
+    if (typeof expectedSnapshotHash !== 'string' || !/^[a-f0-9]{64}$/.test(expectedSnapshotHash)) {
+      throw new HttpError(400, 'A valid expectedSnapshotHash is required');
+    }
+    futureScheduleTime(scheduledTime);
+    await withScheduleIdentity(req,async (user,tx) => {
+      const [row] = await tx.select().from(scheduledJobs).where(scheduleOwnerWhere(req.params.id,user)).limit(1).for('update');
+      if (!row) throw new HttpError(404, 'Scheduled job not found');
+      if (!['pending','awaiting_approval'].includes(row.status)) throw new HttpError(409, 'Only pending or awaiting-approval jobs can be approved');
+      if (schedulePreviewRevisionHash(row) !== expectedSnapshotHash) throw new HttpError(409, 'Scheduled inputs changed; review a fresh approval preview');
+      await approvalPreview(tx,row);
+      const next = { ...row,scheduledTime: futureScheduleTime(scheduledTime),approvedByUserId: user.id,
+        approvedSessionEpoch: user.sessionEpoch,approvedAt: new Date(),status: 'pending',error: null,completedAt: null };
+      await tx.update(scheduledJobs).set({ scheduledTime: next.scheduledTime,approvedByUserId: next.approvedByUserId,
+        approvedSessionEpoch: next.approvedSessionEpoch,approvedAt: next.approvedAt,approvalHash: approvalSnapshotHash(next),
+        status: 'pending',error: null,completedAt: null }).where(eq(scheduledJobs.id,row.id));
+    });
+    res.json({ success: true,jobId: req.params.id });
+  } catch (error) { scheduleRouteFailure(res,error); }
+});
+
+// Cancel eligible jobs under the same identity-before-job lock order as approval.
 router.delete('/aptlss/scheduled/:id', async (req: any, res: Response) => {
   try {
-    const { id } = req.params;
-    const user = req.user;
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-    const [existing] = await db.select({ status: scheduledJobs.status }).from(scheduledJobs)
-      .where(and(eq(scheduledJobs.id, id), eq(scheduledJobs.createdBy, user.openId)))
-      .limit(1);
-    if (!existing) return res.status(404).json({ error: 'Scheduled job not found' });
-    if (existing.status !== 'pending') {
-      return res.status(409).json({ error: `Only pending jobs can be cancelled (current status: ${existing.status})` });
-    }
-    await db.update(scheduledJobs)
-      .set({ status: 'cancelled' })
-      .where(and(
-        eq(scheduledJobs.id, id),
-        eq(scheduledJobs.createdBy, user.openId),
-        eq(scheduledJobs.status, 'pending')
-      ));
+    await withScheduleIdentity(req,async (user,tx) => {
+      const [row] = await tx.select().from(scheduledJobs).where(scheduleOwnerWhere(req.params.id,user)).limit(1).for('update');
+      if (!row) throw new HttpError(404, 'Scheduled job not found');
+      if (!['pending','awaiting_approval'].includes(row.status)) throw new HttpError(409, 'Only pending or awaiting-approval jobs can be cancelled');
+      await tx.update(scheduledJobs).set({ status: 'cancelled' }).where(eq(scheduledJobs.id,row.id));
+    });
     res.json({ success: true });
-  } catch (error) {
-    console.error('Error cancelling scheduled job:', error);
-    res.status(500).json({ error: 'Failed to cancel scheduled job' });
-  }
+  } catch (error) { scheduleRouteFailure(res,error); }
 });
 
 export default router;

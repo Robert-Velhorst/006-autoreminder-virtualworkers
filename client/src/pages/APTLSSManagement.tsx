@@ -45,11 +45,13 @@ import {
   MessageSquare,
   X,
   AlertTriangle,
+  Calendar,
 } from "lucide-react";
 import { GoalInterviewDialog } from "@/components/GoalInterviewDialog";
 import { AresConfigurationPanel } from "@/components/AresConfigurationPanel";
 import { Link } from "wouter";
 import { useLoadingQueue } from "@/contexts/LoadingQueueContext";
+import { CreateScheduledGenerationDialog, ScheduledGenerationView, generationSettingsOnly, type ScheduledGenerationJob } from "@/components/ScheduledGeneration";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -582,6 +584,11 @@ export default function APTLSSManagement() {
   const [jobDetails, setJobDetails] = useState<any>(null);
   const retryInFlight = useRef(false);
   const [retryPending, setRetryPending] = useState(false);
+  const [scheduledJobs, setScheduledJobs] = useState<ScheduledGenerationJob[]>([]);
+  const [scheduledLoading, setScheduledLoading] = useState(false);
+  const [scheduledError, setScheduledError] = useState<string | null>(null);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const scheduledRead = useRef(0);
 
   //  Settings
   const [settings, setSettings] = useState({
@@ -898,12 +905,19 @@ export default function APTLSSManagement() {
   };
 
   const loadScheduledJobs = async () => {
+    const sequence = ++scheduledRead.current;
+    setScheduledLoading(true);
+    setScheduledError(null);
     try {
-      const res = await fetch("/api/aptlss/scheduled");
-      const jobs = await res.json();
-      setSettings(prev => ({ ...prev, scheduledJobs: jobs }));
+      const res = await fetch("/api/aptlss/scheduled", { signal: AbortSignal.timeout(30_000) });
+      const jobs = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(typeof jobs?.error === "string" ? jobs.error : `Could not load scheduled jobs (HTTP ${res.status}).`);
+      if (!Array.isArray(jobs) || jobs.some(job => !job || typeof job.id !== "string" || typeof job.status !== "string" || typeof job.scheduledTime !== "string")) throw new Error("Could not verify scheduled jobs. Reload before taking an action.");
+      if (sequence === scheduledRead.current) setScheduledJobs(jobs);
     } catch (err) {
-      console.error("Error loading scheduled jobs:", err);
+      if (sequence === scheduledRead.current) setScheduledError(err instanceof Error && err.name !== "TypeError" && err.name !== "TimeoutError" ? err.message : "Could not load scheduled jobs. Reload to check their status.");
+    } finally {
+      if (sequence === scheduledRead.current) setScheduledLoading(false);
     }
   };
 
@@ -1323,6 +1337,11 @@ export default function APTLSSManagement() {
   };
 
   //  Generation
+  const selectedGenerationSettings = () => generationSettingsOnly({
+    ...settings,
+    ...(cards.filter(card => card.selected).length === 1 && cards.some(card => card.selected && card.id === clarifiedCardId) && clarifiedGoal != null
+      ? { clarifiedGoal } : {}),
+  });
   const startGeneration = async () => {
     const selected = cards.filter(c => c.selected);
     if (selected.length === 0) {
@@ -1345,7 +1364,7 @@ export default function APTLSSManagement() {
         credentials: "include",
         body: JSON.stringify({
           cardIds: selected.map(c => c.id),
-          settings: { ...settings, clarifiedGoal },
+          settings: selectedGenerationSettings(),
         }),
       });
 
@@ -1518,7 +1537,7 @@ export default function APTLSSManagement() {
       <Tabs defaultValue="workspaces" className="flex-1">
         <Card>
           <CardHeader>
-            <TabsList className="grid w-full grid-cols-4">
+            <TabsList className="grid w-full grid-cols-2 sm:grid-cols-5 h-auto gap-1">
               <TabsTrigger value="workspaces">Workspaces</TabsTrigger>
               <TabsTrigger value="cards">
                 Cards
@@ -1529,6 +1548,7 @@ export default function APTLSSManagement() {
                 )}
               </TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
+              <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
               <TabsTrigger value="settings">Settings</TabsTrigger>
             </TabsList>
           </CardHeader>
@@ -1909,6 +1929,9 @@ export default function APTLSSManagement() {
                       )}
                       Generate ({selectedCount})
                     </Button>
+                    <Button variant="outline" size="sm" disabled={selectedCount === 0 || selectedCount > 250} onClick={() => setScheduleOpen(true)}>
+                      <Calendar className="h-4 w-4 mr-2" />Schedule selected ({selectedCount})
+                    </Button>
                   </div>
                 </CardContent>
               </Card>
@@ -2085,6 +2108,10 @@ export default function APTLSSManagement() {
               </div>
             </TabsContent>
 
+            <TabsContent value="scheduled" className="space-y-4">
+              <ScheduledGenerationView jobs={scheduledJobs} loading={scheduledLoading} error={scheduledError} onRefresh={() => void loadScheduledJobs()} />
+            </TabsContent>
+
             {/*  Settings Tab  */}
             <TabsContent value="settings" className="space-y-4">
               {/* ARES Configuration */}
@@ -2169,6 +2196,9 @@ export default function APTLSSManagement() {
       </Tabs>
 
       {/*  Workspace Selector Dialog  */}
+      <CreateScheduledGenerationDialog open={scheduleOpen} onOpenChange={setScheduleOpen}
+        cards={cards.filter(card => card.selected).map(card => ({ id: card.id, name: card.name }))}
+        settings={selectedGenerationSettings()} onSaved={() => void loadScheduledJobs()} />
       <WorkspaceSelectorDialog
         open={showWorkspaceSelector}
         onClose={() => setShowWorkspaceSelector(false)}

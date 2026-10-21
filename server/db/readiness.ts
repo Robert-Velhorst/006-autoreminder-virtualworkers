@@ -1,7 +1,7 @@
 export const REQUIRED_POSTGRES_MIGRATION = {
-  tag: "0011_generation_status_width",
-  createdAt: 1792573083723n,
-  hash: "e2afb582f3efee81a95f5fffadbe6a4929a94aa176d90f24d9bee0b373a64a1e",
+  tag: "0012_scheduled_generation_approval",
+  createdAt: 1792574751125n,
+  hash: "1d241f9e430a59672dc4053f11f4bf5c8f96a5212828eef402530c73630946a6",
 } as const;
 
 export const READINESS_QUERY_TIMEOUT_MS = 2_000;

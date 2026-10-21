@@ -1,5 +1,24 @@
 # Consolidation Ledger
 
+## Superseded Candidate Archive: October 21, 2026
+
+PR #146 head `dd23e75df25e229a3acaa0d153ecc4ddc34e9061` is fully contained in
+published PR #147 head `53feeb8ddebf7dff38c47ec2374c2068a6790870`. Ancestry and
+the intervening source changes were checked before closing the redundant PR.
+The exact candidate is retained by annotated remote tag
+`archive/subscription-authority-candidate-20261021`, tag object
+`073669e56400fa25f0d1530121be50f0557591bd`, verified peeled head `dd23e75`.
+Only the matching remote ref was removed, with its expected-SHA lease; guarded
+local branch deletion succeeded. This was supersession, not a production or
+security-acceptance merge.
+
+PR #147 quality `39575196607` completed successfully at its exact published
+head. Its CodeQL aggregate still has two unaccepted executable-configuration
+findings. The launch-root finding is absent from the newer branch analysis.
+Subsequent scheduled-approval source remains separate until its own gates pass;
+neither candidate's tests accept those later edits. Only-main consolidation is
+not complete while the current review/follow-up branches remain.
+
 ## Current Consolidation Checkpoint: October 21, 2026
 
 Main now includes accepted timer PR #141, OAuth PR #142 and assignment PR #143.

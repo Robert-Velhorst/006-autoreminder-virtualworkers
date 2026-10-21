@@ -85,6 +85,13 @@
       "when": 1792573083723,
       "tag": "0011_generation_status_width",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1792574751125,
+      "tag": "0012_scheduled_generation_approval",
+      "breakpoints": true
     }
   ]
 }

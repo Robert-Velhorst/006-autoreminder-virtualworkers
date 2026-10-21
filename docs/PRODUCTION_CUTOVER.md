@@ -118,8 +118,13 @@ Configure these values in the deployment platform's secret store:
 - `TRELLO_TOKEN`: active Trello member token.
 
 Set `DATABASE_URL` in `.env` to the separately provisioned PostgreSQL service.
-For PostgreSQL installed on the Docker host, use `host.docker.internal`; for
-production, use private networking and add one `sslmode=verify-full` option to
+For PostgreSQL installed on the Docker host, `host.docker.internal` names the
+configured host gateway; it does not make a loopback-only PostgreSQL listener
+reachable from a bridge-network container. Verify an approved private route
+and the certificate's DNS identity before configuring that address. Do not
+open a shared database port, replace its certificates or change other apps'
+listeners merely to pass a connection test. For production, use private
+networking and add one `sslmode=verify-full` option to
 the URL without an `ssl` override. Node.js then verifies the certificate and
 hostname using its TLS trust configuration. Set `REDIS_URL` only
 when an external Redis service is configured. Do not commit `.env`.

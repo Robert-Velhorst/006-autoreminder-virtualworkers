@@ -1,14 +1,27 @@
-import { createHash } from "node:crypto";
-import { setTimeout as sleep } from "node:timers/promises";
-import { and, asc, eq, lte } from "drizzle-orm";
-import { generationItems, generationJobs, scheduledJobs } from "../../drizzle/schema.postgres";
-import { getDb } from "../db";
-import { runScheduledJob, ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader } from "../scheduledJobRuntime";
-import { assertAptlssJobOwnership, getAptlssChecklistWriteAuthorization } from "./trello-checklist-sync";
+import { createHash } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { and, asc, eq, lte } from 'drizzle-orm';
+import { generationItems, generationJobs, scheduledJobs } from '../../drizzle/schema.postgres';
+import { getDb } from '../db';
 import {
-  fetchAndGenerateAptlss,
-  type AptlssGenerationSettings,
-} from "./aptlss-generation";
+  runScheduledJob,
+  ScheduledJobLeaseLostError,
+  type ScheduledJobContext,
+  type ScheduledJobOwnershipReader,
+} from '../scheduledJobRuntime';
+import { assertAptlssJobOwnership, getAptlssChecklistWriteAuthorization } from './trello-checklist-sync';
+import {
+  createScheduledGenerationApprovalContext,
+  holdScheduledGenerationForApproval,
+  ScheduledGenerationApprovalError,
+  type ScheduledApprovalWriter,
+} from './aptlss-scheduled-approval';
+export {
+  approvalSnapshotHash,
+  parseScheduledGenerationApproval,
+  assertScheduledGenerationApproval,
+} from './aptlss-scheduled-approval';
+import { fetchAndGenerateAptlss, type AptlssGenerationSettings } from './aptlss-generation';
 
 type BatchInput = {
   jobId: string;
@@ -16,10 +29,12 @@ type BatchInput = {
   settings?: AptlssGenerationSettings & { maxRetries?: number };
   createdBy: string;
   context?: ScheduledJobContext;
+  persist?: (action: (writer: ScheduledApprovalWriter) => Promise<void>) => Promise<void>;
 };
 
-const UNKNOWN_TRELLO_OUTCOME = "outcome_unknown";
-const UNKNOWN_TRELLO_OUTCOME_MESSAGE = "A previous attempt may have changed Trello. Verify the Trello checklist before retrying.";
+const UNKNOWN_TRELLO_OUTCOME = 'outcome_unknown';
+const UNKNOWN_TRELLO_OUTCOME_MESSAGE =
+  'A previous attempt may have changed Trello. Verify the Trello checklist before retrying.';
 
 export type AptlssBatchResult = {
   success: true;
@@ -39,8 +54,10 @@ export type AptlssBatchResult = {
 };
 
 function cleanCardIds(value: unknown) {
-  if (!Array.isArray(value)) throw new Error("cardIds must be an array");
-  return Array.from(new Set(value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean))).slice(0, 250);
+  if (!Array.isArray(value)) throw new Error('cardIds must be an array');
+  return Array.from(
+    new Set(value.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean)),
+  ).slice(0, 250);
 }
 
 function errorMessage(error: unknown) {
@@ -49,14 +66,14 @@ function errorMessage(error: unknown) {
 
 function parsePersistedGenerationResult(value: unknown, cardId: string) {
   let parsed = value;
-  if (typeof parsed === "string") {
+  if (typeof parsed === 'string') {
     try {
       parsed = JSON.parse(parsed) as unknown;
     } catch {
       return null;
     }
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
   const result = parsed as {
     success?: unknown;
     cardId?: unknown;
@@ -66,11 +83,14 @@ function parsePersistedGenerationResult(value: unknown, cardId: string) {
     validation?: { needsReview?: unknown } | null;
   };
   if (
-    result.success !== true
-    || result.cardId !== cardId
-    || !result.aptlss || typeof result.aptlss !== "object"
-    || !result.validation || typeof result.validation.needsReview !== "boolean"
-  ) return null;
+    result.success !== true ||
+    result.cardId !== cardId ||
+    !result.aptlss ||
+    typeof result.aptlss !== 'object' ||
+    !result.validation ||
+    typeof result.validation.needsReview !== 'boolean'
+  )
+    return null;
   return result as Awaited<ReturnType<typeof fetchAndGenerateAptlss>>;
 }
 
@@ -81,7 +101,7 @@ function affectedRows(result: unknown) {
 function generationItemId(jobId: string, index: number, cardId: string) {
   const legacyId = `item_${jobId}_${index}`;
   if (legacyId.length <= 64) return legacyId;
-  const digest = createHash("sha256").update(jobId).update("\0").update(cardId).digest("hex");
+  const digest = createHash('sha256').update(jobId).update('\0').update(cardId).digest('hex');
   return `item_${digest.slice(0, 59)}`;
 }
 
@@ -100,38 +120,47 @@ export async function executeAptlssGenerationBatch(input: BatchInput): Promise<A
   const { context } = input;
   await assertAptlssJobOwnership(context);
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) throw new Error('Database not available');
+  const persist =
+    input.persist ??
+    (async (action: (writer: ScheduledApprovalWriter) => Promise<void>) => {
+      await action(db);
+    });
   const cardIds = cleanCardIds(input.cardIds);
-  if (cardIds.length === 0) throw new Error("At least one card is required");
+  if (cardIds.length === 0) throw new Error('At least one card is required');
   const settings = input.settings ?? {};
   const maxAttempts = Math.min(3, Math.max(1, Math.round(Number(settings.maxRetries) || 1)));
 
   await assertAptlssJobOwnership(context);
-  await db.insert(generationJobs).values({
-    id: input.jobId,
-    totalCards: cardIds.length,
-    completedCards: 0,
-    failedCards: 0,
-    status: "running",
-    settings: JSON.stringify(settings),
-    createdBy: input.createdBy,
-    completedAt: null,
-  }).onConflictDoUpdate({
-    target: generationJobs.id,
-    set: {
-      totalCards: cardIds.length,
-      completedCards: 0,
-      failedCards: 0,
-      status: "running",
-      settings: JSON.stringify(settings),
-      completedAt: null,
-    },
+  await persist(async (writer) => {
+    await writer
+      .insert(generationJobs)
+      .values({
+        id: input.jobId,
+        totalCards: cardIds.length,
+        completedCards: 0,
+        failedCards: 0,
+        status: 'running',
+        settings: JSON.stringify(settings),
+        createdBy: input.createdBy,
+        completedAt: null,
+      })
+      .onConflictDoUpdate({
+        target: generationJobs.id,
+        set: {
+          totalCards: cardIds.length,
+          completedCards: 0,
+          failedCards: 0,
+          status: 'running',
+          settings: JSON.stringify(settings),
+          completedAt: null,
+        },
+      });
   });
 
-  const priorItems = await db.select().from(generationItems)
-    .where(eq(generationItems.jobId, input.jobId));
+  const priorItems = await db.select().from(generationItems).where(eq(generationItems.jobId, input.jobId));
   const priorItemsByCardId = new Map(priorItems.map((item) => [item.cardId, item]));
-  const results: AptlssBatchResult["results"] = [];
+  const results: AptlssBatchResult['results'] = [];
   let completed = 0;
   let failed = 0;
   let needsReview = 0;
@@ -140,12 +169,13 @@ export async function executeAptlssGenerationBatch(input: BatchInput): Promise<A
     await assertAptlssJobOwnership(context);
     const itemId = generationItemId(input.jobId, index, cardId);
     const priorItem = priorItemsByCardId.get(cardId);
-    const priorResult = priorItem && (priorItem.status === "completed" || priorItem.status === "needs_review")
-      ? parsePersistedGenerationResult(priorItem.result, cardId)
-      : null;
+    const priorResult =
+      priorItem && (priorItem.status === 'completed' || priorItem.status === 'needs_review')
+        ? parsePersistedGenerationResult(priorItem.result, cardId)
+        : null;
     if (priorItem && priorResult) {
       const requiresReview = priorResult.validation.needsReview;
-      if ((priorItem.status === "needs_review") === requiresReview) {
+      if ((priorItem.status === 'needs_review') === requiresReview) {
         completed += 1;
         if (requiresReview) needsReview += 1;
         results.push({
@@ -170,65 +200,79 @@ export async function executeAptlssGenerationBatch(input: BatchInput): Promise<A
 
     const authorization = await getAptlssChecklistWriteAuthorization(cardId);
     if (!authorization.allowed) {
-      const reason = authorization.reason || "Trello checklist write authorization failed.";
+      const reason = authorization.reason || 'Trello checklist write authorization failed.';
       failed += 1;
       await assertAptlssJobOwnership(context);
-      await db.insert(generationItems).values({
-        id: itemId,
-        jobId: input.jobId,
-        cardId,
-        cardName: `Card ${cardId}`,
-        boardName: null,
-        status: "failed",
-        attempts: 0,
-        maxAttempts,
-        error: reason.slice(0, 8_000),
-        result: null,
-      }).onConflictDoUpdate({
-        target: generationItems.id,
-        set: {
-          status: "failed",
-          attempts: 0,
-          error: reason.slice(0, 8_000),
-          result: null,
-          updatedAt: new Date(),
-        },
+      await persist(async (writer) => {
+        await writer
+          .insert(generationItems)
+          .values({
+            id: itemId,
+            jobId: input.jobId,
+            cardId,
+            cardName: `Card ${cardId}`,
+            boardName: null,
+            status: 'failed',
+            attempts: 0,
+            maxAttempts,
+            error: reason.slice(0, 8_000),
+            result: null,
+          })
+          .onConflictDoUpdate({
+            target: generationItems.id,
+            set: {
+              status: 'failed',
+              attempts: 0,
+              error: reason.slice(0, 8_000),
+              result: null,
+              updatedAt: new Date(),
+            },
+          });
       });
       results.push({ cardId, success: false, error: reason });
       await assertAptlssJobOwnership(context);
-      await db.update(generationJobs).set({ completedCards: completed, failedCards: failed })
-        .where(eq(generationJobs.id, input.jobId));
+      await persist(async (writer) => {
+        await writer
+          .update(generationJobs)
+          .set({ completedCards: completed, failedCards: failed })
+          .where(eq(generationJobs.id, input.jobId));
+      });
       continue;
     }
 
     const applyToTrello = settings.applyToTrello !== false && authorization.applyToTrello;
     if (applyToTrello) {
       await assertAptlssJobOwnership(context);
-      await db.insert(generationItems).values({
-        id: itemId,
-        jobId: input.jobId,
-        cardId,
-        cardName: `Card ${cardId}`,
-        boardName: null,
-        status: UNKNOWN_TRELLO_OUTCOME,
-        attempts: 0,
-        maxAttempts,
-        error: UNKNOWN_TRELLO_OUTCOME_MESSAGE,
-        result: null,
-      }).onConflictDoUpdate({
-        target: generationItems.id,
-        set: {
-          status: UNKNOWN_TRELLO_OUTCOME,
-          attempts: 0,
-          maxAttempts,
-          error: UNKNOWN_TRELLO_OUTCOME_MESSAGE,
-          result: null,
-          updatedAt: new Date(),
-        },
+      await persist(async (writer) => {
+        await writer
+          .insert(generationItems)
+          .values({
+            id: itemId,
+            jobId: input.jobId,
+            cardId,
+            cardName: `Card ${cardId}`,
+            boardName: null,
+            status: UNKNOWN_TRELLO_OUTCOME,
+            attempts: 0,
+            maxAttempts,
+            error: UNKNOWN_TRELLO_OUTCOME_MESSAGE,
+            result: null,
+          })
+          .onConflictDoUpdate({
+            target: generationItems.id,
+            set: {
+              status: UNKNOWN_TRELLO_OUTCOME,
+              attempts: 0,
+              maxAttempts,
+              error: UNKNOWN_TRELLO_OUTCOME_MESSAGE,
+              result: null,
+              updatedAt: new Date(),
+            },
+          });
       });
     }
 
-    let lastError = "Generation failed";
+    let lastError = 'Generation failed';
     let result: Awaited<ReturnType<typeof fetchAndGenerateAptlss>> | null = null;
     let attempts = 0;
 
@@ -237,10 +281,14 @@ export async function executeAptlssGenerationBatch(input: BatchInput): Promise<A
       attempts += 1;
       try {
         await assertAptlssJobOwnership(context);
-        result = await fetchAndGenerateAptlss(cardId, {
-          ...settings,
-          applyToTrello,
-        }, context);
+        result = await fetchAndGenerateAptlss(
+          cardId,
+          {
+            ...settings,
+            applyToTrello,
+          },
+          context,
+        );
       } catch (error) {
         if (error instanceof ScheduledJobLeaseLostError) throw error;
         await assertAptlssJobOwnership(context);
@@ -260,26 +308,31 @@ export async function executeAptlssGenerationBatch(input: BatchInput): Promise<A
       completed += 1;
       if (result.validation.needsReview) needsReview += 1;
       await assertAptlssJobOwnership(context);
-      await db.insert(generationItems).values({
-        id: itemId,
-        jobId: input.jobId,
-        cardId,
-        cardName: result.aptlss.summary.slice(0, 255),
-        boardName: null,
-        status: result.validation.needsReview ? "needs_review" : "completed",
-        attempts,
-        maxAttempts,
-        error: null,
-        result: JSON.stringify(result),
-      }).onConflictDoUpdate({
-        target: generationItems.id,
-        set: {
-          status: result.validation.needsReview ? "needs_review" : "completed",
-          attempts,
-          error: null,
-          result: JSON.stringify(result),
-          updatedAt: new Date(),
-        },
+      await persist(async (writer) => {
+        await writer
+          .insert(generationItems)
+          .values({
+            id: itemId,
+            jobId: input.jobId,
+            cardId,
+            cardName: result.aptlss.summary.slice(0, 255),
+            boardName: null,
+            status: result.validation.needsReview ? 'needs_review' : 'completed',
+            attempts,
+            maxAttempts,
+            error: null,
+            result: JSON.stringify(result),
+          })
+          .onConflictDoUpdate({
+            target: generationItems.id,
+            set: {
+              status: result.validation.needsReview ? 'needs_review' : 'completed',
+              attempts,
+              error: null,
+              result: JSON.stringify(result),
+              updatedAt: new Date(),
+            },
+          });
       });
       results.push({
         cardId,
@@ -291,55 +344,79 @@ export async function executeAptlssGenerationBatch(input: BatchInput): Promise<A
     } else {
       failed += 1;
       await assertAptlssJobOwnership(context);
-      await db.insert(generationItems).values({
-        id: itemId,
-        jobId: input.jobId,
-        cardId,
-        cardName: `Card ${cardId}`,
-        boardName: null,
-        status: applyToTrello ? UNKNOWN_TRELLO_OUTCOME : "failed",
-        attempts,
-        maxAttempts,
-        error: (applyToTrello
-          ? `${UNKNOWN_TRELLO_OUTCOME_MESSAGE} Last error: ${lastError}`
-          : lastError).slice(0, 8_000),
-        result: null,
-      }).onConflictDoUpdate({
-        target: generationItems.id,
-        set: {
-          status: applyToTrello ? UNKNOWN_TRELLO_OUTCOME : "failed",
-          attempts,
-          error: (applyToTrello
-            ? `${UNKNOWN_TRELLO_OUTCOME_MESSAGE} Last error: ${lastError}`
-            : lastError).slice(0, 8_000),
-          result: null,
-          updatedAt: new Date(),
-        },
+      await persist(async (writer) => {
+        await writer
+          .insert(generationItems)
+          .values({
+            id: itemId,
+            jobId: input.jobId,
+            cardId,
+            cardName: `Card ${cardId}`,
+            boardName: null,
+            status: applyToTrello ? UNKNOWN_TRELLO_OUTCOME : 'failed',
+            attempts,
+            maxAttempts,
+            error: (applyToTrello
+              ? `${UNKNOWN_TRELLO_OUTCOME_MESSAGE} Last error: ${lastError}`
+              : lastError
+            ).slice(0, 8_000),
+            result: null,
+          })
+          .onConflictDoUpdate({
+            target: generationItems.id,
+            set: {
+              status: applyToTrello ? UNKNOWN_TRELLO_OUTCOME : 'failed',
+              attempts,
+              error: (applyToTrello
+                ? `${UNKNOWN_TRELLO_OUTCOME_MESSAGE} Last error: ${lastError}`
+                : lastError
+              ).slice(0, 8_000),
+              result: null,
+              updatedAt: new Date(),
+            },
+          });
       });
       results.push({ cardId, success: false, error: lastError });
     }
 
     await assertAptlssJobOwnership(context);
-    await db.update(generationJobs).set({ completedCards: completed, failedCards: failed })
-      .where(eq(generationJobs.id, input.jobId));
+    await persist(async (writer) => {
+      await writer
+        .update(generationJobs)
+        .set({ completedCards: completed, failedCards: failed })
+        .where(eq(generationJobs.id, input.jobId));
+    });
   }
 
   await assertAptlssJobOwnership(context);
-  await db.update(generationJobs).set({
-    status: failed > 0 ? "completed_with_errors" : needsReview > 0 ? "needs_review" : "completed",
-    completedCards: completed,
-    failedCards: failed,
-    completedAt: new Date(),
-  }).where(eq(generationJobs.id, input.jobId));
+  await persist(async (writer) => {
+    await writer
+      .update(generationJobs)
+      .set({
+        status: failed > 0 ? 'completed_with_errors' : needsReview > 0 ? 'needs_review' : 'completed',
+        completedCards: completed,
+        failedCards: failed,
+        completedAt: new Date(),
+      })
+      .where(eq(generationJobs.id, input.jobId));
+  });
 
-  return { success: true, jobId: input.jobId, total: cardIds.length, completed, failed, needsReview, results };
+  return {
+    success: true,
+    jobId: input.jobId,
+    total: cardIds.length,
+    completed,
+    failed,
+    needsReview,
+    results,
+  };
 }
 
 function parseSettings(value: string): AptlssGenerationSettings & { maxRetries?: number } {
   try {
     const parsed = JSON.parse(value) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as AptlssGenerationSettings & { maxRetries?: number }
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as AptlssGenerationSettings & { maxRetries?: number })
       : {};
   } catch {
     return {};
@@ -349,13 +426,16 @@ function parseSettings(value: string): AptlssGenerationSettings & { maxRetries?:
 export async function processDueAptlssGenerationJobs(now = new Date(), context?: ScheduledJobContext) {
   await assertAptlssJobOwnership(context);
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) throw new Error('Database not available');
 
   let processed = 0;
   let failed = 0;
+  let awaitingApproval = 0;
 
-  const running = await db.select().from(scheduledJobs)
-    .where(and(eq(scheduledJobs.status, "running"), lte(scheduledJobs.scheduledTime, now)))
+  const running = await db
+    .select()
+    .from(scheduledJobs)
+    .where(and(eq(scheduledJobs.status, 'running'), lte(scheduledJobs.scheduledTime, now)))
     .orderBy(asc(scheduledJobs.scheduledTime))
     .limit(5);
 
@@ -364,27 +444,57 @@ export async function processDueAptlssGenerationJobs(now = new Date(), context?:
     try {
       await assertAptlssJobOwnership(context);
       // The shared lease runtime refuses this callback while a worker is still heartbeating.
-      await runScheduledJob({
-        jobKey: `aptlss-scheduled:${orphaned.id}`,
-        leaseMs: 60 * 60_000,
-        skipIfSuccessful: false,
-      }, async (childContext) => {
-        jobContext = chainJobContext(childContext, context);
-        await assertAptlssJobOwnership(jobContext);
-        const reset = await db.update(scheduledJobs).set({ status: "pending" })
-          .where(and(
-            eq(scheduledJobs.id, orphaned.id),
-            eq(scheduledJobs.status, "running"),
-            lte(scheduledJobs.scheduledTime, now),
-          ));
-        return {
-          recordsProcessed: 0,
-          detail: affectedRows(reset) === 1
-            ? "Recovered an interrupted scheduled generation after acquiring its expired or missing lease."
-            : "Scheduled generation state changed before recovery.",
-        };
-      });
+      await runScheduledJob(
+        {
+          jobKey: `aptlss-scheduled:${orphaned.id}`,
+          leaseMs: 60 * 60_000,
+          skipIfSuccessful: false,
+        },
+        async (childContext) => {
+          jobContext = chainJobContext(childContext, context);
+          await assertAptlssJobOwnership(jobContext);
+          const [current] = await db
+            .select()
+            .from(scheduledJobs)
+            .where(eq(scheduledJobs.id, orphaned.id))
+            .limit(1);
+          if (!current || current.status !== 'running') return { recordsProcessed: 0 };
+          const approval = createScheduledGenerationApprovalContext(current, jobContext, db);
+          try {
+            let reset: unknown;
+            await approval.write(async (writer) => {
+              reset = await writer
+                .update(scheduledJobs)
+                .set({ status: 'pending' })
+                .where(
+                  and(
+                    eq(scheduledJobs.id, orphaned.id),
+                    eq(scheduledJobs.status, 'running'),
+                    lte(scheduledJobs.scheduledTime, now),
+                  ),
+                );
+            });
+            return {
+              recordsProcessed: 0,
+              detail:
+                affectedRows(reset) === 1
+                  ? 'Recovered an interrupted scheduled generation after acquiring its expired or missing lease.'
+                  : 'Scheduled generation state changed before recovery.',
+            };
+          } catch (error) {
+            const reason =
+              approval.failure ?? (error instanceof ScheduledGenerationApprovalError ? error : undefined);
+            if (reason) {
+              if (await holdScheduledGenerationForApproval(current, reason, jobContext, db))
+                awaitingApproval++;
+              throw reason;
+            }
+            throw error;
+          }
+        },
+      );
     } catch (error) {
+      if (error instanceof ScheduledGenerationApprovalError) continue;
       if (error instanceof ScheduledJobLeaseLostError) throw error;
       if (jobContext?.signal.aborted) throw new ScheduledJobLeaseLostError();
       // The runtime has released the child lease; only the parent remains assertable.
@@ -395,8 +505,10 @@ export async function processDueAptlssGenerationJobs(now = new Date(), context?:
   }
 
   await assertAptlssJobOwnership(context);
-  const due = await db.select().from(scheduledJobs)
-    .where(and(eq(scheduledJobs.status, "pending"), lte(scheduledJobs.scheduledTime, now)))
+  const due = await db
+    .select()
+    .from(scheduledJobs)
+    .where(and(eq(scheduledJobs.status, 'pending'), lte(scheduledJobs.scheduledTime, now)))
     .orderBy(asc(scheduledJobs.scheduledTime))
     .limit(5);
 
@@ -404,60 +516,111 @@ export async function processDueAptlssGenerationJobs(now = new Date(), context?:
     let jobContext: ScheduledJobContext | undefined;
     try {
       await assertAptlssJobOwnership(context);
-      const run = await runScheduledJob({
-        jobKey: `aptlss-scheduled:${queued.id}`,
-        leaseMs: 60 * 60_000,
-        skipIfSuccessful: false,
-      }, async (childContext) => {
-        jobContext = chainJobContext(childContext, context);
-        await assertAptlssJobOwnership(jobContext);
-        const [current] = await db.select().from(scheduledJobs)
-          .where(eq(scheduledJobs.id, queued.id)).limit(1);
-        if (!current || current.status !== "pending" || current.scheduledTime > now) {
-          return { recordsProcessed: 0, detail: "Job was no longer due and pending." };
-        }
-
-        await assertAptlssJobOwnership(jobContext);
-        const claim = await db.update(scheduledJobs).set({ status: "running", error: null })
-          .where(and(
-            eq(scheduledJobs.id, current.id),
-            eq(scheduledJobs.status, "pending"),
-            lte(scheduledJobs.scheduledTime, now),
-          ));
-        if (affectedRows(claim) !== 1) return { recordsProcessed: 0, detail: "Job claim was lost." };
-
-        try {
-          const cardIds = cleanCardIds(JSON.parse(current.cardIds));
-          const result = await executeAptlssGenerationBatch({
-            jobId: current.id,
-            cardIds,
-            settings: parseSettings(current.settings),
-            createdBy: current.createdBy,
-            context: jobContext,
-          });
+      const run = await runScheduledJob(
+        {
+          jobKey: `aptlss-scheduled:${queued.id}`,
+          leaseMs: 60 * 60_000,
+          skipIfSuccessful: false,
+        },
+        async (childContext) => {
+          jobContext = chainJobContext(childContext, context);
           await assertAptlssJobOwnership(jobContext);
-          await db.update(scheduledJobs).set({
-            status: result.failed > 0 ? "completed_with_errors" : result.needsReview > 0 ? "needs_review" : "completed",
-            completedAt: new Date(),
-            error: result.failed > 0 ? `${result.failed} card(s) failed; inspect generation history.` : null,
-          }).where(eq(scheduledJobs.id, current.id));
-          return {
-            recordsProcessed: result.completed,
-            detail: JSON.stringify({ total: result.total, completed: result.completed, failed: result.failed, needsReview: result.needsReview }),
-          };
-        } catch (error) {
-          if (error instanceof ScheduledJobLeaseLostError) throw error;
-          await assertAptlssJobOwnership(jobContext);
-          await db.update(scheduledJobs).set({
-            status: "failed",
-            completedAt: new Date(),
-            error: errorMessage(error).slice(0, 8_000),
-          }).where(eq(scheduledJobs.id, current.id));
-          throw error;
-        }
-      });
-      if (run.state === "success") processed += 1;
+          const [current] = await db
+            .select()
+            .from(scheduledJobs)
+            .where(eq(scheduledJobs.id, queued.id))
+            .limit(1);
+          if (!current || current.status !== 'pending' || current.scheduledTime > now) {
+            return { recordsProcessed: 0, detail: 'Job was no longer due and pending.' };
+          }
+          const approval = createScheduledGenerationApprovalContext(current, jobContext, db);
+          try {
+            let claim: unknown;
+            await approval.write(async (writer) => {
+              claim = await writer
+                .update(scheduledJobs)
+                .set({ status: 'running', error: null })
+                .where(
+                  and(
+                    eq(scheduledJobs.id, current.id),
+                    eq(scheduledJobs.status, 'pending'),
+                    lte(scheduledJobs.scheduledTime, now),
+                  ),
+                );
+            });
+            if (affectedRows(claim) !== 1) return { recordsProcessed: 0, detail: 'Job claim was lost.' };
+
+            try {
+              const cardIds = cleanCardIds(JSON.parse(current.cardIds));
+              const result = await executeAptlssGenerationBatch({
+                jobId: current.id,
+                cardIds,
+                settings: parseSettings(current.settings),
+                createdBy: current.createdBy,
+                context: approval.context,
+                persist: approval.write,
+              });
+              await approval.write(async (writer) => {
+                await writer
+                  .update(scheduledJobs)
+                  .set({
+                    status:
+                      result.failed > 0
+                        ? 'completed_with_errors'
+                        : result.needsReview > 0
+                          ? 'needs_review'
+                          : 'completed',
+                    completedAt: new Date(),
+                    error:
+                      result.failed > 0
+                        ? `${result.failed} card(s) failed; inspect generation history.`
+                        : null,
+                  })
+                  .where(eq(scheduledJobs.id, current.id));
+              });
+              return {
+                recordsProcessed: result.completed,
+                detail: JSON.stringify({
+                  total: result.total,
+                  completed: result.completed,
+                  failed: result.failed,
+                  needsReview: result.needsReview,
+                }),
+              };
+            } catch (error) {
+              if (
+                error instanceof ScheduledJobLeaseLostError ||
+                error instanceof ScheduledGenerationApprovalError ||
+                approval.failure
+              )
+                throw error;
+              await approval.write(async (writer) => {
+                await writer
+                  .update(scheduledJobs)
+                  .set({
+                    status: 'failed',
+                    completedAt: new Date(),
+                    error: errorMessage(error).slice(0, 8_000),
+                  })
+                  .where(eq(scheduledJobs.id, current.id));
+              });
+              throw error;
+            }
+          } catch (error) {
+            const reason =
+              approval.failure ?? (error instanceof ScheduledGenerationApprovalError ? error : undefined);
+            if (reason) {
+              if (await holdScheduledGenerationForApproval(current, reason, jobContext, db))
+                awaitingApproval++;
+              throw reason;
+            }
+            throw error;
+          }
+        },
+      );
+      if (run.state === 'success') processed += 1;
     } catch (error) {
+      if (error instanceof ScheduledGenerationApprovalError) continue;
       if (error instanceof ScheduledJobLeaseLostError) throw error;
       if (jobContext?.signal.aborted) throw new ScheduledJobLeaseLostError();
       await assertAptlssJobOwnership(context);
@@ -466,7 +629,7 @@ export async function processDueAptlssGenerationJobs(now = new Date(), context?:
     }
   }
   await assertAptlssJobOwnership(context);
-  return { found: due.length, processed, failed };
+  return { found: due.length, processed, failed, awaitingApproval };
 }
 
 let processorTimer: ReturnType<typeof setInterval> | null = null;
@@ -479,7 +642,7 @@ async function tick() {
   try {
     await processDueAptlssGenerationJobs();
   } catch (error) {
-    console.error("[APTLSS Scheduler] Due-job scan failed", error);
+    console.error('[APTLSS Scheduler] Due-job scan failed', error);
   } finally {
     processorRunning = false;
   }
