@@ -2,6 +2,46 @@
 
 Statuses describe the repository, not provider consent outside the repository.
 
+## Current Release Decision, 2026-10-21
+
+**Not cleared for production deployment or active automatic planning.** The
+accepted source baseline is `main` at
+`9490bcacee1b41300af7aec823c806ea65e9c6e0` (PR #134). Exact-main quality run
+`39523531579` and CodeQL/push run `39523531049` both succeeded. This supersedes
+the older source/publication/branch observations below, not their retained
+historical evidence. A passed source gate is not a live deployment receipt.
+
+| Requirement | Verified current evidence | Remaining acceptance |
+| --- | --- | --- |
+| Consolidate local source without losing history | PRs #99, #133 and #134 were accepted; the final merge trees were compared with their reviewed heads. Local progress and reviewed branch heads are retained under verified remote archive tags. | PR #135 is a new, unmerged security change. Its review branch must remain until acceptance and then be removed; do not claim only `main` while it exists. |
+| Canonical runtime and additive data model | Persistent Node 26.12.0 application, PostgreSQL 18.6 test fixtures, canonical migrations through `0005_durable_digest_outbox`, and parity for 137 tables. Historical migration files remain history, not another runtime backend. | Provision and test the actual shared PostgreSQL service, dedicated application database and least-privilege role. A conditional legacy transfer utility is not evidence that data was imported. |
+| Source safety and regressions | PR #134's reviewed source passed 4,000 local database-backed tests with 22 skips, TypeScript, secret checks, and required hosted checks. CI includes synthetic role/browser contracts, migration apply/parity, isolated backup/restore, image build and runtime checks. | Match future evidence to its exact source and artifact. These results do not verify real provider delivery, target-host recovery or all unexamined roadmap criteria. |
+| Durable notification delivery and recovery | PR #134 records exact digest membership, immutable payload/address, dispatch phases, lease fencing and audited recovery. Final provider-boundary checks cover consent, address and worker-access changes during provider preparation. Issue #75 is closed against its regression evidence. | Verify the selected live provider and operator recovery procedure. Provider acceptance is not inbox receipt; uncertain results must not become silent replay permission. |
+| Image vulnerability enforcement | PR #135 source checkpoint `6c08c7cf001725cb77ecd745788034436abc4fcd` has 178 passing local contract tests and successful CodeQL with no new alerts. The candidate scan/promotion path and an empty, strictly scoped exception policy are implemented in that review branch. | The real image job has not started. Repository policy rejects the new exact-pinned official report-upload action; owner approval is pending. Do not bypass the allowlist or call a startup failure a scan result. Require exact-head real-scan artifacts, protected-main verification and separate release promotion evidence. |
+| Private information and historical credentials | Current source changes were secret-scanned. Private configuration, recovery archives and operational data were not uploaded as source. Historical secret alerts #1 and #4 remain open. | Resolve exposed credentials through verified, authorized rotation/revocation. Source removal and a clean current-tree scan do not revoke historical credentials. Retained private backups are not a PostgreSQL migration or application-data reconciliation receipt. |
+| Deployable release and infrastructure | The repository contains a guarded Hetzner deployment workflow. Existing `v1.0.0-rc.1` remains a historical, non-production preview; its notes explicitly distinguish it from current source. | Confirm the host/domain, prepare private runtime configuration and database/TLS/backup/restore, configure production SSH secrets, publish an accepted image/release and perform the authorized target-host deployment. No production environment SSH secrets were present in this check. |
+| Real operator and integration acceptance | Authenticated synthetic browser, source-contract and database tests exist. Their account and provider scopes remain explicit. | Verify real owner/worker access, Google/Trello/browser callbacks and freshness, WebSockets, schedulers and recovery on the target environment. Mocked transports and local previews are not live-account acceptance. |
+| Reliable APTLSS activation | Shadow-mode controls and regression evidence remain available. No calibrated probability of future correctness is claimed. | At least five working days and 100 human-reviewed proposals, Robert's review of urgent conflicts, zero critical errors and at least 98 correct and sufficiently supported proposals; begin active operation with one worker only after acceptance. |
+
+The remaining issue inventory must be checked against current code and tests,
+not treated as either proven defects or automatically completed work. Existing
+capability criteria that have not been inspected remain unproven. Do not close
+broader security or integration issues using a narrow digest or UI test result.
+
+A subsequent read-only source audit identified additional application gaps to
+verify and repair before production: shared authentication does not consistently
+enforce worker offboarding, CSV formula protection and briefing/email HTML
+escaping are incomplete, and legacy timer, payroll-settlement and assignment
+writers need transactional and ownership review. These are source-audit findings,
+not executed exploit reproductions or completed fixes. Infrastructure is not the
+only remaining work.
+
+Use [Image Security](IMAGE_SECURITY.md),
+[Notification Delivery](NOTIFICATION_DELIVERY.md),
+[Consolidation Ledger](CONSOLIDATION_LEDGER.md), and
+[Production Cutover](PRODUCTION_CUTOVER.md) for the current contracts. The
+records below retain their original source, database, artifact and date scopes.
+
 ## Release Decision, 2026-10-02
 
 **Not cleared for production cutover or active automatic planning.** The older

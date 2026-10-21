@@ -1,4 +1,12 @@
 # Universal Card Execution System (UCES)
+
+> Planning reference, not a current implementation or production-acceptance
+> report. Use [Goal Completion Matrix](docs/GOAL_COMPLETION_MATRIX.md) for dated
+> evidence and remaining gates. Percentages and automation thresholds proposed
+> below are not calibrated probabilities and do not authorize active planning or
+> external dispatch. Current shadow-mode, source-verification, review and
+> worker-approval controls take precedence; proposals are not sent messages.
+
 ## 8-Week Implementation Roadmap
 
 **Project:** VA Dashboard Enhancement  
