@@ -37,6 +37,15 @@ The same image must still pass the unchanged vulnerability policy and configured
 PostgreSQL acceptance. Source changes and local mocked tests alone do not prove
 that the corrected image has passed those hosted checks.
 
+At source `192a4dc`, hosted run `39556533820` passed the unchanged image policy
+and runtime/configured PostgreSQL image checks for config ID
+`sha256:b80aeca4ed6e86a0070c5c2c608a90320bc824f0e0ac44b0907c5f2596d3a28c`.
+Its retained report covers 633 packages, zero HIGH/CRITICAL findings and zero
+exceptions. It still reported MEDIUM `CVE-2026-85091` in Alpine `zlib` 1.3.2-r0,
+with a fixed package at 1.3.2-r1. The final Docker stage now refreshes zlib from
+the base distribution's repository. A fresh exact-image receipt is required;
+the earlier passing receipt does not cover this new candidate.
+
 ## Pinned Scanner And Fail-Closed Policy
 
 [`scan-production-image.mjs`](../scripts/scan-production-image.mjs) downloads
