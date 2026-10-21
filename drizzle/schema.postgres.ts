@@ -13,7 +13,20 @@ import {
   foreignKey,
   pgEnum,
   pgTable,
+  customType,
+  check,
 } from "drizzle-orm/pg-core";
+
+const sessionEpochType = customType<{ data: string; driverData: string }>({
+  dataType: () => "bigint",
+  fromDriver: value => String(value),
+  toDriver: value => {
+    if (!/^(0|[1-9][0-9]{0,18})$/.test(value) || BigInt(value) > 9223372036854775807n) {
+      throw new Error("Invalid session epoch");
+    }
+    return value;
+  },
+});
 
 export const pgEnumType01 = pgEnum("enum_role_1pxhzfx", [
   "user",
@@ -402,16 +415,32 @@ export const users = pgTable("users", {
   role: enumText("role", ["user", "admin", "worker"]).default("user").notNull(),
   /** bcrypt hash of the user's password (local auth only) */
   passwordHash: varchar("passwordHash", { length: 255 }),
+  sessionEpoch: sessionEpochType("sessionEpoch").notNull().default(sql`1`),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt")
     .defaultNow()
     .$onUpdateFn(() => new Date())
     .notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
-});
+}, table => [check("users_session_epoch_nonnegative", sql`${table.sessionEpoch} >= 0`)]);
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
+
+export const workerLifecycleAudit = pgTable("worker_lifecycle_audit", {
+  id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
+  actorUserId: integer("actorUserId").notNull(),
+  userId: integer("userId").notNull(),
+  workerProfileId: integer("workerProfileId").notNull(),
+  founderId: integer("founderId").notNull(),
+  action: varchar("action", { length: 32 }).notNull(),
+  previousStatus: varchar("previousStatus", { length: 20 }),
+  nextStatus: varchar("nextStatus", { length: 20 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, table => [
+  index("worker_lifecycle_user_created_idx").on(table.userId, table.createdAt),
+  index("worker_lifecycle_actor_created_idx").on(table.actorUserId, table.createdAt),
+]);
 
 // Generation history tables
 export const generationJobs = pgTable("generation_jobs", {

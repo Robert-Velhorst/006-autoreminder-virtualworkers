@@ -18,7 +18,8 @@ import {
 } from '../../drizzle/schema.postgres';
 import { eq, and, desc, sql, inArray } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
-import { PASSWORD_MIN_LENGTH, validatePassword } from '../passwordPolicy';
+import { PASSWORD_MIN_LENGTH } from '../passwordPolicy';
+import { createManagedWorker, updateManagedWorker, validateWorkerEmail, validateWorkerStatus, workerManagementFailure } from '../workerManagementLifecycle';
 import { sendMorningBriefing, sendEODReport, sendWorkerInvitationEmail, validateEmailProvider } from '../services/email';
 import { websocketService } from '../services/websocket';
 import { invalidateCache } from '../services/trello-cache';
@@ -232,198 +233,84 @@ router.post('/vas/invite', async (req: any, res) => {
 
 router.post('/vas', async (req: any, res) => {
   try {
-    const user = req.user;
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+    const { name, email, password } = body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+    validateWorkerEmail(email);
+    validateWorkerStatus(body.status);
+    if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'Worker name is required' });
+    if (['id', 'userId', 'founderId'].some(field => Object.prototype.hasOwnProperty.call(body, field))) {
+      return res.status(400).json({ error: 'Worker account and founder ownership cannot be changed' });
     }
-
-    const { 
-      name, email, password, timezone, skills, hourlyRate, currency, 
-      workStartHour, workEndHour, workingDays,
-      breakfastTime, breakfastDuration,
-      lunchTime, lunchDuration,
-      dinnerTime, dinnerDuration,
-      trelloMemberId
-    } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
-    }
-
-    try {
-      validatePassword(password);
-    } catch {
+    if (typeof password !== 'string' || password.length < PASSWORD_MIN_LENGTH) {
       return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters` });
     }
-
     const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-
-    // Check if email already taken
-    const existingUser = await db.select().from(users).where(eq(users.openId, email));
-    if (existingUser.length > 0) {
-      return res.status(409).json({ error: 'Email already registered' });
-    }
-
-    // Hash password
+    if (!db) return res.status(503).json({ error: 'Database not available' });
     const passwordHash = await bcrypt.hash(password, 10);
-
-    // Create system user for worker
-    const [userResult] = await db.insert(users).values({
-      openId: email,
-      name,
-      email,
-      loginMethod: 'local',
-      role: 'worker',
-      passwordHash,
-      lastSignedIn: new Date(),
-    }).returning({ id: users.id });
-    if (!userResult) throw new Error("Failed to create worker user");
-    const newUserId = userResult.id;
-
-    const [result] = await db.insert(vaProfiles).values({
-      founderId: user.id,
-      userId: newUserId,
-      name,
-      email,
-      timezone: timezone || 'Asia/Manila',
-      skills: skills ? JSON.stringify(skills) : null,
-      hourlyRate,
-      currency: currency || 'USD',
-      workStartHour: workStartHour ?? 9,
-      workEndHour: workEndHour ?? 18,
-      workingDays: workingDays || '1,2,3,4,5',
-      breakfastTime: breakfastTime ?? null,
-      breakfastDuration: breakfastDuration ?? 0,
-      lunchTime: lunchTime ?? 12,
-      lunchDuration: lunchDuration ?? 60,
-      dinnerTime: dinnerTime ?? null,
-      dinnerDuration: dinnerDuration ?? 0,
-      trelloMemberId: trelloMemberId || null,
-    }).returning({ id: vaProfiles.id });
-
-    if (!result) throw new Error("Failed to create worker profile");
-    res.json({ success: true, id: result.id });
+    const fields = Object.fromEntries(Object.entries(body).filter(([field]) => workerProfileUpdateFields.has(field)));
+    const id = await createManagedWorker(db, req.user.id, {
+      ...fields, name, email, timezone: body.timezone || 'Asia/Manila',
+      skills: body.skills ? JSON.stringify(body.skills) : null,
+      currency: body.currency || 'USD', workStartHour: body.workStartHour ?? 9,
+      workEndHour: body.workEndHour ?? 18, workingDays: body.workingDays || '1,2,3,4,5',
+      breakfastTime: body.breakfastTime ?? null, breakfastDuration: body.breakfastDuration ?? 0,
+      lunchTime: body.lunchTime ?? 12, lunchDuration: body.lunchDuration ?? 60,
+      dinnerTime: body.dinnerTime ?? null, dinnerDuration: body.dinnerDuration ?? 0,
+      trelloMemberId: body.trelloMemberId || null,
+    }, passwordHash);
+    res.json({ success: true, id });
   } catch (error) {
-    console.error('Error creating VA:', error);
-    res.status(500).json({ error: 'Failed to create VA' });
+    const failure = workerManagementFailure(error);
+    res.status(failure?.status ?? 500).json({ error: failure?.error ?? 'Failed to create VA' });
   }
 });
 
-// Update VA profile
 router.put('/vas/:id', async (req: any, res) => {
   try {
-    const user = req.user;
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const vaId = parseInt(req.params.id);
+    const vaId = Number(req.params.id);
+    if (!Number.isSafeInteger(vaId) || vaId <= 0) return res.status(400).json({ error: 'Invalid VA id' });
     const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
     const { password, ...requestedUpdates } = body;
-    if (['id', 'userId', 'founderId'].some((field) => Object.prototype.hasOwnProperty.call(requestedUpdates, field))) {
+    if (['id', 'userId', 'founderId'].some(field => Object.prototype.hasOwnProperty.call(requestedUpdates, field))) {
       return res.status(400).json({ error: 'Worker account and founder ownership cannot be changed' });
     }
     const updates: Record<string, any> = Object.fromEntries(
       Object.entries(requestedUpdates).filter(([field]) => workerProfileUpdateFields.has(field)),
     );
-
+    validateWorkerStatus(updates.status);
+    if (Object.prototype.hasOwnProperty.call(updates, 'email')) validateWorkerEmail(updates.email);
+    if (password !== undefined && (typeof password !== 'string' || password.length < PASSWORD_MIN_LENGTH)) {
+      return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters` });
+    }
     const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+    const passwordHash = password === undefined ? undefined : await bcrypt.hash(password, 10);
+    if (Object.prototype.hasOwnProperty.call(updates, 'skills')) {
+      updates.skills = updates.skills === null ? null : JSON.stringify(updates.skills);
     }
-    
-    // Verify ownership
-    const existing = await db.select().from(vaProfiles).where(
-      and(eq(vaProfiles.id, vaId), eq(vaProfiles.founderId, user.id))
-    );
-    
-    if (existing.length === 0) {
-      return res.status(404).json({ error: 'VA not found' });
-    }
-
-    const linkedUserId = existing[0].userId;
-    const changesCredentials = Boolean(password)
-      || (updates.email && updates.email !== existing[0].email);
-    if (changesCredentials) {
-      const linkedAccount = await db.select({ id: users.id, role: users.role })
-        .from(users)
-        .where(eq(users.id, linkedUserId))
-        .limit(1);
-      if (linkedAccount[0]?.role !== 'worker') {
-        return res.status(409).json({ error: 'The linked account is not a worker account' });
-      }
-    }
-
-    // Handle password update if provided
-    if (password) {
-      try {
-        validatePassword(password);
-      } catch {
-        return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters` });
-      }
-      const passwordHash = await bcrypt.hash(password, 10);
-      await db.update(users)
-        .set({ passwordHash })
-        .where(and(eq(users.id, linkedUserId), eq(users.role, 'worker')));
-    }
-
-    // Handle email update if provided
-    if (updates.email && updates.email !== existing[0].email) {
-      // Check if email already taken by someone else
-      const existingUser = await db.select().from(users).where(
-        and(eq(users.openId, updates.email), sql`${users.id} != ${linkedUserId}`)
-      );
-      if (existingUser.length > 0) {
-        return res.status(409).json({ error: 'Email already registered' });
-      }
-      // Update system user login credentials
-      await db.update(users)
-        .set({ openId: updates.email, email: updates.email })
-        .where(and(eq(users.id, linkedUserId), eq(users.role, 'worker')));
-    }
-
-    await db.update(vaProfiles)
-      .set({
-        ...updates,
-        skills: updates.skills ? JSON.stringify(updates.skills) : existing[0].skills,
-      })
-      .where(eq(vaProfiles.id, vaId));
-
+    await updateManagedWorker(db, req.user.id, vaId, updates, passwordHash);
     res.json({ success: true });
   } catch (error) {
-    console.error('Error updating VA:', error);
-    res.status(500).json({ error: 'Failed to update VA' });
+    const failure = workerManagementFailure(error);
+    res.status(failure?.status ?? 500).json({ error: failure?.error ?? 'Failed to update VA' });
   }
 });
 
-// Delete VA profile
+// Offboarding retains the account, profile, and historical work.
 router.delete('/vas/:id', async (req: any, res) => {
   try {
-    const user = req.user;
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const vaId = parseInt(req.params.id);
+    const vaId = Number(req.params.id);
+    if (!Number.isSafeInteger(vaId) || vaId <= 0) return res.status(400).json({ error: 'Invalid VA id' });
     const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-
-    await db.delete(vaProfiles).where(
-      and(eq(vaProfiles.id, vaId), eq(vaProfiles.founderId, user.id))
-    );
-
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+    await updateManagedWorker(db, req.user.id, vaId, {}, undefined, true);
     res.json({ success: true });
   } catch (error) {
-    console.error('Error deleting VA:', error);
-    res.status(500).json({ error: 'Failed to delete VA' });
+    const failure = workerManagementFailure(error);
+    res.status(failure?.status ?? 500).json({ error: failure?.error ?? 'Failed to delete VA' });
   }
 });
-
 // ============================================
 // TIMEZONE DETECTION
 // ============================================

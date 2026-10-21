@@ -3,7 +3,6 @@ import { ForbiddenError } from "@shared/_core/errors";
 import axios, { type AxiosInstance } from "axios";
 import { parse as parseCookieHeader } from "cookie";
 import type { Request } from "express";
-import { isDatabaseUnavailable, DatabaseUnavailableError } from "../databaseAvailability";
 import { SignJWT, jwtVerify } from "jose";
 import { randomUUID } from "crypto";
 import type { User } from "../../drizzle/schema.postgres";
@@ -17,7 +16,8 @@ import type {
   GetUserInfoWithJwtResponse,
 } from "./types/manusTypes";
 import { resolveLocalBypassUser } from "./localAuthBypass";
-import { getSessionAudience } from "./sessionIdentity";
+import { getSessionAudience, isSessionEpoch, type SessionIdentityProof } from "./sessionIdentity";
+import { withSessionIdentity } from "../sessionLifecycle";
 // Utility function
 const isNonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
@@ -171,7 +171,7 @@ class SDKServer {
    */
   async createSessionToken(
     openId: string,
-    options: { expiresInMs?: number; name?: string } = {}
+    options: { expiresInMs?: number; name?: string; expectedIdentity?: SessionIdentityProof } = {}
   ): Promise<string> {
     return this.signSession(
       {
@@ -185,27 +185,31 @@ class SDKServer {
 
   async signSession(
     payload: SessionPayload,
-    options: { expiresInMs?: number } = {}
+    options: { expiresInMs?: number; expectedIdentity?: SessionIdentityProof } = {}
   ): Promise<string> {
-    const issuedAt = Date.now();
-    const expiresInMs = options.expiresInMs ?? ONE_YEAR_MS;
-    const expirationSeconds = Math.floor((issuedAt + expiresInMs) / 1000);
-    const secretKey = this.getSessionSecret();
+    return withSessionIdentity(payload.openId, options.expectedIdentity, async user => {
+      const issuedAt = Date.now();
+      const expiresInMs = options.expiresInMs ?? ONE_YEAR_MS;
+      const expirationSeconds = Math.floor((issuedAt + expiresInMs) / 1000);
+      const secretKey = this.getSessionSecret();
 
-    return new SignJWT({
-      openId: payload.openId,
-      appId: payload.appId,
-      name: payload.name,
-    })
-      .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-      .setJti(randomUUID())
-      .setExpirationTime(expirationSeconds)
-      .sign(secretKey);
+      return new SignJWT({
+        openId: payload.openId,
+        appId: payload.appId,
+        name: payload.name,
+        userId: user.id,
+        sessionEpoch: user.sessionEpoch,
+      })
+        .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+        .setJti(randomUUID())
+        .setExpirationTime(expirationSeconds)
+        .sign(secretKey);
+    });
   }
 
   async verifySession(
     cookieValue: string | undefined | null
-  ): Promise<{ openId: string; appId: string; name: string; sessionId: string; expiresAt: Date } | null> {
+  ): Promise<{ openId: string; appId: string; name: string; sessionId: string; expiresAt: Date; userId?: number; sessionEpoch?: string } | null> {
     if (!cookieValue) {
       return null;
     }
@@ -215,7 +219,8 @@ class SDKServer {
       const { payload } = await jwtVerify(cookieValue, secretKey, {
         algorithms: ["HS256"],
       });
-      const { openId, appId, name, jti, exp } = payload as Record<string, unknown>;
+      const { openId, appId, name, jti, exp, userId, sessionEpoch } = payload as Record<string, unknown>;
+      const legacy = !("userId" in payload) && !("sessionEpoch" in payload);
 
       if (
         !isNonEmptyString(openId) ||
@@ -224,6 +229,7 @@ class SDKServer {
         !isNonEmptyString(jti) ||
         typeof exp !== "number" ||
         appId !== getSessionAudience()
+        || (!legacy && (!Number.isSafeInteger(userId) || (userId as number) <= 0 || !isSessionEpoch(sessionEpoch)))
       ) {
         console.warn("[Auth] Session payload missing required fields");
         return null;
@@ -235,6 +241,7 @@ class SDKServer {
         name,
         sessionId: jti,
         expiresAt: new Date(exp * 1000),
+        ...(!legacy ? { userId: userId as number, sessionEpoch: sessionEpoch as string } : {}),
       };
     } catch (error) {
       console.warn("[Auth] Session verification failed", String(error));
@@ -268,7 +275,7 @@ class SDKServer {
 
   async authenticateRequest(req: Request): Promise<User> {
     const bypassUser = await resolveLocalBypassUser(req);
-    if (bypassUser) return bypassUser;
+    if (bypassUser) return withSessionIdentity(bypassUser.openId, undefined, async user => user);
 
     // Regular authentication flow
     const cookies = this.parseCookies(req.headers.cookie);
@@ -279,33 +286,9 @@ class SDKServer {
       throw ForbiddenError("Invalid session cookie");
     }
 
-    const sessionUserId = session.openId;
-    let user = await db.getUserByOpenId(sessionUserId);
-
-    // If user not in DB, sync from OAuth server automatically
-    if (!user) {
-      try {
-        const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
-        await db.upsertUser({
-          openId: userInfo.openId,
-          name: userInfo.name || null,
-          email: userInfo.email ?? null,
-          loginMethod: userInfo.loginMethod ?? userInfo.platform ?? null,
-          lastSignedIn: new Date(),
-        });
-        user = await db.getUserByOpenId(userInfo.openId);
-      } catch (error) {
-        if (isDatabaseUnavailable(error)) throw new DatabaseUnavailableError();
-        console.error("[Auth] Failed to sync user from OAuth");
-        throw ForbiddenError("Failed to sync user info");
-      }
-    }
-
-    if (!user) {
-      throw ForbiddenError("User not found");
-    }
-
-    return user;
+    return withSessionIdentity(session.openId,
+      session.userId === undefined ? "legacy" : { userId: session.userId, sessionEpoch: session.sessionEpoch! },
+      async user => user);
   }
 
   async revokeSession(cookieValue: string | undefined | null): Promise<void> {

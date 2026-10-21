@@ -2,6 +2,7 @@ import express, { type Request, type Response } from "express";
 import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { sdk } from "./_core/sdk";
+import { sessionIdentityProof } from "./_core/sessionIdentity";
 import {
   acceptWorkerInvitation,
   getWorkerInvitation,
@@ -39,6 +40,7 @@ router.post("/:token/accept", async (req: Request, res: Response) => {
     const sessionToken = await sdk.createSessionToken(accepted.openId, {
       name: accepted.name,
       expiresInMs: ONE_YEAR_MS,
+      expectedIdentity: sessionIdentityProof({ id: accepted.userId, sessionEpoch: accepted.sessionEpoch }),
     });
     res.cookie(COOKIE_NAME, sessionToken, { ...getSessionCookieOptions(req), maxAge: ONE_YEAR_MS });
     return res.json({ success: true, redirectTo: "/worker/settings?onboarding=1" });

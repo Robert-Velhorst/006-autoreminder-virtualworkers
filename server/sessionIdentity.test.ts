@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getSessionAudience } from "./_core/sessionIdentity";
 
+vi.mock("./db", () => ({ getDb: async () => ({ transaction: async (run: (tx: unknown) => unknown) => run({
+  select: () => ({ from: () => ({ where: () => ({ limit: () => ({ for: async () => [
+    { id: 7, openId: "worker-local", role: "admin", sessionEpoch: "1" },
+  ] }) }) }) }),
+}) }) }));
+
 const originalEnvironment = { ...process.env };
 
 afterEach(() => {
@@ -44,6 +50,8 @@ describe("session identity", () => {
       name: "Worker",
       sessionId: expect.any(String),
       expiresAt: expect.any(Date),
+      userId: 7,
+      sessionEpoch: "1",
     });
   }, 20_000);
 });
