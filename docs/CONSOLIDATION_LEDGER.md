@@ -3,18 +3,19 @@
 ## Current Consolidation Checkpoint: October 21, 2026
 
 The latest accepted main source is merge
-`5af68da3216986bef1b26f634f9abb2e264d0a28` from PR #140. Its reviewed parent
-`5f237b01f84f3254108882d797902fc5b68f23a1` is preserved under verified tag
-`archive/postgres-release-acceptance-20261021`; that temporary branch was
-removed after acceptance. The subsequent main regression run exposed a shared
-reminder fixture isolation failure. Acceptance of the reviewed parent is not
-proof that a later main run passed.
+`df5c9f3f8af3c06723fe0d1992a50d6153ed4410` from PR #141. Its tree exactly
+matches reviewed head `386aab90401312d48f818d3e8c3ccb6ab2266d76`, preserved
+under verified annotated tag `archive/canonical-timer-acceptance-20261021`.
+Reviewed-head quality `39543523895` and CodeQL `39543520471` passed. Separate
+post-merge main quality `39544579909` and CodeQL/push `39544579781` also passed.
+The timer branch was removed only after archive and merge-tree verification.
 
-Two temporary review branches remain: PR #135 for exact-image security, and
-draft PR #141 for canonical timers and worker-interface changes. Their source
-progress is online; neither is discarded to manufacture an only-main result.
-PR #135 awaits the narrowly scoped Action-policy decision. PR #141 needs fixes
-and fresh native regression acceptance. Consolidate each into main only after
+Two temporary source branches remain: PR #135 for exact-image security and the
+browser-bound OAuth state repair. PR #135's integrated head `188dc0d` passed
+local checks and CodeQL `39545169245`, but quality `39545173841` could not
+start; the narrowly scoped Action-policy decision remains pending. The OAuth
+repair requires its own exact-head native/route checks and review. Neither
+branch is discarded to manufacture an only-main result. Consolidate each only after
 its exact-head checks and review pass, preserve the reviewed head in a verified
 archive tag, and delete only the matching branch ref. Private configuration,
 secrets and recovery archives remain outside Git.

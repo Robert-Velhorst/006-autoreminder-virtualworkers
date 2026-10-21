@@ -28,6 +28,11 @@ authorization checks.
 
 ## Worker Session Lifecycle
 
+The optional external login must follow [OAuth Login State](docs/OAUTH_LOGIN_STATE.md):
+server-owned initiation, an expiring browser-bound single-use database record,
+validated callback configuration and sanitized provider errors. Google consent
+controls do not substitute for this separate login flow.
+
 See [Worker Session Lifecycle](docs/WORKER_SESSION_LIFECYCLE.md) for persisted
 session invalidation, atomic offboarding, guarded realtime delivery and the
 required migration/cutover acceptance. Older binaries must be drained, not left
