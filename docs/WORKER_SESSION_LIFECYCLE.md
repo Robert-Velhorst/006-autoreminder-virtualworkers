@@ -68,13 +68,15 @@ separate operational identities.
 
 ## Current Verification Boundary
 
-The complete test run without database connections passed 3,840 tests, with 297
-skips, on Node 26.12.0 before integration with subsequent main changes. Focused
+After integrating main's output-safety changes, the complete test run without
+database connections passed 4,002 tests, with 297 skips, on Node 26.12.0. Focused
 socket tests and independent source reviews also passed their stated scopes.
 Earlier native tests used an older DDL checkpoint and are not acceptance of the
 final migration. Final-hash native migration, schema parity, concurrent lock
 ordering, rollback, browser and hosted full-suite checks remain required.
 
 The one temporary local PostgreSQL fixture subsequently stopped accepting new
-connections while Docker commands stalled. This is not a successful migration
-or cleanup receipt. No real provider or production infrastructure was changed.
+connections while Docker commands stalled. Its stop command completed, but final
+Docker inventory/removal verification was still pending at this checkpoint.
+This is not a successful migration or cleanup receipt. No real provider or
+production infrastructure was changed.
