@@ -150,6 +150,9 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     return { ...user, cardId, stepId: step.id, profileId: profile.id };
   }
 
+  const timerIdentity = (owner: Worker) => ({ vaId: null, trackedUserId: owner.id,
+    trackedProfileId: owner.profileId, founderId: adminId });
+
   it("projects only worker-scoped timing actions, preserves latest-100 order and leaves full history intact", async () => {
     const other = await insertWorker();
     const values = Array.from({ length: 101 }, (_, index) => ({
@@ -177,7 +180,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
 
   it("calibrates completed work against its latest pre-start estimate using projected history", async () => {
     await db.update(schema.aptlssSteps).set({ status: "complete" }).where(eq(schema.aptlssSteps.id, worker.stepId));
-    await db.insert(schema.timeEntries).values({ vaId: worker.id, founderId: adminId, taskId: worker.cardId,
+    await db.insert(schema.timeEntries).values({ ...timerIdentity(worker), taskId: worker.cardId,
       cardId: worker.cardId, aptlssStepId: worker.stepId, category: "client_work",
       startTime: new Date(NOW.getTime() - 30 * 60_000), endTime: new Date(NOW.getTime() - 15 * 60_000),
       durationMinutes: 15, durationSeconds: 900 });
@@ -289,7 +292,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     const assessmentCardIds = (await db.select({ cardId: schema.aptlssPlans.cardId }).from(schema.aptlssPlans)
       .where(inArray(schema.aptlssPlans.vaId, ownedUsers))).map(row => row.cardId);
     const ownedTimeEntryIds = (await db.select({ id: schema.timeEntries.id }).from(schema.timeEntries)
-      .where(inArray(schema.timeEntries.vaId, ownedUsers))).map(row => row.id);
+      .where(and(inArray(schema.timeEntries.trackedUserId, ownedUsers), inArray(schema.timeEntries.founderId, ownedUsers)))).map(row => row.id);
     const evidenceIds = [...new Set([...ownedEvidenceIds, ...evidence.map(row => row.id), ...driveEvidence.map(row => row.id)])];
     await db.transaction(async tx => {
       await tx.update(queueSlots).set({vaId:null,token:null,leaseUntil:null}).where(inArray(queueSlots.vaId,ownedUsers));
@@ -319,8 +322,10 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
         await tx.delete(schema.workspaceEvidenceItems).where(inArray(schema.workspaceEvidenceItems.id, evidenceIds));
       }
       await tx.delete(schema.dailyPlans).where(inArray(schema.dailyPlans.vaId, ownedUsers));
-      if (ownedTimeEntryIds.length) await tx.delete(schema.timeEntryEvents).where(inArray(schema.timeEntryEvents.timeEntryId, ownedTimeEntryIds));
-      await tx.delete(schema.timeEntries).where(inArray(schema.timeEntries.vaId, ownedUsers));
+      if (ownedTimeEntryIds.length) {
+        await tx.delete(schema.timeEntryEvents).where(inArray(schema.timeEntryEvents.timeEntryId, ownedTimeEntryIds));
+        await tx.delete(schema.timeEntries).where(inArray(schema.timeEntries.id, ownedTimeEntryIds));
+      }
       if (assessmentCardIds.length) await tx.delete(schema.aptlssAssessments).where(inArray(schema.aptlssAssessments.cardId, assessmentCardIds));
       await tx.delete(schema.notificationHistory).where(inArray(schema.notificationHistory.userId, ownedUsers));
       await tx.delete(schema.userNotificationPreferences).where(inArray(schema.userNotificationPreferences.userId, ownedUsers));
@@ -480,22 +485,22 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     await db.update(schema.aptlssSteps).set({ status: "complete" })
       .where(eq(schema.aptlssSteps.id, otherWorker.stepId));
 
-    const addEntry = async (vaId: number, cardId: string, stepId: number | null, minutes: number, category = "client_work", endOffsetMinutes = 0) => {
+    const addEntry = async (owner: Worker, cardId: string, stepId: number | null, minutes: number, category = "client_work", endOffsetMinutes = 0) => {
       const endTime = new Date(NOW.getTime() - endOffsetMinutes * 60_000);
       const [result] = await db.insert(schema.timeEntries).values({
-        vaId, founderId: adminId, taskId: cardId, cardId, aptlssStepId: stepId,
+        ...timerIdentity(owner), taskId: cardId, cardId, aptlssStepId: stepId,
         category, startTime: new Date(endTime.getTime() - minutes * 60_000), endTime,
         durationMinutes: minutes, durationSeconds: minutes * 60,
       }).returning({ id: schema.timeEntries.id });
       return result.id;
     };
-    const interruptedEntryId = await addEntry(worker.id, worker.cardId, worker.stepId, 15, "client_work", 25);
-    await addEntry(worker.id, worker.cardId, worker.stepId, 25);
-    await addEntry(worker.id, worker.cardId, secondStep.id, 12);
-    await addEntry(worker.id, worker.cardId, openStep.id, 90);
-    await addEntry(otherWorker.id, otherWorker.cardId, otherWorker.stepId, 99);
-    await addEntry(worker.id, worker.cardId, null, 4, "waiting", 3);
-    await addEntry(worker.id, worker.cardId, null, 3, "break");
+    const interruptedEntryId = await addEntry(worker, worker.cardId, worker.stepId, 15, "client_work", 25);
+    await addEntry(worker, worker.cardId, worker.stepId, 25);
+    await addEntry(worker, worker.cardId, secondStep.id, 12);
+    await addEntry(worker, worker.cardId, openStep.id, 90);
+    await addEntry(otherWorker, otherWorker.cardId, otherWorker.stepId, 99);
+    await addEntry(worker, worker.cardId, null, 4, "waiting", 3);
+    await addEntry(worker, worker.cardId, null, 3, "break");
     await db.insert(schema.timeEntryEvents).values({ timeEntryId: interruptedEntryId, eventType: "pause" });
 
     const input = await service.collectManagerInput(db, worker.id, NOW);
@@ -1726,7 +1731,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     try {
       await paused.ready;
       expect(await runs()).toEqual([]);
-      if (kind === "timer") await db.insert(schema.timeEntries).values({ vaId: worker.id, founderId: adminId,
+      if (kind === "timer") await db.insert(schema.timeEntries).values({ ...timerIdentity(worker),
         taskId: worker.cardId, cardId: worker.cardId, startTime: NOW, aptlssStepId: worker.stepId });
       if (kind === "plan") await seedPlan();
       if (kind === "hours") await db.update(schema.userWorkingHours).set({ workEndHour: 12 }).where(eq(schema.userWorkingHours.userId, worker.id));
@@ -2009,17 +2014,17 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
 
   it("rejects restoring a previous plan while a real active timer exists", async () => {
     const runId = await seedAppliedRun(planWithBlock("11:00"), planWithBlock("13:00"));
-    await db.insert(schema.timeEntries).values({ vaId: worker.id, founderId: adminId, taskId: worker.cardId,
+    await db.insert(schema.timeEntries).values({ ...timerIdentity(worker), taskId: worker.cardId,
       cardId: worker.cardId, startTime: NOW, planDateKey: DATE_KEY, planBlockId: "restore-fixture-block",
       aptlssStepId: worker.stepId });
     const before = await plans(), beforeState = await state(), beforeLease = await lease();
-    const beforeTimers = await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id));
+    const beforeTimers = await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.trackedUserId, worker.id));
     controls.allowPlanMutation = true;
     await expect(reviews.restoreManagerPlan(adminId, worker.id, runId)).rejects.toThrow(/stop the active timer/i);
     expect(await plans()).toEqual(before);
     expect(await state()).toEqual(beforeState);
     expect(await lease()).toEqual(beforeLease);
-    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toEqual(beforeTimers);
+    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.trackedUserId, worker.id))).toEqual(beforeTimers);
   });
 
   it.each([
@@ -3014,12 +3019,12 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
       trigger: "coverage_test", mode: "shadow", snapshotJson: await reviewedManagerSnapshot() });
     const first = await caller.start(input);
-    const repeated = await caller.start(input);
-    expect(repeated.id).toBe(first.id);
+    await expect(caller.start(input)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await caller.getActive())?.id).toBe(first.id);
     expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
       .toMatchObject({ generation: 1, trigger: "timer_changed" });
     expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
-    const entries = await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id));
+    const entries = await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.trackedUserId, worker.id));
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ cardName: "Review local requirements", boardName: "Integration fixture", listName: "TO DO" });
 
@@ -3029,7 +3034,8 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     const current = await reviewedManagerSnapshot();
     await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
       trigger: "assignment_refresh", mode: "shadow", snapshotJson: current });
-    expect((await caller.start(input)).id).toBe(first.id);
+    await expect(caller.start(input)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await caller.getActive())?.id).toBe(first.id);
 
     await db.update(schema.aptlssPlans).set({ listName: "ON-HOLD" }).where(eq(schema.aptlssPlans.vaId, worker.id));
     await expect(caller.start(input)).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
@@ -3040,12 +3046,12 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
       trigger: "timer_test", mode: "shadow", snapshotJson: await reviewedManagerSnapshot(worker.id, { interventions: [{ cardId: worker.cardId }] }) });
     await expect(caller.start(input)).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
     expect((await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.id, first.id)))[0].endTime).toBeNull();
-    expect((await caller.stop({ cardId: worker.cardId }))?.id).toBe(first.id);
+    expect((await caller.stop({ cardId: worker.cardId, entryId: first.id }))?.id).toBe(first.id);
     expect((await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.id, first.id)))[0].endTime).not.toBeNull();
     expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
       .toMatchObject({ generation: 2, trigger: "timer_changed" });
     expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
-    expect(await caller.stop({ cardId: worker.cardId })).toBeNull();
+    expect(await caller.stop({ cardId: worker.cardId, entryId: first.id })).toMatchObject({ id: first.id, alreadyStopped: true });
     expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);
   });
 
@@ -3082,7 +3088,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     const response = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
     expect(response.status).toBe(409);
     expect(response.body.error).toMatch(/source required by the next step/i);
-    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toHaveLength(0);
+    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.trackedUserId, worker.id))).toHaveLength(0);
   });
 
   it("blocks both timer routes for a step awaiting the founder's recorded decision", async () => {
@@ -3118,7 +3124,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     const httpResponse = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
     expect(httpResponse.status).toBe(409);
     expect(httpResponse.body.error).toMatch(/verification before work can continue/i);
-    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toHaveLength(0);
+    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.trackedUserId, worker.id))).toHaveLength(0);
   });
 
   it("uses the sole active profile for both worker timer routes when an older profile is inactive", async () => {
@@ -3154,7 +3160,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     const httpStarted = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
     expect(httpStarted.status).toBe(200);
     expect(httpStarted.body.entry.founderId).toBe(nextFounder.id);
-    await request(app).post("/api/time-tracking/stop").send({ notes: "Profile resolution test" }).expect(200);
+    await request(app).post("/api/time-tracking/stop").send({ entryId: httpStarted.body.entry.id, notes: "Profile resolution test" }).expect(200);
 
     const { timerRouter } = await import("./routes/manus");
     const caller = timerRouter.createCaller({ user: ownUser, req: {}, res: {} } as TrpcContext);
@@ -3162,7 +3168,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
       cardUrl: `https://trello.com/c/${worker.cardId}`, boardName: "Integration fixture", listName: "TO DO" });
     expect((await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.id, trpcStarted.id)))[0].founderId)
       .toBe(nextFounder.id);
-    await caller.stop({ cardId: worker.cardId });
+    await caller.stop({ cardId: worker.cardId, entryId: trpcStarted.id });
   });
 
   it("refuses timer starts when multiple active profiles make worker identity ambiguous", async () => {
@@ -3180,7 +3186,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     const response = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
     expect(response.status).toBe(403);
     expect(response.body.error).toMatch(/worker profile is ambiguous/i);
-    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toHaveLength(0);
+    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.trackedUserId, worker.id))).toHaveLength(0);
 
     const workerApp = express();
     workerApp.use(express.json());
@@ -3195,8 +3201,8 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     const caller = timerRouter.createCaller({ user: ownUser, req: {}, res: {} } as TrpcContext);
     await expect(caller.start({ cardId: worker.cardId, cardName: "Review local requirements",
       cardUrl: `https://trello.com/c/${worker.cardId}`, boardName: "Integration fixture", listName: "TO DO" }))
-      .rejects.toMatchObject({ code: "PRECONDITION_FAILED", message: expect.stringMatching(/worker profile is ambiguous/i) });
-    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toHaveLength(0);
+      .rejects.toMatchObject({ code: "FORBIDDEN", message: expect.stringMatching(/exactly one active worker profile is required/i) });
+    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.trackedUserId, worker.id))).toHaveLength(0);
   });
 
   it("denies Trello token login when one member maps to multiple active worker profiles", async () => {
@@ -3475,18 +3481,18 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     const incomplete = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
     expect(incomplete.status).toBe(409);
     expect(incomplete.body.error).toMatch(/full work list has not been checked/i);
-    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toHaveLength(0);
+    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.trackedUserId, worker.id))).toHaveLength(0);
     await db.insert(schema.aptlssManagerRuns).values({ vaId: worker.id, inputHash: hash(randomUUID()),
       trigger: "coverage_test", mode: "shadow", snapshotJson: await reviewedManagerSnapshot() });
     const accepted = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
     expect(accepted.status).toBe(200);
-    expect(accepted.body.entry.vaId).toBe(worker.id);
+    expect(accepted.body.entry).toMatchObject({ vaId: null, trackedUserId: worker.id, trackedProfileId: worker.profileId });
     expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
       .toMatchObject({ generation: 1, trigger: "timer_changed" });
     expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(1);
     const repeated = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
-    expect(repeated.status).toBe(400);
-    const stopped = await request(app).post("/api/time-tracking/stop").send({ notes: "Reviewed" });
+    expect(repeated.status).toBe(409);
+    const stopped = await request(app).post("/api/time-tracking/stop").send({ entryId: accepted.body.entry.id, notes: "Reviewed" });
     expect(stopped.status).toBe(200);
     expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
       .toMatchObject({ generation: 2, trigger: "timer_changed" });
@@ -3495,7 +3501,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
       trigger: "legacy_timer_test", mode: "shadow", snapshotJson: await reviewedManagerSnapshot(worker.id, { interventions: [{ cardId: worker.cardId }] }) });
     const blocked = await request(app).post("/api/time-tracking/start").send({ taskId: worker.cardId });
     expect(blocked.status).toBe(409);
-    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id))).toHaveLength(1);
+    expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.trackedUserId, worker.id))).toHaveLength(1);
   });
 
   it.each(["stop", "pause"] as const)("serializes legacy timer %s with worker timer starts", async (transition) => {
@@ -3526,7 +3532,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     try {
       const { rows: lockedUsers } = await lockConnection!.query("SELECT id FROM users WHERE id = $1 FOR UPDATE", [worker.id]);
       expect(lockedUsers).toHaveLength(1);
-      finishRequest = request(app).post(`/api/time-tracking/${transition}`).send({ notes: "Completed timer safely" })
+      finishRequest = request(app).post(`/api/time-tracking/${transition}`).send({ entryId: started.body.entry.id, notes: "Completed timer safely" })
         .then(response => {
           completedWhileAccountLocked = true;
           return response;
@@ -3544,7 +3550,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     expect(finished.body.entry?.endTime).not.toBeNull();
     expect(finished.body.entry?.durationMinutes).not.toBeNull();
     if (transition === "pause") expect(finished.body.entry?.notes).toContain("(paused)");
-    expect((await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.vaId, worker.id)))).toHaveLength(1);
+    expect((await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.trackedUserId, worker.id)))).toHaveLength(1);
     expect((await db.select().from(queueJobs).where(eq(queueJobs.vaId, worker.id)))[0])
       .toMatchObject({ generation: 2, trigger: "timer_changed" });
     expect(await db.select().from(queueEvents).where(eq(queueEvents.vaId, worker.id))).toHaveLength(2);

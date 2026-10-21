@@ -1,4 +1,4 @@
-import { dateKeyInTimeZone, dateWindowInTimeZone, weekDateKeys } from '../../shared/workerTime';
+import { addDaysToDateKey, dateKeyInTimeZone, dateWindowInTimeZone, weekDateKeys } from '../../shared/workerTime';
 import { Router } from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { getDb } from '../db';
@@ -10,7 +10,7 @@ import { managerActionNeedsSourceVerification, managerActionSourceRequirements, 
 import { enqueueManagerTask } from '../aptlssManagerQueue';
 import { WORKER_EXECUTION_HOLD_MESSAGE } from '../../shared/aptlssManager';
 import { readManagerAssignmentState } from '../aptlssManagerAssignments';
-import { selectWorkerProfile } from '../workerOperatorContext';
+import { resolveWorkerOperatorContext, selectWorkerProfile } from '../workerOperatorContext';
 import { closeCanonicalTimer, insertCanonicalTimer, withTimerAccountTransaction, lockTimerAccount, requireEntryId, timerFailure, timeCompleteness, assertTimerIdentityReady } from '../canonicalTimer';
 import { recordedMinutes } from '../../shared/timerDuration';
 import { getGoogleEvidenceStatus } from '../googleEvidence';
@@ -244,8 +244,11 @@ router.get('/time-tracking/active', async (req: any, res: Response) => {
     const result = await withTimeTrackingScope(db, user, async (connection, scope) => {
       const activeTimers = await connection.select()
         .from(timeEntries)
-        .where(and(timeEntryCandidateScopeWhere(scope), eq(timeEntries.isVoided, false), sql`${timeEntries.endTime} IS NULL`))
+        .where(and(eq(timeEntries.trackedUserId, user.id), eq(timeEntries.isVoided, false), sql`${timeEntries.endTime} IS NULL`))
         .orderBy(desc(timeEntries.startTime));
+      if (activeTimers.some((entry: typeof timeEntries.$inferSelect) => entry.founderId !== scope.founderId)) {
+        return { previousFounderTimer: true as const };
+      }
       if (activeTimers.some((entry: typeof timeEntries.$inferSelect) => timeEntryHasAmbiguousIdentity(entry, scope))) {
         return { ownershipAmbiguous: true as const };
       }
@@ -254,6 +257,9 @@ router.get('/time-tracking/active', async (req: any, res: Response) => {
       return activeTimer ? { active: true, entry: activeTimer } : { active: false, entry: null };
     });
     if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+    if ('previousFounderTimer' in result.value && result.value.previousFounderTimer) {
+      return res.status(409).json({ error: 'An active timer belongs to a previous founder. Ask that founder to close the exact entry before starting another timer.' });
+    }
     if ('ownershipAmbiguous' in result.value && result.value.ownershipAmbiguous) {
       return res.status(409).json({ error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR });
     }
@@ -523,10 +529,11 @@ router.get('/time-tracking/summary', async (req: any, res: Response) => {
     }
 
     const result = await withTimeTrackingScope(db, user, async (connection, scope) => {
+      const { timezone: zone } = await resolveWorkerOperatorContext(user, connection);
       const conditions = [timeEntryScopeWhere(scope)];
       if (startDate && endDate) {
-        const start = dateWindowInTimeZone(String(startDate), scope.profile?.timezone ?? 'UTC').start;
-        const end = new Date(dateWindowInTimeZone(String(endDate), scope.profile?.timezone ?? 'UTC').endExclusive.getTime() - 1);
+        const start = dateWindowInTimeZone(String(startDate), zone).start;
+        const end = new Date(dateWindowInTimeZone(String(endDate), zone).endExclusive.getTime() - 1);
         conditions.push(gte(timeEntries.startTime, start), lte(timeEntries.startTime, end));
       }
       const rows = await connection.select().from(timeEntries)
@@ -539,7 +546,7 @@ router.get('/time-tracking/summary', async (req: any, res: Response) => {
       const byDate: Record<string, number> = {};
       const byTask: Record<string, number> = {};
       entries.forEach((entry: typeof timeEntries.$inferSelect) => {
-        const date = dateKeyInTimeZone(new Date(entry.startTime), scope.profile?.timezone ?? 'UTC');
+        const date = dateKeyInTimeZone(new Date(entry.startTime), zone);
         byDate[date] = (byDate[date] || 0) + nonNegativeDurationMinutes(entry);
         byTask[entry.taskId] = (byTask[entry.taskId] || 0) + nonNegativeDurationMinutes(entry);
       });
@@ -575,7 +582,8 @@ router.get('/time-tracking/weekly-progress', async (req: any, res: Response) => 
     }
 
     const result = await withTimeTrackingScope(db, user, async (connection, scope) => {
-      const zone = scope.profile?.timezone ?? 'UTC';
+      const context = await resolveWorkerOperatorContext(user, connection);
+      const zone = context.timezone;
       const bounds = weekDateKeys(dateKeyInTimeZone(new Date(), zone));
       const startOfWeek = dateWindowInTimeZone(bounds.startDateKey, zone).start;
       const endOfWeek = new Date(dateWindowInTimeZone(bounds.endDateKey, zone).endExclusive.getTime() - 1);
@@ -595,35 +603,16 @@ router.get('/time-tracking/weekly-progress', async (req: any, res: Response) => 
       );
       const actualHours = Math.round(actualMinutes / 60 * 10) / 10;
 
-      const { userWorkingHours } = await import('../../drizzle/schema.postgres');
-      const settings = await connection.select()
-        .from(userWorkingHours)
-        .where(eq(userWorkingHours.userOpenId, user.openId))
-        .limit(1);
-
-      let weeklyHoursMin = 55;
-      let weeklyHoursMax = 60;
-      let dailyHoursMin = 9.5;
-      let dailyHoursMax = 11.5;
-
-      if (settings.length > 0) {
-        weeklyHoursMin = settings[0].weeklyHoursMin || 55;
-        weeklyHoursMax = settings[0].weeklyHoursMax || 60;
-        dailyHoursMin = parseFloat(String(settings[0].dailyHoursMin)) || 9.5;
-        dailyHoursMax = parseFloat(String(settings[0].dailyHoursMax)) || 11.5;
-      }
+      const { weeklyHoursMin, weeklyHoursMax, dailyHoursMin, dailyHoursMax } = context;
 
     // Calculate daily breakdown
       const dailyBreakdown: Record<string, number> = {};
       for (let i = 0; i < 7; i++) {
-        const date = new Date(startOfWeek);
-        date.setDate(startOfWeek.getDate() + i);
-        const dateStr = date.toISOString().split('T')[0];
-        dailyBreakdown[dateStr] = 0;
+        dailyBreakdown[addDaysToDateKey(bounds.startDateKey, i)] = 0;
       }
 
       weekEntries.forEach((entry: typeof timeEntries.$inferSelect) => {
-        const date = dateKeyInTimeZone(new Date(entry.startTime), scope.profile?.timezone ?? 'UTC');
+        const date = dateKeyInTimeZone(new Date(entry.startTime), zone);
         if (dailyBreakdown[date] !== undefined) {
           dailyBreakdown[date] += nonNegativeDurationMinutes(entry);
         }

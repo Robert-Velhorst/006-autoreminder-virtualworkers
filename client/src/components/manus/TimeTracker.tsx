@@ -388,14 +388,18 @@ export default function TimeTracker() {
     staleTime: 30 * 60_000,
   });
 
-  const refreshTimerData = useCallback(() => Promise.all([
-    utils.timer.getActive.invalidate(),
-    utils.timer.getDateContext.invalidate(),
-    utils.timer.getDailySummary.invalidate(),
-    utils.timer.getWeeklyTotal.invalidate(),
-    utils.timer.getWeeklyBreakdown.invalidate(),
-    utils.trello.weeklyHours.invalidate(),
-  ]), [utils]);
+  const refreshTimerData = useCallback(() => {
+    const activeRefresh = utils.timer.getActive.invalidate();
+    // History availability must not hold the active-timer mutation lock.
+    void Promise.all([
+      utils.timer.getDateContext.invalidate(),
+      utils.timer.getDailySummary.invalidate(),
+      utils.timer.getWeeklyTotal.invalidate(),
+      utils.timer.getWeeklyBreakdown.invalidate(),
+      utils.trello.weeklyHours.invalidate(),
+    ]).catch(() => {});
+    return activeRefresh;
+  }, [utils]);
 
   const dailyGoalSeconds = (goalData?.hours ?? 9) * 3600;
 

@@ -80,6 +80,8 @@ function database(profiles: Row[], tasks: Row[] = [], times: Row[] = []) {
         from: (value: unknown) => { table = value; return query; },
         where: (value: unknown) => { condition = value; return query; },
         orderBy: () => query,
+        limit: () => query,
+        catch: (reject: (error: unknown) => unknown) => Promise.resolve(rows()).catch(reject),
         then: (resolve: (value: Row[]) => unknown, reject: (error: unknown) => unknown) =>
           Promise.resolve(rows()).then(resolve, reject),
       };

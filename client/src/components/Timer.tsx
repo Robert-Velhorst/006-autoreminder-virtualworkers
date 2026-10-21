@@ -94,7 +94,7 @@ export function Timer({ taskId, taskName, estimatedHours, onTimeUpdate, compact 
         if (currentRead()) setLoading(false);
       }
     })();
-    const historyRead = (async () => {
+    void (async () => {
       try {
         const response = await fetch(`/api/time-tracking/task/${encodeURIComponent(taskId)}`);
         if (!response.ok) throw new Error('History unavailable');
@@ -112,7 +112,7 @@ export function Timer({ taskId, taskName, estimatedHours, onTimeUpdate, compact 
         if (currentRead()) setHistoryStatus('History unavailable');
       }
     })();
-    await Promise.all([activeRead, historyRead]);
+    await activeRead;
   }, [taskId, updateActiveTimer]);
   const latestReload = useRef(reloadTimer);
   latestReload.current = reloadTimer;

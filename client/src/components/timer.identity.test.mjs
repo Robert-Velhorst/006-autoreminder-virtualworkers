@@ -174,7 +174,7 @@ test('REST stale A stop refreshes B after 409 but never retries or claims succes
   } });
   try {
     await f.page.getByRole('button', { name: 'Stop', exact: true }).click();
-    await expect(f.page.getByRole('status')).toContainText('Timer status changed');
+    await expect(f.page.getByRole('status').filter({ hasText: 'Timer status changed' })).toBeVisible();
     assert.deepEqual(f.postCalls().map(call => call.input), [{ entryId: 17 }]);
     assert.ok(f.calls.filter(call => call.path === '/api/time-tracking/active').length >= 2);
     assert.deepEqual(await f.page.evaluate(() => window.timerNotices), []);
@@ -189,7 +189,7 @@ test('REST stale A stop refreshes B after 409 but never retries or claims succes
 test('REST cannot implicitly stop-and-switch to a different task', async () => {
   const f = await fixture('rest', { active: active(17, 'other-task') });
   try {
-    await expect(f.page.getByRole('status')).toContainText('Stop it before starting this task');
+    await expect(f.page.getByRole('status').filter({ hasText: 'Stop it before starting this task' })).toBeVisible();
     await expect(f.page.getByRole('button', { name: 'Start', exact: true })).toBeDisabled();
     assert.equal(f.postCalls().length, 0);
   } finally { await f.close(); }
@@ -198,7 +198,7 @@ test('REST cannot implicitly stop-and-switch to a different task', async () => {
 test('REST rejects missing entry IDs with an honest reload action, including compact controls', async () => {
   const f = await fixture('rest', { compact: true, active: { ...active(), id: undefined } });
   try {
-    await expect(f.page.getByRole('status')).toContainText('could not be identified');
+    await expect(f.page.getByRole('status').filter({ hasText: 'could not be identified' })).toBeVisible();
     await expect(f.page.getByTitle('Stop', { exact: true })).toBeDisabled();
     await expect(f.page.getByTitle('Pause', { exact: true })).toBeDisabled();
     assert.equal(f.postCalls().length, 0);
@@ -271,7 +271,7 @@ test('REST mismatched acknowledgement never claims that the displayed timer stop
   } });
   try {
     await f.page.getByRole('button', { name: 'Stop', exact: true }).click();
-    await expect(f.page.getByRole('status')).toContainText('change was not confirmed');
+    await expect(f.page.getByRole('status').filter({ hasText: 'change was not confirmed' })).toBeVisible();
     assert.equal((await f.page.evaluate(() => window.timerNotices)).length, 0);
     assert.deepEqual(f.postCalls()[0].input, { entryId: 17 });
   } finally { await f.close(); }
@@ -295,7 +295,7 @@ test('Manus stop retains entry A and card context through a B refresh and confli
     await expect(f.page.getByText('Replacement timer', { exact: true })).toBeVisible();
     await expect(f.page.getByRole('button', { name: 'Stop', exact: true }).first()).toBeDisabled();
     gate.release();
-    await expect(f.page.getByRole('status')).toContainText('Timer status changed');
+    await expect(f.page.getByRole('status').filter({ hasText: 'Timer status changed' })).toBeVisible();
     await f.page.waitForTimeout(80);
     assert.equal(f.postCalls().length, 1);
     assert.equal((await f.page.evaluate(() => window.timerNotices)).some(notice => notice.kind === 'success'), false);
@@ -325,7 +325,7 @@ for (const ack of [null, { id: 999 }]) {
     } });
     try {
       await f.page.getByRole('button', { name: 'Stop', exact: true }).first().click();
-      await expect(f.page.getByRole('status')).toContainText('stop was not confirmed');
+      await expect(f.page.getByRole('status').filter({ hasText: 'stop was not confirmed' })).toBeVisible();
       assert.equal((await f.page.evaluate(() => window.timerNotices)).some(notice => notice.kind === 'success'), false);
       assert.equal(f.postCalls().length, 1);
     } finally { await f.close(); }
@@ -351,7 +351,7 @@ test('Manus failed stop does not inherit automatic retries or print backend diag
   } });
   try {
     await f.page.getByRole('button', { name: 'Stop', exact: true }).first().click();
-    await expect(f.page.getByRole('status')).toContainText('stop was not confirmed');
+    await expect(f.page.getByRole('status').filter({ hasText: 'stop was not confirmed' })).toBeVisible();
     await f.page.waitForTimeout(80);
     assert.equal(f.postCalls().length, 1);
     await expect(f.page.locator('body')).not.toContainText('PRIVATE_DIAGNOSTIC');
@@ -541,7 +541,7 @@ for (const action of ['stop', 'pause']) {
       } });
       try {
         await f.page.getByRole('button', { name: action === 'stop' ? 'Stop' : 'Pause', exact: true }).click();
-        await expect(f.page.getByRole('status')).toContainText('change was not confirmed');
+        await expect(f.page.getByRole('status').filter({ hasText: 'change was not confirmed' })).toBeVisible();
         await expect(f.page.getByRole('button', { name: 'Stop', exact: true })).toBeDisabled();
         await expect(f.page.getByRole('button', { name: 'Pause', exact: true })).toBeDisabled();
         await expect(f.page.getByRole('button', { name: 'Start', exact: true })).toHaveCount(0);
@@ -713,6 +713,117 @@ for (const completeness of [false, undefined]) {
 }
 
 const historyProcedures = ['timer.getDailySummary', 'timer.getWeeklyTotal', 'timer.getWeeklyBreakdown'];
+
+test('REST start ACK plus verified active A permits Stop while history hangs, without duplicate writes', async () => {
+  const historyGate = deferred(), stopGate = deferred();
+  let started = false, historyPending = false;
+  const f = await fixture('rest', { active: null, handle: async ({ route, call, state, json }) => {
+    if (call.path === '/api/time-tracking/start') {
+      started = true; state.active = active(23);
+      await json(route, { success: true, entry: state.active }); return true;
+    }
+    if (started && call.path.startsWith('/api/time-tracking/task/')) {
+      historyPending = true;
+      await historyGate.promise;
+      await json(route, { totalMinutes: 0, complete: true, unresolvedEntryCount: 0 }); return true;
+    }
+    if (call.path === '/api/time-tracking/stop') {
+      const entry = state.active;
+      await stopGate.promise; state.active = null;
+      await json(route, { success: true, entry }); return true;
+    }
+    return false;
+  } });
+  try {
+    await f.page.getByRole('button', { name: 'Start', exact: true }).click();
+    await expect.poll(() => historyPending).toBe(true);
+    await expect(f.page.getByRole('button', { name: 'Stop', exact: true })).toBeEnabled();
+    await expect(f.page.getByRole('status')).toHaveText('Loading history...');
+    await f.page.evaluate(() => {
+      const stop = [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Stop');
+      stop.click(); stop.click();
+    });
+    await expect.poll(() => f.postCalls().length).toBe(2);
+    assert.deepEqual(f.postCalls()[1].input, { entryId: 23 });
+    await expect(f.page.getByRole('button', { name: 'Stop', exact: true })).toBeDisabled();
+    stopGate.release();
+    await expect(f.page.getByRole('button', { name: 'Start', exact: true })).toBeEnabled();
+    await expect(f.page.getByRole('status')).toHaveText('Loading history...');
+    assert.equal(f.postCalls().length, 2);
+  } finally { historyGate.release(); stopGate.release(); await f.close(); }
+});
+
+test('REST start ACK does not bypass a failed active verification while history hangs', async () => {
+  const historyGate = deferred();
+  let started = false;
+  const f = await fixture('rest', { active: null, handle: async ({ route, call, state, json }) => {
+    if (call.path === '/api/time-tracking/start') {
+      started = true; state.active = active(23);
+      await json(route, { success: true, entry: state.active }); return true;
+    }
+    if (started && call.path === '/api/time-tracking/active') {
+      await json(route, { error: 'private' }, 503); return true;
+    }
+    if (started && call.path.startsWith('/api/time-tracking/task/')) {
+      await historyGate.promise;
+      await json(route, { totalMinutes: 0, complete: true, unresolvedEntryCount: 0 }); return true;
+    }
+    return false;
+  } });
+  try {
+    await f.page.getByRole('button', { name: 'Start', exact: true }).click();
+    await expect(f.page.getByRole('status').filter({ hasText: 'Timer status could not be loaded' })).toBeVisible();
+    await expect(f.page.getByRole('button', { name: 'Stop', exact: true })).toBeDisabled();
+    await expect(f.page.getByRole('button', { name: 'Start', exact: true })).toHaveCount(0);
+    await expect(f.page.getByRole('button', { name: 'Reload timer status' })).toBeEnabled();
+    assert.equal(f.postCalls().length, 1);
+  } finally { historyGate.release(); await f.close(); }
+});
+
+for (const ancillary of ['date context', 'history']) {
+  test(`Manus stop ACK settles while ${ancillary} hangs, preserving a stoppable verified replacement B`, async () => {
+    const ancillaryGate = deferred(), stopGate = deferred();
+    let stoppedA = false, ancillaryPending = false;
+    const f = await fixture('manus', { handle: async ({ route, call, state, json }) => {
+      if ((ancillary === 'date context' && call.procedure === 'timer.getDateContext')
+        || (ancillary === 'history' && stoppedA && historyProcedures.includes(call.procedure))) {
+        ancillaryPending = true;
+        await ancillaryGate.promise;
+        await json(route, rpcError('INTERNAL_SERVER_ERROR'), 503); return true;
+      }
+      if (call.procedure === 'timer.stop') {
+        const entry = state.active;
+        if (!stoppedA) {
+          stoppedA = true;
+          state.active = { ...active(18), cardName: 'Verified replacement B' };
+        } else {
+          await stopGate.promise; state.active = null;
+        }
+        await json(route, rpcData(entry)); return true;
+      }
+      return false;
+    } });
+    try {
+      await f.page.getByRole('button', { name: 'Stop', exact: true }).first().click();
+      await expect.poll(() => ancillaryPending).toBe(true);
+      await expect(f.page.getByText('Verified replacement B', { exact: true })).toBeVisible();
+      await expect(f.page.getByRole('button', { name: 'Stop', exact: true }).first()).toBeEnabled();
+      await f.page.evaluate(() => {
+        const stop = [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Stop');
+        stop.click(); stop.click();
+      });
+      await expect.poll(() => f.postCalls().length).toBe(2);
+      assert.deepEqual(f.postCalls().map(call => call.input), [
+        { entryId: 17, cardId: 'task-a' }, { entryId: 18, cardId: 'task-a' },
+      ]);
+      await expect(f.page.getByRole('button', { name: 'Stop', exact: true }).first()).toBeDisabled();
+      stopGate.release();
+      await expect(f.page.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);
+      assert.equal(f.postCalls().length, 2);
+    } finally { ancillaryGate.release(); stopGate.release(); await f.close(); }
+  });
+}
+
 const dateContexts = [
   { timezone: 'America/Los_Angeles', date: '2026-10-18', startDate: '2026-10-12', endDate: '2026-10-18' },
   { timezone: 'Asia/Tokyo', date: '2026-10-19', startDate: '2026-10-19', endDate: '2026-10-25' },

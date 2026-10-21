@@ -6,7 +6,9 @@ import { getDb } from '../db';
 import { taskAssignments, vaProfiles, timeEntries } from '../../drizzle/schema.postgres';
 import { requireActiveWorkerProfile, requireAuthenticated, requestUser } from '../middleware/auth';
 import { attributeTimeEntriesToProfiles, loadAccountTimeEntries } from '../timeEntryOwnership';
-import { selectWorkerProfile } from '../workerOperatorContext';
+import { resolveWorkerOperatorContext, selectWorkerProfile, type WorkerOperatorContext } from '../workerOperatorContext';
+import { calculateScheduledTargetSeconds } from '../complianceMetrics';
+import { addDaysToDateKey, dateKeyInTimeZone, dateWindowInTimeZone } from '../../shared/workerTime';
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -63,32 +65,12 @@ async function getScopedOperationalData(req: Request, db: Database) {
 
 const trackedMinutes = recordedMinutes;
 
-function scheduledMinutes(profile: typeof vaProfiles.$inferSelect, start: Date, dayCount: number) {
-  const workingDays = new Set(profile.workingDays.split(',').map(Number).filter(Number.isInteger));
+function scheduledMinutes(schedule: WorkerOperatorContext, startDateKey: string, dayCount: number) {
   let total = 0;
   for (let index = 0; index < dayCount; index += 1) {
-    const day = new Date(start);
-    day.setDate(start.getDate() + index);
-    if (!workingDays.has(day.getDay())) continue;
-
-    const gross = Math.max(0, profile.workEndHour - profile.workStartHour) * 60;
-    const breaks = [
-      [profile.breakfastTime, profile.breakfastDuration],
-      [profile.lunchTime, profile.lunchDuration],
-      [profile.dinnerTime, profile.dinnerDuration],
-    ].reduce((sum, [hour, duration]) => {
-      const isInsideShift = hour != null && hour >= profile.workStartHour && hour < profile.workEndHour;
-      return sum + (isInsideShift ? Math.max(0, duration ?? 0) : 0);
-    }, 0);
-    total += Math.max(0, gross - breaks);
+    total += calculateScheduledTargetSeconds(schedule, addDaysToDateKey(startDateKey, index)) / 60;
   }
   return total;
-}
-
-function startOfDay(date: Date) {
-  const result = new Date(date);
-  result.setHours(0, 0, 0, 0);
-  return result;
 }
 
 router.get('/worker-productivity', async (req, res) => {
@@ -139,11 +121,17 @@ router.get('/team-capacity', async (req, res) => {
     const attribution = attributeTimeEntriesToProfiles(attributionProfiles, times);
     if (attribution.unattributed.length) { completeness.complete = false; completeness.unresolvedEntryCount += attribution.unattributed.filter(entry => entry.trackedUserId !== null).length; }
     const attributedTimes = profiles.flatMap(profile => attribution.entriesByProfileId.get(profile.id) ?? []);
-    const periodStart = startOfDay(new Date());
-    periodStart.setDate(periodStart.getDate() - 6);
     const periodEnd = new Date();
-    const workers = profiles.map(profile => {
-      const expectedMinutes = scheduledMinutes(profile, periodStart, 7);
+    const { timezone } = await resolveWorkerOperatorContext(user, db);
+    const endDateKey = dateKeyInTimeZone(periodEnd, timezone);
+    const startDateKey = addDaysToDateKey(endDateKey, -6);
+    const periodStart = dateWindowInTimeZone(startDateKey, timezone).start;
+    const workers = await Promise.all(profiles.map(async profile => {
+      // Profiles are already caller-scoped; resolve each account's effective
+      // schedule rather than reusing the viewer's or a retired profile's hours.
+      const schedule = await resolveWorkerOperatorContext({ ...user, id: profile.userId, name: profile.name }, db);
+      const expectedMinutes = schedule.profileId === profile.id && schedule.founderId === profile.founderId
+        ? scheduledMinutes(schedule, startDateKey, 7) : 0;
       const actualMinutes = (attribution.entriesByProfileId.get(profile.id) ?? [])
         .filter(entry => entry.startTime >= periodStart && entry.startTime <= periodEnd)
         .reduce((sum, entry) => sum + trackedMinutes(entry), 0);
@@ -155,7 +143,7 @@ router.get('/team-capacity', async (req, res) => {
         utilization: expectedMinutes > 0 ? Math.round((actualMinutes / expectedMinutes) * 1000) / 10 : null,
         overtimeMinutes: Math.max(0, Math.round(actualMinutes - expectedMinutes)),
       };
-    });
+    }));
     const expectedMinutes = workers.reduce((sum, worker) => sum + worker.expectedMinutes, 0);
     const actualMinutes = attributedTimes
       .filter(entry => entry.startTime >= periodStart && entry.startTime <= periodEnd)
@@ -167,7 +155,8 @@ router.get('/team-capacity', async (req, res) => {
     res.json({
       ...completeness,
       success: true,
-      period: { start: periodStart.toISOString(), end: periodEnd.toISOString(), days: 7 },
+      period: { start: periodStart.toISOString(), end: periodEnd.toISOString(), days: 7,
+        timezone, startDate: startDateKey, endDate: endDateKey },
       utilization: expectedMinutes > 0 ? Math.round((actualMinutes / expectedMinutes) * 1000) / 10 : null,
       expectedMinutes,
       trackedMinutes: actualMinutes,
@@ -197,15 +186,13 @@ router.get('/trends', async (req, res) => {
     const attribution = attributeTimeEntriesToProfiles(attributionProfiles, times);
     if (attribution.unattributed.length) { completeness.complete = false; completeness.unresolvedEntryCount += attribution.unattributed.filter(entry => entry.trackedUserId !== null).length; }
     const attributedTimes = profiles.flatMap(profile => attribution.entriesByProfileId.get(profile.id) ?? []);
-    const periodStart = startOfDay(new Date());
-    periodStart.setDate(periodStart.getDate() - 13);
+    const { timezone } = await resolveWorkerOperatorContext(user, db);
+    const startDateKey = addDaysToDateKey(dateKeyInTimeZone(new Date(), timezone), -13);
     const trends = Array.from({ length: 14 }, (_, index) => {
-      const dayStart = new Date(periodStart);
-      dayStart.setDate(periodStart.getDate() + index);
-      const dayEnd = new Date(dayStart);
-      dayEnd.setDate(dayEnd.getDate() + 1);
+      const date = addDaysToDateKey(startDateKey, index);
+      const { start: dayStart, endExclusive: dayEnd } = dateWindowInTimeZone(date, timezone);
       return {
-        date: dayStart.toISOString().slice(0, 10),
+        date,
         trackedMinutes: Math.round(attributedTimes
           .filter(entry => entry.startTime >= dayStart && entry.startTime < dayEnd)
           .reduce((sum, entry) => sum + trackedMinutes(entry), 0)),
@@ -223,7 +210,7 @@ router.get('/trends', async (req, res) => {
       };
     });
 
-    res.json({ ...completeness, success: true, periodDays: 14, trends, source: 'task_assignments+time_entries' });
+    res.json({ ...completeness, success: true, timezone, periodDays: 14, trends, source: 'task_assignments+time_entries' });
   } catch (error) {
     console.error('[Analytics] Failed to get trends', error);
     res.status(500).json({ error: 'Failed to get trends' });

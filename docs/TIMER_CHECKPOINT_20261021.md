@@ -1,4 +1,4 @@
-# Canonical timer draft checkpoint
+# Canonical timer checkpoint record
 
 This checkpoint preserves work in progress at the owner's request. It is not a
 production release or approval to migrate an operational database.
@@ -12,7 +12,7 @@ production release or approval to migrate an operational database.
 - Client controls that retain exact entry IDs and avoid implicit timer switching.
 - Unit, browser-component, and native PostgreSQL regression coverage.
 
-## Remaining acceptance work
+## Initial Draft Gaps at df3931f
 
 - Execute and review native PostgreSQL migration, rollback, restricted-role,
   concurrent-writer, and process-restart cases. These were not run locally.
@@ -30,7 +30,7 @@ production release or approval to migrate an operational database.
   transfer fixture contracts after canonical timer import changes. Those fixtures
   and the actual import behavior require reconciliation before acceptance.
 
-## Local checkpoint verification
+## Initial Local Checkpoint Verification
 
 - TypeScript and whitespace checks passed.
 - Vitest: 4,059 passed, 319 skipped without a local database.
@@ -38,6 +38,29 @@ production release or approval to migrate an operational database.
 - Staged Gitleaks scan: no leaks found.
 - Browser component checks use intercepted requests, not a live backend. A broad
   status selector was corrected after a 65/66 run; the PR records the final rerun.
+
+## Follow-up Implementation
+
+Subsequent changes address those draft gaps; the initial failures above remain
+historical evidence, not descriptions of a passing release:
+
+- [Timer Identity Cutover](TIMER_IDENTITY_CUTOVER.md) documents explicit offline
+  duplicate recovery, preserved provenance/durations, audit replay, database
+  privilege and settlement boundaries. Native cases cover the real SQL paths.
+- Operator transfer fixtures and legacy staging privilege checks are updated
+  without inferring account identity from an old numeric alias.
+- Reminder integration uses its own fully migrated temporary database; its
+  unrelated-work guard is retained. Manager fixtures use canonical timer IDs and
+  remove only exact owned records before restrictive profile cleanup.
+- History requests no longer retain active-timer mutation locks. Canonical
+  timezone/calendar resolution is shared across relevant timer readers.
+- PostgreSQL RESTRICT assertions check the actual restrictive-FK error rather
+  than expecting the different foreign-key SQLSTATE.
+
+These changes require fresh exact-head CI, including native migration, locking,
+recovery, restricted-role, settlement, restart, and complete regression checks.
+Presence of a native test is not proof that it passed. Consult the PR checks for
+the source revision under consideration.
 
 Real provider behavior, production deployment, operational backups/restores, and
 the human-reviewed shadow trial require separate acceptance. No credentials,

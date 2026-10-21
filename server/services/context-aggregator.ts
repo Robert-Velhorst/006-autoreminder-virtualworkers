@@ -1,5 +1,7 @@
 import { recordedMinutes } from '../../shared/timerDuration';
 import { timeCompleteness } from '../canonicalTimer';
+import { dateKeyInTimeZone, dateWindowInTimeZone } from '../../shared/workerTime';
+import { resolveWorkerOperatorContextById } from '../workerOperatorContext';
 /**
  * Context Aggregator Service
  * 
@@ -159,6 +161,10 @@ async function getTimeTrackingData(cardId: string, trackedUserId?: number): Prom
   
   const profiles = await db.select().from(vaProfiles).where(and(eq(vaProfiles.userId, trackedUserId), eq(vaProfiles.status, 'active')));
   if (profiles.length !== 1) return { complete: false, totalMinutesToday: 0, totalMinutesAllTime: 0, estimatedMinutes: null, entries: [] };
+  const worker = await resolveWorkerOperatorContextById(trackedUserId, db);
+  if (worker.profileId !== profiles[0].id || worker.founderId !== profiles[0].founderId) {
+    return { complete: false, totalMinutesToday: 0, totalMinutesAllTime: 0, estimatedMinutes: null, entries: [] };
+  }
   const completeness = await timeCompleteness(db, profiles[0].founderId);
   // Use taskId field which stores the Trello card ID
   const entries = await db
@@ -168,8 +174,7 @@ async function getTimeTrackingData(cardId: string, trackedUserId?: number): Prom
     .orderBy(desc(timeEntries.startTime))
     .limit(5001);
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const today = dateWindowInTimeZone(dateKeyInTimeZone(new Date(), worker.timezone), worker.timezone);
   
   let totalMinutesToday = 0;
   let totalMinutesAllTime = 0;
@@ -178,7 +183,7 @@ async function getTimeTrackingData(cardId: string, trackedUserId?: number): Prom
     const minutes = recordedMinutes(entry);
     totalMinutesAllTime += minutes;
     
-    if (entry.startTime && new Date(entry.startTime) >= today) {
+    if (entry.startTime && new Date(entry.startTime) >= today.start && new Date(entry.startTime) < today.endExclusive) {
       totalMinutesToday += minutes;
     }
     
@@ -206,24 +211,26 @@ async function getWorkerInfo(vaId: number): Promise<WorkerContext | null> {
   if (!db) return null;
   
   try {
+    const worker = await resolveWorkerOperatorContextById(vaId, db);
+    if (!worker.profileId) return null;
     const profiles = await db
       .select()
       .from(vaProfiles)
-      .where(eq(vaProfiles.userId, vaId))
+      .where(and(eq(vaProfiles.id, worker.profileId), eq(vaProfiles.userId, vaId), eq(vaProfiles.founderId, worker.founderId!)))
       .limit(1);
 
     if (profiles.length > 0) {
       const profile = profiles[0];
       return {
-        name: profile.name,
+        name: worker.displayName,
         email: profile.email || null,
-        timezone: profile.timezone,
-        workingHoursStart: profile.workStartHour ? `${profile.workStartHour}:00` : null,
-        workingHoursEnd: profile.workEndHour ? `${profile.workEndHour}:00` : null
+        timezone: worker.timezone,
+        workingHoursStart: worker.workStartTime,
+        workingHoursEnd: worker.workEndTime
       };
     }
   } catch (error) {
-    console.error('[ContextAggregator] Failed to get worker info:', error);
+    console.error('[ContextAggregator] Failed to get worker info');
   }
   
   return null;

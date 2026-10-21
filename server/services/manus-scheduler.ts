@@ -21,7 +21,7 @@ import {
 } from "./trello-manus";
 import { areNotificationsEnabled } from "./notificationPolicy";
 import { parseDateKey } from "../utils/date-only";
-import { dateKeyInTimeZone, dateWindowInTimeZone } from "../../shared/workerTime";
+import { dateKeyInTimeZone, dateWindowInTimeZone, timeKeyInTimeZone } from "../../shared/workerTime";
 import { calculateScheduledTargetSeconds } from "../complianceMetrics";
 import { resolveWorkerOperatorContextById } from "../workerOperatorContext";
 import { runScheduledJob, ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader } from "../scheduledJobRuntime";
@@ -82,17 +82,11 @@ async function runBackgroundTasks() {
 
   for (const worker of activeWorkers) {
     try {
-      const formatter = new Intl.DateTimeFormat("en-US", {
-        timeZone: worker.timezone || "UTC",
-        hour: "numeric",
-        minute: "numeric",
-        hourCycle: "h23",
-      });
-      const parts = formatter.formatToParts(new Date());
-      const currentHour = Number(parts.find(part => part.type === "hour")?.value ?? 0);
-      const currentMinute = Number(parts.find(part => part.type === "minute")?.value ?? 0);
+      const operatorContext = await resolveWorkerOperatorContextById(worker.userId, db);
+      if (operatorContext.profileId !== worker.id || operatorContext.founderId !== worker.founderId) continue;
       const now = new Date();
-      const dateKey = dateKeyInTimeZone(now, worker.timezone);
+      const [currentHour, currentMinute] = timeKeyInTimeZone(now, operatorContext.timezone).split(':').map(Number);
+      const dateKey = dateKeyInTimeZone(now, operatorContext.timezone);
 
       if (currentHour === 0 && currentMinute <= 4) {
         await runScheduledJob({ jobKey: `auto-stop:${worker.userId}:${dateKey}` }, async context => {
@@ -102,7 +96,7 @@ async function runBackgroundTasks() {
       }
     } catch (error) {
       if (error instanceof ScheduledJobLeaseLostError) throw error;
-      console.error(`[ManusScheduler] Error processing worker ${worker.id}:`, error);
+      console.error(`[ManusScheduler] Error processing worker ${worker.id}`);
     }
   }
 }
@@ -201,22 +195,23 @@ export async function collectComplianceSnapshot(
 ) {
   await checkpointOwnership(context);
   const now = new Date();
-  const dateKey = dateKeyInTimeZone(now, worker.timezone);
-  console.log(`[ManusScheduler] Collecting compliance for ${worker.name} on ${dateKey}`);
-
   const db = await getDb();
   if (!db) throw new Error("Database not available");
+  const operatorContext = await resolveWorkerOperatorContextById(worker.userId, db);
+  if (operatorContext.profileId !== worker.id || operatorContext.founderId !== worker.founderId) throw new Error('Worker ownership changed before compliance collection');
+  const dateKey = dateKeyInTimeZone(now, operatorContext.timezone);
+  console.log(`[ManusScheduler] Collecting compliance for ${worker.name} on ${dateKey}`);
 
   const apiKey = process.env.TRELLO_API_KEY;
   const apiToken = process.env.TRELLO_TOKEN;
   if (!apiKey || !apiToken) throw new Error("Trello API credentials not configured");
 
   const trelloMemberId = worker.trelloMemberId || "me";
-  const window = dateWindowInTimeZone(dateKey, worker.timezone);
+  const window = dateWindowInTimeZone(dateKey, operatorContext.timezone);
   const endInclusive = new Date(window.endExclusive.getTime() - 1);
-  const [allCards, commentedCardIds, messages, emails, trackedEntries, operatorContext] = await Promise.all([
+  const [allCards, commentedCardIds, messages, emails, trackedEntries] = await Promise.all([
     getWorkerCards(apiKey, apiToken, trelloMemberId),
-    getWorkerCommentedCardIdsToday(apiKey, apiToken, trelloMemberId, undefined, undefined, worker.timezone),
+    getWorkerCommentedCardIdsToday(apiKey, apiToken, trelloMemberId, undefined, undefined, operatorContext.timezone),
     db.select().from(replyThreads).where(and(
       eq(replyThreads.vaId, worker.userId),
       gte(replyThreads.lastNonWorkerMsgAt, window.start),
@@ -229,12 +224,12 @@ export async function collectComplianceSnapshot(
     )),
     db.select().from(timeEntries).where(and(
       eq(timeEntries.trackedUserId, worker.userId),
+      eq(timeEntries.founderId, worker.founderId),
       eq(timeEntries.isVoided, false),
       isNotNull(timeEntries.endTime),
       gte(timeEntries.startTime, window.start),
       lte(timeEntries.startTime, endInclusive),
     )),
-    resolveWorkerOperatorContextById(worker.userId),
   ]);
   const doingCards = allCards.filter(card => card.list && isDoingList(card.list.name));
   const onHoldCards = allCards.filter(card => card.list && isOnHoldList(card.list.name));

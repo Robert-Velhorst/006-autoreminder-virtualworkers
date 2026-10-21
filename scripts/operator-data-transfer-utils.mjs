@@ -188,6 +188,8 @@ export function canonicalColumnValue(value, column) {
 export function prepareTransferRow(source, columns, identity, table) {
   if (!source || Array.isArray(source) || typeof source !== "object") throw new Error(`Invalid source row: ${table}`);
   const metadata = new Map(columns.map(column => [column.column_name, column]));
+  if (table === 'time_entries' && ['trackedUserId', 'trackedProfileId'].some(name => metadata.get(name)?.data_type !== 'integer'
+    || metadata.get(name)?.is_nullable !== 'YES')) throw new Error('Canonical timer migration must be installed before import');
   if (Object.keys(source).some(key => !metadata.has(key))) throw new Error(`Unmapped source columns: ${table}`);
   for (const [column, id] of [["vaId", identity.workerUserId], ["founderId", identity.founderUserId]]) {
     if (!metadata.has(column)) continue;
@@ -200,7 +202,6 @@ export function prepareTransferRow(source, columns, identity, table) {
   }
   const row = { ...source };
   if (table === 'time_entries') {
-    if (!metadata.has('trackedUserId') || !metadata.has('trackedProfileId')) throw new Error('Canonical timer migration must be installed before import');
     if (source.trackedUserId != null && positiveId(source.trackedUserId) !== identity.workerUserId) throw new Error('Canonical timer owner mismatch');
     if (source.trackedProfileId != null && positiveId(source.trackedProfileId) !== identity.workerProfileId) throw new Error('Canonical timer profile mismatch');
     if (source.trackedUserId == null && source.trackedProfileId != null) throw new Error('Canonical profile without canonical account');
@@ -275,7 +276,11 @@ export async function transferOperatorRecords(connection, payload, definitions, 
     if (execute && !reconcile) {
       // Operator-only import stages unresolved history. Runtime inserts never
       // enable this transaction-local mode; readiness remains closed for open rows.
-      await connection.query("SELECT set_config('aptlss.legacy_timer_import', txid_current()::text, true)");
+      if (payload.tables.time_entries?.some(row => row.trackedUserId == null || row.vaId != null)) {
+        const privilege = await connection.query("SELECT has_table_privilege(current_user, 'time_entries', 'TRIGGER') AS allowed");
+        if (privilege.rows[0]?.allowed !== true) throw new Error('Privileged operator connection required for legacy timer import');
+        await connection.query("SELECT set_config('aptlss.legacy_timer_import', txid_current()::text, true)");
+      }
       const tables = [...new Set(["users", "va_profiles", ...definitions.map(item => item.name)])].sort();
       await connection.query(`LOCK TABLE ${tables.map(quoteIdentifier).join(", ")} IN ACCESS EXCLUSIVE MODE`);
     }

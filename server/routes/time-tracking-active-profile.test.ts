@@ -107,6 +107,16 @@ describe("canonical timer eligibility and ownership", () => {
     expect(updates).toEqual([]);
   });
 
+  it('reports a blocking previous-founder timer without disclosing its entry or card', async () => {
+    const { app, updates, inserts } = fixture({ entries: [entry({ founderId: 9, notes: 'private previous-founder notes' })] });
+    const response = await request(app).get('/time-tracking/active');
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({ error: expect.stringMatching(/previous founder.*close the exact entry/i) });
+    expect(JSON.stringify(response.body)).not.toMatch(/private-task|previous-founder notes|"id":55/);
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+
   it("a delayed stop replay for A never closes a newly started B", async () => {
     const a = entry({ id: 1, endTime: new Date(), durationSeconds: 60 });
     const b = entry({ id: 2, taskId: "new-task" });
