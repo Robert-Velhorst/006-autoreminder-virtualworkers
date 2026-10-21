@@ -2,7 +2,7 @@ import { encodeTrelloPathSegment } from '../utils/trello-path';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../db';
-import { generationJobs, generationItems, scheduledJobs, userWorkingHours, holidays, vaProfiles, taskAssignments, taskDependencies, clients } from '../../drizzle/schema.postgres';
+import { generationJobs, generationItems, scheduledJobs, userWorkingHours, holidays, vaProfiles, taskAssignments, taskDependencies, clients, users } from '../../drizzle/schema.postgres';
 import { eq, desc, and, inArray } from 'drizzle-orm';
 import { fetchWithRetry } from '../utils/retry';
 import { getCachedTasks, setCachedTasks, invalidateCache } from '../services/trello-cache';
@@ -14,6 +14,57 @@ import {
   generateAptlssForCard,
 } from '../services/aptlss-generation';
 import { executeAptlssGenerationBatch } from '../services/aptlss-scheduled-generation';
+import { AssignmentError, MAX_ASSIGNMENT_TASKS, assignmentFailure, readCanonicalAssignments } from '../taskAssignmentMutation';
+
+export async function readSchedulingAssignmentSnapshot(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, founderId: number, taskIds: string[]) {
+  if (!Number.isSafeInteger(founderId) || founderId <= 0) throw new AssignmentError(400, 'Invalid scheduling founder');
+  const keys = [...new Set(taskIds)].sort();
+  return db.transaction(async tx => {
+    const read = async (lock: boolean) => {
+      const rows: typeof taskAssignments.$inferSelect[] = [];
+      for (let offset = 0; offset < keys.length; offset += MAX_ASSIGNMENT_TASKS) {
+        rows.push(...await readCanonicalAssignments(tx, founderId, keys.slice(offset, offset + MAX_ASSIGNMENT_TASKS), { lock }));
+      }
+      return rows;
+    };
+    // Discover account IDs without trusting this initial view. Recheck the whole
+    // identity under locks, before selecting by worker or operational status.
+    const observed = await read(false);
+    const profileIds = [...new Set(observed.map(row => row.vaId))];
+    const discovered = profileIds.length ? await tx.select().from(vaProfiles).where(inArray(vaProfiles.id, profileIds)) : [];
+    if (discovered.length !== profileIds.length) throw new AssignmentError(409, 'Assignment worker identity requires review');
+    const accountIds = [...new Set([founderId, ...discovered.map(profile => profile.userId)])].sort((a, b) => a - b);
+    const accounts = new Map<number, typeof users.$inferSelect>();
+    for (const id of accountIds) {
+      if (!Number.isSafeInteger(id) || id <= 0) throw new AssignmentError(409, 'Assignment worker identity requires review');
+      const [account] = await tx.select().from(users).where(eq(users.id, id)).for('no key update');
+      if (account) accounts.set(id, account);
+    }
+    if (accounts.get(founderId)?.role !== 'admin') throw new AssignmentError(403, 'Scheduling account permissions changed; reload before trying again');
+    const workerAccountIds = [...new Set(discovered.map(profile => profile.userId))];
+    const profiles = workerAccountIds.length ? await tx.select().from(vaProfiles)
+      .where(inArray(vaProfiles.userId, workerAccountIds)).orderBy(vaProfiles.id).for('update') : [];
+    const verified = new Map<number, typeof vaProfiles.$inferSelect>();
+    for (const original of discovered) {
+      const active = profiles.filter(profile => profile.userId === original.userId && profile.status === 'active');
+      if (accounts.get(original.userId)?.role !== 'worker' || active.length !== 1
+        || active[0].id !== original.id || active[0].founderId !== founderId) {
+        throw new AssignmentError(409, 'Assignment worker eligibility or ownership changed; reload before scheduling');
+      }
+      verified.set(original.id, active[0]);
+    }
+    const assignments = await read(true);
+    if (assignments.some(row => !verified.has(row.vaId))) {
+      throw new AssignmentError(409, 'Assignment ownership changed; reload before scheduling');
+    }
+    const currentProfileIds = new Set(assignments.map(row => row.vaId));
+    return { assignments, workers: [...verified.values()].filter(profile => currentProfileIds.has(profile.id)) };
+  });
+}
+
+export async function readSchedulingAssignments(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, founderId: number, taskIds: string[]) {
+  return (await readSchedulingAssignmentSnapshot(db, founderId, taskIds)).assignments;
+}
 
 const router = Router();
 const LEGACY_APTLSS_PREFIXES = ['/trello', '/aptlss'];
@@ -1117,8 +1168,19 @@ router.get('/trello/tasks', async (req: any, res: Response) => {
       forceRefresh,
     });
     if (cachedData && !forceRefresh) {
-      console.log('Cache hit for tasks');
-      return res.json(cachedData);
+      const db = await getDb();
+      if (!db) throw new AssignmentError(503, 'Worker assignments could not be verified; retry before scheduling');
+      const cachedTasks = [...(Array.isArray(cachedData.tasks) ? cachedData.tasks : []),
+        ...(Array.isArray(cachedData.overflow) ? cachedData.overflow : [])];
+      if (Array.isArray(cachedData.tasks) && cachedTasks.every(task => typeof task?.id === 'string')) {
+        const snapshot = await readSchedulingAssignmentSnapshot(db, user.id, cachedTasks.map(task => task.id));
+        const owners = new Map(snapshot.assignments.map(row => [row.taskId, row.vaId]));
+        if (cachedTasks.every(task => task.workerId === owners.get(task.id))) {
+          console.log('Cache hit for tasks');
+          return res.json(cachedData);
+        }
+      }
+      await invalidateCache(user.id, user.openId, 'tasks');
     }
 
     console.log('Cache miss for tasks - fetching from Trello API');
@@ -1134,6 +1196,7 @@ router.get('/trello/tasks', async (req: any, res: Response) => {
     const queueKey = `trello-tasks-${user.openId}`;
     const responseData = await requestQueue.execute(queueKey, async () => {
       const db = await getDb();
+      if (!db) throw new AssignmentError(503, 'Worker assignments could not be verified; retry before scheduling');
       const allClients = db ? await db.select().from(clients).where(eq(clients.founderId, user.id)) : [];
       const boardToClientMap = new Map<string, typeof allClients[0]>();
       for (const client of allClients) {
@@ -1377,23 +1440,16 @@ router.get('/trello/tasks', async (req: any, res: Response) => {
           const taskIds = tasks.map(t => t.id);
           
           // Fetch task assignments for these tasks
-          const assignments = await db.select()
-            .from(taskAssignments)
-            .where(inArray(taskAssignments.taskId, taskIds));
+          const { assignments, workers } = await readSchedulingAssignmentSnapshot(db, user.id, taskIds);
           
           if (assignments.length > 0) {
             // Get unique worker IDs
             const workerIds = Array.from(new Set(assignments.map((a: any) => Number(a.vaId)))) as number[];
             
-            // Fetch worker profiles
-            const workers = await db.select()
-              .from(vaProfiles)
-              .where(inArray(vaProfiles.id, workerIds));
-            
             // Fetch dependencies for these tasks
             const dependencies = await db.select()
               .from(taskDependencies)
-              .where(inArray(taskDependencies.taskId, taskIds));
+              .where(and(inArray(taskDependencies.taskId, taskIds), eq(taskDependencies.founderId, user.id)));
             
             const blockedByLookup = new Map<string, string[]>();
             for (const dep of dependencies) {
@@ -1451,9 +1507,12 @@ router.get('/trello/tasks', async (req: any, res: Response) => {
             
             console.log(`[Scheduling] Found ${assignments.length} task assignments across ${workerIds.length} workers`);
           }
+        } else {
+          throw new AssignmentError(503, 'Worker assignments could not be verified; retry before scheduling');
         }
       } catch (error) {
-        console.warn('Could not fetch worker assignments, using default settings:', error);
+        if (assignmentFailure(error)) throw error;
+        throw new AssignmentError(503, 'Worker assignments could not be verified; retry before scheduling');
       }
     }
     
@@ -1494,6 +1553,8 @@ router.get('/trello/tasks', async (req: any, res: Response) => {
 
     res.json(responseData);
   } catch (error) {
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
     console.error('Error fetching Trello tasks:', error);
     res.status(500).json({ error: 'Failed to fetch tasks from Trello' });
   }

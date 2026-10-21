@@ -35,9 +35,11 @@ describe("legacy founder time-entry ownership", () => {
     const reassignment = source.slice(source.indexOf("router.post('/assignments/:id/assign'"), source.indexOf("router.post('/assignments/:id/priority'"));
     const handoff = source.slice(source.indexOf("router.post('/handoff'"), source.indexOf("router.get('/handoff/:taskId'"));
 
-    expect(assignment).toContain("await getFounderWorker(db, user.id, vaId)");
-    expect(reassignment).toContain("await getFounderWorker(db, user.id, vaId)");
+    expect(assignment).toContain("await assignTask(db, user, { taskId, workerProfileId: vaId");
+    expect(reassignment).toContain("await reassignTask(db, user, { assignmentId, workerProfileId: vaId");
     expect(handoff).toContain("await getFounderWorker(db, user.id, fromVaId)");
     expect(handoff).toContain("await getFounderWorker(db, user.id, toVaId)");
+    expect(handoff).toContain("withLockedAssignment(db, user, taskId");
+    expect(handoff).toContain("workerProfileIds: toVaId === null ? [fromVaId] : [fromVaId, toVaId]");
   });
 });

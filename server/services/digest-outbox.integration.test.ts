@@ -39,7 +39,7 @@ describe.skipIf(!url)('digest outbox full-migration native PostgreSQL', { timeou
     db = drizzle(pool, { schema }); controls.db = db;
     await migrate(db, { migrationsFolder: path.resolve('drizzle-postgres-v1') });
     const tables = await pool.query("select count(*)::integer as count from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'");
-    expect(tables.rows[0].count).toBe(138);
+    expect(tables.rows[0].count).toBe(139);
   }, 125_000);
 
   afterAll(async () => {

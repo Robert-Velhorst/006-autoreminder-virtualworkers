@@ -10,6 +10,7 @@ import {
   toShortcutMap,
 } from '../schedulingApi.js';
 import { requestUser, requireAuthenticated } from '../middleware/auth';
+import { assignmentFailure } from '../taskAssignmentMutation';
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -199,6 +200,8 @@ router.post('/reschedule', async (req: Request, res: Response) => {
         : 'Task rescheduled successfully'
     });
   } catch (error) {
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error, code: failure.code });
     console.error('[AdvancedScheduling] Error rescheduling task:', error);
     res.status(500).json({ error: 'Failed to reschedule task' });
   }
@@ -230,6 +233,8 @@ router.post('/undo/:taskId', async (req: Request, res: Response) => {
       message: 'Previous schedule restored'
     });
   } catch (error) {
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error, code: failure.code });
     console.error('[AdvancedScheduling] Error undoing reschedule:', error);
     res.status(500).json({ error: 'Failed to undo reschedule' });
   }
@@ -259,6 +264,8 @@ router.get('/history/:taskId', async (req: Request, res: Response) => {
       count: history.length
     });
   } catch (error) {
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error, code: failure.code });
     console.error('[AdvancedScheduling] Error getting schedule history:', error);
     res.status(500).json({ error: 'Failed to get schedule history' });
   }
@@ -314,6 +321,8 @@ router.post('/detect-conflicts', async (req: Request, res: Response) => {
       suggestions
     });
   } catch (error) {
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error, code: failure.code });
     console.error('[AdvancedScheduling] Error detecting conflicts:', error);
     res.status(500).json({ error: 'Failed to detect conflicts' });
   }
@@ -363,7 +372,13 @@ router.post('/batch-start', async (req: Request, res: Response) => {
       });
     }
 
-    // Create batch operation record
+    const actor = getScheduleActor(req)!;
+    const assignments = await schedulingDb.getUserTasks(actor);
+    if (normalizedTaskIds.some(taskId => !assignments.some(assignment => assignment.taskId === taskId))) {
+      return res.status(404).json({ error: 'Task assignment not found' });
+    }
+
+    // Create batch operation record only after canonical ownership checks.
     const jobId = await schedulingDb.createBatchOperation({
       userId: userOpenId,
       operationType,
@@ -390,6 +405,8 @@ router.post('/batch-start', async (req: Request, res: Response) => {
       message: 'Batch operation started'
     });
   } catch (error) {
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error, code: failure.code });
     console.error('[AdvancedScheduling] Error starting batch operation:', error);
     res.status(500).json({ error: 'Failed to start batch operation' });
   }

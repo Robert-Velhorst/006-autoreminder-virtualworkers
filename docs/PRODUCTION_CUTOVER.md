@@ -55,6 +55,11 @@ Resolve ownership and any required actual stop times through the audited
 operator path, without guessing aliases, deleting history, or changing settled
 financial records. A schema migration alone is not data acceptance.
 
+Before assignment migration 0008, follow
+[Assignment Identity Cutover](ASSIGNMENT_IDENTITY_CUTOVER.md). Existing duplicate
+founder/full-task identities deliberately abort migration unchanged. Review them
+privately; do not remove rows or history automatically to satisfy readiness.
+
 Production deployment is started manually from protected `main`. The selected
 release must be a published stable `vMAJOR.MINOR.PATCH` tag whose commit is
 contained in `main`. The workflow verifies the GHCR image's provenance against

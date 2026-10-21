@@ -42,6 +42,7 @@ import { parseManagerAssignmentReference, readManagerAssignmentState } from "../
 import { selectWorkerProfile } from "../workerOperatorContext";
 import { getGoogleEvidenceStatus } from "../googleEvidence";
 import { readCurrentManagerHistory } from "../aptlssManagerHistoryDb";
+import { assertCanonicalAssignmentRows, readCanonicalAssignments, assignmentFailure, MAX_ASSIGNMENT_TASKS } from "../taskAssignmentMutation";
 
 // ─── Payment Cycles Router ──────────────────────────────────────────────────
 export const paymentRouter = router({
@@ -511,7 +512,7 @@ async function requireTimerHistory(db: NonNullable<Awaited<ReturnType<typeof get
 async function timerRoute<T>(action: () => Promise<T>): Promise<T> {
   try { return await action(); }
   catch (error) {
-    const failure = timerFailure(error);
+    const failure = assignmentFailure(error) ?? timerFailure(error);
     if (failure) throw new TRPCError({ code: failure.status === 409 ? "CONFLICT" : failure.status === 404 ? "NOT_FOUND" : failure.status === 400 ? "BAD_REQUEST" : "FORBIDDEN", message: failure.error });
     if (error instanceof TRPCError) throw error;
     throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Timer operation could not be completed" });
@@ -560,21 +561,22 @@ export const timerRouter = router({
             .limit(1)
           : [];
         if (ctx.user.role === "worker") {
-          const assignments = await tx.select({ taskId: taskAssignments.taskId, status: taskAssignments.status })
+          const founderAssignments = await tx.select()
             .from(taskAssignments)
-            .where(and(
-              eq(taskAssignments.vaId, profile!.id),
-              eq(taskAssignments.founderId, profile!.founderId),
-              inArray(taskAssignments.status, ["assigned", "in_progress", "blocked"]),
-            ))
-            .orderBy(taskAssignments.taskId)
-            .limit(251)
-            .for("update");
-          if (assignments.length > 250) {
+            .where(eq(taskAssignments.founderId, profile!.founderId));
+          const cardKeys = [...new Set([input.cardId, ...founderAssignments
+            .filter(assignment => parseManagerAssignmentReference(assignment.taskId)?.cardId === input.cardId)
+            .map(assignment => assignment.taskId)])];
+          if (cardKeys.length > MAX_ASSIGNMENT_TASKS) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This card has too many assignment keys to verify safely." });
+          }
+          const cardRows = await readCanonicalAssignments(tx, profile!.founderId, cardKeys, { lock: true });
+          assertCanonicalAssignmentRows(cardRows);
+          if (cardRows.length > 250) {
             throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Your current task assignments could not be verified. Refresh your work list before tracking time." });
           }
-          const cardAssignments = assignments.filter(assignment =>
-            parseManagerAssignmentReference(assignment.taskId)?.cardId === input.cardId,
+          const cardAssignments = cardRows.filter(assignment =>
+            assignment.vaId === profile!.id && ["assigned", "in_progress", "blocked"].includes(assignment.status),
           );
           if (!cardAssignments.some(assignment => assignment.status === "assigned" || assignment.status === "in_progress")) {
             if (cardAssignments.some(assignment => assignment.status === "blocked")) {

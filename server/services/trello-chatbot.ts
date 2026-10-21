@@ -158,6 +158,7 @@ async function attemptTrelloComment(
   cardId: string,
   text: string,
   origin?: TrelloCommentOrigin,
+  beforeDispatch?: () => Promise<boolean>,
 ): Promise<TrelloCommentAttempt> {
   if (!isTrelloCommentAutomationEnabled()) {
     console.log(`[TrelloChatbot] ${TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE}`);
@@ -178,6 +179,17 @@ async function attemptTrelloComment(
     return { posted: false, failureReason: 'Trello credentials are not configured.' };
   }
 
+  // Finish readiness first; never interpret failures after fetch starts as a
+  // rejected authorization guard. No database locks span the provider request.
+  if (beforeDispatch) {
+    try {
+      if (!await beforeDispatch()) return { posted: false, failureReason: 'Comment authorization changed before dispatch.' };
+    } catch {
+      return { posted: false, failureReason: 'Comment authorization could not be verified before dispatch.' };
+    }
+  }
+  if (!isTrelloCommentAutomationEnabled()) return { posted: false, failureReason: TRELLO_COMMENT_AUTOMATION_DISABLED_MESSAGE };
+
   try {
     const response = await fetch(
       `https://api.trello.com/1/cards/${encodedCardId}/actions/comments?${new URLSearchParams(credentials).toString()}`,
@@ -193,7 +205,7 @@ async function attemptTrelloComment(
       ? { posted: true }
       : { posted: false, failureReason: 'Trello did not accept the comment.' };
   } catch (error) {
-    console.error('[TrelloChatbot] Failed to post comment:', error);
+    console.error('[TrelloChatbot] Failed to post comment; delivery could not be confirmed');
     return { posted: false, failureReason: 'The Trello comment request failed before success could be confirmed.' };
   }
 }
@@ -201,8 +213,8 @@ async function attemptTrelloComment(
 /**
  * Post a comment to a Trello card
  */
-export async function postTrelloComment(cardId: string, text: string): Promise<boolean> {
-  return (await attemptTrelloComment(cardId, text)).posted;
+export async function postTrelloComment(cardId: string, text: string, beforeDispatch?: () => Promise<boolean>): Promise<boolean> {
+  return (await attemptTrelloComment(cardId, text, undefined, beforeDispatch)).posted;
 }
 
 /**

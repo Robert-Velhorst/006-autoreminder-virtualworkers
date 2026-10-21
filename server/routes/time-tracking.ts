@@ -15,6 +15,7 @@ import { closeCanonicalTimer, insertCanonicalTimer, withTimerAccountTransaction,
 import { recordedMinutes } from '../../shared/timerDuration';
 import { getGoogleEvidenceStatus } from '../googleEvidence';
 import { readCurrentManagerHistory } from '../aptlssManagerHistoryDb';
+import { readCanonicalAssignments, assignmentFailure } from '../taskAssignmentMutation';
 
 const router = Router();
 router.use('/time-tracking', requireAuthenticated, requireActiveWorkerProfileForTimeTracking);
@@ -148,72 +149,6 @@ async function withTimeTrackingScope<T extends TimeTrackingObject>(
   });
 }
 
-async function lockCurrentWorkerTaskAssignment(tx: any, workerProfileId: number, workerFounderId: number, taskId: string) {
-  // The assignment table has no task/worker index. Read candidates without a lock,
-  // then lock only the exact primary-key row and recheck ownership in a current read.
-  const candidates = await tx.select({
-    id: taskAssignments.id,
-    status: taskAssignments.status,
-    founderId: taskAssignments.founderId,
-  }).from(taskAssignments).where(and(
-    eq(taskAssignments.vaId, workerProfileId),
-    eq(taskAssignments.founderId, workerFounderId),
-    eq(taskAssignments.taskId, taskId),
-  )).limit(2);
-
-  if (candidates.length > 1) return { kind: 'ambiguous' as const };
-  const candidate = candidates[0];
-  if (!candidate) return { kind: 'missing' as const };
-  if (candidate.founderId !== workerFounderId) return { kind: 'missing' as const };
-
-  const [current] = await tx.select({
-    id: taskAssignments.id,
-    status: taskAssignments.status,
-    founderId: taskAssignments.founderId,
-  }).from(taskAssignments).where(and(
-    eq(taskAssignments.id, candidate.id),
-    eq(taskAssignments.vaId, workerProfileId),
-    eq(taskAssignments.founderId, workerFounderId),
-    eq(taskAssignments.taskId, taskId),
-  )).limit(1).for('update');
-
-  return current && current.founderId === workerFounderId
-    ? { kind: 'current' as const, assignment: current }
-    : { kind: 'changed' as const };
-}
-
-async function lockTaskAssignmentOwner(tx: any, workerFounderId: number, workerProfileId: number, taskId: string) {
-  const candidates = await tx.select({
-    id: taskAssignments.id,
-    vaId: taskAssignments.vaId,
-    status: taskAssignments.status,
-    founderId: taskAssignments.founderId,
-  }).from(taskAssignments).where(and(
-    eq(taskAssignments.founderId, workerFounderId),
-    eq(taskAssignments.taskId, taskId),
-  )).limit(2);
-
-  if (candidates.length > 1) return { kind: 'ambiguous' as const };
-  const candidate = candidates[0];
-  if (!candidate) return { kind: 'missing' as const };
-  if (candidate.vaId !== workerProfileId) return { kind: 'other' as const, assignment: candidate };
-
-  const [current] = await tx.select({
-    id: taskAssignments.id,
-    vaId: taskAssignments.vaId,
-    status: taskAssignments.status,
-    founderId: taskAssignments.founderId,
-  }).from(taskAssignments).where(and(
-    eq(taskAssignments.id, candidate.id),
-    eq(taskAssignments.founderId, workerFounderId),
-    eq(taskAssignments.taskId, taskId),
-  )).limit(1).for('update');
-
-  return current && current.founderId === workerFounderId
-    ? { kind: 'current' as const, assignment: current }
-    : { kind: 'changed' as const };
-}
-
 async function transitionActiveTimer(user: User, transition: "stop" | "pause", rawEntryId: unknown, notes?: string | null) {
   const entryId = requireEntryId(rawEntryId);
   const db = await getDb();
@@ -300,46 +235,24 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
       const isPilotWorker = user.role === 'worker' && isManagerPilotWorker(user.id);
       if (user.role === 'worker') {
         if (!profile) return { status: 403, body: { error: 'Worker profile is required for this task' } };
-        const assignmentAccess = await lockCurrentWorkerTaskAssignment(tx, profile.id, profile.founderId, taskId);
-        if (assignmentAccess.kind === 'ambiguous') {
-          return { status: 409, body: { error: 'This task has multiple assignments for your worker account. Ask an administrator to resolve them before tracking time.' } };
+        const cardId = taskId.split(':')[0];
+        // Lock the absent child and parent keys together before considering fallback access.
+        const candidates = await readCanonicalAssignments(tx, profile.founderId, [taskId, cardId], { lock: true });
+        const exact = candidates.find(candidate => candidate.taskId === taskId);
+        if (exact && exact.vaId !== profile.id) {
+          return { status: 403, body: { error: 'This task is assigned to a different worker. Ask the founder to update the assignment before tracking time.' } };
         }
-        if (assignmentAccess.kind === 'changed') {
-          return { status: 409, body: { error: 'This task assignment changed while the timer was starting. Refresh your task list before trying again.' } };
-        }
-        assignment = assignmentAccess.kind === 'current' ? assignmentAccess.assignment : undefined;
+        assignment = exact;
         if (!assignment && !isPilotWorker) {
           return { status: 403, body: { error: 'This task is not assigned to your worker account' } };
         }
         if (!assignment && isPilotWorker) {
-          const exactOwner = await lockTaskAssignmentOwner(tx, profile.founderId, profile.id, taskId);
-          if (exactOwner.kind === 'ambiguous') {
-            return { status: 409, body: { error: 'This task has multiple assignments. Ask an administrator to resolve them before tracking time.' } };
-          }
-          if (exactOwner.kind === 'other') {
-            return { status: 403, body: { error: 'This task is assigned to a different worker. Ask the founder to update the assignment before tracking time.' } };
-          }
-          if (exactOwner.kind === 'changed') {
-            return { status: 409, body: { error: 'This task assignment changed while the timer was starting. Refresh your task list before trying again.' } };
-          }
-          if (exactOwner.kind === 'current') {
-            assignment = exactOwner.assignment;
-          }
-          const cardId = taskId.split(':')[0];
           if (!assignment && cardId !== taskId) {
-            const cardOwner = await lockTaskAssignmentOwner(tx, profile.founderId, profile.id, cardId);
-            if (cardOwner.kind === 'ambiguous') {
-              return { status: 409, body: { error: 'This card has multiple assignments. Ask an administrator to resolve them before tracking time.' } };
-            }
-            if (cardOwner.kind === 'other') {
+            const cardOwner = candidates.find(candidate => candidate.taskId === cardId);
+            if (cardOwner && cardOwner.vaId !== profile.id) {
               return { status: 403, body: { error: 'This task is assigned to a different worker. Ask the founder to update the assignment before tracking time.' } };
             }
-            if (cardOwner.kind === 'changed') {
-              return { status: 409, body: { error: 'This card assignment changed while the timer was starting. Refresh your task list before trying again.' } };
-            }
-            if (cardOwner.kind === 'current') {
-              assignment = cardOwner.assignment;
-            }
+            assignment = cardOwner;
           }
         }
         if (assignment?.status === 'completed') return { status: 409, body: { error: 'This task is already complete' } };
@@ -429,7 +342,7 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
     });
     res.status(outcome.status).json(outcome.body);
   } catch (error) {
-    const failure = timerFailure(error);
+    const failure = assignmentFailure(error) ?? timerFailure(error);
     if (failure) return res.status(failure.status).json({ error: failure.error });
     console.error('Error starting timer');
     res.status(500).json({ error: 'Failed to start timer' });

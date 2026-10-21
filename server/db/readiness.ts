@@ -1,7 +1,7 @@
 export const REQUIRED_POSTGRES_MIGRATION = {
-  tag: "0007_canonical_timer_columns",
-  createdAt: 1792551653166n,
-  hash: "f8045e01e9ea4c0d596a061fb5f70d548fef47345f8807820250da7fb5b18037",
+  tag: "0008_assignment_identity",
+  createdAt: 1792559997541n,
+  hash: "5a7f67d77a91384a486ea618fa4df7a847da0b5f2a565c89598216d34c28a2be",
 } as const;
 
 export const READINESS_QUERY_TIMEOUT_MS = 2_000;
@@ -37,6 +37,24 @@ export async function hasRequiredPostgresSchema(
           JOIN pg_namespace n ON n.oid=c.relnamespace
           WHERE n.nspname='public' AND c.relname='time_entries_one_active_account_idx'
             AND i.indisvalid AND i.indisunique
+        ) AND NOT EXISTS (
+          SELECT 1 FROM task_assignments
+          GROUP BY "founderId", "taskId" HAVING count(*) > 1
+        ) AND EXISTS (
+          SELECT 1 FROM pg_constraint co
+          JOIN pg_class t ON t.oid=co.conrelid
+          JOIN pg_namespace n ON n.oid=t.relnamespace
+          JOIN pg_index i ON i.indexrelid=co.conindid
+          WHERE n.nspname='public' AND t.relname='task_assignments'
+            AND co.conname='task_assignments_founder_task_unique'
+            AND co.contype='u' AND co.convalidated AND NOT co.condeferrable
+            AND i.indisvalid AND i.indisunique AND i.indpred IS NULL AND i.indexprs IS NULL
+            AND i.indnkeyatts=2
+            AND ARRAY(
+              SELECT a.attname::text FROM unnest(co.conkey) WITH ORDINALITY k(attnum, position)
+              JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=k.attnum
+              ORDER BY k.position
+            ) = ARRAY['founderId', 'taskId']::text[]
         ) AS required_migration_applied
       `,
       values: [
