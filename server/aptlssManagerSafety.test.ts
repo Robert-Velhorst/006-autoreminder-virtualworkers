@@ -28,6 +28,7 @@ function prepareSourceTree(root: string) {
   writeFileSync(join(root,"browser-extension/service-worker.js"), "initial worker");
   const files=["scripts/verify-aptlss-safety.ts","scripts/seal-aptlss-build.ts","scripts/package-browser-collector.ps1","scripts/aptlss-pilot-compose.mjs","scripts/aptlss-pilot-validation.mjs","scripts/run-manager-codex.ts","scripts/Start-ManagerCodex.ps1","package.json","pnpm-lock.yaml","pnpm-workspace.yaml","drizzle.config.ts","vitest.config.ts","Dockerfile","docker-compose.yml","deployment/shadow-pilot.yml","deployment/codex-subscription.yml","playwright.aptlss.config.ts","e2e/aptlss-manager.spec.ts","e2e/aptlss-manager-live.spec.ts","e2e/aptlss-manager-review.spec.ts","scripts/start-aptlss-test-server.ts"];
   for (const file of files) { mkdirSync(dirname(join(root,file)),{recursive:true}); writeFileSync(join(root,file),"fixture\r\n"); }
+  for (const file of ["e2e/api-rate-window.mjs", "e2e/api-rate-window.test.mjs"]) writeFileSync(join(root, file), "fixture\r\n");
   mkdirSync(join(root,"drizzle/contracts"),{recursive:true});
   writeFileSync(join(root,"drizzle/contracts/generate-pilot-snapshot.mjs"),"export const snapshotSource = true;\r\n");
 }
@@ -76,6 +77,16 @@ it("includes executable module extensions in source identity", () => {
   const first = managerSafetyDigest(root);
   writeFileSync(join(root,"drizzle/contracts/generate-pilot-snapshot.mjs"),"export const snapshotSource = false;\n");
   expect(managerSafetyDigest(root)).not.toBe(first);
+});
+it("includes live-browser rate-window pacing in source identity", () => {
+  const { root } = fixture();
+  prepareSourceTree(root);
+  const first = managerSafetyDigest(root);
+  const pacing = join(root, "e2e/api-rate-window.mjs");
+  writeFileSync(pacing, "export const changedPacing = true;\n");
+  expect(managerSafetyDigest(root)).not.toBe(first);
+  rmSync(pacing);
+  expect(() => managerSafetyDigest(root)).toThrow();
 });
 it("includes the rollout validation dependency in source identity", () => {
   const { root } = fixture();

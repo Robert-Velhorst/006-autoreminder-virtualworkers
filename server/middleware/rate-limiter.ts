@@ -4,7 +4,27 @@
  */
 
 import { Request, Response, NextFunction } from 'express';
+import { getTRPCErrorShape, initTRPC, TRPCError, transformTRPCResponse } from '@trpc/server';
+import superjson from 'superjson';
 import { getRedis, isRedisAvailable } from '../services/redis';
+
+const rateLimitRpc = initTRPC.create({ transformer: superjson, isDev: false });
+
+function rateLimitBody(req: Request, message: string, retryAfter: number, limit: number, windowMs: number) {
+  const url = new URL(req.originalUrl, 'http://rate-limit.invalid');
+  const match = /^\/api\/trpc(?:\/(.*))?$/i.exec(url.pathname);
+  if (!match) return { error: message, retryAfter, limit, windowMs };
+  let path: string | undefined;
+  try { path = decodeURIComponent(match[1] ?? ''); } catch { /* Keep malformed paths throttled too. */ }
+  const batch = url.searchParams.get('batch') === '1';
+  const errors = (batch ? (path ?? '').split(',') : [path]).map(operation => {
+    const shape = getTRPCErrorShape({ config: rateLimitRpc._config,
+      error: new TRPCError({ code: 'TOO_MANY_REQUESTS', message }),
+      type: 'unknown', path: operation || undefined, input: undefined, ctx: undefined });
+    return { error: { ...shape, data: { ...shape.data, retryAfter, limit, windowMs } } };
+  });
+  return transformTRPCResponse(rateLimitRpc._config, batch ? errors : errors[0]);
+}
 
 interface RateLimitConfig {
   bucket: string;
@@ -175,12 +195,7 @@ export function createRateLimiter(config: RateLimitConfig) {
         res.setHeader('X-RateLimit-Reset', info.resetTime.toString());
         res.setHeader('Retry-After', retryAfter.toString());
         
-        res.status(429).json({
-          error: message,
-          retryAfter,
-          limit: maxRequests,
-          windowMs,
-        });
+        res.status(429).json(rateLimitBody(req, message, retryAfter, maxRequests, windowMs));
         return;
       }
       const charged = chargedRequestPolicies.get(req) ?? new Set<string>();

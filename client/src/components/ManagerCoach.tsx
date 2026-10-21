@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, BrainCircuit, Check, ChevronDown, ChevronRight, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import { trpc } from "@/lib/trpc";
-import { isManagerPilotDenied, managerStatusPollingInterval, managerStatusQueryOptions } from "@/lib/managerPilotAvailability";
+import { isManagerPilotDenied, managerStatusPollingInterval, managerStatusQueryOptions, managerStatusRetryRemaining } from "@/lib/managerPilotAvailability";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -154,13 +154,17 @@ export default function ManagerCoach() {
   const [now, setNow] = useState(Date.now);
   const query = trpc.operator.getManagerStatus.useQuery(undefined, { ...managerStatusQueryOptions, refetchInterval: managerStatusPollingInterval });
   const pilotDenied = isManagerPilotDenied(query.error);
+  const retryRemaining = managerStatusRetryRemaining(query.error, query.errorUpdatedAt, now);
+  const statusRead = useRef(query);
+  statusRead.current = query;
   useEffect(() => {
     if (pilotDenied) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    const timer = window.setInterval(() => setNow(Date.now()), query.error ? 1000 : 30_000);
     return () => window.clearInterval(timer);
-  }, [pilotDenied]);
+  }, [pilotDenied, query.error]);
   const refresh = useCallback(() => {
-    if (pilotDenied) return;
+    const current = statusRead.current;
+    if (pilotDenied || managerStatusRetryRemaining(current.error, current.errorUpdatedAt) > 0) return;
     void utils.operator.getManagerStatus.invalidate();
     void utils.operator.getDailyPlan.invalidate();
     void utils.operator.getWorkQueueContext.invalidate();
@@ -262,7 +266,16 @@ export default function ManagerCoach() {
       </div>
       <div className={open ? "grid min-w-0 items-start gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] 2xl:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]" : "min-w-0"}>
       <div className="min-w-0 space-y-3">
-      {(query.error || query.data?.error) && <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Work guidance could not be refreshed</AlertTitle><AlertDescription>Try again shortly. You can continue with unrelated work. Contact your supervisor if the problem continues.</AlertDescription></Alert>}
+      {(query.error || query.data?.error) && <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Work guidance could not be refreshed</AlertTitle><AlertDescription>
+        <p>Try again shortly. You can continue with unrelated work. Contact your supervisor if the problem continues.</p>
+        <Button variant="outline" size="sm" className="mt-2" disabled={query.isFetching || retryRemaining > 0}
+          onClick={() => {
+            if (!query.isFetching && !pilotDenied && managerStatusRetryRemaining(query.error, query.errorUpdatedAt) === 0) void query.refetch();
+          }}>
+          {query.isFetching ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}Reload work guidance
+        </Button>
+        {retryRemaining > 0 && <p role="status" className="mt-1">Try again in {Math.ceil(retryRemaining / 1000)} seconds.</p>}
+      </AlertDescription></Alert>}
       {!query.isLoading && !executionReady && <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Wait before starting a task</AlertTitle><AlertDescription>{WORKER_EXECUTION_HOLD_MESSAGE}</AlertDescription></Alert>}
       {query.isLoading ? <p role="status" className="text-sm text-muted-foreground">Loading manager status...</p> : !snapshot ? null : !executionReady ? null : (
         <div aria-label="Current manager instruction" role={urgent ? "alert" : "status"} className={"min-w-0 space-y-4 border-l-2 px-3 py-4 sm:px-4 " + (intervention ? urgent ? "border-red-500 bg-red-500/5" : "border-amber-500 bg-amber-500/5" : "border-border bg-muted/30")}>

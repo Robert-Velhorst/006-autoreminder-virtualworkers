@@ -86,6 +86,28 @@ exclusion is changed. All 25 focused rate-limit tests and TypeScript pass.
 This is a documented model correction, not dismissal of an actual authorization
 boundary, and requires a fresh aggregate result before acceptance.
 
+Exact source `f7b1007` subsequently passed CodeQL workflow `39554924516` and
+aggregate `119072528447`. Its quiet full local suite passed 4,541 tests, with
+422 environment-dependent skips. Functional workflow `39554928758` still
+failed the manager live-browser gate (88 passed, three failed, three not run).
+The logs include HTTP 429 responses: serial scenarios share a worker account's
+unchanged 60-per-minute quota even though their test client IPs differ.
+
+The follow-up preserves all quotas and adds typed tRPC throttling responses,
+a read-only worker status-reload action respecting the supplied cooldown, and
+serial live-fixture pacing using actual reset headers. A mutation completion
+timer starts only after dispatch; missing dispatch has a separate bounded
+admission wait and does not imply a running server mutation. The new pacing
+helper and its tests participate in the source safety digest. No failed run is
+reclassified, no mutation is automatically retried, and fresh exact-head
+browser/database acceptance remains required before merging PR144.
+
+Separately, PR135 source `192a4dc` passed its real image scan in workflow
+`39556533820`: zero HIGH/CRITICAL findings, zero exceptions, one MEDIUM finding.
+Runtime and isolated PostgreSQL image acceptance passed for the same image.
+That older security-branch image is not acceptance of the financial source,
+the complete workflow, real providers or a Hetzner deployment.
+
 ## Cleanup Boundaries
 
 Only source, tests and documentation are published. Private environment files,

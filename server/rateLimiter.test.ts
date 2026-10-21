@@ -1,5 +1,11 @@
 import express from 'express';
 import request from 'supertest';
+import { once } from 'node:events';
+import type { AddressInfo } from 'node:net';
+import { initTRPC } from '@trpc/server';
+import { createExpressMiddleware } from '@trpc/server/adapters/express';
+import { createTRPCClient, httpBatchLink, httpLink, TRPCClientError } from '@trpc/client';
+import superjson from 'superjson';
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const redisState = vi.hoisted(() => ({ client: null as null | { eval: ReturnType<typeof vi.fn> } }));
 vi.mock('./services/redis', () => ({ getRedis: () => redisState.client, isRedisAvailable: () => redisState.client !== null }));
@@ -90,6 +96,118 @@ function httpFixture() {
     post: (path: string) => request(app).post(path).set('X-Forwarded-For', ip),
   };
 }
+
+async function rpcFixture(work: (fixture: {
+  url: string; fetcher: typeof fetch; calls: ReturnType<typeof vi.fn>;
+  responses: Array<{ status: number; headers: Headers; body: any }>;
+}) => Promise<void>) {
+  const f = httpFixture();
+  const clientIp = `203.0.113.${nextIp - 1}`;
+  const calls = vi.fn();
+  const rpc = initTRPC.create({ transformer: superjson });
+  const routes = rpc.router({
+    first: rpc.procedure.query(() => { calls('first'); return 'first'; }),
+    second: rpc.procedure.query(() => { calls('second'); return 'second'; }),
+    writeFirst: rpc.procedure.mutation(() => { calls('writeFirst'); return 'first'; }),
+    writeSecond: rpc.procedure.mutation(() => { calls('writeSecond'); return 'second'; }),
+  });
+  f.app.use(express.json());
+  f.app.use('/api', createRateLimiter({ bucket: 'rpc-test', maxRequests: 1, windowMs: 60_000 }));
+  f.app.use('/api/trpc', createExpressMiddleware({ router: routes }));
+  const server = f.app.listen(0, '127.0.0.1');
+  try {
+    await once(server, 'listening');
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/trpc`;
+    const responses: Array<{ status: number; headers: Headers; body: any }> = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      const headers = new Headers(init?.headers);
+      headers.set('X-Forwarded-For', clientIp);
+      const response = await fetch(input, { ...init, headers });
+      responses.push({ status: response.status, headers: response.headers, body: await response.clone().json() });
+      return response;
+    };
+    await work({ url, fetcher, calls, responses });
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+}
+
+describe('tRPC rate-limit HTTP envelopes', () => {
+  it.each(['query', 'mutation'] as const)('deserializes a single %s rejection as a typed 429 without executing it', async method => {
+    await rpcFixture(async ({ url, fetcher, calls, responses }) => {
+      const client = createTRPCClient({ links: [httpLink({ url, transformer: superjson, fetch: fetcher })] });
+      await (client as any).first.query();
+      const pending = method === 'query' ? (client as any).second.query() : (client as any).writeFirst.mutate();
+      await expect(pending).rejects.toMatchObject({
+        message: 'Too many requests, please try again later',
+        data: { code: 'TOO_MANY_REQUESTS', httpStatus: 429, path: method === 'query' ? 'second' : 'writeFirst' },
+      });
+      await expect(pending).rejects.toBeInstanceOf(TRPCClientError);
+      expect(calls.mock.calls).toEqual([['first']]);
+      const response = responses.at(-1)!;
+      expect(response.status).toBe(429);
+      expect(Array.isArray(response.body)).toBe(false);
+      const error = superjson.deserialize<any>(response.body.error);
+      expect(error.code).toBe(-32029);
+      expect(error.data.stack).toBeUndefined();
+      expect(error.data).toMatchObject({ limit: 1, windowMs: 60000, retryAfter: Number(response.headers.get('retry-after')) });
+      expect(response.headers.get('x-ratelimit-remaining')).toBe('0');
+    });
+  });
+
+  it.each(['query', 'mutation'] as const)('deserializes every %s batch member as 429 without executing either operation', async method => {
+    await rpcFixture(async ({ url, fetcher, calls, responses }) => {
+      const client = createTRPCClient({ links: [httpBatchLink({ url, transformer: superjson, fetch: fetcher })] });
+      await (client as any).first.query();
+      const results = await Promise.allSettled(method === 'query'
+        ? [(client as any).first.query(), (client as any).second.query()]
+        : [(client as any).writeFirst.mutate(), (client as any).writeSecond.mutate()]);
+      const paths = method === 'query' ? ['first', 'second'] : ['writeFirst', 'writeSecond'];
+      for (const [index, result] of results.entries()) {
+        expect(result.status).toBe('rejected');
+        if (result.status !== 'rejected') throw new Error('Blocked operation executed');
+        expect(result.reason).toBeInstanceOf(TRPCClientError);
+        expect(result.reason).toMatchObject({ data: { code: 'TOO_MANY_REQUESTS', httpStatus: 429, path: paths[index] } });
+      }
+      expect(responses).toHaveLength(2);
+      expect(responses[1].status).toBe(429);
+      expect(responses[1].body).toHaveLength(2);
+      expect(responses[1].body.map((item: any) => superjson.deserialize<any>(item.error).data.path)).toEqual(paths);
+      expect(calls.mock.calls).toEqual([['first']]);
+    });
+  });
+
+  it('preserves the array shape for a one-operation batch and encoded procedure paths', async () => {
+    await rpcFixture(async ({ url, fetcher }) => {
+      await fetcher(`${url}/first`);
+      const one = await fetcher(`${url}/second?batch=1`);
+      const oneBody = await one.json();
+      expect(one.status).toBe(429); expect(oneBody).toHaveLength(1);
+      expect(superjson.deserialize<any>(oneBody[0].error).data.path).toBe('second');
+      const encoded = await fetcher(`${url.replace('/api/trpc', '/API/TRPC')}/first%2Csecond?batch=1`);
+      const encodedBody = await encoded.json();
+      expect(encoded.status).toBe(429);
+      expect(encodedBody.map((item: any) => superjson.deserialize<any>(item.error).data.path)).toEqual(['first', 'second']);
+      const malformed = await fetcher(`${url}/%ZZ?batch=1`);
+      const malformedBody = await malformed.json();
+      expect(malformed.status).toBe(429); expect(malformedBody).toHaveLength(1);
+      expect(superjson.deserialize<any>(malformedBody[0].error).data).toMatchObject({ code: 'TOO_MANY_REQUESTS', httpStatus: 429 });
+    });
+  });
+
+  it('retains the original REST response and does not confuse a nearby namespace with tRPC', async () => {
+    const f = httpFixture();
+    f.app.use('/api', createRateLimiter({ bucket: 'rpc-rest-shape', maxRequests: 1, windowMs: 60000 }));
+    f.app.get('/api/probe', (_req, res) => res.json({ ok: true }));
+    expect((await f.get('/api/probe')).status).toBe(200);
+    for (const path of ['/api/probe', '/api/trpc-other/first']) {
+      const response = await f.get(path);
+      expect(response.status).toBe(429);
+      expect(response.body).toEqual({ error: 'Too many requests, please try again later',
+        retryAfter: Number(response.headers['retry-after']), limit: 1, windowMs: 60000 });
+    }
+  });
+});
 
 describe('mounted HTTP policy budgets', () => {
   it('requires an explicit stable configuration bucket', () => {

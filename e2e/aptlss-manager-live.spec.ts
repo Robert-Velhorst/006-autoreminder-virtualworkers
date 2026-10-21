@@ -1,5 +1,6 @@
 import { expect, type ConsoleMessage, type Locator, type Page, type TestInfo } from "@playwright/test";
-import { test } from "./aptlss-browser-fixtures";
+import { test as browserTest } from "./aptlss-browser-fixtures";
+import { ApiRateWindow } from "./api-rate-window.mjs";
 import AxeBuilder from "@axe-core/playwright";
 import { isDisabledProviderResponse, TRELLO_CREDENTIALS_MISSING_MESSAGE, UNLINKED_TRELLO_MESSAGE, UNLINKED_TRELLO_PATH } from "./disabled-provider-response.mjs";
 import { createHash, randomUUID } from "node:crypto";
@@ -16,6 +17,19 @@ const PASSWORD = "Aptlss-browser-fixture-only-2026!";
 type MutationState = { pending: Set<Promise<void>>; uncertain: boolean };
 const mutationsByPage = new WeakMap<Page, MutationState>();
 const controlledRealtimeOutages = new WeakSet<Page>();
+const apiRateWindow = new ApiRateWindow();
+const test = browserTest.extend<{ rateWindow: void }>({
+  rateWindow: [async ({ page }, use) => {
+    const wait = apiRateWindow.waitMilliseconds();
+    if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+    page.on("response", response => {
+      if (new URL(response.url()).origin === new URL(test.info().project.use.baseURL!).origin) {
+        apiRateWindow.observe(response.headers());
+      }
+    });
+    await use();
+  }, { auto: true, timeout: 65_000 }],
+});
 
 async function bounded<T>(operation: Promise<T>, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -39,11 +53,15 @@ async function mutateThroughUi<T>(
   const state = mutationsByPage.get(page)!;
   let transportSettled = false;
   let requestObserved = false;
+  let resolveDispatch!: () => void;
+  let rejectDispatch!: (error: Error) => void;
+  const dispatched = new Promise<void>((resolve, reject) => {
+    resolveDispatch = resolve;
+    rejectDispatch = reject;
+  });
   let resolveResponse!: (response: import("@playwright/test").Response) => void;
-  let rejectResponse!: (error: Error) => void;
-  const response = new Promise<import("@playwright/test").Response>((resolve, reject) => {
+  const response = new Promise<import("@playwright/test").Response>(resolve => {
     resolveResponse = resolve;
-    rejectResponse = reject;
   });
   const matchesRequest = (request: import("@playwright/test").Request) =>
     request.method() === "POST" &&
@@ -52,7 +70,10 @@ async function mutateThroughUi<T>(
       ?.split(",")
       .includes(method);
   const onRequest = (request: import("@playwright/test").Request) => {
-    if (matchesRequest(request)) requestObserved = true;
+    if (matchesRequest(request)) {
+      requestObserved = true;
+      resolveDispatch();
+    }
   };
   const onResponse = (result: import("@playwright/test").Response) => {
     if (!matchesRequest(result.request())) return;
@@ -63,7 +84,7 @@ async function mutateThroughUi<T>(
   page.on("request", onRequest);
   page.on("response", onResponse);
   // Observe the complete body, not just response headers or an early database row.
-  const completion = bounded(
+  const completion = dispatched.then(() => bounded(
     (async () => {
       const result = await response;
       const failure = await result.finished();
@@ -86,8 +107,8 @@ async function mutateThroughUi<T>(
       return superjson.deserialize<T>(envelope.result.data);
     })(),
     `${method} did not complete within 30 seconds`
-  ).catch(error => {
-    if (!transportSettled) state.uncertain = true;
+  )).catch(error => {
+    if (requestObserved && !transportSettled) state.uncertain = true;
     page.off("request", onRequest);
     page.off("response", onResponse);
     throw error;
@@ -101,12 +122,15 @@ async function mutateThroughUi<T>(
   state.pending.add(observed);
   try {
     await action();
+    if (!requestObserved) {
+      await bounded(dispatched, `${method} did not dispatch a request within 30 seconds`);
+    }
   } catch (error) {
     if (!requestObserved) {
       transportSettled = true;
       page.off("request", onRequest);
       page.off("response", onResponse);
-      rejectResponse(error instanceof Error ? error : new Error(String(error)));
+      rejectDispatch(error instanceof Error ? error : new Error(String(error)));
       await completion.catch(() => undefined);
       throw error;
     }
