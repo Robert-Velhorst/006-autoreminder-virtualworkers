@@ -18,6 +18,22 @@ function poolReturning(requiredMigrationApplied: boolean): ReadinessPool {
 }
 
 describe("PostgreSQL readiness probe", () => {
+  it('requires exact financial uniqueness and fails closed on legacy duplicate identity', async () => {
+    const pool = poolReturning(true);
+    await hasRequiredPostgresSchema(pool);
+    const query = vi.mocked(pool.query).mock.calls[0][0].text;
+    expect(query).toContain('payment_cycles_founder_dates_unique');
+    expect(query).toContain('weekly_pay_log_founder_worker_week_unique');
+    expect(query).toContain('financial_ledger_events_founder_key_unique');
+    expect(query).toContain('payment_cycles_predecessor_unique');
+    expect(query).toContain('GROUP BY "founderId", "vaId", "weekStart" HAVING count(*) > 1');
+  });
+  it('preflights financial duplicates under a writer lock without rewriting historic rows', async () => {
+    const migration = await readFile(new URL('../../drizzle-postgres-v1/0009_financial_ledger_authority.sql', import.meta.url), 'utf8');
+    expect(migration.indexOf('LOCK TABLE')).toBeLessThan(migration.indexOf('IF EXISTS'));
+    expect(migration.indexOf('RAISE EXCEPTION')).toBeLessThan(migration.indexOf('CREATE TABLE'));
+    expect(migration).not.toMatch(/\b(?:UPDATE|DELETE|TRUNCATE)\s+"?(?:payment_cycles|weekly_pay_log)\b/i);
+  });
   it("requires the latest checked-in migration version", async () => {
     const journal = JSON.parse(
       await readFile(
@@ -86,6 +102,36 @@ describe("PostgreSQL readiness probe", () => {
         ],
       })
     );
+  });
+
+  it("checks the full assignment unique constraint and duplicate guard without dropping timer checks", async () => {
+    const pool = poolReturning(true);
+    await hasRequiredPostgresSchema(pool);
+    const query = vi.mocked(pool.query).mock.calls[0][0].text;
+    expect(query).toContain('GROUP BY "founderId", "taskId" HAVING count(*) > 1');
+    expect(query).toContain("co.conname='task_assignments_founder_task_unique'");
+    expect(query).toContain("co.contype='u' AND co.convalidated AND NOT co.condeferrable");
+    expect(query).toContain('i.indpred IS NULL AND i.indexprs IS NULL');
+    expect(query).toContain("ARRAY['founderId', 'taskId']::text[]");
+    expect(query).toContain('time_entries_one_active_account_idx');
+    expect(query).toContain('"trackedUserId" IS NULL AND "endTime" IS NULL');
+  });
+
+  it("preflights duplicates under a writer lock before additive DDL, without rewriting history", async () => {
+    const migration = await readFile(new URL('../../drizzle-postgres-v1/0008_assignment_identity.sql', import.meta.url), 'utf8');
+    expect(migration.indexOf('LOCK TABLE')).toBeLessThan(migration.indexOf('IF EXISTS'));
+    expect(migration.indexOf('RAISE EXCEPTION')).toBeLessThan(migration.indexOf('CREATE TABLE'));
+    expect(migration).toContain('UNIQUE("founderId","taskId")');
+    expect(migration).not.toMatch(/\b(?:UPDATE|DELETE|TRUNCATE)\s+"?(?:task_assignments|task_schedule_history)\b/i);
+  });
+
+  it('stores assignment audit instants with timezone in both migration and snapshot', async () => {
+    const migration = await readFile(new URL('../../drizzle-postgres-v1/0008_assignment_identity.sql', import.meta.url), 'utf8');
+    const snapshot = JSON.parse(await readFile(new URL('../../drizzle-postgres-v1/meta/0008_snapshot.json', import.meta.url), 'utf8'));
+    expect(migration).toContain('"createdAt" timestamp with time zone DEFAULT now() NOT NULL');
+    expect(snapshot.tables['public.assignment_events'].columns.createdAt).toMatchObject({
+      type: 'timestamp with time zone', default: 'now()', notNull: true,
+    });
   });
 
   it.skipIf(!process.env.DATABASE_URL)(

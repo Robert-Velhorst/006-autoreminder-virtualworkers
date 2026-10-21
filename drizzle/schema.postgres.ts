@@ -6,6 +6,8 @@ import {
   timestamp,
   varchar,
   numeric,
+  jsonb,
+  unique,
   boolean,
   date,
   uniqueIndex,
@@ -682,7 +684,29 @@ export const taskAssignments = pgTable("task_assignments", {
     .defaultNow()
     .$onUpdateFn(() => new Date())
     .notNull(),
-});
+}, table => [
+  unique("task_assignments_founder_task_unique").on(table.founderId, table.taskId),
+]);
+
+export const assignmentEvents = pgTable("assignment_events", {
+  id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
+  assignmentId: integer("assignmentId").notNull().references(() => taskAssignments.id, { onDelete: "restrict" }),
+  founderId: integer("founderId").notNull(),
+  taskId: varchar("taskId", { length: 128 }).notNull(),
+  actorUserId: integer("actorUserId").notNull().references(() => users.id, { onDelete: "restrict" }),
+  kind: varchar("kind", { length: 32 }).notNull(),
+  previousWorkerProfileId: integer("previousWorkerProfileId"),
+  nextWorkerProfileId: integer("nextWorkerProfileId").notNull(),
+  previousStatus: varchar("previousStatus", { length: 20 }),
+  nextStatus: varchar("nextStatus", { length: 20 }).notNull(),
+  beforeJson: jsonb("beforeJson").$type<Record<string, unknown> | null>(),
+  afterJson: jsonb("afterJson").$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp("createdAt", { withTimezone: true }).defaultNow().notNull(),
+}, table => [
+  index("assignment_events_assignment_created_idx").on(table.assignmentId, table.createdAt),
+  index("assignment_events_founder_task_idx").on(table.founderId, table.taskId),
+  check("assignment_events_kind_check", sql`${table.kind} IN ('created', 'reassigned', 'status_changed', 'notes_changed')`),
+]);
 
 // Shift schedules for handoffs
 export const shiftSchedules = pgTable("shift_schedules", {
@@ -858,6 +882,7 @@ export const timeEntries = pgTable('time_entries', {
 export const paymentCycles = pgTable("payment_cycles", {
   id: integer("id").generatedByDefaultAsIdentity().primaryKey(),
   founderId: integer("founderId").notNull(),
+  predecessorCycleId: integer("predecessorCycleId"),
   cycleStart: date("cycleStart", { mode: "date" }).notNull(),
   cycleEnd: date("cycleEnd", { mode: "date" }).notNull(),
   baseAmount: numeric("baseAmount", { precision: 8, scale: 2 })
@@ -868,7 +893,12 @@ export const paymentCycles = pgTable("payment_cycles", {
   paidBy: varchar("paidBy", { length: 64 }),
   notes: text("notes"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+}, table => [
+  unique('payment_cycles_founder_dates_unique').on(table.founderId, table.cycleStart, table.cycleEnd),
+  unique('payment_cycles_predecessor_unique').on(table.predecessorCycleId),
+  foreignKey({ columns: [table.predecessorCycleId], foreignColumns: [table.id] })
+    .onDelete('restrict'),
+]);
 
 // Weekly merit/demerit log per worker
 export const weeklyPayLog = pgTable("weekly_pay_log", {
@@ -941,7 +971,27 @@ export const weeklyPayLog = pgTable("weekly_pay_log", {
     .defaultNow()
     .$onUpdateFn(() => new Date())
     .notNull(),
-});
+}, table => [
+  unique('weekly_pay_log_founder_worker_week_unique').on(table.founderId, table.vaId, table.weekStart),
+]);
+
+export const financialLedgerEvents = pgTable('financial_ledger_events', {
+  id: integer('id').generatedByDefaultAsIdentity().primaryKey(),
+  founderId: integer('founderId').notNull(),
+  actorUserId: integer('actorUserId').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  cycleId: integer('cycleId').references(() => paymentCycles.id, { onDelete: 'restrict' }),
+  weeklyLogId: integer('weeklyLogId').references(() => weeklyPayLog.id, { onDelete: 'restrict' }),
+  kind: varchar('kind', { length: 32 }).notNull(),
+  eventKey: varchar('eventKey', { length: 256 }),
+  requestHash: varchar('requestHash', { length: 64 }),
+  beforeJson: jsonb('beforeJson').$type<Record<string, unknown> | null>(),
+  afterJson: jsonb('afterJson').$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp('createdAt', { withTimezone: true }).defaultNow().notNull(),
+}, table => [
+  unique('financial_ledger_events_founder_key_unique').on(table.founderId, table.eventKey),
+  index('financial_ledger_events_founder_created_idx').on(table.founderId, table.createdAt),
+  check('financial_ledger_events_kind_check', sql`${table.kind} IN ('cycle_settled', 'weekly_saved', 'd1_incremented')`),
+]);
 
 // Daily triage state per worker
 export const dailyTriageState = pgTable(

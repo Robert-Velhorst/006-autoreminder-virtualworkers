@@ -1,7 +1,8 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { taskAssignments } from "../drizzle/schema.postgres";
+import { taskAssignments, users, vaProfiles } from "../drizzle/schema.postgres";
+import { matchesTimerWhere } from './test/timerDatabase';
 
 const mocks = vi.hoisted(() => ({ getDb: vi.fn() }));
 
@@ -29,6 +30,8 @@ function makeDb() {
     id: 15,
     taskId: "shared-task",
     vaId: 7,
+    founderId: 8,
+    status: 'assigned',
     decisionLog: null as string | null,
   };
   let assignmentLockTail: Promise<void> = Promise.resolve();
@@ -37,14 +40,26 @@ function makeDb() {
     transaction: vi.fn(async <T>(callback: (transaction: any) => Promise<T>) => {
       const heldLocks: Array<() => void> = [];
       const tx = {
+        execute: vi.fn(async () => ({ rows: [] })),
         select: vi.fn(() => {
           let table: unknown;
+          let condition: unknown;
+          const rows = () => {
+            if (table === taskAssignments) return [assignment].filter(row => matchesTimerWhere(row, condition));
+            if (table === users) return [{ id: 42, role: 'worker', name: 'Worker' }, { id: 8, role: 'admin' }]
+              .filter(row => matchesTimerWhere(row, condition));
+            if (table === vaProfiles) return [{ id: 7, userId: 42, founderId: 8, status: 'active' }]
+              .filter(row => matchesTimerWhere(row, condition));
+            return [];
+          };
           const query: any = {
             from: vi.fn((value: unknown) => { table = value; return query; }),
-            where: vi.fn(() => query),
+            where: vi.fn((value: unknown) => { condition = value; return query; }),
             limit: vi.fn(() => query),
+            orderBy: vi.fn(() => query),
+            then: (resolve: any, reject: any) => Promise.resolve(rows()).then(resolve, reject),
             for: vi.fn(async () => {
-              if (table !== taskAssignments) return [];
+              if (table !== taskAssignments) return rows();
               assignmentRowLockCount += 1;
               const previous = assignmentLockTail;
               let release!: () => void;

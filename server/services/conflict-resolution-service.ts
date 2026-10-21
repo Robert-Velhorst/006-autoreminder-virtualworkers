@@ -3,12 +3,23 @@
  * Automatically resolves scheduling conflicts
  */
 
-import { getDb } from '../db';
-import { taskAssignments, taskScheduleHistory } from '../../drizzle/schema.postgres';
-import { eq, and, gte, lte, ne } from 'drizzle-orm';
-import { nanoid } from 'nanoid';
-import { log } from '../utils/logger';
-import { invalidateCache } from './trello-cache';
+import { getDb } from "../db";
+import {
+  taskAssignments,
+  taskScheduleHistory,
+  users,
+} from "../../drizzle/schema.postgres";
+import { eq } from "drizzle-orm";
+import { nanoid } from "nanoid";
+import { log } from "../utils/logger";
+import { invalidateCache } from "./trello-cache";
+import {
+  AssignmentError,
+  MAX_ASSIGNMENT_TASKS,
+  assertCanonicalAssignmentRows,
+  readCanonicalAssignments,
+  type TaskAssignment,
+} from "../taskAssignmentMutation";
 
 export interface ScheduleConflict {
   taskId: string;
@@ -43,14 +54,29 @@ export async function detectConflicts(
 ): Promise<ScheduleConflict[]> {
   const db = await getDb();
   if (!db) {
-    throw new Error('Database not available');
+    throw new Error("Database not available");
   }
 
-  // Get all task assignments with schedules
+  const [actor] = await db.select().from(users).where(eq(users.id, userId));
+  if (actor?.role !== "admin" || actor.openId !== userOpenId) {
+    throw new AssignmentError(
+      403,
+      "Administrator access required",
+      "ASSIGNMENT_FORBIDDEN"
+    );
+  }
   const assignments = await db
     .select()
     .from(taskAssignments)
     .where(eq(taskAssignments.founderId, userId));
+
+  return conflictsForAssignments(assignments);
+}
+
+function conflictsForAssignments(
+  assignments: TaskAssignment[]
+): ScheduleConflict[] {
+  assertCanonicalAssignmentRows(assignments);
 
   const conflicts: ScheduleConflict[] = [];
 
@@ -61,6 +87,7 @@ export async function detectConflicts(
 
     for (let j = i + 1; j < assignments.length; j++) {
       const task2 = assignments[j];
+      if (task1.vaId !== task2.vaId) continue;
       if (!task2.startTime || !task2.endTime) continue;
 
       // Check if tasks overlap
@@ -100,44 +127,78 @@ export async function detectConflicts(
 export async function resolveConflicts(
   userId: number,
   userOpenId: string,
-  strategy: 'move_later' | 'compress' | 'next_day' = 'move_later'
+  strategy: "move_later" | "compress" | "next_day" = "move_later"
 ): Promise<ConflictResolutionResult> {
   const db = await getDb();
   if (!db) {
-    throw new Error('Database not available');
+    throw new Error("Database not available");
   }
 
-  const conflicts = await detectConflicts(userId, userOpenId);
-  const resolutions: ConflictResolutionResult['resolutions'] = [];
-  let resolved = 0;
-  let failed = 0;
+  if (!["move_later", "next_day", "compress"].includes(strategy)) {
+    throw new AssignmentError(
+      400,
+      "Invalid conflict resolution strategy",
+      "ASSIGNMENT_INPUT"
+    );
+  }
+  const result = await db.transaction(async tx => {
+    // The shared assignment service locks accounts before assignment identities.
+    // Holding the founder account also serializes discovery with its mutations.
+    const [actor] = await tx
+      .select()
+      .from(users)
+      .where(eq(users.id, userId))
+      .for("no key update");
+    if (actor?.role !== "admin" || actor.openId !== userOpenId) {
+      throw new AssignmentError(
+        403,
+        "Administrator access required",
+        "ASSIGNMENT_FORBIDDEN"
+      );
+    }
+    const observed = await tx
+      .select()
+      .from(taskAssignments)
+      .where(eq(taskAssignments.founderId, userId));
+    assertCanonicalAssignmentRows(observed);
+    const keys = [...new Set(observed.map(row => row.taskId))].sort();
+    const assignments: TaskAssignment[] = [];
+    // The founder account remains held across every globally ordered batch.
+    for (let offset = 0; offset < keys.length; offset += MAX_ASSIGNMENT_TASKS) {
+      assignments.push(...await readCanonicalAssignments(tx, userId,
+        keys.slice(offset, offset + MAX_ASSIGNMENT_TASKS), { lock: true }));
+    }
+    if (assignments.length !== observed.length)
+      throw new AssignmentError(
+        409,
+        "Assignments changed; reload before trying again"
+      );
+    const conflicts = conflictsForAssignments(assignments);
+    const resolutions: ConflictResolutionResult["resolutions"] = [];
+    let resolved = 0;
+    let failed = 0;
 
-  log.info('Starting conflict resolution', {
-    userId: userOpenId,
-    conflictCount: conflicts.length,
-    strategy,
-  });
+    log.info("Starting conflict resolution", {
+      userId: userOpenId,
+      conflictCount: conflicts.length,
+      strategy,
+    });
 
-  for (const conflict of conflicts) {
-    try {
-      // Get the task assignment
-      const assignments = await db
-        .select()
-        .from(taskAssignments)
-        .where(
-          and(
-            eq(taskAssignments.founderId, userId),
-            eq(taskAssignments.taskId, conflict.taskId)
-          )
-        )
-        .limit(1);
-
-      if (assignments.length === 0) {
-        failed++;
+    for (const conflict of conflicts) {
+      const assignment = assignments.find(
+        row => row.taskId === conflict.taskId
+      )!;
+      const conflicting = assignments.find(
+        row => row.taskId === conflict.conflictingTaskId
+      )!;
+      // Earlier moves in this transaction may already have removed this overlap.
+      if (
+        new Date(assignment.startTime!).getTime() >=
+          new Date(conflicting.endTime!).getTime() ||
+        new Date(assignment.endTime!).getTime() <=
+          new Date(conflicting.startTime!).getTime()
+      )
         continue;
-      }
-
-      const assignment = assignments[0];
       const oldStartTime = new Date(assignment.startTime!);
       const oldEndTime = new Date(assignment.endTime!);
 
@@ -145,14 +206,14 @@ export async function resolveConflicts(
       let newEndTime: Date;
 
       switch (strategy) {
-        case 'move_later':
+        case "move_later":
           // Move task to end of conflicting task
-          newStartTime = new Date(conflict.conflictingEndTime);
+          newStartTime = new Date(conflicting.endTime!);
           const duration = oldEndTime.getTime() - oldStartTime.getTime();
           newEndTime = new Date(newStartTime.getTime() + duration);
           break;
 
-        case 'next_day':
+        case "next_day":
           // Move task to next day at same time
           newStartTime = new Date(oldStartTime);
           newStartTime.setDate(newStartTime.getDate() + 1);
@@ -160,39 +221,66 @@ export async function resolveConflicts(
           newEndTime.setDate(newEndTime.getDate() + 1);
           break;
 
-        case 'compress':
-          // Try to compress task duration (not implemented yet)
-          newStartTime = oldStartTime;
-          newEndTime = oldEndTime;
-          break;
+        case "compress":
+          // No compression algorithm exists; do not claim a successful repair.
+          failed++;
+          continue;
 
         default:
           newStartTime = oldStartTime;
           newEndTime = oldEndTime;
       }
 
+      // Moving past the original partner can collide with a previously disjoint
+      // task. Find a genuinely free slot against the entire locked schedule.
+      const duration = oldEndTime.getTime() - oldStartTime.getTime();
+      const scheduledOthers = assignments.filter(row => row.id !== assignment.id && row.vaId === assignment.vaId && row.startTime && row.endTime)
+        .sort((a, b) => a.startTime!.getTime() - b.startTime!.getTime());
+      for (const other of scheduledOthers) {
+        if (newStartTime.getTime() >= other.endTime!.getTime()
+          || newEndTime.getTime() <= other.startTime!.getTime()) continue;
+        if (strategy === 'next_day') {
+          newStartTime = new Date(newStartTime);
+          do {
+            const days = Math.max(1, Math.ceil((other.endTime!.getTime() - newStartTime.getTime()) / 86_400_000));
+            newStartTime.setDate(newStartTime.getDate() + days);
+          } while (newStartTime.getTime() < other.endTime!.getTime());
+        } else {
+          newStartTime = new Date(other.endTime!);
+        }
+        newEndTime = new Date(newStartTime.getTime() + duration);
+      }
+
       // Update task assignment
-      await db
+      const [updated] = await tx
         .update(taskAssignments)
         .set({
           startTime: newStartTime,
           endTime: newEndTime,
           updatedAt: new Date(),
         })
-        .where(eq(taskAssignments.id, assignment.id));
+        .where(eq(taskAssignments.id, assignment.id))
+        .returning();
+      if (!updated)
+        throw new AssignmentError(
+          409,
+          "Assignment changed; reload before trying again"
+        );
 
       // Record in schedule history
-      await db.insert(taskScheduleHistory).values({
+      await tx.insert(taskScheduleHistory).values({
         id: nanoid(),
+        founderId: userId,
+        assignmentId: assignment.id,
         taskId: conflict.taskId,
-        cardTrelloId: assignment.taskId.split(':')[0],
+        cardTrelloId: assignment.taskId.split(":")[0],
         previousStartTime: oldStartTime,
         previousEndTime: oldEndTime,
         newStartTime,
         newEndTime,
         changedBy: userOpenId,
-        reason: 'Automatic conflict resolution',
-        source: 'conflict_resolution',
+        reason: "Automatic conflict resolution",
+        source: "conflict_resolution",
         hadConflicts: 1,
         conflictDetails: JSON.stringify([conflict]),
         createdAt: new Date(),
@@ -208,37 +296,23 @@ export async function resolveConflicts(
       });
 
       resolved++;
-
-      log.debug('Conflict resolved', {
-        taskId: conflict.taskId,
-        strategy,
-        oldTime: `${oldStartTime.toISOString()} - ${oldEndTime.toISOString()}`,
-        newTime: `${newStartTime.toISOString()} - ${newEndTime.toISOString()}`,
-      });
-    } catch (error) {
-      log.error('Failed to resolve conflict', error as Error, {
-        taskId: conflict.taskId,
-      });
-      failed++;
+      Object.assign(assignment, updated);
     }
-  }
 
-  // Invalidate cache to reflect changes
-  await invalidateCache(userId, userOpenId, 'tasks');
-
-  log.info('Conflict resolution completed', {
-    userId: userOpenId,
-    resolved,
-    failed,
-    totalConflicts: conflicts.length,
+    return { resolved, failed, conflicts, resolutions };
   });
 
-  return {
-    resolved,
-    failed,
-    conflicts,
-    resolutions,
-  };
+  // Invalidate cache to reflect changes
+  if (result.resolved) await invalidateCache(userId, userOpenId, "tasks");
+
+  log.info("Conflict resolution completed", {
+    userId: userOpenId,
+    resolved: result.resolved,
+    failed: result.failed,
+    totalConflicts: result.conflicts.length,
+  });
+
+  return result;
 }
 
 /**
@@ -247,10 +321,11 @@ export async function resolveConflicts(
 export async function getConflictSettings(userId: number, userOpenId: string) {
   const db = await getDb();
   if (!db) {
-    throw new Error('Database not available');
+    throw new Error("Database not available");
   }
 
-  const { conflictDetectionSettings } = await import('../../drizzle/schema.postgres');
+  const { conflictDetectionSettings } =
+    await import("../../drizzle/schema.postgres");
 
   const settings = await db
     .select()

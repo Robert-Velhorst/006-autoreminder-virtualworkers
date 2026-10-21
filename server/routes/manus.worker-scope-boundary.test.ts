@@ -85,15 +85,15 @@ describe("legacy Manus worker-scope boundaries", () => {
     mocks.isManagerPilotWorker.mockReturnValue(false);
   });
 
-  it("ignores a caller-supplied worker ID when a worker reads pay history", async () => {
+  it("rejects a caller-supplied foreign worker ID when a worker reads pay history", async () => {
     const ownEntry = { id: 1, vaId: 10, weekStart: new Date("2026-09-21T00:00:00Z") };
     const otherEntry = { id: 2, vaId: 20, weekStart: new Date("2026-09-21T00:00:00Z") };
     const { db } = makeDb({ initialRows: { weeklyPayLog: [ownEntry, otherEntry] } });
     mocks.getDb.mockResolvedValue(db);
 
-    const result = await payLogRouter.createCaller(context(10)).getAll({ vaId: 20 });
-
-    expect(result).toEqual([ownEntry]);
+    await expect(payLogRouter.createCaller(context(10)).getAll({ vaId: 20 }))
+      .rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(db.select).not.toHaveBeenCalled();
   });
 
   it("makes repeated snooze submissions idempotent and keeps the state per worker", async () => {

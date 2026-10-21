@@ -57,6 +57,20 @@
       "when": 1792551653166,
       "tag": "0007_canonical_timer_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792559997541,
+      "tag": "0008_assignment_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1792562299754,
+      "tag": "0009_financial_ledger_authority",
+      "breakpoints": true
     }
   ]
 }

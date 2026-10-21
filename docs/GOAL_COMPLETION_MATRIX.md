@@ -5,23 +5,30 @@ Statuses describe the repository, not provider consent outside the repository.
 ## Current Release Decision, 2026-10-21
 
 **Not cleared for production deployment or active automatic planning.** The
-accepted source baseline is `main` at
-`df5c9f3f8af3c06723fe0d1992a50d6153ed4410` (PR #141). Its tree matches reviewed
-head `386aab90401312d48f818d3e8c3ccb6ab2266d76`, whose quality run
-`39543523895` and CodeQL `39543520471` succeeded. Post-merge main run
-`39544579909` needs its own acceptance. This supersedes
-the older source/publication/branch observations below, not their retained
-historical evidence. A passed source gate is not a live deployment receipt.
+accepted PR #144 source receipt is `c43dee7`. PR #144 merged as
+`b92be39f88d66e4f53fae782900b70705f9ade90`, with a tree identical to
+`12ed4cfa58c5f3a35da0f144ff92d5b65c26c279`. Quality run `39557268165`,
+CodeQL `39557267429` and the aggregate gate succeeded. The current PR #135
+integration needs fresh exact-head gates; its earlier successful image receipt
+does not certify the new merge. This supersedes older source/publication/branch
+observations below, not their retained historical evidence. A passed source gate
+is not a live deployment receipt or acceptance of every production path.
+
+The supported target is one persistent application container with separately
+provisioned shared PostgreSQL and optional external Redis. The dated MySQL
+implementation and rehearsal sections below are historical, not another runtime
+target. Do not start an additional permanent dashboard or remove private data
+and recovery archives while consolidating source branches.
 
 | Requirement | Verified current evidence | Remaining acceptance |
 | --- | --- | --- |
-| Consolidate local source without losing history | PRs through #141 were merged with exact reviewed-tree comparisons; #141's accepted head is archived under `archive/canonical-timer-acceptance-20261021`. Its merged branch was removed with an expected-SHA lease. | PR #135 remains unmerged. Preserve its branch until integration acceptance, then archive and remove it; do not claim only `main` while it exists. |
-| Canonical runtime and additive data model | Persistent Node 26.12.0 application, PostgreSQL 18.6 test fixtures, canonical migrations through `0007_canonical_timer_columns`. PR #140 verified parity for 138 tables; PR #141 reran the parity gate after its additive timer changes. Historical migrations are not another runtime backend. | Provision and test the actual shared PostgreSQL service, dedicated application database and least-privilege role. A conditional transfer utility is not evidence that data was imported. |
-| Source safety and regressions | PR #141's exact reviewed head passed 4,460 hosted Vitest cases with 22 skips, all 17 native cross-reader cases, required browser checks, configured PostgreSQL image acceptance and backup/restore. Earlier failed candidates remain recorded failures. | Match future evidence to its exact source and artifact. These results do not verify real provider delivery, target-host recovery or all unexamined roadmap criteria. |
+| Consolidate local source without losing history | Timer, OAuth, assignment and financial PRs were merged with reviewed-tree comparisons. PR #144's merge `b92be39f88d66e4f53fae782900b70705f9ade90` has tree `12ed4cfa58c5f3a35da0f144ff92d5b65c26c279`, matching accepted source `c43dee7`. Earlier archive/consolidation receipts remain historical evidence. | Finish PR #135 integration and fresh exact-head acceptance before claiming normal consolidation to `main`. Preserve unique source/history and its branch until authorized archival/removal; do not claim only `main` while it exists. |
+| Canonical runtime and additive data model | Persistent Node 26.12.0 application, PostgreSQL 18.6 fixtures, 140 canonical application tables and migrations through `0009_financial_ledger_authority`. Assignment and financial audit additions are additive; historical migrations are not another runtime backend. | Provision and test the actual shared PostgreSQL service, dedicated application database and least-privilege role. Reconcile any transferred data against its source and preserve rollback evidence; synthetic fixtures and transfer tooling do not prove a real import. |
+| Source safety and regressions | Accepted PR #144 quality run `39557268165` passed 4,952 Vitest tests with 22 skips, 99 Node tests, 1,041 manager tests, 97 manager Chromium cases, 29/29 native financial cases and 8/8 financial browser cases. CodeQL `39557267429` and the aggregate gate were green. Counts describe separate gates, not additive coverage of every feature. | Require fresh quality, native, browser, image and security gates for the current integration. Source tests do not verify real provider delivery, target-host recovery or unexamined roadmap criteria; the two ATIS gaps below remain source work. |
 | Durable notification delivery and recovery | PR #134 records exact digest membership, immutable payload/address, dispatch phases, lease fencing and audited recovery. Final provider-boundary checks cover consent, address and worker-access changes during provider preparation. Issue #75 is closed against its regression evidence. | Verify the selected live provider and operator recovery procedure. Provider acceptance is not inbox receipt; uncertain results must not become silent replay permission. |
-| Image vulnerability enforcement | PR #135's prior published checkpoint is `09429c610dfd2267ba0670236cb1481da4035ae2`; earlier local contracts and CodeQL do not certify its current integration. Scan/promotion tooling and the strictly scoped exception policy are retained, with current-main fixture and exact-candidate positive PostgreSQL gates. | The real image job has not started. Repository policy rejects the exact-pinned official report-upload action; owner approval is pending. Do not bypass the allowlist or call a startup failure a scan result. Require current-head real-scan artifacts, protected-main verification and separate release promotion evidence. |
-| Private information and historical credentials | Current source changes were secret-scanned. Private configuration, recovery archives and operational data were not uploaded as source. Historical secret alerts #1 and #4 remain open. | Resolve exposed credentials through verified, authorized rotation/revocation. Source removal and a clean current-tree scan do not revoke historical credentials. Retained private backups are not a PostgreSQL migration or application-data reconciliation receipt. |
-| Deployable release and infrastructure | The repository contains a guarded Hetzner deployment workflow. Existing `v1.0.0-rc.1` remains a historical, non-production preview; its notes explicitly distinguish it from current source. | Confirm the host/domain, prepare private runtime configuration and database/TLS/backup/restore, configure production SSH secrets, publish an accepted image/release and perform the authorized target-host deployment. No production environment SSH secrets were present in this check. |
+| Image vulnerability enforcement | PR #135 checkpoint `f391013` passed real built-image scanning: 633 packages, zero vulnerabilities and no accepted exceptions. Quality run `39557333508` also passed configured PostgreSQL image acceptance and the full CI gate; CodeQL was green. The exact-pinned action approval was applied; other action-policy entries were unchanged. | Rerun all required gates on the new integration head and retain its exact-image receipt. Require protected-main verification and a real release's exact-digest scan, configured PostgreSQL acceptance, attestation and same-digest promotion. Earlier previews are not proof of this gate or a new accepted release; do not bypass artifact/action policy. |
+| Private information and historical credentials | Accepted source has secret-scan evidence. Private configuration, recovery archives and operational data are not source publication artifacts. Provider-specific remediation documentation was removed in favor of generic historical credential-remediation guidance. Historical alerts #1 and #4 remain open; the owner declined deletion. | Do not treat documentation removal or owner-declined deletion as credential remediation or alert closure. Verify authorized rotation/revocation and record the remaining historical exposure boundary without publishing secret values. Private backups are not a data-migration receipt. |
+| Deployable release and infrastructure | The repository contains guarded deployment and exact-artifact release tooling. Existing `v1.0.0-rc.1` remains a historical, non-production preview. Synthetic configured-image acceptance exists, not an accepted target-host deployment. | Verify the actual host/domain, private runtime configuration, shared database/TLS, backups/restore and authorized deployment credentials. Publish/promote only a freshly accepted exact artifact, then perform authorized deployment, rollback and operator checks. Infrastructure and real deployment remain unverified. |
 | Real operator and integration acceptance | Authenticated synthetic browser, source-contract and database tests exist. Their account and provider scopes remain explicit. | Verify real owner/worker access, Google/Trello/browser callbacks and freshness, WebSockets, schedulers and recovery on the target environment. Mocked transports and local previews are not live-account acceptance. |
 | Reliable APTLSS activation | Shadow-mode controls and regression evidence remain available. No calibrated probability of future correctness is claimed. | At least five working days and 100 human-reviewed proposals, Robert's review of urgent conflicts, zero critical errors and at least 98 correct and sufficiently supported proposals; begin active operation with one worker only after acceptance. |
 
@@ -30,17 +37,28 @@ not treated as either proven defects or automatically completed work. Existing
 capability criteria that have not been inspected remain unproven. Do not close
 broader security or integration issues using a narrow digest or UI test result.
 
-Subsequent accepted changes address account offboarding, output escaping and
-canonical timer ownership; do not repeat the earlier audit as if those paths
-were unchanged. Current source review confirms founder/task assignment
-uniqueness and browser-bound legacy OAuth state remain outstanding (#95 and
-#52). Payroll settlement and unexamined issue criteria still require their own
-acceptance. Infrastructure is not the only remaining work.
+Accepted source now includes account offboarding, output escaping, canonical
+timer ownership, browser-bound legacy OAuth state, founder/full-task assignment
+identity and atomic audited financial ledger changes with optimistic save
+revisions. Do not repeat earlier audits as if those paths were unchanged, or
+equate their bounded acceptance with all source being production-ready.
+
+The latest read-only ATIS audit against `c43dee7` retains two concrete gaps:
+legacy `reprocess-failed`, `reprocess/:cardId` and `reanalyze-all` routes call
+provider analysis outside durable operation admission/lease fencing, while
+their request-rate limit is not a per-card analysis quota; and bulk clients
+request 200/500 cards while the server silently caps selection at 100 without
+explicit continuation. The ordinary understanding process endpoint already
+uses durable operations. Preserve the legacy features and clients while adding
+bounded confirmed selection, durable execution/quota controls and truthful
+batch completion. These gaps and unexamined criteria remain source work;
+infrastructure is not the only remaining acceptance.
 
 Use [Image Security](IMAGE_SECURITY.md),
 [Notification Delivery](NOTIFICATION_DELIVERY.md),
 [Consolidation Ledger](CONSOLIDATION_LEDGER.md), and
-[Production Cutover](PRODUCTION_CUTOVER.md) for the current contracts. The
+[Production Cutover](PRODUCTION_CUTOVER.md), alongside
+[Technical Audit](TECHNICAL_AUDIT.md), for the current contracts. The
 records below retain their original source, database, artifact and date scopes.
 
 ## Release Decision, 2026-10-02

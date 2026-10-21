@@ -164,6 +164,7 @@ function makeTimerDb(
     return history.get(table) ?? [];
   };
   const tx: any = {
+    execute: vi.fn(async () => ({ rows: [] })),
     select: vi.fn(() => {
       let table: unknown;
       let condition: unknown;

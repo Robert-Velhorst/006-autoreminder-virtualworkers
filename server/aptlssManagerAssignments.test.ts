@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { taskAssignments, vaProfiles } from "../drizzle/schema.postgres";
 import { assessManagerAssignmentCoverage, parseManagerAssignmentReference, readManagerAssignmentState } from "./aptlssManagerAssignments";
+import { timerTestDatabase } from './test/timerDatabase';
 
 const state = (assignments: Array<{ taskId: string; status: "assigned" | "in_progress" | "blocked" }>) => ({
   profile: { id: 3, founderId: 9, status: "active" as const },
@@ -11,6 +12,36 @@ const state = (assignments: Array<{ taskId: string; status: "assigned" | "in_pro
 });
 
 describe("manager authoritative task assignments", () => {
+  function reader(assignments: Record<string, unknown>[]) {
+    return timerTestDatabase(new Map<unknown, any[]>([
+      [vaProfiles, [{ id: 3, userId: 22, founderId: 9, status: 'active' }]],
+      [taskAssignments, assignments],
+    ]));
+  }
+  it.each(['assigned', 'in_progress', 'completed', 'blocked'])('marks cross-worker duplicates incomplete before status filtering (%s)', async status => {
+    const original = { id: 1, taskId: 'card:list:item', founderId: 9, vaId: 3, status: 'assigned' };
+    const store = reader([original]);
+    const valid = await readManagerAssignmentState(store.db, 22);
+    store.rows.get(taskAssignments)!.push({ ...original, id: 2, vaId: 4, status });
+    const duplicate = await readManagerAssignmentState(store.db, 22);
+    expect(valid.complete).toBe(true);
+    expect(duplicate).toMatchObject({ complete: false, ambiguous: true });
+    expect(duplicate.fingerprint).not.toBe(valid.fingerprint);
+    expect(assessManagerAssignmentCoverage(duplicate, [{ cardId: 'card' }], [
+      { id: 1, cardId: 'card', trelloChecklistId: 'list', trelloCheckItemId: 'item' },
+    ]).complete).toBe(false);
+  });
+  it('preserves separate composite keys on one card and excludes other founder duplicates', async () => {
+    const store = reader([
+      { id: 1, founderId: 9, vaId: 3, taskId: 'card:list:first', status: 'assigned' },
+      { id: 2, founderId: 9, vaId: 3, taskId: 'card:list:second', status: 'blocked' },
+      { id: 3, founderId: 99, vaId: 3, taskId: 'card:list:first', status: 'assigned' },
+      { id: 4, founderId: 99, vaId: 3, taskId: 'card:list:first', status: 'completed' },
+    ]);
+    const current = await readManagerAssignmentState(store.db, 22);
+    expect(current).toMatchObject({ complete: true, ambiguous: false });
+    expect(current.assignments.map(row => row.taskId)).toEqual(['card:list:first', 'card:list:second']);
+  });
   it("resolves one active profile while ignoring inactive history and rejects multiple active profiles", async () => {
     const readState = (profiles: Array<{ id: number; founderId: number; status: "active" | "inactive" }>) => {
       const db = {

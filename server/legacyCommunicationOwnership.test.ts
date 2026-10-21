@@ -9,14 +9,20 @@ describe('legacy communication ownership', () => {
     const post = source.slice(source.indexOf("router.post('/communication'"), source.indexOf("router.get('/communication/:taskId'"));
     const get = source.slice(source.indexOf("router.get('/communication/:taskId'"), source.indexOf('// ============================================\n// TIME TRACKING'));
 
-    expect(post).toContain('and(eq(taskAssignments.taskId, taskId), eq(taskAssignments.founderId, user.id))');
-    expect(get).toContain('and(eq(taskAssignments.taskId, taskId), eq(taskAssignments.founderId, user.id))');
+    expect(post).toContain('readCanonicalAssignment(db, user.id, taskId)');
+    expect(post).toContain('withLockedAssignment(db, user, taskId');
+    expect(get).toContain('readCanonicalAssignment(db, user.id, taskId)');
+    expect(get).toContain('eq(communicationLog.fromUserId, user.id)');
+    expect(get).toContain('eq(communicationLog.toUserId, user.id)');
   });
 
   it('only permits a founder to address a worker in that founder\'s workspace', () => {
     const post = source.slice(source.indexOf("router.post('/communication'"), source.indexOf("router.get('/communication/:taskId'"));
 
     expect(post).toContain('eq(vaProfiles.userId, recipientId)');
-    expect(post).toContain('eq(vaProfiles.founderId, user.id)');
+    expect(post).toContain("profile.status === 'active'");
+    expect(post).toContain('active.length !== 1 || active[0].founderId !== user.id');
+    expect(post).toContain('workerProfileIds: recipientProfileId');
+    expect(post).toContain('withTimerAccountTransaction(db, user');
   });
 });

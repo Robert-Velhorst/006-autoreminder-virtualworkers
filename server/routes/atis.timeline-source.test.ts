@@ -1,6 +1,6 @@
 import express from 'express';
 import request from 'supertest';
-import { MySqlDialect } from 'drizzle-orm/mysql-core';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { atisBoards, atisCards } from '../../drizzle/schema.postgres';
 
@@ -31,7 +31,7 @@ function app(role?: string) {
   app.use('/api/atis', router);
   return app;
 }
-function database(localBoards = true) {
+function database(localBoards = true, storedChecklist: string | null = JSON.stringify([{ step: 'Check source' }, { step: 'Prepare draft' }])) {
   const conditions: unknown[] = [];
   const db = {
     select: vi.fn((projection?: any) => {
@@ -46,13 +46,16 @@ function database(localBoards = true) {
             : table === atisCards ? (projection?.count ? [{ count: 1 }] : [{
               id: 12, trelloId: '5abbe4b7ddc1b351ef961419', name: 'Verified task',
               boardId: 11, listName: 'Doing', understandingId: 13,
-              aptlssChecklist: JSON.stringify([{ step: 'Check source' }, { step: 'Prepare draft' }]),
+              aptlssChecklist: storedChecklist,
             }]) : [];
           return Promise.resolve(rows).then(resolve, reject);
         },
       };
       return query;
     }),
+    insert: vi.fn(() => { throw new Error('Timeline GET attempted a database write'); }),
+    update: vi.fn(() => { throw new Error('Timeline GET attempted a database write'); }),
+    delete: vi.fn(() => { throw new Error('Timeline GET attempted a database write'); }),
   };
   return { db, conditions };
 }
@@ -61,7 +64,7 @@ beforeEach(() => {
   vi.stubEnv('TRELLO_API_KEY', 'fixture-key'); vi.stubEnv('TRELLO_TOKEN', 'fixture-token');
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
-afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe('ATIS timeline verified source access', () => {
   it.each([[undefined, 401], ['worker', 403], ['user', 403]] as const)(
@@ -114,7 +117,7 @@ describe('ATIS timeline verified source access', () => {
     const response = await request(app('admin')).get('/api/atis/timeline-tasks');
     expect(response.status).toBe(200); expect(response.body.scheduled).toEqual([]);
     expect(db.select).toHaveBeenCalledTimes(1);
-    expect(new MySqlDialect().sqlToQuery(conditions[0] as any).params).toEqual([board]);
+    expect(new PgDialect().sqlToQuery(conditions[0] as any).params).toEqual([board]);
   });
   it('scopes both returned tasks and pagination totals to verified board IDs', async () => {
     const { db, conditions } = database(); mocks.getDb.mockResolvedValue(db);
@@ -123,8 +126,29 @@ describe('ATIS timeline verified source access', () => {
     expect(response.status).toBe(200); expect(response.body.scheduled).toHaveLength(1);
     expect(response.body.scheduled[0]).toMatchObject({ name: 'Verified task', boardName: 'Verified board' });
     expect(response.body.pagination.total).toBe(1);
-    const queries = conditions.map(condition => new MySqlDialect().sqlToQuery(condition as any));
+    const queries = conditions.map(condition => new PgDialect().sqlToQuery(condition as any));
     expect(queries.map(query => query.params)).toEqual([[board], [0, 11], [0, 11]]);
     expect(mocks.analyze).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'missing checklist', stored: null, required: 1 },
+    { label: 'empty stored checklist', stored: '[]', required: 1 },
+    { label: 'valid one-step result', stored: JSON.stringify([{ step: 'Read the message' }]), required: 0 },
+  ])('keeps repeated and concurrent reads passive for $label', async ({ stored, required }) => {
+    const { db } = database(true, stored); mocks.getDb.mockResolvedValue(db);
+    mocks.fetchWithRetry.mockImplementation(async (input: string) => {
+      const url = new URL(input);
+      return ok(url.pathname === '/1/members/me/boards' ? [{ id: board }] : []);
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const application = app('admin');
+    const responses = await Promise.all(Array.from({ length: 3 }, () => request(application).get('/api/atis/timeline-tasks?filter=all')));
+    expect(responses.map(response => response.status)).toEqual([200, 200, 200]);
+    expect(responses.map(response => response.body.analysisRequiredCount)).toEqual([required, required, required]);
+    await request(application).get('/api/atis/timeline-tasks?filter=all').expect(200);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(mocks.analyze).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled(); expect(db.update).not.toHaveBeenCalled(); expect(db.delete).not.toHaveBeenCalled();
   });
 });

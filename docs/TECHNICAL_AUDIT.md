@@ -20,21 +20,65 @@ and isolated backup/restore. Post-merge main quality `39544579909` and
 CodeQL/push `39544579781` also passed. Earlier failed candidates remain failed
 historical evidence; later source changes need their own exact-head checks.
 
-PR142 merged the [external OAuth login state](OAUTH_LOGIN_STATE.md) repair as
+PR [#142](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/142)
+merged the [external OAuth login state](OAUTH_LOGIN_STATE.md) repair as
 `5965eca61a1f8967b1f940af3e947af4bcad6772`, with the same tree as reviewed
-`fc850afb4d24bb4b9be5d7fe2402d68d961abbd8`. Exact-head quality `39548283901`
-and CodeQL aggregate `119051493063` passed, as did separate post-merge main
-quality `39549562272` and Push-on-main `39549561798`. Browser-bound single-use
-state, authenticated-encryption binding and UTC database-clock expiry are now
-part of accepted main. These tests do not establish real provider acceptance.
-Founder/task assignment identity repair (#95) remains under independent review
-in PR143; its new migration and code require their own exact-head acceptance.
+`fc850afb4d24bb4b9be5d7fe2402d68d961abbd8`. Quality `39548283901` and CodeQL
+aggregate `119051493063` passed. Quality reported 4,549 passing Vitest cases,
+22 skips, 96 Node contracts, native OAuth acceptance, configured PostgreSQL
+image acceptance, browser checks and isolated backup/restore. The repair adds
+server-owned initiation and a browser-bound single-use database transaction,
+with UTC database-clock expiry checked after acquiring its row lock, and an
+authenticated-encryption browser binding. These tests do not establish real
+provider acceptance. Separate post-merge main quality `39549562272` and
+Push-on-main `39549561798` also passed.
+
+PR #143's founder/task assignment repair was accepted at exact head
+`e57811c9cd40d5facb829c66074bea18e06a1f79`, with quality `39551621023` and
+CodeQL `39551616110` passing. It merged normally as
+`7dfe3584d3855f878c7060af897f685707ed7fec` with the identical tree
+`76faa0ee2839a63b4f723393e5e0bf9448a6060b`. Native assignment service/migration
+and mounted-route tests, configured image acceptance, browser and backup gates
+passed; this does not establish historical operational data acceptance. See
+[Assignment Identity Cutover](ASSIGNMENT_IDENTITY_CUTOVER.md) before operational
+migration; ambiguous historical assignments are never resolved automatically.
+
+PR [#144](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/144)
+accepted financial authority, fresh financial-read ownership, stale-save
+revision protection, request admission and passive timeline reads at reviewed
+head `c43dee70fadc49522fc4c3fe42285bc37cb5ecb2`. Quality `39557268165` and
+CodeQL workflow `39557267429` and its aggregate check passed. It merged as
+`b92be39f88d66e4f53fae782900b70705f9ade90`, with the identical tree
+`12ed4cfa58c5f3a35da0f144ff92d5b65c26c279`. The reviewed head is retained under
+verified annotated archive tag `archive/financial-authority-acceptance-20261021`.
+The remote financial branch was subsequently deleted with an exact-SHA lease;
+its local ref awaits completion of the PR #135 integration, without forced
+deletion. These gates cover source acceptance, not operational financial-data
+reconciliation; follow [Financial Ledger Cutover](FINANCIAL_LEDGER_CUTOVER.md)
+before applying migration 0009 to historical production data.
+
+The actual reviewed-head quality log records 4,952 passing Vitest cases with
+22 skips, 99 Node contracts, 1,041 manager checks, 97 manager Chromium cases
+(15.2 minutes), 29/29 financial native cases and 8/8 financial browser cases.
+These are separate suite results, not an additive count of unique scenarios.
+The older [checkpoint](CHECKPOINT_20261021.md) describes the earlier incomplete
+state and does not supersede this accepted-head evidence.
 
 PR [#135](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/135)
-retains the separate exact-image vulnerability and promotion gate. Its workflow
-cannot start under the current selected-Action policy. Permission for the one
-pinned official artifact upload action remains an owner decision; neither
-removing evidence retention nor broadening permissions is a substitute.
+retains the separate exact-image vulnerability and promotion gate. The one
+pinned official artifact-upload Action was approved as the sole allowlist
+addition, resolving the earlier policy blocker without bypassing it. Earlier
+head `f391013` passed full CI `39557333508`: the exact production-image scan
+covered 633 packages with zero vulnerabilities and no exceptions, and positive
+PostgreSQL acceptance confirmed cleanup for the same image. This is isolated
+source/image proof, not acceptance of a live host or provider.
+
+The current local PR #135 source includes generic credential documentation
+commit `0ab95ce` and an in-progress merge of accepted main. The resulting
+integration must pass fresh exact-head quality, CodeQL, exact-image security and
+acceptance gates before consolidation. Prior PR #135 or PR #144 results cannot
+be transferred to this changed source. No external-provider acceptance,
+production cutover or human shadow trial was performed by these checks.
 
 The dated results below describe earlier source revisions. The live acceptance
 requirements remain in [Production Cutover](PRODUCTION_CUTOVER.md), and branch

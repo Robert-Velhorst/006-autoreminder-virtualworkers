@@ -2,25 +2,46 @@
 
 ## Current Consolidation Checkpoint: October 21, 2026
 
-The latest accepted main source is OAuth merge
-`5965eca61a1f8967b1f940af3e947af4bcad6772` from PR142. Its tree equals reviewed
-head `fc850afb4d24bb4b9be5d7fe2402d68d961abbd8`, preserved under verified tag
-`archive/browser-bound-oauth-acceptance-20261021`. Exact-head quality
-`39548283901` and CodeQL aggregate `119051493063` passed. Separate post-merge
-main quality `39549562272` and Push-on-main `39549561798` also passed.
-The merged OAuth branch was removed only after archive and tree verification.
+Main now includes accepted timer PR #141, OAuth PR #142 and assignment PR #143.
+Assignment merge `7dfe3584d3855f878c7060af897f685707ed7fec` and reviewed head
+`e57811c9cd40d5facb829c66074bea18e06a1f79` share tree
+`76faa0ee2839a63b4f723393e5e0bf9448a6060b`. Exact-head quality `39551621023`
+and CodeQL `39551616110` passed. The reviewed head is preserved under
+`archive/canonical-assignment-acceptance-20261021`. Assignment PR #143 was merged
+normally with its expected full head; its matching branch was then removed.
+Post-merge main quality `39553158382` and CodeQL/push `39553156950` subsequently
+passed at that exact merge. These are source gates, not Hetzner acceptance.
 
-Two temporary source branches remain: PR135 for exact-image security and PR143
-for canonical assignment identity. PR135's earlier head `188dc0d` passed local
-checks and CodeQL `39545169245`, but quality `39545173841` could not start.
-The narrowly scoped Action-policy decision remains pending. Integration with
-the newly accepted OAuth main requires its own source checks and hosted gate;
-the older receipt is not transferred. PR143 head `1035477` has local regression
-evidence and its own pending native/image/browser/security checks. Neither
-branch is discarded to manufacture an only-main result. Consolidate each only after
-its exact-head checks and review pass, preserve the reviewed head in a verified
-archive tag, and delete only the matching branch ref. Private configuration,
-secrets and recovery archives remain outside Git.
+Financial authority PR #144 is now merged as
+`b92be39f88d66e4f53fae782900b70705f9ade90`. Its tree
+`12ed4cfa58c5f3a35da0f144ff92d5b65c26c279` is identical to reviewed head
+`c43dee70fadc49522fc4c3fe42285bc37cb5ecb2`. Exact-head quality `39557268165`
+and CodeQL workflow `39557267429` plus its aggregate check passed. The reviewed head is preserved by
+verified remote annotated tag `archive/financial-authority-acceptance-20261021`:
+tag object `e17499ed7bd47d8a00d4d51769a6dfb51690a775`, peeled commit
+`c43dee70fadc49522fc4c3fe42285bc37cb5ecb2`. After archive and merged-tree
+verification, the remote financial branch was deleted with its exact-SHA lease.
+Its local ref remains pending: ordinary deletion refused while the current
+PR #135 integration merge was in progress, and no forced deletion was performed.
+Delete that local ref only after the completed integration contains its source.
+
+PR #135 remains the source integration candidate, not accepted main. Earlier head
+`f391013` passed full CI `39557333508`, including an exact-image scan of 633
+packages with zero vulnerabilities and no exceptions, and positive PostgreSQL
+acceptance with confirmed cleanup for that same image. The pinned official
+artifact-upload Action was the sole approved Action-policy addition; the earlier
+policy blocker is resolved without broadening the remaining allowlist.
+
+The current local PR #135 source includes generic credential documentation commit
+`0ab95ce` and an in-progress merge of the accepted main. The completed integration
+requires fresh exact-head quality, security, image and acceptance gates. Neither
+the earlier PR #135 receipt nor PR #144's acceptance transfers to this changed
+source. Only after those gates and review pass may the reviewed head be archived,
+the integration merged, and matching branch refs removed. The target remains
+only `main`, preserving all source and recovery history; that final branch state
+has not yet been established at this checkpoint. Private configuration, secrets
+and recovery archives remain outside Git. No external-provider, deployment or
+human shadow-trial acceptance is claimed.
 
 ### Earlier Only-Main Checkpoint
 

@@ -18,7 +18,7 @@ import {
   atisCardUnderstanding,
   trelloCachedCards,
 } from '../../drizzle/schema.postgres';
-import { eq, and, desc, sql, inArray } from 'drizzle-orm';
+import { eq, and, or, desc, sql, inArray } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import { PASSWORD_MIN_LENGTH } from '../passwordPolicy';
 import { createManagedWorker, updateManagedWorker, validateWorkerEmail, validateWorkerStatus, workerManagementFailure } from '../workerManagementLifecycle';
@@ -28,7 +28,8 @@ import { invalidateCache } from '../services/trello-cache';
 import { fetchWithRetry } from '../utils/retry';
 import { fetchVerifiedTrelloBoardIds, TrelloBoardInventoryUnavailableError } from '../trelloBoardInventory';
 import { requestUser, requireAuthenticated } from '../middleware/auth';
-import { didUpdateSingleTaskAssignment } from '../taskAssignmentMutation';
+import { AssignmentError, MAX_ASSIGNMENT_TASKS, assignmentFailure, readCanonicalAssignment, readCanonicalAssignments, assertCanonicalAssignmentRows } from '../taskAssignmentMutation';
+import { assignTask, reassignTask, changeAssignmentStatus, withLockedAssignment } from '../taskAssignmentService';
 import {
   createWorkerInvitation,
   markWorkerInvitationSent,
@@ -63,6 +64,14 @@ router.use((req, res, next) => {
 });
 
 type Database = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+
+async function verifyAssignmentList(db: Database, founderId: number, rows: typeof taskAssignments.$inferSelect[]) {
+  assertCanonicalAssignmentRows(rows);
+  const keys = [...new Set(rows.map(row => row.taskId))];
+  for (let offset = 0; offset < keys.length; offset += MAX_ASSIGNMENT_TASKS) {
+    await readCanonicalAssignments(db, founderId, keys.slice(offset, offset + MAX_ASSIGNMENT_TASKS));
+  }
+}
 
 const workerProfileUpdateFields = new Set([
   'name', 'email', 'timezone', 'skills', 'hourlyRate', 'currency',
@@ -429,9 +438,12 @@ router.post('/assignments', async (req: any, res) => {
 
     const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId.trim() : '';
     const vaId = Number(req.body?.vaId);
-    const notes = typeof req.body?.notes === 'string' ? req.body.notes : null;
+    const notes = req.body?.notes;
     if (!taskId || !Number.isSafeInteger(vaId) || vaId <= 0) {
       return res.status(400).json({ error: 'A task ID and valid worker profile are required' });
+    }
+    if (notes !== undefined && notes !== null && typeof notes !== 'string') {
+      return res.status(400).json({ error: 'Notes must be text or null' });
     }
 
     const db = await getDb();
@@ -439,35 +451,13 @@ router.post('/assignments', async (req: any, res) => {
       return res.status(503).json({ error: 'Database not available' });
     }
     
-    const worker = await getFounderWorker(db, user.id, vaId);
-    if (!worker) {
-      return res.status(404).json({ error: 'Worker profile not found' });
-    }
-
-    // Check if already assigned
-    const existing = await db.select().from(taskAssignments).where(
-      and(eq(taskAssignments.taskId, taskId), eq(taskAssignments.founderId, user.id))
-    );
-
-    if (existing.length > 0) {
-      // Update existing assignment
-      await db.update(taskAssignments)
-        .set({ vaId, notes, assignedAt: new Date() })
-        .where(eq(taskAssignments.id, existing[0].id));
-    } else {
-      // Create new assignment
-      await db.insert(taskAssignments).values({
-        taskId,
-        vaId,
-        founderId: user.id,
-        assignedBy: user.id,
-        notes,
-      });
-    }
+    await assignTask(db, user, { taskId, workerProfileId: vaId, ...(notes === undefined ? {} : { notes }) });
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error assigning task:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error assigning task');
     res.status(500).json({ error: 'Failed to assign task' });
   }
 });
@@ -480,7 +470,8 @@ router.get('/assignments/va/:vaId', async (req: any, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const vaId = parseInt(req.params.vaId);
+    const vaId = Number(req.params.vaId);
+    if (!Number.isSafeInteger(vaId) || vaId <= 0) return res.status(400).json({ error: 'A valid worker profile is required' });
     const db = await getDb();
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
@@ -489,10 +480,13 @@ router.get('/assignments/va/:vaId', async (req: any, res) => {
     const assignments = await db.select().from(taskAssignments).where(
       and(eq(taskAssignments.vaId, vaId), eq(taskAssignments.founderId, user.id))
     );
+    await verifyAssignmentList(db, user.id, assignments);
 
     res.json(assignments);
   } catch (error) {
-    console.error('Error fetching assignments:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error fetching assignments');
     res.status(500).json({ error: 'Failed to fetch assignments' });
   }
 });
@@ -512,13 +506,13 @@ router.put('/assignments/:taskId/status', async (req: any, res) => {
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
     }
-    await db.update(taskAssignments)
-      .set({ status })
-      .where(and(eq(taskAssignments.taskId, taskId), eq(taskAssignments.founderId, user.id)));
+    await changeAssignmentStatus(db, user, { taskId, status });
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error updating assignment status:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error updating assignment status');
     res.status(500).json({ error: 'Failed to update status' });
   }
 });
@@ -753,35 +747,45 @@ router.post('/communication', async (req: any, res) => {
     }
 
     if (taskId) {
-      const assignments = await db.select({ id: taskAssignments.id }).from(taskAssignments)
-        .where(and(eq(taskAssignments.taskId, taskId), eq(taskAssignments.founderId, user.id)))
-        .limit(1);
-      if (!assignments[0]) {
+      const assignment = await readCanonicalAssignment(db, user.id, taskId);
+      if (!assignment) {
         return res.status(404).json({ error: 'Task assignment not found' });
       }
     }
 
+    let recipientProfileId: number | undefined;
     if (recipientId !== null && recipientId !== user.id) {
-      const recipients = await db.select({ id: vaProfiles.id }).from(vaProfiles)
-        .where(and(eq(vaProfiles.userId, recipientId), eq(vaProfiles.founderId, user.id)))
-        .limit(1);
-      if (!recipients[0]) {
+      const recipients = await db.select().from(vaProfiles).where(eq(vaProfiles.userId, recipientId));
+      const active = recipients.filter(profile => profile.status === 'active');
+      if (active.length !== 1 || active[0].founderId !== user.id) {
         return res.status(404).json({ error: 'Recipient is not a worker in this workspace' });
       }
+      recipientProfileId = active[0].id;
     }
 
-    await db.insert(communicationLog).values({
-      taskId,
-      fromUserId: user.id,
-      toUserId: recipientId,
-      messageType,
-      message,
-      context: context ? JSON.stringify(context) : null,
-    });
+    const messageValues = { taskId, fromUserId: user.id, toUserId: recipientId,
+      messageType, message, context: context ? JSON.stringify(context) : null };
+    if (taskId) {
+      await withLockedAssignment(db, user, taskId, async (tx, _assignment, context) => {
+        if (recipientProfileId !== undefined && context.profiles.get(recipientProfileId)?.userId !== recipientId) {
+          throw new AssignmentError(409, 'Recipient ownership changed; reload before trying again');
+        }
+        await tx.insert(communicationLog).values(messageValues);
+      }, { workerProfileIds: recipientProfileId === undefined ? [] : [recipientProfileId] });
+    } else {
+      await withTimerAccountTransaction(db, user, async (tx, locked) => {
+        if (recipientProfileId !== undefined && locked.profile?.id !== recipientProfileId) {
+          throw new AssignmentError(409, 'Recipient ownership changed; reload before trying again');
+        }
+        await tx.insert(communicationLog).values(messageValues);
+      }, recipientProfileId === undefined ? user.id : recipientId!, user.id);
+    }
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error adding communication:', error);
+    const failure = assignmentFailure(error) ?? timerFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error adding communication');
     res.status(500).json({ error: 'Failed to add message' });
   }
 });
@@ -803,20 +807,21 @@ router.get('/communication/:taskId', async (req: any, res) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    const assignments = await db.select({ id: taskAssignments.id }).from(taskAssignments)
-      .where(and(eq(taskAssignments.taskId, taskId), eq(taskAssignments.founderId, user.id)))
-      .limit(1);
-    if (!assignments[0]) {
+    const assignment = await readCanonicalAssignment(db, user.id, taskId);
+    if (!assignment) {
       return res.status(404).json({ error: 'Task assignment not found' });
     }
 
     const messages = await db.select().from(communicationLog)
-      .where(eq(communicationLog.taskId, taskId))
+      .where(and(eq(communicationLog.taskId, taskId),
+        or(eq(communicationLog.fromUserId, user.id), eq(communicationLog.toUserId, user.id))))
       .orderBy(desc(communicationLog.createdAt));
 
     res.json(messages);
   } catch (error) {
-    console.error('Error fetching communication:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error fetching communication');
     res.status(500).json({ error: 'Failed to fetch messages' });
   }
 });
@@ -852,10 +857,7 @@ router.post('/time-entries/start', async (req: any, res) => {
     }
     const outcome = await withTimerAccountTransaction(db, user, async (tx, locked) => {
       if (locked.profile?.id !== vaId) throw new TimerConflict(409, 'Worker profile changed');
-      const assignments = await tx.select().from(taskAssignments).where(and(
-        eq(taskAssignments.founderId, user.id),
-        inArray(taskAssignments.taskId, [...new Set([taskId, taskId.split(':')[0]])]),
-      )).for('update');
+      const assignments = await readCanonicalAssignments(tx, user.id, [...new Set([taskId, taskId.split(':')[0]])], { lock: true });
       const exact = assignments.filter(row => row.taskId === taskId);
       const relevant = exact.length ? exact : assignments.filter(row => row.taskId === taskId.split(':')[0]);
       if (relevant.length !== 1 || relevant[0].vaId !== vaId || !['assigned', 'in_progress'].includes(relevant[0].status)) {
@@ -907,7 +909,7 @@ router.post('/time-entries/start', async (req: any, res) => {
     }, worker[0].userId, user.id);
     res.json(outcome);
   } catch (error) {
-    const failure = timerFailure(error);
+    const failure = timerFailure(error) ?? assignmentFailure(error);
     if (failure) return res.status(failure.status).json({ error: failure.error });
     console.error('Error starting timer');
     res.status(500).json({ error: 'Failed to start timer' });
@@ -1003,32 +1005,20 @@ router.post('/handoff', async (req: any, res) => {
       return res.status(404).json({ error: 'Worker profile not found' });
     }
 
-    const assignments = await db.select({ vaId: taskAssignments.vaId }).from(taskAssignments)
-      .where(and(
-        eq(taskAssignments.taskId, taskId),
-        eq(taskAssignments.founderId, user.id),
-        inArray(taskAssignments.status, ['assigned', 'in_progress', 'blocked']),
-      ));
-    if (assignments.length === 0) {
-      return res.status(404).json({ error: 'Task assignment not found' });
-    }
-    if (assignments.some(assignment => assignment.vaId !== fromVaId)) {
-      return res.status(409).json({ error: 'The handoff sender is no longer assigned to this task' });
-    }
-
-    await db.insert(handoffNotes).values({
-      taskId,
-      fromVaId,
-      toVaId,
-      founderId: user.id,
-      whereLeftOff,
-      nextSteps,
-      blockers,
+    await withLockedAssignment(db, user, taskId, async (tx, assignment) => {
+      if (assignment.status === 'completed') throw new AssignmentError(404, 'Task assignment not found');
+      if (assignment.vaId !== fromVaId) throw new AssignmentError(409, 'The handoff sender is no longer assigned to this task');
+      await tx.insert(handoffNotes).values({ taskId, fromVaId, toVaId, founderId: user.id,
+        whereLeftOff, nextSteps, blockers });
+    }, {
+      workerProfileIds: toVaId === null ? [fromVaId] : [fromVaId, toVaId],
     });
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error creating handoff:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error creating handoff');
     res.status(500).json({ error: 'Failed to create handoff' });
   }
 });
@@ -1267,20 +1257,15 @@ router.post('/assignments/:id/assign', async (req: any, res) => {
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
     }
-    const worker = await getFounderWorker(db, user.id, vaId);
-    if (!worker) {
-      return res.status(404).json({ error: 'Worker profile not found' });
-    }
-    
-    await db.update(taskAssignments)
-      .set({ vaId, assignedAt: new Date() })
-      .where(and(eq(taskAssignments.id, assignmentId), eq(taskAssignments.founderId, user.id)));
+    await reassignTask(db, user, { assignmentId, workerProfileId: vaId });
 
     await invalidateCache(user.id, user.openId, 'tasks');
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error assigning task:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error assigning task');
     res.status(500).json({ error: 'Failed to assign task' });
   }
 });
@@ -1310,29 +1295,28 @@ router.post('/assignments/:id/priority', async (req: any, res) => {
     }
     
     const taskId = assignment[0].taskId;
+    await readCanonicalAssignment(db, user.id, taskId);
     
-    // Upsert priority override
-    const existing = await db.select().from(founderPriorityOverrides).where(
-      and(eq(founderPriorityOverrides.taskId, taskId), eq(founderPriorityOverrides.founderId, user.id))
-    );
-
-    if (existing.length > 0) {
-      await db.update(founderPriorityOverrides)
-        .set({ priority })
-        .where(eq(founderPriorityOverrides.id, existing[0].id));
-    } else {
-      await db.insert(founderPriorityOverrides).values({
-        taskId,
-        founderId: user.id,
-        priority,
-      });
-    }
+    await withLockedAssignment(db, user, taskId, async (tx, current) => {
+      if (current.id !== assignmentId) throw new AssignmentError(409, 'Assignment identity changed');
+      const existing = await tx.select().from(founderPriorityOverrides).where(
+        and(eq(founderPriorityOverrides.taskId, taskId), eq(founderPriorityOverrides.founderId, user.id))
+      );
+      if (existing.length > 0) {
+        await tx.update(founderPriorityOverrides).set({ priority })
+          .where(eq(founderPriorityOverrides.id, existing[0].id));
+      } else {
+        await tx.insert(founderPriorityOverrides).values({ taskId, founderId: user.id, priority });
+      }
+    });
 
     await invalidateCache(user.id, user.openId, 'tasks');
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error setting priority:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error setting priority');
     res.status(500).json({ error: 'Failed to set priority' });
   }
 });
@@ -1476,6 +1460,7 @@ router.post('/email/morning-briefing/:workerId', async (req: any, res) => {
     const assignments = await db.select().from(taskAssignments).where(
       and(eq(taskAssignments.vaId, workerId), eq(taskAssignments.founderId, user.id))
     );
+    await verifyAssignmentList(db, user.id, assignments);
 
     const tasks = await mapWithConcurrency(assignments, BRIEFING_TRELLO_CONCURRENCY, async (a) => {
       const summary = await fetchTrelloCardSummary(a.taskId);
@@ -1510,7 +1495,9 @@ router.post('/email/morning-briefing/:workerId', async (req: any, res) => {
       res.status(500).json({ error: 'Failed to send email' });
     }
   } catch (error) {
-    console.error('Error sending morning briefing:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error sending morning briefing');
     res.status(500).json({ error: 'Failed to send briefing' });
   }
 });
@@ -1542,6 +1529,7 @@ router.post('/email/eod-report/:workerId', async (req: any, res) => {
     const assignments = await db.select().from(taskAssignments).where(
       and(eq(taskAssignments.vaId, workerId), eq(taskAssignments.founderId, user.id))
     );
+    await verifyAssignmentList(db, user.id, assignments);
 
     const completedTasks = await mapWithConcurrency(assignments.filter((a: typeof assignments[0]) => a.status === 'completed'), BRIEFING_TRELLO_CONCURRENCY, async (a) => {
       const summary = await fetchTrelloCardSummary(a.taskId);
@@ -1605,7 +1593,9 @@ router.post('/email/eod-report/:workerId', async (req: any, res) => {
       res.status(500).json({ error: 'Failed to send email' });
     }
   } catch (error) {
-    console.error('Error sending EOD report:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error sending EOD report');
     res.status(500).json({ error: 'Failed to send report' });
   }
 });
@@ -1702,6 +1692,7 @@ router.get('/workload-overview', async (req: any, res) => {
       const assignments = await db.select().from(taskAssignments).where(
         and(eq(taskAssignments.vaId, va.id), eq(taskAssignments.founderId, user.id))
       );
+      await verifyAssignmentList(db, user.id, assignments);
       
       const statusCounts = {
         assigned: 0,
@@ -1728,7 +1719,9 @@ router.get('/workload-overview', async (req: any, res) => {
 
     res.json(workload);
   } catch (error) {
-    console.error('Error fetching workload overview:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error fetching workload overview');
     res.status(500).json({ error: 'Failed to fetch workload' });
   }
 });
@@ -1823,6 +1816,11 @@ router.get('/worker/tasks', async (req: any, res) => {
         )
       );
 
+      const taskIds = [...new Set<string>(cardRows.map((row: any) => row.card.trelloId))];
+      for (let offset = 0; offset < taskIds.length; offset += MAX_ASSIGNMENT_TASKS) {
+        await readCanonicalAssignments(db, profile.founderId, taskIds.slice(offset, offset + MAX_ASSIGNMENT_TASKS));
+      }
+
       tasks = cardRows.map((row: any) => {
         const card = row.card;
         const board = row.board;
@@ -1888,6 +1886,7 @@ router.get('/worker/tasks', async (req: any, res) => {
         eq(taskAssignments.vaId, vaId),
         eq(taskAssignments.founderId, profile.founderId),
       ));
+      await verifyAssignmentList(db, profile.founderId, assignments);
 
       tasks = await Promise.all(assignments.map(async (a: typeof assignments[0]) => {
         const cardTrelloId = a.taskId.split(':')[0] || a.taskId.split('_')[0];
@@ -1955,7 +1954,9 @@ router.get('/worker/tasks', async (req: any, res) => {
 
     res.json({ tasks });
   } catch (error) {
-    console.error('Error fetching worker tasks:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error fetching worker tasks');
     res.status(500).json({ error: 'Failed to fetch tasks' });
   }
 });
@@ -1970,6 +1971,9 @@ router.post('/worker/tasks/:taskId/complete', async (req: any, res) => {
 
     const { taskId } = req.params;
     const { completed } = req.body;
+    if (typeof completed !== 'boolean') {
+      return res.status(400).json({ error: 'Completion must be true or false' });
+    }
 
     const db = await getDb();
     if (!db) {
@@ -1985,24 +1989,11 @@ router.post('/worker/tasks/:taskId/complete', async (req: any, res) => {
 
     if (pilotCompletionResponse(user.id, res)) return;
     
-    const vaId = profile.id;
-    
-    // Update the assignment status
-    const updateResult = await db.update(taskAssignments)
-      .set({ status: completed ? 'completed' : 'in_progress' })
-      .where(and(
-        eq(taskAssignments.taskId, decodeURIComponent(taskId)),
-        eq(taskAssignments.vaId, vaId),
-        eq(taskAssignments.founderId, profile.founderId),
-      ));
-
-    if (!didUpdateSingleTaskAssignment(updateResult)) {
-      return res.status(404).json({ error: 'Assigned task not found' });
-    }
+    await changeAssignmentStatus(db, user, { taskId, status: completed ? 'completed' : 'in_progress' });
 
     await invalidateCache(user.id, user.openId, 'tasks');
     websocketService.emitToUser(user.openId, 'task:completed', {
-      taskId: decodeURIComponent(taskId),
+      taskId,
       isCompleted: completed,
       timestamp: new Date().toISOString(),
       source: 'worker_task_toggle',
@@ -2010,7 +2001,9 @@ router.post('/worker/tasks/:taskId/complete', async (req: any, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error updating task:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error updating task');
     res.status(500).json({ error: 'Failed to update task' });
   }
 });
@@ -2039,25 +2032,11 @@ router.post('/worker/tasks/:taskId/review', async (req: any, res) => {
 
     if (pilotCompletionResponse(user.id, res)) return;
     
-    const vaId = profile.id;
-    
-    // Update the assignment status to completed
-    const updateResult = await db.update(taskAssignments)
-      .set({ status: 'completed' })
-      .where(and(
-        eq(taskAssignments.taskId, decodeURIComponent(taskId)),
-        eq(taskAssignments.vaId, vaId),
-        eq(taskAssignments.founderId, profile.founderId),
-      ));
-
-    if (!didUpdateSingleTaskAssignment(updateResult)) {
-      return res.status(404).json({ error: 'Assigned task not found' });
-    }
-
+    await changeAssignmentStatus(db, user, { taskId, status: 'completed' });
 
     await invalidateCache(user.id, user.openId, 'tasks');
     websocketService.emitToUser(user.openId, 'task:completed', {
-      taskId: decodeURIComponent(taskId),
+      taskId,
       isCompleted: true,
       status: 'completed',
       timestamp: new Date().toISOString(),
@@ -2066,7 +2045,9 @@ router.post('/worker/tasks/:taskId/review', async (req: any, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error submitting for review:', error);
+    const failure = assignmentFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error submitting for review');
     res.status(500).json({ error: 'Failed to submit for review' });
   }
 });

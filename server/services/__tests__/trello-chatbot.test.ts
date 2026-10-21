@@ -60,6 +60,38 @@ function mockPilotOwners(
 
 describe('Trello Chatbot', () => {
   describe('external comment safety', () => {
+    it.each(['revoked', 'read-error', 'unchanged', 'post-dispatch-error'])('runs the final guard after deferred readiness: %s', async outcome => {
+      vi.stubEnv('NOTIFICATIONS_ENABLED', 'true');
+      vi.stubEnv('TRELLO_API_KEY', 'test-key');
+      vi.stubEnv('TRELLO_TOKEN', 'test-token');
+      vi.stubEnv('APTLSS_MANAGER_SHADOW_ONLY', 'true');
+      vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '9');
+      mockPilotOwners([10]);
+      let release!: () => void;
+      const ready = new Promise<void>(resolve => { release = resolve; });
+      const database = await mocks.getDb();
+      mocks.getDb.mockImplementation(async () => { await ready; return database; });
+      const fetchSpy = vi.fn().mockImplementation(async () => {
+        if (outcome === 'post-dispatch-error') throw new Error('Connection lost');
+        return { ok: true };
+      });
+      vi.stubGlobal('fetch', fetchSpy);
+      let allowed = true;
+      const guard = vi.fn(async () => {
+        if (outcome === 'read-error') throw new Error('Read unavailable');
+        return allowed;
+      });
+      const pending = postTrelloComment('0123456789abcdef01234567', 'Approved question', guard);
+      await Promise.resolve();
+      expect(guard).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      if (outcome === 'revoked') allowed = false;
+      release();
+      expect(await pending).toBe(outcome === 'unchanged');
+      expect(guard).toHaveBeenCalledOnce();
+      expect(fetchSpy).toHaveBeenCalledTimes(outcome === 'unchanged' || outcome === 'post-dispatch-error' ? 1 : 0);
+    });
+
     it('requires an explicit notification opt-in before automation can post to Trello', () => {
       expect(isTrelloCommentAutomationEnabled({})).toBe(false);
       expect(isTrelloCommentAutomationEnabled({ NOTIFICATIONS_ENABLED: 'false', NODE_ENV: 'production' })).toBe(false);

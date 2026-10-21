@@ -164,6 +164,8 @@ jobs:
         env:
           APTLSS_UI_ONLY: "true"
         run: pnpm exec playwright test --config e2e/digest-recovery-ui.config.ts
+      - name: Verify isolated financial editor browser contracts
+        run: pnpm exec playwright test --config e2e/financial-ui.config.ts
       - name: Verify authentication and worker dashboard in a browser
         env:
           JWT_SECRET: ci-only-playwright-session-secret-not-for-deployment

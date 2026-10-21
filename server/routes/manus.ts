@@ -6,7 +6,6 @@ import { adminProcedure, operatorAccountProcedure, router, publicProcedure } fro
 import { getDb } from "../db";
 import {
   timeEntries,
-  paymentCycles,
   weeklyPayLog,
   dailyTriageState,
   sundayChecklist,
@@ -28,7 +27,7 @@ import {
   trelloCachedCards,
   users,
 } from "../../drizzle/schema.postgres";
-import { eq, and, desc, asc, gte, lte, sql, isNull, isNotNull, inArray } from "drizzle-orm";
+import { eq, and, desc, gte, lte, sql, isNull, isNotNull, inArray } from "drizzle-orm";
 import { collectComplianceSnapshot } from "../services/manus-scheduler";
 import { parseDateKey } from "../utils/date-only";
 import { calculateCompliancePercentage } from "../complianceMetrics";
@@ -42,82 +41,46 @@ import { parseManagerAssignmentReference, readManagerAssignmentState } from "../
 import { selectWorkerProfile } from "../workerOperatorContext";
 import { getGoogleEvidenceStatus } from "../googleEvidence";
 import { readCurrentManagerHistory } from "../aptlssManagerHistoryDb";
+import { assertCanonicalAssignmentRows, readCanonicalAssignments, assignmentFailure, MAX_ASSIGNMENT_TASKS } from "../taskAssignmentMutation";
+import { financialFailure, settlePaymentCycle, saveWeeklyPayLog, getWeeklyPayLogs, getWeeklyPayLog } from '../financialLedger';
+import { readPaymentCycles } from '../financialReadService';
 
 // ─── Payment Cycles Router ──────────────────────────────────────────────────
+const financialId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const financialCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const financialDateKey = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
+  try { parseDateKey(value); return true; } catch { return false; }
+}, 'A valid calendar date is required');
+function throwFinancialRouteError(error: unknown): never {
+  const failure = financialFailure(error);
+  if (!failure) throw error;
+  throw new TRPCError({ code: failure.status === 400 ? 'BAD_REQUEST'
+    : failure.status === 403 ? 'FORBIDDEN' : failure.status === 404 ? 'NOT_FOUND'
+      : failure.status === 409 ? 'CONFLICT' : 'INTERNAL_SERVER_ERROR', message: failure.error });
+}
+
 export const paymentRouter = router({
   getAllCycles: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
-    const founderId = Number(ctx.user.id);
-    return db.select().from(paymentCycles)
-      .where(eq(paymentCycles.founderId, founderId))
-      .orderBy(asc(paymentCycles.cycleStart));
+    if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB not available' });
+    return readPaymentCycles(db, ctx.user);
   }),
 
   getCurrentCycle: operatorAccountProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return null;
-    const founderId = Number(ctx.user.id);
-    const all = await db
-      .select()
-      .from(paymentCycles)
-      .where(and(eq(paymentCycles.isPaid, false), eq(paymentCycles.founderId, founderId)))
-      .orderBy(asc(paymentCycles.cycleStart))
-      .limit(1);
+    if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB not available' });
+    const all = await readPaymentCycles(db, ctx.user, true);
     return all[0] ?? null;
   }),
 
   markPaid: adminProcedure
-    .input(z.object({ cycleId: z.number() }))
+    .input(z.object({ cycleId: financialId }).strict())
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
-      const founderId = Number(ctx.user.id);
-
-      const [cycle] = await db
-        .select()
-        .from(paymentCycles)
-        .where(and(eq(paymentCycles.id, input.cycleId), eq(paymentCycles.founderId, founderId)))
-        .limit(1);
-      if (!cycle) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Payment cycle not found" });
-      }
-      if (cycle.isPaid) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Payment cycle is already settled" });
-      }
-
-      const updateResult = await db
-        .update(paymentCycles)
-        .set({ isPaid: true, paidAt: new Date(), paidBy: String(ctx.user.openId) })
-        .where(and(
-          eq(paymentCycles.id, input.cycleId),
-          eq(paymentCycles.founderId, founderId),
-          eq(paymentCycles.isPaid, false),
-        ));
-      if ((updateResult.rowCount ?? 0) !== 1) {
-        throw new TRPCError({ code: "CONFLICT", message: "Payment cycle was already settled" });
-      }
-
-      {
-        const currentEnd = new Date(cycle.cycleEnd);
-        const nextStart = new Date(currentEnd);
-        nextStart.setDate(nextStart.getDate() + 1);
-        const nextEnd = new Date(nextStart);
-        nextEnd.setDate(nextStart.getDate() + 13); // 14-day cycle
-
-        // Advance to next Friday
-        while (nextEnd.getDay() !== 5) {
-          nextEnd.setDate(nextEnd.getDate() + 1);
-        }
-
-        await db.insert(paymentCycles).values({
-          founderId,
-          cycleStart: nextStart,
-          cycleEnd: nextEnd,
-          baseAmount: "90.00",
-          isPaid: false,
-        });
-      }
+      try {
+        await settlePaymentCycle(db, ctx.user, input);
+      } catch (error) { throwFinancialRouteError(error); }
       return { success: true };
     }),
 });
@@ -125,113 +88,64 @@ export const paymentRouter = router({
 // ─── Weekly Pay Log Router ──────────────────────────────────────────────────
 export const payLogRouter = router({
   getAll: operatorAccountProcedure
-    .input(z.object({ limit: z.number().optional(), vaId: z.number().optional() }))
+    .input(z.object({ limit: z.number().int().min(1).max(100).optional(), vaId: financialId.optional() }).strict())
     .query(async ({ input, ctx }) => {
+      if (ctx.user.role === 'admin' && input.vaId === undefined) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'An explicit worker user ID is required' });
+      }
+      if (ctx.user.role === 'worker' && input.vaId !== undefined && input.vaId !== ctx.user.id) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'Workers can read only their own pay log' });
+      }
       const db = await getDb();
-      if (!db) return [];
-      const userId = Number(ctx.user.id);
-      const isWorker = ctx.user.role === "worker";
-      const vaId = isWorker ? userId : input.vaId;
-      if (!vaId) return [];
-
-      return db.select().from(weeklyPayLog)
-        .where(eq(weeklyPayLog.vaId, vaId))
-        .orderBy(desc(weeklyPayLog.weekStart))
-        .limit(input.limit ?? 10);
+      if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB not available' });
+      try { return await getWeeklyPayLogs(db, ctx.user, input); }
+      catch (error) { throwFinancialRouteError(error); }
     }),
 
   getByWeek: operatorAccountProcedure
-    .input(z.object({ weekStart: z.string(), vaId: z.number().optional() }))
+    .input(z.object({ weekStart: financialDateKey, vaId: financialId.optional() }).strict())
     .query(async ({ input, ctx }) => {
+      if (ctx.user.role === 'admin' && input.vaId === undefined) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'An explicit worker user ID is required' });
+      }
+      if (ctx.user.role === 'worker' && input.vaId !== undefined && input.vaId !== ctx.user.id) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'Workers can read only their own pay log' });
+      }
       const db = await getDb();
-      if (!db) return null;
-      const userId = Number(ctx.user.id);
-      const isWorker = ctx.user.role === "worker";
-      const vaId = isWorker ? userId : input.vaId;
-      if (!vaId) return null;
-
-      const results = await db.select().from(weeklyPayLog).where(
-        and(eq(weeklyPayLog.weekStart, parseDateKey(input.weekStart)), eq(weeklyPayLog.vaId, vaId))
-      ).limit(1);
-      return results[0] ?? null;
+      if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB not available' });
+      try { return await getWeeklyPayLog(db, ctx.user, input); }
+      catch (error) { throwFinancialRouteError(error); }
     }),
 
   upsert: adminProcedure
     .input(z.object({
-      vaId: z.number().optional(),
-      weekStart: z.string(),
-      weekEnd: z.string(),
-      paymentCycleId: z.number().optional(),
-      meritM1: z.number().default(0),
-      meritM2: z.number().default(0),
-      meritM3: z.number().default(0),
-      meritStreak: z.number().default(0),
-      demeritD1: z.number().default(0),
-      demeritD2: z.number().default(0),
-      demeritD3: z.number().default(0),
-      demeritD4: z.number().default(0),
-      demeritD5: z.number().default(0),
-      demeritD6: z.number().default(0),
-      demeritD7: z.number().default(0),
-      demeritD8: z.number().default(0),
-      demeritD9: z.number().default(0),
-      demeritD10: z.number().default(0),
-      demeritD11: z.number().default(0),
+      vaId: financialId,
+      weekStart: financialDateKey,
+      weekEnd: financialDateKey,
+      expectedRevision: z.string().max(100_000).nullable(),
+      paymentCycleId: financialId.optional(),
+      meritM1: financialCount.default(0),
+      meritM2: financialCount.default(0),
+      meritM3: financialCount.default(0),
+      meritStreak: financialCount.default(0),
+      demeritD1: financialCount.default(0),
+      demeritD2: financialCount.default(0),
+      demeritD3: financialCount.default(0),
+      demeritD4: financialCount.default(0),
+      demeritD5: financialCount.default(0),
+      demeritD6: financialCount.default(0),
+      demeritD7: financialCount.default(0),
+      demeritD8: financialCount.default(0),
+      demeritD9: financialCount.default(0),
+      demeritD10: financialCount.default(0),
+      demeritD11: financialCount.default(0),
       notes: z.string().optional(),
-    }))
+    }).strict().refine(value => value.weekEnd >= value.weekStart, 'Week end must not precede week start'))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB not available" });
-      const founderId = Number(ctx.user.id);
-      const vaId = input.vaId || founderId;
-
-      const totalMerits = input.meritM1 + input.meritM2 + input.meritM3 + input.meritStreak;
-      const totalDemerits = input.demeritD1 + input.demeritD2 + input.demeritD3 + input.demeritD4 +
-        input.demeritD5 + input.demeritD6 + input.demeritD7 + input.demeritD8 +
-        input.demeritD9 + input.demeritD10 + input.demeritD11;
-      const baseVal = 90;
-      const projectedVal = baseVal - totalDemerits + totalMerits;
-
-      const values = {
-        vaId,
-        founderId,
-        weekStart: parseDateKey(input.weekStart),
-        weekEnd: parseDateKey(input.weekEnd),
-        paymentCycleId: input.paymentCycleId || null,
-        baseAmount: String(baseVal),
-        meritM1: String(input.meritM1),
-        meritM2: String(input.meritM2),
-        meritM3: String(input.meritM3),
-        meritStreak: String(input.meritStreak),
-        demeritD1: String(input.demeritD1),
-        demeritD2: String(input.demeritD2),
-        demeritD3: String(input.demeritD3),
-        demeritD4: String(input.demeritD4),
-        demeritD5: String(input.demeritD5),
-        demeritD6: String(input.demeritD6),
-        demeritD7: String(input.demeritD7),
-        demeritD8: String(input.demeritD8),
-        demeritD9: String(input.demeritD9),
-        demeritD10: String(input.demeritD10),
-        demeritD11: String(input.demeritD11),
-        totalMerits: String(totalMerits),
-        totalDemerits: String(totalDemerits),
-        projectedPay: String(projectedVal),
-        notes: input.notes || null,
-      };
-
-      const existing = await db.select().from(weeklyPayLog).where(
-        and(eq(weeklyPayLog.weekStart, parseDateKey(input.weekStart)), eq(weeklyPayLog.vaId, vaId))
-      ).limit(1);
-
-      if (existing[0]) {
-        await db.update(weeklyPayLog).set(values).where(eq(weeklyPayLog.id, existing[0].id));
-        return { ...existing[0], ...values };
-      } else {
-        const [result] = await db.insert(weeklyPayLog).values(values)
-          .returning({ id: weeklyPayLog.id });
-        return { id: result?.id, ...values };
-      }
+      try { return (await saveWeeklyPayLog(db, ctx.user, input)).log; }
+      catch (error) { throwFinancialRouteError(error); }
     }),
 });
 
@@ -511,7 +425,7 @@ async function requireTimerHistory(db: NonNullable<Awaited<ReturnType<typeof get
 async function timerRoute<T>(action: () => Promise<T>): Promise<T> {
   try { return await action(); }
   catch (error) {
-    const failure = timerFailure(error);
+    const failure = assignmentFailure(error) ?? timerFailure(error);
     if (failure) throw new TRPCError({ code: failure.status === 409 ? "CONFLICT" : failure.status === 404 ? "NOT_FOUND" : failure.status === 400 ? "BAD_REQUEST" : "FORBIDDEN", message: failure.error });
     if (error instanceof TRPCError) throw error;
     throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Timer operation could not be completed" });
@@ -560,21 +474,22 @@ export const timerRouter = router({
             .limit(1)
           : [];
         if (ctx.user.role === "worker") {
-          const assignments = await tx.select({ taskId: taskAssignments.taskId, status: taskAssignments.status })
+          const founderAssignments = await tx.select()
             .from(taskAssignments)
-            .where(and(
-              eq(taskAssignments.vaId, profile!.id),
-              eq(taskAssignments.founderId, profile!.founderId),
-              inArray(taskAssignments.status, ["assigned", "in_progress", "blocked"]),
-            ))
-            .orderBy(taskAssignments.taskId)
-            .limit(251)
-            .for("update");
-          if (assignments.length > 250) {
+            .where(eq(taskAssignments.founderId, profile!.founderId));
+          const cardKeys = [...new Set([input.cardId, ...founderAssignments
+            .filter(assignment => parseManagerAssignmentReference(assignment.taskId)?.cardId === input.cardId)
+            .map(assignment => assignment.taskId)])];
+          if (cardKeys.length > MAX_ASSIGNMENT_TASKS) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This card has too many assignment keys to verify safely." });
+          }
+          const cardRows = await readCanonicalAssignments(tx, profile!.founderId, cardKeys, { lock: true });
+          assertCanonicalAssignmentRows(cardRows);
+          if (cardRows.length > 250) {
             throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Your current task assignments could not be verified. Refresh your work list before tracking time." });
           }
-          const cardAssignments = assignments.filter(assignment =>
-            parseManagerAssignmentReference(assignment.taskId)?.cardId === input.cardId,
+          const cardAssignments = cardRows.filter(assignment =>
+            assignment.vaId === profile!.id && ["assigned", "in_progress", "blocked"].includes(assignment.status),
           );
           if (!cardAssignments.some(assignment => assignment.status === "assigned" || assignment.status === "in_progress")) {
             if (cardAssignments.some(assignment => assignment.status === "blocked")) {

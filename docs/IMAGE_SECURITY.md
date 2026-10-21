@@ -46,6 +46,15 @@ with a fixed package at 1.3.2-r1. The final Docker stage now refreshes zlib from
 the base distribution's repository. A fresh exact-image receipt is required;
 the earlier passing receipt does not cover this new candidate.
 
+The patched candidate `f391013` subsequently passed full quality run
+`39557333508`, including its real scan and configured PostgreSQL acceptance.
+Its exact image config ID is
+`sha256:e64b8f6464f0f4ca255356488a64c48ed17498307805b5808e36ff69a2b4e7df`:
+633 packages, zero findings at every severity and zero exceptions. The passing
+database receipt matches that ID and confirms fixture cleanup. This is source
+and isolated-image acceptance, not a production-host deployment. Integration
+with the accepted financial main needs its own newly built and scanned image.
+
 ## Pinned Scanner And Fail-Closed Policy
 
 [`scan-production-image.mjs`](../scripts/scan-production-image.mjs) downloads
