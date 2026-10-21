@@ -21,9 +21,9 @@ verified remote annotated tag `archive/financial-authority-acceptance-20261021`:
 tag object `e17499ed7bd47d8a00d4d51769a6dfb51690a775`, peeled commit
 `c43dee70fadc49522fc4c3fe42285bc37cb5ecb2`. After archive and merged-tree
 verification, the remote financial branch was deleted with its exact-SHA lease.
-Its local ref remains pending: ordinary deletion refused while the current
-PR #135 integration merge was in progress, and no forced deletion was performed.
-Delete that local ref only after the completed integration contains its source.
+Ordinary local deletion initially refused while the integration merge was in
+progress. After merge `be5eea6` contained the accepted source, guarded
+`git branch -d` succeeded. No forced local deletion was performed.
 
 PR #135 remains the source integration candidate, not accepted main. Earlier head
 `f391013` passed full CI `39557333508`, including an exact-image scan of 633
@@ -33,7 +33,7 @@ artifact-upload Action was the sole approved Action-policy addition; the earlier
 policy blocker is resolved without broadening the remaining allowlist.
 
 The current local PR #135 source includes generic credential documentation commit
-`0ab95ce` and an in-progress merge of the accepted main. The completed integration
+`0ab95ce` and completed merge `be5eea6` of the accepted main. The integration
 requires fresh exact-head quality, security, image and acceptance gates. Neither
 the earlier PR #135 receipt nor PR #144's acceptance transfers to this changed
 source. Only after those gates and review pass may the reviewed head be archived,

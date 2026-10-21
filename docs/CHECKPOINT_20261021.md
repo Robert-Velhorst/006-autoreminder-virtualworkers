@@ -122,7 +122,8 @@ it does not prove the live data cutover, providers or human shadow trial.
 The accepted head is preserved under the verified annotated remote tag
 `archive/financial-authority-acceptance-20261021`. Its remote development branch
 was deleted using its expected full SHA after archive and merge-tree comparison.
-The local branch remains until the image-security integration contains it.
+After image-security integration merge `be5eea6` contained it, guarded local
+branch deletion also succeeded; no forced deletion was needed.
 
 PR135 separately passed full quality `39557333508` at `f391013`, including
 a real zero-finding image report without exceptions. The current integration

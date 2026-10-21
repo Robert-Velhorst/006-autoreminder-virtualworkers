@@ -52,8 +52,9 @@ CodeQL workflow `39557267429` and its aggregate check passed. It merged as
 `12ed4cfa58c5f3a35da0f144ff92d5b65c26c279`. The reviewed head is retained under
 verified annotated archive tag `archive/financial-authority-acceptance-20261021`.
 The remote financial branch was subsequently deleted with an exact-SHA lease;
-its local ref awaits completion of the PR #135 integration, without forced
-deletion. These gates cover source acceptance, not operational financial-data
+its local ref was removed by guarded deletion after integration merge `be5eea6`
+contained the source. No forced local deletion was used. These gates cover
+source acceptance, not operational financial-data
 reconciliation; follow [Financial Ledger Cutover](FINANCIAL_LEDGER_CUTOVER.md)
 before applying migration 0009 to historical production data.
 
@@ -74,7 +75,7 @@ PostgreSQL acceptance confirmed cleanup for the same image. This is isolated
 source/image proof, not acceptance of a live host or provider.
 
 The current local PR #135 source includes generic credential documentation
-commit `0ab95ce` and an in-progress merge of accepted main. The resulting
+commit `0ab95ce` and completed merge `be5eea6` of accepted main. The resulting
 integration must pass fresh exact-head quality, CodeQL, exact-image security and
 acceptance gates before consolidation. Prior PR #135 or PR #144 results cannot
 be transferred to this changed source. No external-provider acceptance,
