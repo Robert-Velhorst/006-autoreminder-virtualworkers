@@ -17,6 +17,12 @@ database or cache publicly; use a private network or loopback-bound host service
 Public password registration is disabled; existing workers authenticate with
 their registered Trello identity or a separately provisioned local password.
 
+If the optional legacy external OAuth login is enabled, follow
+[OAuth Login State](OAUTH_LOGIN_STATE.md). Register the exact callback under the
+configured public origin and verify real provider login and Secure cookie
+behavior on the target host. Local route/native tests do not prove provider
+acceptance. Leave that compatibility flow unconfigured when it is not needed.
+
 Set `PUBLIC_URL`, `APP_URL`, and `VITE_FRONTEND_URL` in the same
 `/opt/va-dashboard/.env` file passed to `docker compose --env-file`. All three
 must be the public HTTPS origin (for example `https://dashboard.example.com`),

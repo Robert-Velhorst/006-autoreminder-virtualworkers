@@ -11,11 +11,21 @@ authentication and worker offboarding, and confirmed fixture cleanup. This is
 not acceptance of the real Hetzner host, providers, or operational data.
 
 PR [#141](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/141)
-contains the next canonical timer identity and worker-interface changes. Its
-initial source `df3931fedbf45f5253891dcd47af3cd4aabf2db6` passed CodeQL and the
-configured image gate, but failed full native regression acceptance. Its result
-must not be described as a green release. Follow-up changes require fresh
-exact-head tests, including real database concurrency and recovery checks.
+merged canonical timer identity and worker-interface changes as
+`df5c9f3f8af3c06723fe0d1992a50d6153ed4410`, with an identical tree to reviewed
+head `386aab90401312d48f818d3e8c3ccb6ab2266d76`. That head passed quality
+`39543523895` and CodeQL `39543520471`: 4,460 Vitest cases with 22 skips,
+all 17 native cross-reader cases, configured image acceptance, browser gates
+and isolated backup/restore. Post-merge main quality `39544579909` and
+CodeQL/push `39544579781` also passed. Earlier failed candidates remain failed
+historical evidence; later source changes need their own exact-head checks.
+
+The separate [external OAuth login state](OAUTH_LOGIN_STATE.md) repair adds
+server-owned initiation and a browser-bound single-use database transaction,
+with UTC database-clock expiry checked after acquiring its row lock. Mounted
+route and SDK tests do not establish real provider acceptance; native races,
+expiry and rollback must pass on the exact candidate. Founder/task assignment
+uniqueness remains a confirmed separate production gap (#95).
 
 PR [#135](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/135)
 retains the separate exact-image vulnerability and promotion gate. Its workflow
