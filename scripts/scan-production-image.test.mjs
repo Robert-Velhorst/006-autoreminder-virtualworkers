@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { IMAGE_REPOSITORY, SCANNER, runtimeManifestDigest, scanProductionImage, scannerEnvironment, sha256, verifyScannerArchive } from './scan-production-image.mjs';
 
 const imageId = `sha256:${'1'.repeat(64)}`;
@@ -156,5 +158,34 @@ test('rejects mutable registry references and paths outside runner temporary sto
     await assert.rejects(scanProductionImage(`${IMAGE_REPOSITORY}:latest`, f.proofPath, f.options));
     await assert.rejects(scanProductionImage('va-dashboard:ci', join(f.root, '..', 'not-owned.json'), f.options));
     assert.equal(f.state.calls.length, 0);
+  } finally { f.cleanup(); }
+});
+
+test('actual scanner CLI rejects mutable input before any external executable is available', () => {
+  const f = fixture();
+  try {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('./scan-production-image.mjs', import.meta.url)),
+      `${IMAGE_REPOSITORY}:latest`, f.proofPath], {
+      encoding: 'utf8', timeout: 10_000, env: { ...process.env, PATH: '', RUNNER_TEMP: f.root },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Only the local CI image or a pinned VA Dashboard registry digest/);
+    assert.ok(!readdirSync(f.root).includes('proof.json'));
+  } finally { f.cleanup(); }
+});
+
+test('actual scanner CLI cannot overwrite files outside its runner temporary root', () => {
+  const f = fixture();
+  try {
+    const runner = join(f.root, 'runner'); mkdirSync(runner);
+    const sentinel = join(f.root, 'retained.txt'); writeFileSync(sentinel, 'Retain this private fixture');
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('./scan-production-image.mjs', import.meta.url)),
+      'va-dashboard:ci', sentinel], {
+      encoding: 'utf8', timeout: 10_000, env: { ...process.env, PATH: '', RUNNER_TEMP: runner },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /inside the runner temporary directory/);
+    assert.equal(readFileSync(sentinel, 'utf8'), 'Retain this private fixture');
+    assert.ok(!result.stderr.includes('Retain this private fixture'));
   } finally { f.cleanup(); }
 });

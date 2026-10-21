@@ -139,8 +139,10 @@ The CI scan does not substitute for scanning the separately built release.
    helper does not independently verify the external attestation; workflow
    ordering supplies that prerequisite.
 4. [`promote-scanned-image.mjs`](../scripts/promote-scanned-image.mjs) rechecks
-   the proof, raw report and policy hashes, evaluator decision, manifest/config
-   identity, and platform. Proof age is limited to one hour and future-dated
+   the proof, raw report, database metadata and policy hashes, evaluator
+   decision, manifest/config identity, and platform. It reads only the canonical
+   `image-security-release.json` evidence files under absolute `RUNNER_TEMP`;
+   arbitrary command-line file paths are rejected. Proof age is limited to one hour and future-dated
    proofs are rejected. It promotes without rebuilding, with `latest` only
    for a stable, non-prerelease release.
 5. Promotion resolves the final tags and checks their equality with the scanned

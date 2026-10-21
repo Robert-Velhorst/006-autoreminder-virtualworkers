@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
@@ -21,7 +21,8 @@ function databaseMetadata(at) {
     DownloadedAt: new Date(time - 60_000).toISOString(), NextUpdate: new Date(time + 60 * 60_000).toISOString() };
 }
 function fixture() {
-  const input = { repository: REPOSITORY, builtDigest: digest, releaseTag: 'v1.2.3', isPrerelease: 'false', proofPath: '/isolated/scan.json' };
+  const tempRoot = resolve(tmpdir(), 'isolated-promotion-fixture');
+  const input = { repository: REPOSITORY, builtDigest: digest, releaseTag: 'v1.2.3', isPrerelease: 'false', proofPath: join(tempRoot, 'image-security-release.json') };
   const report = Buffer.from(JSON.stringify({ Metadata: { ImageID: imageId }, Results: [] }));
   const policy = Buffer.from(JSON.stringify({ version: 1 }));
   const database = Buffer.from(JSON.stringify(databaseMetadata(now)));
@@ -38,6 +39,7 @@ function fixture() {
     promotedDigest: digest,
   };
   const dependencies = {
+    tempRoot,
     now: () => now,
     readArtifact(path, maximum) {
       state.reads.push(path);
@@ -135,6 +137,33 @@ test('promotes the exact scanned immutable index with attestations, without anno
   assert.deepEqual(state.calls.find(args => args[0] === 'pull'), ['pull', '--platform', 'linux/amd64', sourceRef]);
   assert.ok(state.calls.some(args => args[3] === `${REPOSITORY}@${runtimeDigest}` && args.includes('--raw')));
 });
+
+for (const [label, path] of [
+  ['relative filename', () => 'image-security-release.json'],
+  ['traversal', root => `${root}/../image-security-release.json`],
+  ['same-directory traversal alias', root => `${root}/sub/../image-security-release.json`],
+  ['sibling-prefix directory', root => `${root}-other/image-security-release.json`],
+  ['unrelated secret path', root => join(root, '.env')],
+  ['different filename', root => join(root, 'scan.json')],
+  ['encoded traversal', root => `${root}/%2e%2e/image-security-release.json`],
+  ['opposite separator alias', root => `${root}${process.platform === 'win32' ? '/' : '\\'}image-security-release.json`],
+]) {
+  test(`rejects ${label} before reading any artifact or invoking Docker`, async () => {
+    const { input, state, dependencies } = fixture();
+    input.proofPath = path(dependencies.tempRoot);
+    await assert.rejects(promoteScannedImage(input, dependencies), /canonical release artifact/);
+    assert.equal(state.reads.length, 0);
+    assert.equal(state.calls.length, 0);
+  });
+}
+
+for (const root of ['', '.', 'relative/directory']) {
+  test(`rejects missing or relative trusted temporary root ${JSON.stringify(root)} before reads`, async () => {
+    const { input, state, dependencies } = fixture(); dependencies.tempRoot = root;
+    await assert.rejects(promoteScannedImage(input, dependencies), /absolute trusted RUNNER_TEMP/);
+    assert.equal(state.reads.length, 0); assert.equal(state.calls.length, 0);
+  });
+}
 
 test('rc promotion never writes or inspects latest', async () => {
   const { input, state, dependencies } = fixture();
@@ -260,7 +289,7 @@ test('actual Node CLI validates disk proof and current policy with Docker subpro
   const dir = mkdtempSync(join(tmpdir(), 'promotion-cli-'));
   try {
     const { input, state } = fixture();
-    const proofPath = join(dir, 'proof.json');
+    const proofPath = join(dir, 'image-security-release.json');
     const commandLog = join(dir, 'docker-calls.jsonl');
     const transportPath = join(dir, 'transport.json');
     const preload = join(dir, 'mock-docker.mjs');
@@ -292,7 +321,8 @@ test('actual Node CLI validates disk proof and current policy with Docker subpro
     `);
     const script = fileURLToPath(new URL('./promote-scanned-image.mjs', import.meta.url));
     const args = ['--import', pathToFileURL(preload).href, script, REPOSITORY, digest, input.releaseTag, input.isPrerelease, proofPath];
-    const result = spawnSync(process.execPath, args, { cwd: dir, encoding: 'utf8', timeout: 15_000 });
+    const cliOptions = { cwd: dir, encoding: 'utf8', timeout: 15_000, env: { ...process.env, RUNNER_TEMP: dir } };
+    const result = spawnSync(process.execPath, args, cliOptions);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).sourceRef, sourceRef);
     const calls = readFileSync(commandLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
@@ -300,15 +330,23 @@ test('actual Node CLI validates disk proof and current policy with Docker subpro
     assert.equal(calls.find(call => call[2] === 'create').at(-1), sourceRef);
     assert.deepEqual(calls.slice(-2).map(call => call[3]), [`${REPOSITORY}:v1.2.3`, `${REPOSITORY}:latest`]);
     rmSync(commandLog);
+    const alternate = join(dir, 'other-proof.json');
+    writeFileSync(alternate, JSON.stringify(state.proof));
+    writeFileSync(`${alternate}.trivy.json`, report); writeFileSync(`${alternate}.database.json`, metadata);
+    for (const untrusted of [alternate, 'image-security-release.json', `${dir}/sub/../image-security-release.json`, `${dir}-sibling/image-security-release.json`, join(dir, '.env')]) {
+      const denied = spawnSync(process.execPath, [...args.slice(0, -1), untrusted], cliOptions);
+      assert.equal(denied.status, 1);
+      assert.equal(existsSync(commandLog), false, 'Noncanonical argv proof path must not reach Docker');
+    }
     state.proof.reportSha256 = '0'.repeat(64); writeFileSync(proofPath, JSON.stringify(state.proof));
-    const rejected = spawnSync(process.execPath, args, { cwd: dir, encoding: 'utf8', timeout: 15_000 });
+    const rejected = spawnSync(process.execPath, args, cliOptions);
     assert.equal(rejected.status, 1);
     assert.equal(existsSync(commandLog), false, 'Invalid evidence must not reach even mocked Docker');
     state.proof.reportSha256 = sha(report);
     const oversized = Buffer.alloc(1024 * 1024 + 1, ' ');
     state.proof.databaseMetadataSha256 = sha(oversized);
     writeFileSync(proofPath, JSON.stringify(state.proof)); writeFileSync(`${proofPath}.database.json`, oversized);
-    const oversizedResult = spawnSync(process.execPath, args, { cwd: dir, encoding: 'utf8', timeout: 15_000 });
+    const oversizedResult = spawnSync(process.execPath, args, cliOptions);
     assert.equal(oversizedResult.status, 1);
     assert.equal(existsSync(commandLog), false, 'Oversized database metadata must not reach Docker');
   } finally { rmSync(dir, { recursive: true, force: true }); }
