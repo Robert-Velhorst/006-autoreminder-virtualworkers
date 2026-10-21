@@ -15,7 +15,7 @@ import { ENV } from './_core/env';
 import { sdk } from './_core/sdk';
 import { registerOAuthRoutes } from './_core/oauth';
 import { createOAuthLoginState, consumeOAuthLoginState } from './_core/oauthStateDb';
-import { createOAuthLoginNonce, hashOAuthLoginNonce, OAUTH_LOGIN_STATE_PREFIX, type OAuthLoginStateRecord } from './_core/oauthState';
+import { createOAuthLoginNonce, hashOAuthLoginNonce, openOAuthLoginBinding, OAUTH_LOGIN_STATE_PREFIX, type OAuthLoginStateRecord } from './_core/oauthState';
 
 const fixtureUrl = process.env.APTLSS_TEST_DATABASE_URL;
 describe.skipIf(!fixtureUrl)('OAuth state native atomicity and DB-clock expiry', { timeout: 25000 }, () => {
@@ -124,11 +124,13 @@ describe.skipIf(!fixtureUrl)('OAuth state native atomicity and DB-clock expiry',
       expect(authorization.searchParams.get('redirectUri')).toBe(callbackUri);
       const state = authorization.searchParams.get('state')!;
       const bindingCookie = ([] as string[]).concat(started.headers['set-cookie'] ?? [])[0].split(';')[0];
-      const binding = Object.values(parseCookies(bindingCookie))[0]!;
+      const encryptedBinding = Object.values(parseCookies(bindingCookie))[0]!;
+      const binding = openOAuthLoginBinding(encryptedBinding, callbackUri);
+      expect(binding).toMatch(/^[\w-]{43}$/); expect(encryptedBinding).not.toContain(binding!);
       const persisted = await rows(); expect(persisted).toHaveLength(1);
       expect(persisted[0]).toMatchObject({ key: `${OAUTH_LOGIN_STATE_PREFIX}${hashOAuthLoginNonce(state)}`, vaId: null });
-      expect(JSON.parse(persisted[0].value)).toEqual({ bindingHash: hashOAuthLoginNonce(binding), callbackUri });
-      expect(JSON.stringify(persisted)).not.toContain(state); expect(JSON.stringify(persisted)).not.toContain(binding);
+      expect(JSON.parse(persisted[0].value)).toEqual({ bindingHash: hashOAuthLoginNonce(binding!), callbackUri });
+      expect(JSON.stringify(persisted)).not.toContain(state); expect(JSON.stringify(persisted)).not.toContain(binding!);
       expect(exchange).not.toHaveBeenCalled(); expect(userInfo).not.toHaveBeenCalled();
 
       const completed = await browser.get('/api/oauth/callback').query({ state, code: 'synthetic-chain-code' }).expect(302);

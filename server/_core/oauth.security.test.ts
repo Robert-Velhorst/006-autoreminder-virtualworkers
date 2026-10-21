@@ -1,5 +1,6 @@
 import express from 'express';
 import request from 'supertest';
+import { parse as parseCookies } from 'cookie';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { users } from '../../drizzle/schema.postgres';
 import { COOKIE_NAME } from '../../shared/const';
@@ -16,7 +17,8 @@ vi.mock('../db', () => ({ getDb: controls.getDb, upsertUser: controls.upsert,
 vi.mock('./oauthStateDb', () => ({ createOAuthLoginState: controls.create, consumeOAuthLoginState: controls.consume }));
 import { registerOAuthRoutes } from './oauth';
 import { sdk } from './sdk';
-import { hashOAuthLoginNonce, createOAuthLoginNonce, OAUTH_LOGIN_STATE_TTL_MS } from './oauthState';
+import { ENV } from './env';
+import { hashOAuthLoginNonce, createOAuthLoginNonce, openOAuthLoginBinding, OAUTH_LOGIN_STATE_TTL_MS } from './oauthState';
 
 const callbackUri = 'https://dashboard.example.invalid/api/oauth/callback';
 function mounted() { const app = express(); registerOAuthRoutes(app); return app; }
@@ -34,6 +36,7 @@ function noAccountOrProviderCalls() {
   expect(controls.upsert).not.toHaveBeenCalled(); expect(controls.account).not.toHaveBeenCalled();
 }
 beforeEach(() => {
+  ENV.cookieSecret = controls.secret;
   vi.stubEnv('NODE_ENV', 'test'); vi.stubEnv('PUBLIC_URL', 'https://dashboard.example.invalid');
   vi.stubEnv('VITE_OAUTH_PORTAL_URL', 'https://portal.example.invalid'); vi.stubEnv('SESSION_APP_ID', 'synthetic-oauth-app');
   controls.states.clear();
@@ -52,7 +55,7 @@ beforeEach(() => {
   vi.spyOn(sdk, 'getUserInfo').mockResolvedValue({ openId: account.openId, name: account.name, email: null, loginMethod: 'oauth' } as never);
   vi.spyOn(console, 'error').mockImplementation(() => undefined);
 });
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+afterEach(() => { ENV.cookieSecret = controls.secret; vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 describe('mounted browser-bound OAuth login', () => {
   it('issues separate browser/state nonces, persists only hashes and uses configured callback despite hostile request metadata', async () => {
@@ -62,11 +65,14 @@ describe('mounted browser-bound OAuth login', () => {
     expect(url.origin).toBe('https://portal.example.invalid'); expect(url.pathname).toBe('/app-auth');
     expect(url.searchParams.get('redirectUri')).toBe(callbackUri);
     const state = url.searchParams.get('state')!;
-    const binding = cookieHeaders(response)[0].split(';')[0].split('=')[1];
+    const encryptedBinding = Object.values(parseCookies(cookieHeaders(response)[0].split(';')[0]))[0]!;
+    const binding = openOAuthLoginBinding(encryptedBinding, callbackUri);
+    expect(binding).toMatch(/^[\w-]{43}$/);
+    expect(encryptedBinding).not.toContain(binding!);
     expect(state).not.toBe(binding); expect(state).toMatch(/^[\w-]{43}$/);
-    expect(controls.create).toHaveBeenCalledWith({ stateHash: hashOAuthLoginNonce(state), bindingHash: hashOAuthLoginNonce(binding), callbackUri });
+    expect(controls.create).toHaveBeenCalledWith({ stateHash: hashOAuthLoginNonce(state), bindingHash: hashOAuthLoginNonce(binding!), callbackUri });
     expect(JSON.stringify(controls.create.mock.calls)).not.toContain(state);
-    expect(JSON.stringify(controls.create.mock.calls)).not.toContain(binding);
+    expect(JSON.stringify(controls.create.mock.calls)).not.toContain(binding!);
     expect(response.headers['cache-control']).toBe('no-store'); noAccountOrProviderCalls();
   });
 
@@ -81,7 +87,7 @@ describe('mounted browser-bound OAuth login', () => {
     expect(cookieHeaders(response).some(cookie => cookie.startsWith('va_oauth_binding=;'))).toBe(true);
   });
 
-  it.each(['missing code','missing state','malformed state','tampered state','legacy redirect state','missing cookie','malformed cookie','wrong browser','swapped state'])(
+  it.each(['missing code','missing state','malformed state','tampered state','legacy redirect state','missing cookie','malformed cookie','tampered cookie','wrong browser','swapped state'])(
     'rejects %s without provider/account calls or consuming the legitimate browser attempt', async defect => {
       const client = request.agent(mounted()); const legit = await start(client);
       const other = await start(request.agent(mounted()));
@@ -93,12 +99,18 @@ describe('mounted browser-bound OAuth login', () => {
       if (defect === 'legacy redirect state') state = Buffer.from('https://evil.invalid/api/oauth/callback').toString('base64');
       if (defect === 'missing cookie') cookie = '';
       if (defect === 'malformed cookie') cookie = 'va_oauth_binding=invalid';
+      if (defect === 'tampered cookie') {
+        const [name, sealed] = Object.entries(parseCookies(cookie))[0];
+        const middle = Math.floor(sealed!.length / 2);
+        cookie = `${name}=${encodeURIComponent(sealed!.slice(0, middle) + (sealed![middle] === 'A' ? 'B' : 'A') + sealed!.slice(middle + 1))}`;
+      }
       if (defect === 'wrong browser') cookie = other.cookie;
       if (defect === 'swapped state') state = other.state;
       const invalid = await request(mounted()).get('/api/oauth/callback').query({ ...(state ? { state } : {}), ...(code ? { code } : {}) })
         .set('Cookie', cookie).expect(400);
       expect(sessionCookie(invalid)).toBeUndefined(); expect(cookieHeaders(invalid)).toEqual([]);
       expect(controls.states.has(hashOAuthLoginNonce(legit.state))).toBe(true); noAccountOrProviderCalls();
+      if (defect === 'tampered cookie') expect(controls.consume).not.toHaveBeenCalled();
       await client.get('/api/oauth/callback').query({ state: legit.state, code: 'legitimate-code' }).expect(302);
     },
   );
@@ -152,8 +164,18 @@ describe('mounted browser-bound OAuth login', () => {
     const client = request.agent(mounted()); const attempt = await start(client);
     vi.stubEnv('PUBLIC_URL', 'https://different.example.invalid');
     await client.get('/api/oauth/callback').query({ state: attempt.state, code: 'code' }).expect(400);
-    noAccountOrProviderCalls();
+    noAccountOrProviderCalls(); expect(controls.consume).not.toHaveBeenCalled();
     vi.stubEnv('PUBLIC_URL', 'https://dashboard.example.invalid');
+    await client.get('/api/oauth/callback').query({ state: attempt.state, code: 'code' }).expect(302);
+  });
+
+  it('rejects a binding sealed under the previous key before persistence/provider/account calls without clearing the pending cookie', async () => {
+    const client = request.agent(mounted()); const attempt = await start(client);
+    ENV.cookieSecret = crypto.randomUUID() + crypto.randomUUID();
+    const denied = await client.get('/api/oauth/callback').query({ state: attempt.state, code: 'code' }).expect(400);
+    expect(cookieHeaders(denied)).toEqual([]); expect(controls.consume).not.toHaveBeenCalled(); noAccountOrProviderCalls();
+    expect(controls.states.has(hashOAuthLoginNonce(attempt.state))).toBe(true);
+    ENV.cookieSecret = controls.secret;
     await client.get('/api/oauth/callback').query({ state: attempt.state, code: 'code' }).expect(302);
   });
 

@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const provider = vi.hoisted(() => ({ post: vi.fn() }));
 vi.mock("axios", () => ({ default: { create: () => ({ post: provider.post }) } }));
-vi.mock("./env", () => ({ ENV: { appId: "synthetic-app", oAuthServerUrl: "https://oauth.example.test" } }));
+vi.mock("./env", () => ({ ENV: { appId: "synthetic-app", oAuthServerUrl: "https://oauth.example.test",
+  cookieSecret: crypto.randomUUID() + crypto.randomUUID() } }));
 import { sdk } from "./sdk";
 
 describe("external OAuth token exchange", () => {

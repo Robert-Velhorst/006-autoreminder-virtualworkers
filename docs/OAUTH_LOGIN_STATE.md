@@ -9,15 +9,23 @@ password login remains available without this provider.
 The client navigates to `/api/oauth/start`; it does not construct an external
 authorization URL or encode a redirect URI as state. The server requires an
 explicit canonical `PUBLIC_URL`, `VITE_APP_ID`, `VITE_OAUTH_PORTAL_URL` and
-`OAUTH_SERVER_URL`. Production origins use HTTPS. Only an explicit loopback
+`OAUTH_SERVER_URL`, plus the stable session secret of at least 32 bytes.
+Production origins use HTTPS. Only an explicit loopback
 public origin may use HTTP outside production. Request Host or forwarded-host
 headers cannot choose the OAuth callback.
 
 The server generates separate cryptographically random authorization state and
-browser binding. An HttpOnly, SameSite=Lax cookie carries the browser binding.
+browser binding. An HttpOnly, SameSite=Lax cookie carries an AES-256-GCM
+authenticated ciphertext, not the raw binding. Its domain-separated key derives
+from the existing session secret; its authenticated context includes the exact
+callback URI. Cookie alteration, callback mismatch or key rotation invalidates
+that binding. The database remains authoritative for one-time use and expiry;
+encryption does not make a stolen bearer cookie safe to reuse.
 The production cookie uses the Secure `__Host-` prefix with root path and no
 Domain attribute, preventing a sibling subdomain from supplying the binding.
 Development HTTP uses a separate non-prefixed cookie.
+Rotating the session secret also invalidates pending external login attempts;
+restart those attempts after rotation.
 
 State records use the existing `app_settings` table with a private namespace.
 They retain hashes of the random values and the configured callback, not raw

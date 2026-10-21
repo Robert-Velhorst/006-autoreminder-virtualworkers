@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const configuration = vi.hoisted(() => ({ appId: "synthetic-app", oAuthServerUrl: "https://oauth.example.test" }));
+const configuration = vi.hoisted(() => ({ appId: "synthetic-app", oAuthServerUrl: "https://oauth.example.test",
+  cookieSecret: crypto.randomUUID() + crypto.randomUUID() }));
 vi.mock("./env", () => ({ ENV: configuration }));
-import { createOAuthLoginNonce, getOAuthLoginConfiguration, hashOAuthLoginNonce, isOAuthLoginNonce } from "./oauthState";
+import { createOAuthLoginNonce, getOAuthLoginConfiguration, hashOAuthLoginNonce, isOAuthLoginNonce,
+  sealOAuthLoginBinding, openOAuthLoginBinding } from "./oauthState";
+const originalCookieSecret = configuration.cookieSecret;
 
 beforeEach(() => {
   configuration.appId = "synthetic-app";
   configuration.oAuthServerUrl = "https://oauth.example.test";
+  configuration.cookieSecret = originalCookieSecret;
   vi.stubEnv("NODE_ENV", "test");
   vi.stubEnv("PUBLIC_URL", "https://dashboard.example.test");
   vi.stubEnv("VITE_OAUTH_PORTAL_URL", "https://portal.example.test");
@@ -59,6 +63,37 @@ describe("OAuth initiation configuration and nonce boundaries", () => {
   it("requires an explicitly configured application identity", () => {
     configuration.appId = " ";
     expect(() => getOAuthLoginConfiguration()).toThrow();
+  });
+
+  it.each(["", "short", "a".repeat(31)])("rejects a missing or short cookie encryption key", secret => {
+    configuration.cookieSecret = secret;
+    expect(() => getOAuthLoginConfiguration()).toThrow();
+  });
+
+  it("encrypts the binding with randomized authenticated ciphertext scoped to the callback", () => {
+    const binding = createOAuthLoginNonce();
+    const callback = getOAuthLoginConfiguration().callbackUri;
+    const first = sealOAuthLoginBinding(binding, callback);
+    const second = sealOAuthLoginBinding(binding, callback);
+    expect(first).not.toBe(second);
+    expect(first).not.toContain(binding);
+    expect(openOAuthLoginBinding(first, callback)).toBe(binding);
+    expect(openOAuthLoginBinding(second, callback)).toBe(binding);
+    expect(openOAuthLoginBinding(first, "https://different.example.test/api/oauth/callback")).toBeNull();
+    configuration.cookieSecret = crypto.randomUUID() + crypto.randomUUID();
+    expect(openOAuthLoginBinding(first, callback)).toBeNull();
+  });
+
+  it("rejects unauthenticated, malformed, oversized and tampered browser-binding cookies", () => {
+    const callback = getOAuthLoginConfiguration().callbackUri;
+    const sealed = sealOAuthLoginBinding(createOAuthLoginNonce(), callback);
+    const parts = sealed.split(".");
+    const changed = [...parts];
+    changed[2] = (changed[2][0] === "A" ? "B" : "A") + changed[2].slice(1);
+    for (const value of ["", "v2." + parts.slice(1).join("."), "invalid", sealed + ".extra",
+      changed.join("."), "a".repeat(10000), createOAuthLoginNonce()]) {
+      expect(openOAuthLoginBinding(value, callback)).toBeNull();
+    }
   });
 
   it.each(["http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:3000"])(

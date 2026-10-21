@@ -8,6 +8,7 @@ import { sessionIdentityProof } from "./sessionIdentity";
 import {
   createOAuthLoginNonce, getOAuthLoginConfiguration, getOAuthLoginCookieName,
   getOAuthLoginCookieOptions, hashOAuthLoginNonce, isOAuthLoginNonce, OAUTH_LOGIN_STATE_TTL_MS,
+  openOAuthLoginBinding, sealOAuthLoginBinding,
 } from "./oauthState";
 import { createOAuthLoginState, consumeOAuthLoginState } from "./oauthStateDb";
 
@@ -27,7 +28,9 @@ export function registerOAuthRoutes(app: Express) {
     }
     const state = createOAuthLoginNonce();
     const binding = createOAuthLoginNonce();
+    let sealedBinding: string;
     try {
+      sealedBinding = sealOAuthLoginBinding(binding, configuration.callbackUri);
       await createOAuthLoginState({ stateHash: hashOAuthLoginNonce(state), bindingHash: hashOAuthLoginNonce(binding),
         callbackUri: configuration.callbackUri });
     } catch {
@@ -35,7 +38,13 @@ export function registerOAuthRoutes(app: Express) {
       res.status(503).json({ error: "OAuth login is unavailable" });
       return;
     }
-    res.cookie(getOAuthLoginCookieName(), binding, { ...getOAuthLoginCookieOptions(req), maxAge: OAUTH_LOGIN_STATE_TTL_MS });
+    res.cookie(getOAuthLoginCookieName(), sealedBinding, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production" || getSessionCookieOptions(req).secure,
+      path: process.env.NODE_ENV === "production" ? "/" : "/api/oauth",
+      maxAge: OAUTH_LOGIN_STATE_TTL_MS,
+    });
     const authorization = new URL(`${configuration.portalUrl}/app-auth`);
     authorization.search = new URLSearchParams({ appId: configuration.appId, redirectUri: configuration.callbackUri,
       state, type: "signIn" }).toString();
@@ -44,11 +53,11 @@ export function registerOAuthRoutes(app: Express) {
 
   app.get("/api/oauth/callback", async (req: Request, res: Response) => {
     res.setHeader("Cache-Control", "no-store");
-    const binding = parseCookies(req.headers.cookie ?? "")[getOAuthLoginCookieName()];
+    const encryptedBinding = parseCookies(req.headers.cookie ?? "")[getOAuthLoginCookieName()];
     const code = getQueryParam(req, "code");
     const state = getQueryParam(req, "state");
 
-    if (!code || !isOAuthLoginNonce(state) || !isOAuthLoginNonce(binding)) {
+    if (!code || !isOAuthLoginNonce(state) || !encryptedBinding) {
       res.status(400).json({ error: "Invalid OAuth login attempt" });
       return;
     }
@@ -57,6 +66,11 @@ export function registerOAuthRoutes(app: Express) {
     try { configuration = getOAuthLoginConfiguration(); }
     catch {
       res.status(503).json({ error: "OAuth login is unavailable" });
+      return;
+    }
+    const binding = openOAuthLoginBinding(encryptedBinding, configuration.callbackUri);
+    if (!binding) {
+      res.status(400).json({ error: "Invalid OAuth login attempt" });
       return;
     }
     try {
