@@ -1,5 +1,6 @@
 import { encodeTrelloPathSegment } from '../utils/trello-path';
 import { Router } from 'express';
+import { createHash } from 'node:crypto';
 import type { Request, Response } from 'express';
 import { getDb } from '../db';
 import { generationJobs, generationItems, scheduledJobs, userWorkingHours, holidays, vaProfiles, taskAssignments, taskDependencies, clients, users } from '../../drizzle/schema.postgres';
@@ -18,7 +19,12 @@ import { AssignmentError, MAX_ASSIGNMENT_TASKS, assignmentFailure, readCanonical
 import { withSessionIdentity } from '../sessionLifecycle';
 import { sessionIdentityProof } from '../_core/sessionIdentity';
 import { ForbiddenError, HttpError } from '../../shared/_core/errors';
-import { ScheduledJobLeaseLostError, type ScheduledJobContext } from '../scheduledJobRuntime';
+import { runScheduledJob, ScheduledJobLeaseLostError, type ScheduledJobContext } from '../scheduledJobRuntime';
+
+function canonicalRetryJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
+}
 
 export async function readSchedulingAssignmentSnapshot(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, founderId: number, taskIds: string[]) {
   if (!Number.isSafeInteger(founderId) || founderId <= 0) throw new AssignmentError(400, 'Invalid scheduling founder');
@@ -247,13 +253,6 @@ export function generationRequestContext(req: Request, res: Response) {
   return { context,get failureStatus() { return failureStatus; },dispose: () => {
     req.removeListener('aborted',cancel); res.removeListener('close',close);
   } };
-}
-
-async function generateAptlssChecklist(card: any, settings: any) {
-  return generateAptlssForCard(card, {
-    ...(settings && typeof settings === 'object' ? settings : {}),
-    applyToTrello: true,
-  });
 }
 
 // Enhanced task scheduling algorithm with break times and task type optimization
@@ -991,7 +990,8 @@ router.get('/aptlss/history', async (req: Request, res: Response) => {
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
     }
-    const jobs = await db.select().from(generationJobs).orderBy(desc(generationJobs.createdAt));
+    const jobs = await db.select().from(generationJobs)
+      .where(eq(generationJobs.createdBy, requestUser(req)!.openId)).orderBy(desc(generationJobs.createdAt));
     res.json(jobs);
   } catch (error) {
     console.error('Error fetching history:', error);
@@ -1009,7 +1009,9 @@ router.get('/aptlss/history/:jobId', async (req: Request, res: Response) => {
     
     const { jobId } = req.params;
     
-    const job = await db.select().from(generationJobs).where(eq(generationJobs.id, jobId)).limit(1);
+    const job = await db.select().from(generationJobs).where(and(
+      eq(generationJobs.id, jobId), eq(generationJobs.createdBy, requestUser(req)!.openId),
+    )).limit(1);
     
     if (!job || job.length === 0) {
       return res.status(404).json({ error: 'Job not found' });
@@ -1029,6 +1031,8 @@ router.get('/aptlss/history/:jobId', async (req: Request, res: Response) => {
 
 // Retry failed items
 router.post('/aptlss/history/:jobId/retry', async (req: Request, res: Response) => {
+  let operation: ReturnType<typeof generationRequestContext> | undefined;
+  let retryJobId: string | undefined;
   try {
     const db = await getDb();
     if (!db) {
@@ -1042,110 +1046,100 @@ router.post('/aptlss/history/:jobId/retry', async (req: Request, res: Response) 
       return res.status(401).json({ error: 'Unauthorized' });
     }
     
-    // Get failed items
-    const failedItems = await db.select()
-      .from(generationItems)
-      .where(eq(generationItems.jobId, jobId));
-    
-    const failed = failedItems.filter((item: any) => item.status === 'failed');
-    
-    if (failed.length === 0) {
-      return res.json({ message: 'No failed items to retry' });
-    }
-    
-    // Create new job for retries
-    const newJobId = `retry_${jobId}_${Date.now()}`;
-    
-    await db.insert(generationJobs).values({
-      id: newJobId,
-      totalCards: failed.length,
-      completedCards: 0,
-      failedCards: 0,
-      status: 'running',
-      settings: '{}',
-      createdBy: user.openId,
-    });
+    operation = generationRequestContext(req, res);
+    await operation.context.assertOwnership();
+    const [parent] = await db.select().from(generationJobs).where(and(
+      eq(generationJobs.id, jobId), eq(generationJobs.createdBy, user.openId),
+    )).limit(1);
+    if (!parent) return res.status(404).json({ error: 'Job not found' });
 
-    const retryResults: any[] = [];
-    let completedCards = 0;
-    let failedCards = 0;
-
-    for (const [index, item] of failed.entries()) {
-      const itemId = `item_${newJobId}_${index}`;
+    const childId = `retry_${createHash('sha256').update(JSON.stringify([user.openId, jobId])).digest('hex').slice(0, 58)}`;
+    retryJobId = childId;
+    const requestContext = operation.context;
+    let result: Awaited<ReturnType<typeof executeAptlssGenerationBatch>> | undefined;
+    let nothingToRetry = false;
+    const run = await runScheduledJob({ jobKey: `aptlss-retry:${childId}`, trigger: 'manual',
+      leaseMs: 60 * 60_000, skipIfSuccessful: false,
+      shouldRun: async (_lease, tx) => { await requestContext.assertOwnership(tx); return true; },
+    }, async lease => {
+      const context: ScheduledJobContext = { signal: AbortSignal.any([requestContext.signal, lease.signal]),
+        assertOwnership: async reader => {
+          await requestContext.assertOwnership(reader);
+          await lease.assertOwnership(reader);
+        } };
+      await context.assertOwnership();
+      const [currentParent] = await db.select().from(generationJobs).where(and(
+        eq(generationJobs.id, jobId), eq(generationJobs.createdBy, user.openId),
+      )).limit(1);
+      if (!currentParent) throw new HttpError(404, 'Job not found');
+      const [child] = await db.select().from(generationJobs).where(eq(generationJobs.id, childId)).limit(1);
+      const parentItems = await db.select().from(generationItems).where(eq(generationItems.jobId, jobId));
+      const failed = parentItems.filter(item => item.status === 'failed');
+      if (!child && failed.length === 0) { nothingToRetry = true; return { recordsProcessed: 0 }; }
+      const cardIds = [...new Set(failed.map(item => item.cardId.trim()))].sort();
+      const conflict = () => new HttpError(409, 'Retry history or settings changed; review before retrying');
+      if (cardIds.length === 0 || cardIds.length > 250 || cardIds.some(id => !id || id.length > 64)
+        || parentItems.some(item => item.status === 'outcome_unknown' && cardIds.includes(item.cardId))) throw conflict();
+      let settings: Record<string, unknown> = {};
       try {
-        const card = await fetchCardForAptlss(item.cardId);
-        const result = await generateAptlssChecklist(card, {});
-
-        await db.insert(generationItems).values({
-          id: itemId,
-          jobId: newJobId,
-          cardId: card.id,
-          cardName: card.name,
-          boardName: card.board?.name ?? null,
-          status: 'completed',
-          attempts: 1,
-          maxAttempts: 3,
-          result: JSON.stringify(result),
-        });
-
-        completedCards++;
-        retryResults.push({
-          cardId: card.id,
-          success: true,
-          checklistId: result.checklistId || null,
-        });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        failedCards++;
-        retryResults.push({
-          cardId: item.cardId,
-          success: false,
-          error: errorMessage,
-        });
-
-        await db.insert(generationItems).values({
-          id: itemId,
-          jobId: newJobId,
-          cardId: item.cardId,
-          cardName: item.cardName,
-          boardName: item.boardName || null,
-          status: 'failed',
-          attempts: 1,
-          maxAttempts: 3,
-          error: errorMessage,
-          result: null,
-        });
+        const parsed: unknown = currentParent.settings ? JSON.parse(currentParent.settings) : {};
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw conflict();
+        settings = parsed as Record<string, unknown>;
+      } catch { throw conflict(); }
+      const boundSettings: Record<string, unknown> & NonNullable<Parameters<typeof executeAptlssGenerationBatch>[0]['settings']> = { ...settings, _retryBinding: { version: 1, parentJobId: jobId,
+        actorUserId: user.id, ownerOpenId: user.openId, cardIds,
+        settingsHash: createHash('sha256').update(canonicalRetryJson(settings)).digest('hex') } };
+      const childItems = await db.select().from(generationItems).where(eq(generationItems.jobId, childId));
+      if ((!child && childItems.length > 0) || child && (child.createdBy !== user.openId
+        || child.totalCards !== cardIds.length || !child.settings)) throw conflict();
+      if (child) {
+        try { if (canonicalRetryJson(JSON.parse(child.settings!)) !== canonicalRetryJson(boundSettings)) throw conflict(); }
+        catch { throw conflict(); }
       }
-
-      await db.update(generationJobs).set({
-        completedCards,
-        failedCards,
-      }).where(eq(generationJobs.id, newJobId));
-    }
-
-    await db.update(generationJobs).set({
-      status: failedCards > 0 ? 'completed_with_errors' : 'completed',
-      completedCards,
-      failedCards,
-      completedAt: new Date(),
-    }).where(eq(generationJobs.id, newJobId));
+      if (new Set(childItems.map(item => item.cardId)).size !== childItems.length
+        || childItems.some(item => !cardIds.includes(item.cardId))) throw conflict();
+      await context.assertOwnership();
+      result = await executeAptlssGenerationBatch({ jobId: childId, cardIds, settings: boundSettings,
+        createdBy: user.openId, context });
+      await context.assertOwnership();
+      return { recordsProcessed: result.completed };
+    });
+    if (run.state === 'skipped') return res.status(409).json({
+      error: 'Retry is already running; inspect the existing retry job', jobId: childId,
+    });
+    await operation.context.assertOwnership();
+    if (nothingToRetry) return res.json({ message: 'No failed items to retry' });
+    if (!result) throw new Error('Retry did not produce a verified result');
     
     res.json({
       success: true,
-      jobId: newJobId,
-      itemsToRetry: failed.length,
-      completed: completedCards,
-      failed: failedCards,
-      results: retryResults,
+      jobId: childId,
+      itemsToRetry: result.total,
+      completed: result.completed,
+      failed: result.failed,
+      needsReview: result.needsReview,
+      results: result.results.map(item => item.success
+        ? { cardId: item.cardId, success: true, checklistId: item.checklistId ?? null,
+          needsReview: item.needsReview, appliedToTrello: item.appliedToTrello }
+        : { cardId: item.cardId, success: false, error: item.error }),
     });
   } catch (error) {
+    if (res.destroyed || res.headersSent) return;
+    if (error instanceof HttpError && [404, 409].includes(error.statusCode)) {
+      return res.status(error.statusCode).json({ error: error.message,
+        ...(error.statusCode === 409 && retryJobId ? { jobId: retryJobId } : {}) });
+    }
+    if (error instanceof ScheduledJobLeaseLostError) {
+      return res.status(operation?.failureStatus ?? 409).json({ error: 'Generation authority changed or was cancelled; review before retrying.' });
+    }
     console.error('Error retrying failed items:', error);
     res.status(500).json({ error: 'Failed to retry items' });
-  }
+  } finally { operation?.dispose(); }
 });
 
 // Batch generate APTLSS
 router.post('/aptlss/generate-batch', async (req: Request, res: Response) => {
+  let operation: ReturnType<typeof generationRequestContext> | undefined;
   try {
     const { cardIds, settings } = req.body;
     const user = (req as any).user;
@@ -1159,17 +1153,25 @@ router.post('/aptlss/generate-batch', async (req: Request, res: Response) => {
     }
 
     const jobId = `aptlss_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    operation = generationRequestContext(req, res);
+    await operation.context.assertOwnership();
     const result = await executeAptlssGenerationBatch({
       jobId,
       cardIds,
       settings: settings && typeof settings === 'object' ? settings : {},
       createdBy: user.openId,
+      context: operation.context,
     });
+    await operation.context.assertOwnership();
     res.json(result);
   } catch (error) {
+    if (res.destroyed || res.headersSent) return;
+    if (error instanceof ScheduledJobLeaseLostError) {
+      return res.status(operation?.failureStatus ?? 409).json({ error: 'Generation authority changed or was cancelled; review before retrying.' });
+    }
     console.error('Error in batch generation:', error);
     res.status(500).json({ error: 'Failed to batch generate APTLSS' });
-  }
+  } finally { operation?.dispose(); }
 });
 
 // Get generation status
@@ -1181,7 +1183,9 @@ router.get('/aptlss/status/:jobId', async (req: Request, res: Response) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    const job = await db.select().from(generationJobs).where(eq(generationJobs.id, jobId)).limit(1);
+    const job = await db.select().from(generationJobs).where(and(
+      eq(generationJobs.id, jobId), eq(generationJobs.createdBy, requestUser(req)!.openId),
+    )).limit(1);
     if (job.length === 0) {
       return res.status(404).json({ error: 'Job not found' });
     }

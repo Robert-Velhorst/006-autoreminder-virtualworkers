@@ -19,7 +19,9 @@ function physicalFuturePath(path) {
 }
 
 export function resolveCodexBridgePaths(env, cwd = process.cwd()) {
-  const root = resolve(cwd, env.APTLSS_CODEX_BRIDGE_ROOT || '.');
+  const selectedRoot = resolve(cwd, env.APTLSS_CODEX_BRIDGE_ROOT || '.');
+  const root = selectedRoot === resolve(process.cwd())
+    ? realpathSync(process.cwd()) : confinedLocalPath(selectedRoot);
   const queue = confinedLocalPath(resolve(root, env.APTLSS_CODEX_QUEUE_DIR || '.local/pilot/codex-queue'));
   const managerWork = confinedLocalPath(resolve(root, env.APTLSS_CODEX_PRIVATE_DIR || '.local/pilot/codex-private'));
   const llmWork = confinedLocalPath(resolve(root, env.APTLSS_CODEX_LLM_PRIVATE_DIR || '.local/pilot/codex-llm-private'));

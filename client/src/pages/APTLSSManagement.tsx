@@ -580,6 +580,8 @@ export default function APTLSSManagement() {
   const [history, setHistory] = useState<any[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [jobDetails, setJobDetails] = useState<any>(null);
+  const retryInFlight = useRef(false);
+  const [retryPending, setRetryPending] = useState(false);
 
   //  Settings
   const [settings, setSettings] = useState({
@@ -923,20 +925,57 @@ export default function APTLSSManagement() {
   };
 
   const retryFailedItems = async (jobId: string) => {
+    if (retryInFlight.current) return;
+    retryInFlight.current = true;
+    setRetryPending(true);
     try {
       const res = await fetch(`/api/aptlss/history/${jobId}/retry`, {
         method: "POST",
       });
-      const result = await res.json();
-      if (result.success) {
-        toast.success(`Retrying ${result.itemsToRetry} failed items`);
-        void loadHistory();
-      } else {
-        toast.info(result.message || "No items to retry");
+      const result = await res.json().catch(() => null);
+      if (!res.ok) {
+        toast.error(
+          typeof result?.error === "string"
+            ? result.error
+            : `Retry request returned HTTP ${res.status}. Check History before retrying.`
+        );
+        return;
       }
-    } catch (err) {
-      console.error("Error retrying items:", err);
-      toast.error("Failed to retry items");
+      if (result?.success !== true) {
+        if (result?.message === "No failed items to retry") {
+          toast.info(result.message);
+          void loadHistory();
+          return;
+        }
+        throw new Error("Unconfirmed retry result");
+      }
+      const { itemsToRetry, completed, failed } = result;
+      const needsReview = result.needsReview;
+      const reviewReported = Object.prototype.hasOwnProperty.call(result, "needsReview");
+      if (
+        ![itemsToRetry, completed, failed].every(
+          count => Number.isSafeInteger(count) && count >= 0
+        ) ||
+        completed + failed !== itemsToRetry ||
+        (reviewReported && (!Number.isSafeInteger(needsReview) || needsReview < 0 || needsReview > completed))
+      ) throw new Error("Unconfirmed retry counts");
+      let message = reviewReported
+        ? `Retry results: ${completed - needsReview} completed without review, ${needsReview} need review, ${failed} failed.`
+        : `Retry results: ${completed} completed, ${failed} failed. Review status not reported.`;
+      const successful = Array.isArray(result.results)
+        ? result.results.filter((item: any) => item?.success === true)
+        : null;
+      if (successful?.length === completed && successful.every((item: any) => typeof item.appliedToTrello === "boolean")) {
+        message += ` ${successful.filter((item: any) => item.appliedToTrello).length} applied to Trello.`;
+      }
+      if (failed > 0 || !reviewReported || needsReview > 0) toast.warning(message);
+      else toast.success(message);
+      void loadHistory();
+    } catch {
+      toast.error("Retry outcome unknown. Server work may have started. Check History before submitting another retry.");
+    } finally {
+      retryInFlight.current = false;
+      setRetryPending(false);
     }
   };
 
@@ -1465,6 +1504,7 @@ export default function APTLSSManagement() {
                 variant="outline"
                 size="sm"
                 onClick={() => retryFailedItems(activeJob.id)}
+                disabled={retryPending}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Retry {activeJob.failedCards} Failed Items
@@ -1982,6 +2022,7 @@ export default function APTLSSManagement() {
                               variant="outline"
                               size="sm"
                               onClick={() => retryFailedItems(job.id)}
+                              disabled={retryPending}
                             >
                               <RefreshCw className="h-4 w-4 mr-2" />
                               Retry {job.failedCards} Failed Items

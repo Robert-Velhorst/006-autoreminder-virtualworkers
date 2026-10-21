@@ -65,6 +65,14 @@ Before financial migration 0009, follow
 identities abort unchanged. Existing ownership, settlement values and linked
 history require explicit review; the migration is not financial reconciliation.
 
+Migration `0011_generation_status_width` widens the generation and scheduled-job
+status columns to 32 characters. The existing `completed_with_errors` value is
+21 characters and cannot fit the former 20-character columns. Apply this
+additive migration before running the new application: readiness requires its
+exact ledger entry. No existing job values or history are rewritten. Retain the
+normal backup/restore and schema-parity gates rather than editing old migrations
+or shortening existing terminal status names to hide the failure.
+
 Production deployment is started manually from protected `main`. The selected
 release must be a published stable `vMAJOR.MINOR.PATCH` tag whose commit is
 contained in `main`. The workflow verifies the GHCR image's provenance against

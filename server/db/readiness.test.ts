@@ -18,6 +18,14 @@ function poolReturning(requiredMigrationApplied: boolean): ReadinessPool {
 }
 
 describe("PostgreSQL readiness probe", () => {
+  it('widens generation terminal status columns additively without rewriting history', async () => {
+    const migration = await readFile(new URL('../../drizzle-postgres-v1/0011_generation_status_width.sql', import.meta.url), 'utf8');
+    for (const table of ['generation_jobs', 'scheduled_jobs']) {
+      expect(migration).toContain(`ALTER TABLE "${table}" ALTER COLUMN "status" SET DATA TYPE varchar(32)`);
+    }
+    expect(migration).not.toMatch(/\b(?:UPDATE|DELETE|TRUNCATE|DROP)\b/i);
+    expect('completed_with_errors'.length).toBeGreaterThan(20);
+  });
   it('requires exact financial uniqueness and fails closed on legacy duplicate identity', async () => {
     const pool = poolReturning(true);
     await hasRequiredPostgresSchema(pool);

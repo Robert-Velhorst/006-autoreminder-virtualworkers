@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { join, resolve } from "node:path";
 import { runCodexBridge } from "../scripts/run-codex-bridge";
+import { resolveCodexBridgePaths } from "../shared/codex-bridge-paths.mjs";
 
 const env = {
   APTLSS_CODEX_EXECUTABLE: "mock-official-codex",
@@ -14,6 +15,13 @@ const untilAborted = (signal: AbortSignal) => new Promise<void>(done => {
 });
 
 describe("private subscription bridge lifecycle", () => {
+  it("rejects an outside bridge root even when all transport directories are inside the workspace", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      expect(() => resolveCodexBridgePaths({ ...env, APTLSS_CODEX_BRIDGE_ROOT: resolve("../outside-bridge") }))
+        .toThrow("inside the application workspace");
+    } finally { vi.unstubAllEnvs(); }
+  });
   it("runs both protocols with separate private work and queue identities, then joins shutdown", async () => {
     const controller = new AbortController();
     let started = 0;
