@@ -174,7 +174,7 @@ const DEMERIT_AMOUNTS: Record<string, number> = { demeritD1: 5, demeritD2: 10, d
 
 function ProjectedPayChip() {
   // Get the current week start (Monday) and end (Sunday)
-  const { weekStart, weekEnd } = useMemo(() => {
+  const { weekStart } = useMemo(() => {
     const d = new Date();
     const day = d.getDay();
     const diff = day === 0 ? -6 : 1 - day;
@@ -188,30 +188,12 @@ function ProjectedPayChip() {
       weekEnd: end.toISOString().slice(0, 10),
     };
   }, []);
-  const utils = trpc.useUtils();
   const { data: payData, isLoading } = trpc.payLog.getByWeek.useQuery({ weekStart }, { staleTime: 5 * 60_000 });
-  const createWeekLog = trpc.payLog.upsert.useMutation({
-    onSuccess: () => utils.payLog.getByWeek.invalidate({ weekStart }),
-  });
-  // Auto-create a zero-row for this week so the Weekly Pay Calculator is pre-populated
-  useEffect(() => {
-    if (!isLoading && payData === null) {
-      createWeekLog.mutate({
-        weekStart, weekEnd,
-        meritM1: 0, meritM2: 0, meritM3: 0, meritStreak: 0,
-        demeritD1: 0, demeritD2: 0, demeritD3: 0, demeritD4: 0,
-        demeritD5: 0, demeritD6: 0, demeritD7: 0, demeritD8: 0,
-        demeritD9: 0, demeritD10: 0, demeritD11: 0,
-      });
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLoading, payData === null]);
-  // Show brief loading indicator; fall back to base $90 if no row exists yet this week
   if (isLoading) return <span className="text-xs text-muted-foreground">…</span>;
+  if (!payData) return <span className="text-xs text-muted-foreground">Not recorded</span>;
   // Calculate projected pay using same formula as WeeklyPayCalculator
   // Base is $90/week; merits add, demerits subtract
-  // Use empty object fallback so chip shows $90.00 base when no row exists yet
-  const safeData = (payData ?? {}) as Record<string, unknown>;
+  const safeData = payData as Record<string, unknown>;
   const totalMerits = Object.entries(MERIT_AMOUNTS).reduce((sum, [key, amt]) => sum + (Number(safeData[key]) || 0) * amt, 0);
   const totalDemerits = Object.entries(DEMERIT_AMOUNTS).reduce((sum, [key, amt]) => sum + (Number(safeData[key]) || 0) * amt, 0);
   const rawProjected = 90 - totalDemerits + totalMerits;

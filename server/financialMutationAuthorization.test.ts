@@ -11,6 +11,10 @@ describe("financial mutation authorization", () => {
     expect(payment).toMatch(/markPaid:\s*adminProcedure/);
     expect(payLog).toMatch(/upsert:\s*adminProcedure/);
     expect(payment).toContain("eq(paymentCycles.founderId, founderId)");
-    expect(payment).toContain('throw new TRPCError({ code: "NOT_FOUND", message: "Payment cycle not found" })');
+    expect(payment).toContain('await settlePaymentCycle(db, ctx.user, input)');
+    expect(payLog).toContain('await saveWeeklyPayLog(db, ctx.user, input)');
+    expect(payLog).toContain('await getWeeklyPayLogs(db, ctx.user, input)');
+    expect(payLog).toContain('await getWeeklyPayLog(db, ctx.user, input)');
+    expect(payLog).not.toContain('input.vaId || founderId');
   });
 });

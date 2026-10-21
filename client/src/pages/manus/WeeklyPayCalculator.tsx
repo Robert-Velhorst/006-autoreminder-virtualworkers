@@ -355,7 +355,12 @@ interface WeeklyPayCalculatorProps {
 
 export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps = {}) {
   const { user } = useAuth();
-  const isFounder = user?.role === "admin";
+  return <ScopedWeeklyPayCalculator key={`${user?.id}:${vaId ?? "self"}`} vaId={vaId} />;
+}
+
+function ScopedWeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps) {
+  const { user } = useAuth();
+  const isFounder = user?.role === "admin" && Number.isSafeInteger(vaId) && Number(vaId) > 0;
   const [weekStart] = useState(() => getWeekStart());
   const weekEnd = getWeekEnd(weekStart);
   const [counts, setCounts] = useState<Counts>(defaultCounts());
@@ -453,6 +458,7 @@ export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps =
   };
 
   const confirmD1Decrease = () => {
+    if (!isFounder || vaId === undefined) return;
     if (d1GuardPending !== null) {
       const prevD1 = counts.demeritD1;
       const newD1 = Math.max(0, prevD1 + d1GuardPending);
@@ -468,7 +474,7 @@ export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps =
       setNotes(updatedNotes);
       // Auto-save so the audit trail is persisted immediately
       upsert.mutate(
-        { weekStart, weekEnd, ...counts, demeritD1: newD1, notes: updatedNotes },
+        { vaId, weekStart, weekEnd, ...counts, demeritD1: newD1, notes: updatedNotes },
         { onSuccess: () => toast.info("D1 override recorded", { description: auditLine }) }
       );
     }
@@ -476,7 +482,8 @@ export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps =
   };
 
   const handleSave = () => {
-    upsert.mutate({ weekStart, weekEnd, ...counts, notes });
+    if (!isFounder || vaId === undefined) return;
+    upsert.mutate({ vaId, weekStart, weekEnd, ...counts, notes });
   };
 
   return (

@@ -64,6 +64,13 @@
       "when": 1792559997541,
       "tag": "0008_assignment_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1792562299754,
+      "tag": "0009_financial_ledger_authority",
+      "breakpoints": true
     }
   ]
 }
