@@ -6,7 +6,8 @@ import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq, inArray, like, or, sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
-import { Pool, type PoolClient } from "pg";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { escapeIdentifier, Pool, type PoolClient } from "pg";
 import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
 import * as schema from "../drizzle/schema.postgres";
 import type { ManagerInput, ManagerResult, ManagerSnapshot } from "../shared/aptlssManager";
@@ -3307,83 +3308,145 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
   it("keeps the data-transfer command from reassigning an existing browser collector", async () => {
     const { TABLES } = await import("../scripts/operator-data-transfer.mjs");
     const { TRANSFER_EXPORT_FORMAT, sourceIdentity, transferIdentity, transferOperatorRecords } = await import("../scripts/operator-data-transfer-utils.mjs");
-    const otherWorker = await insertWorker();
-    const collectorId = `browser-import-it-${randomUUID()}`;
-    const initial = {
-      protocolVersion: 2 as const, collectorId, captureSequence: 1,
-      sourceCapturedAt: NOW.toISOString(), collectorLabel: "Import integration browser",
-      tabs: [{ id: "1", title: "example.test", url: "https://example.test/", pinned: false, active: true, windowId: 1 }],
+    const baseUrl = new URL(requireIsolatedPostgresTestDatabase(controls.url, process.env.NODE_ENV === "production"));
+    const databaseName = `collector_transfer_${randomUUID().replaceAll("-", "")}`;
+    const assertOwnedDatabaseName = () => {
+      if (!/^collector_transfer_[a-f0-9]{32}$/.test(databaseName) || databaseName === baseUrl.pathname.slice(1)) {
+        throw new Error("Unsafe collector transfer fixture database name");
+      }
     };
-    const { ingestBrowserTabInventory } = await import("./browserTabHygiene");
-    await ingestBrowserTabInventory(worker.id, initial, NOW);
-    const [before] = await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId));
-    // Export v2 preserves database wall-clock strings, not host-timezone Date objects.
-    const sourceRow = {
-      ...Object.fromEntries(Object.entries(before).map(([key, value]) => [
-        key, value instanceof Date ? value.toISOString().replace("T", " ").replace("Z", "") : value,
-      ])),
-      vaId: otherWorker.id, captureSequence: 2, sourceCapturedAt: "2026-09-04 10:01:00.000",
-    };
-    const [founder] = await db.select().from(schema.users).where(eq(schema.users.id, adminId));
-    const identityFor = async (owner: Worker) => {
-      const [profile] = await db.select().from(schema.vaProfiles).where(eq(schema.vaProfiles.id, owner.profileId));
-      return sourceIdentity({
-        workerUserId: owner.id, workerProfileId: owner.profileId, founderUserId: adminId,
-        workerOpenId: owner.openId, founderOpenId: founder.openId, trelloMemberId: profile.trelloMemberId,
-      });
-    };
-    const tables: Record<string, Record<string, unknown>[]> = Object.fromEntries(TABLES.map(({ name }: { name: string }) => [name, []]));
-    tables.browser_tab_states = [sourceRow];
-    const payload = {
-      format: TRANSFER_EXPORT_FORMAT, createdAt: NOW.toISOString(), tables, skipped: [], credentialOmissions: [],
-      identities: [await identityFor(otherWorker)],
-      counts: Object.fromEntries(TABLES.map(({ name }: { name: string }) => [name, name === "browser_tab_states" ? 1 : 0])),
-    };
-    const directory = await mkdtemp(path.join(os.tmpdir(), "aptlss-browser-import-"));
+    assertOwnedDatabaseName();
+    const adminPool = new Pool({ connectionString: baseUrl.href, max: 1, connectionTimeoutMillis: 5000 });
+    const sharedPool = pool;
+    const sharedProfileId = worker.profileId;
+    const previousDb = controls.db;
+    let databaseCreated = false;
+    let isolatedPool: Pool | undefined;
+    let unrelatedWriter: PoolClient | undefined;
     try {
-      const input = path.join(directory, "export.json");
-      const save = () => writeFile(input, JSON.stringify({ ...payload, digest: hash(JSON.stringify(payload)) }), "utf8");
-      const invoke = (owner: Worker) => spawnSync(process.execPath, [
-        path.resolve(import.meta.dirname, "../scripts/operator-data-transfer.mjs"),
-        "import", "--execute", "--in", input, "--target", controls.url!,
-        "--worker-user-id", String(owner.id), "--worker-profile-id", String(owner.profileId),
-        "--founder-user-id", String(adminId),
-      ], { cwd: path.resolve(import.meta.dirname, ".."), encoding: "utf8", timeout: 20_000,
-        env: { ...process.env, NODE_ENV: "test" } });
-      await save();
-      // This valid, source-bound payload reaches the actual PostgreSQL collision
-      // check rather than failing on missing identity, tables or execution flags.
-      const client = await pool.connect();
+      // Full migrations preserve enum types, foreign keys and identity sequences.
+      // No supplied URL can select this generated database or broaden the shared guard.
+      await adminPool.query(`CREATE DATABASE ${escapeIdentifier(databaseName)}`);
+      databaseCreated = true;
+      const isolatedUrl = new URL(baseUrl.href);
+      isolatedUrl.pathname = `/${databaseName}`;
+      isolatedPool = new Pool({ connectionString: isolatedUrl.href, max: 4, connectionTimeoutMillis: 5000 });
+      const pool = isolatedPool;
+      const db = drizzle(pool, { schema });
+      await migrate(db, { migrationsFolder: path.resolve(import.meta.dirname, "../drizzle-postgres-v1") });
+      expect((await pool.query("SELECT current_database() AS name")).rows[0].name).toBe(databaseName);
+      const foreignKeys = await pool.query(`SELECT count(*)::int AS count FROM pg_constraint
+        WHERE contype = 'f' AND connamespace = 'public'::regnamespace`);
+      expect(foreignKeys.rows[0].count).toBeGreaterThan(0);
+      controls.db = db;
+      const [founder] = await db.insert(schema.users).values({ openId: `collector-founder-${randomUUID()}`, role: "admin" }).returning();
+      const adminId = founder.id;
+      type TransferWorker = Pick<Worker, "id" | "openId" | "profileId">;
+      const createOwner = async (): Promise<TransferWorker> => {
+        const [account] = await db.insert(schema.users).values({ openId: `collector-worker-${randomUUID()}`, role: "worker" }).returning();
+        const [profile] = await db.insert(schema.vaProfiles).values({ userId: account.id, founderId: adminId, name: "Isolated collector worker" }).returning();
+        return { id: account.id, openId: account.openId, profileId: profile.id };
+      };
+      const worker = await createOwner();
+      const otherWorker = await createOwner();
+      // A shared-fixture writer remains open throughout both direct and CLI imports.
+      // An accidental return to public-fixture table locks would block on this transaction.
+      unrelatedWriter = await sharedPool.connect();
+      await unrelatedWriter.query("BEGIN");
+      await unrelatedWriter.query("SELECT id FROM va_profiles WHERE id = $1 FOR UPDATE", [sharedProfileId]);
+      const collectorId = `browser-import-it-${randomUUID()}`;
+      const initial = {
+        protocolVersion: 2 as const, collectorId, captureSequence: 1,
+        sourceCapturedAt: NOW.toISOString(), collectorLabel: "Import integration browser",
+        tabs: [{ id: "1", title: "example.test", url: "https://example.test/", pinned: false, active: true, windowId: 1 }],
+      };
+      const { ingestBrowserTabInventory } = await import("./browserTabHygiene");
+      await ingestBrowserTabInventory(worker.id, initial, NOW);
+      const [before] = await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId));
+      // Export v2 preserves database wall-clock strings, not host-timezone Date objects.
+      const sourceRow = {
+        ...Object.fromEntries(Object.entries(before).map(([key, value]) => [
+          key, value instanceof Date ? value.toISOString().replace("T", " ").replace("Z", "") : value,
+        ])),
+        vaId: otherWorker.id, captureSequence: 2, sourceCapturedAt: "2026-09-04 10:01:00.000",
+      };
+      const identityFor = async (owner: TransferWorker) => {
+        const [profile] = await db.select().from(schema.vaProfiles).where(eq(schema.vaProfiles.id, owner.profileId));
+        return sourceIdentity({
+          workerUserId: owner.id, workerProfileId: owner.profileId, founderUserId: adminId,
+          workerOpenId: owner.openId, founderOpenId: founder.openId, trelloMemberId: profile.trelloMemberId,
+        });
+      };
+      const tables: Record<string, Record<string, unknown>[]> = Object.fromEntries(TABLES.map(({ name }: { name: string }) => [name, []]));
+      tables.browser_tab_states = [sourceRow];
+      const payload = {
+        format: TRANSFER_EXPORT_FORMAT, createdAt: NOW.toISOString(), tables, skipped: [], credentialOmissions: [],
+        identities: [await identityFor(otherWorker)],
+        counts: Object.fromEntries(TABLES.map(({ name }: { name: string }) => [name, name === "browser_tab_states" ? 1 : 0])),
+      };
+      const directory = await mkdtemp(path.join(os.tmpdir(), "aptlss-browser-import-"));
       try {
-        await expect(transferOperatorRecords(client, payload, TABLES, {
-          identity: transferIdentity(otherWorker.id, adminId, otherWorker.profileId), execute: true,
-        })).rejects.toThrow(/collision/);
-      } finally { client.release(); }
-      const result = invoke(otherWorker);
-      expect(result.error).toBeUndefined();
-      expect(result.status, result.stderr).toBe(1);
-      expect(result.stderr).toContain("No successful transfer or reconciliation is claimed");
-      expect((await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId)))[0]).toEqual(before);
+        const input = path.join(directory, "export.json");
+        const save = () => writeFile(input, JSON.stringify({ ...payload, digest: hash(JSON.stringify(payload)) }), "utf8");
+        const invoke = (owner: TransferWorker) => spawnSync(process.execPath, [
+          path.resolve(import.meta.dirname, "../scripts/operator-data-transfer.mjs"),
+          "import", "--execute", "--in", input, "--target", isolatedUrl.href,
+          "--worker-user-id", String(owner.id), "--worker-profile-id", String(owner.profileId),
+          "--founder-user-id", String(adminId),
+        ], { cwd: path.resolve(import.meta.dirname, ".."), encoding: "utf8", timeout: 20_000,
+          env: { ...process.env, NODE_ENV: "test" } });
+        await save();
+        // This valid, source-bound payload reaches the actual PostgreSQL collision
+        // check rather than failing on missing identity, tables or execution flags.
+        const client = await pool.connect();
+        try {
+          await expect(transferOperatorRecords(client, payload, TABLES, {
+            identity: transferIdentity(otherWorker.id, adminId, otherWorker.profileId), execute: true,
+          })).rejects.toThrow(/collision/);
+        } finally { client.release(); }
+        const result = invoke(otherWorker);
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(1);
+        expect(result.stderr).toContain("No successful transfer or reconciliation is claimed");
+        expect((await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId)))[0]).toEqual(before);
 
-      // Recovery never overwrites a different snapshot. Prove acceptance by
-      // importing a new, correctly owned collector and preserving the first one.
-      const { rows: [next] } = await pool.query("SELECT nextval(pg_get_serial_sequence('browser_tab_states', 'id'))::int AS id");
-      const acceptedCollectorId = `browser-import-accepted-${randomUUID()}`;
-      payload.tables.browser_tab_states = [{ ...sourceRow, id: next.id, vaId: worker.id, collectorId: acceptedCollectorId }];
-      payload.identities = [await identityFor(worker)];
-      await save();
-      const accepted = invoke(worker);
-      expect(accepted.error).toBeUndefined();
-      expect(accepted.status, accepted.stderr).toBe(0);
-      expect(JSON.parse(accepted.stdout)).toMatchObject({ success: true, applied: true,
-        tables: { browser_tab_states: { inserted: 1, credentialOmissions: 0 } } });
-      const [imported] = await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, acceptedCollectorId));
-      expect(imported.vaId).toBe(worker.id);
-      expect(Number(imported.captureSequence)).toBe(2);
-      expect(imported.sourceCapturedAt?.toISOString()).toBe("2026-09-04T10:01:00.000Z");
-      expect((await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId)))[0]).toEqual(before);
+        // Recovery never overwrites a different snapshot. Prove acceptance by
+        // importing a new, correctly owned collector and preserving the first one.
+        const { rows: [next] } = await pool.query("SELECT nextval(pg_get_serial_sequence('browser_tab_states', 'id'))::int AS id");
+        const acceptedCollectorId = `browser-import-accepted-${randomUUID()}`;
+        payload.tables.browser_tab_states = [{ ...sourceRow, id: next.id, vaId: worker.id, collectorId: acceptedCollectorId }];
+        payload.identities = [await identityFor(worker)];
+        await save();
+        const accepted = invoke(worker);
+        expect(accepted.error).toBeUndefined();
+        expect(accepted.status, accepted.stderr).toBe(0);
+        expect(JSON.parse(accepted.stdout)).toMatchObject({ success: true, applied: true,
+          tables: { browser_tab_states: { inserted: 1, credentialOmissions: 0 } } });
+        const [imported] = await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, acceptedCollectorId));
+        expect(imported.vaId).toBe(worker.id);
+        expect(Number(imported.captureSequence)).toBe(2);
+        expect(imported.sourceCapturedAt?.toISOString()).toBe("2026-09-04T10:01:00.000Z");
+        expect((await db.select().from(schema.browserTabStates).where(eq(schema.browserTabStates.collectorId, collectorId)))[0]).toEqual(before);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
     } finally {
-      await rm(directory, { recursive: true, force: true });
+      controls.db = previousDb;
+      try {
+        if (unrelatedWriter) {
+          try { await unrelatedWriter.query("ROLLBACK"); }
+          finally { unrelatedWriter.release(); }
+        }
+      } finally {
+        try {
+          // All direct clients are released above and CLI children exit synchronously.
+          if (isolatedPool) await isolatedPool.end();
+          if (databaseCreated) {
+            assertOwnedDatabaseName();
+            await adminPool.query(`DROP DATABASE ${escapeIdentifier(databaseName)}`);
+          }
+        } finally { await adminPool.end(); }
+      }
     }
   });
 

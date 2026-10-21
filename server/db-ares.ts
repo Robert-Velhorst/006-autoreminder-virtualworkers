@@ -136,34 +136,34 @@ export async function getAresValidationRules(
 }
 
 export async function getAresValidationRule(
-  ruleId: string
+  ruleId: string,
+  configId: string
 ): Promise<AresValidationRule | null> {
   const db = await getDatabase();
   return ((await db.query.aresValidationRules.findFirst({
-    where: eq(aresValidationRules.id, ruleId),
+    where: and(eq(aresValidationRules.id, ruleId), eq(aresValidationRules.configId, configId)),
   })) ?? null) as AresValidationRule | null;
 }
 
 export async function updateAresValidationRule(
   ruleId: string,
-  updates: Partial<InsertAresValidationRule>
-): Promise<AresValidationRule> {
+  configId: string,
+  updates: Partial<Omit<InsertAresValidationRule, 'id' | 'configId'>>
+): Promise<AresValidationRule | null> {
   const db = await getDatabase();
-  await db.update(aresValidationRules)
+  const [updated] = await db.update(aresValidationRules)
     .set(updates)
-    .where(eq(aresValidationRules.id, ruleId));
-  
-  const updated = await db.query.aresValidationRules.findFirst({
-    where: eq(aresValidationRules.id, ruleId),
-  });
-  if (!updated) throw new Error('Failed to update ARES validation rule');
-  return updated;
+    .where(and(eq(aresValidationRules.id, ruleId), eq(aresValidationRules.configId, configId)))
+    .returning();
+  return updated ?? null;
 }
 
-export async function deleteAresValidationRule(ruleId: string): Promise<void> {
+export async function deleteAresValidationRule(ruleId: string, configId: string): Promise<boolean> {
   const db = await getDatabase();
-  await db.delete(aresValidationRules)
-    .where(eq(aresValidationRules.id, ruleId));
+  const deleted = await db.delete(aresValidationRules)
+    .where(and(eq(aresValidationRules.id, ruleId), eq(aresValidationRules.configId, configId)))
+    .returning({ id: aresValidationRules.id });
+  return deleted.length > 0;
 }
 
 // ─── Validation History Operations ──────────────────────────────────────────

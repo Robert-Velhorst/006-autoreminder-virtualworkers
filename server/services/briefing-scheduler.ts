@@ -6,6 +6,7 @@ import { dateKeyInTimeZone, dateWindowInTimeZone } from '../../shared/workerTime
 import { runScheduledJob, ScheduledJobLeaseLostError } from '../scheduledJobRuntime';
 import { getBriefingSettings, shouldRunBriefingAt, type BriefingSettings } from '../briefingSettings';
 import { createNonOverlappingRunner } from './non-overlapping-runner';
+import { hasRecipientEmailConsent } from './recipientEmailConsent';
 
 let schedulerInterval: NodeJS.Timeout | null = null;
 
@@ -78,9 +79,11 @@ export async function processScheduledBriefings() {
       }
       const shouldSendMorning = settings.morningBriefingEnabled
         && shouldRunBriefingAt(settings.morningBriefingTime, currentHour, currentMinute)
-        && Boolean(worker.email);
+        && Boolean(worker.email)
+        && await hasRecipientEmailConsent(worker.userId);
       const shouldSendEod = settings.eodReportEnabled
-        && shouldRunBriefingAt(settings.eodReportTime, currentHour, currentMinute);
+        && shouldRunBriefingAt(settings.eodReportTime, currentHour, currentMinute)
+        && await hasRecipientEmailConsent(worker.founderId);
       if (!shouldSendMorning && !shouldSendEod) continue;
 
       // Only load detailed worker state when a delivery is due.
@@ -118,6 +121,7 @@ export async function processScheduledBriefings() {
       if (shouldSendMorning) {
         await runScheduledJob({ jobKey: `briefing:${worker.userId}:${dateKey}` }, async context => {
           await context.assertOwnership();
+          if (!await hasRecipientEmailConsent(worker.userId)) throw new Error("Morning briefing recipient has not enabled email");
           console.log(`[Scheduler] Triggering Morning Briefing for ${worker.name} (${workerTimezone})`);
           const delivered = await sendMorningBriefing(worker.email!, {
             workerName: worker.name,
@@ -155,6 +159,7 @@ export async function processScheduledBriefings() {
             ? 0
             : Math.round((completedTasks.length / assignments.length) * 100);
           await context.assertOwnership();
+          if (!await hasRecipientEmailConsent(worker.founderId)) throw new Error("EOD report recipient has not enabled email");
           const delivered = await sendEODReport(founder[0].email!, {
             workerName: worker.name,
             date: reportDate,
