@@ -253,6 +253,20 @@ test('requires preloaded images and does not create resources if PG version is w
   assert.equal(f.files.size, 0);
 });
 
+test('reports bounded container and port diagnostics without raw engine output', async () => {
+  const f = fixture({ command: ({ args, containers }) => {
+    if (args[0] === 'container' && args[1] === 'inspect' && args[2].endsWith('-postgres') && containers.has(args[2])) {
+      containers.get(args[2]).NetworkSettings.Ports = {};
+    }
+  } });
+  const error = await verifyPostgresProductionImage('candidate:test', f.dependencies).catch(error => error);
+  assert.match(error.message, /owned PostgreSQL/);
+  assert.match(error.message, /"running":true/);
+  assert.match(error.message, /"publishedPortCount":0/);
+  assert.equal(error.message.includes('postgresql:'), false);
+  assert.equal(f.containers.size, 0); assert.equal(f.networks.size, 0);
+});
+
 for (const [name, options] of [
   ['ambiguous network creation', { networkCreateTimeout: true }],
   ['ambiguous PG startup', { postgresRunFailure: true }],

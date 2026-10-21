@@ -215,9 +215,14 @@ export async function verifyPostgresProductionImage(image, dependencies = {}) {
   let stage = 'preflight';
   let failure;
   let report;
+  let diagnostic;
   const checked = (program, args, timeout) => {
     controller.signal.throwIfAborted();
     const result = run(program, args, { timeout: timeout ?? 60_000 });
+    if (result.error || result.status !== 0) diagnostic = {
+      operation: `${program}:${args[0]}`, commandExitCode: Number.isInteger(result.status) ? result.status : null,
+      executionError: Boolean(result.error),
+    };
     assert.ok(!result.error && result.status === 0);
     return result.stdout;
   };
@@ -245,15 +250,26 @@ export async function verifyPostgresProductionImage(image, dependencies = {}) {
   };
   const port = (container, expectedImage, internalPort, network) => {
     const value = inspect('container', container);
+    const binding = value?.NetworkSettings?.Ports?.[`${internalPort}/tcp`];
+    diagnostic = {
+      running: value?.State?.Running === true,
+      containerExitCode: Number.isInteger(value?.State?.ExitCode) ? value.State.ExitCode : null,
+      imageMatches: value?.Image === expectedImage,
+      ownerMatches: value?.Config?.Labels?.[OWNER_LABEL] === fixtureId,
+      networkCount: Object.keys(value?.NetworkSettings?.Networks ?? {}).length,
+      publishedPortCount: Array.isArray(binding) ? binding.length : 0,
+      boundToLoopback: binding?.[0]?.HostIp === '127.0.0.1',
+    };
     assert.equal(value.Config.Labels[OWNER_LABEL], fixtureId);
     assert.equal(value.Image, expectedImage);
     assert.equal(value.State.Running, true);
     assert.deepEqual(Object.keys(value.NetworkSettings.Networks), [network]);
-    const binding = value.NetworkSettings.Ports[`${internalPort}/tcp`];
+    assert.ok(Array.isArray(binding));
     assert.equal(binding.length, 1); assert.equal(binding[0].HostIp, '127.0.0.1');
     assert.match(binding[0].HostPort, /^\d{1,5}$/);
     const number = Number(binding[0].HostPort);
     assert.ok(number > 0 && number <= 65535);
+    diagnostic = undefined;
     return { number, details: value };
   };
   try {
@@ -389,7 +405,8 @@ export async function verifyPostgresProductionImage(image, dependencies = {}) {
       ...fixture.schema, checks: ['verified-postgres-tls-host-and-app', 'least-privilege-app-role', 'canonical-schema', 'readiness',
         'password-login', 'safe-auth-me', 'active-worker-profile', 'worker-admin-denial', 'offboard-epoch', 'stale-session-denial'] };
   } catch {
-    failure = new Error(`PostgreSQL image acceptance failed at ${stage}. No production acceptance is established.`);
+    failure = new Error(`PostgreSQL image acceptance failed at ${stage}. No production acceptance is established.` +
+      (diagnostic ? ` Diagnostic: ${JSON.stringify(diagnostic)}` : ''));
   } finally {
     clearTimeout(deadline);
     let cleanupFailed = false;
