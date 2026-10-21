@@ -81,3 +81,22 @@ acceptance, data reconciliation and the human shadow trial remain separate.
 Browser fixtures intercept providers and use synthetic accounts. Native database
 fixtures use real PostgreSQL but synthetic CLI/Trello responses. Neither proves
 live provider access, target-host readiness or a completed operational trial.
+
+### Hosted Keyboard-Proof Follow-Up
+
+The first PR #148 quality run (`39580315269`, head `dace4b9`) failed four
+theme/viewport keyboard checks: the enabled CTA was within the viewport and
+unobscured, but the fixed eight-Tab traversal assertion did not reach it on the
+Linux runner. Its 5,448 passing Vitest cases, 318 passing Node cases and successful
+image checks do not override that browser failure or accept the skipped steps.
+
+The follow-up test replaces the platform-specific Tab count with bounded real
+focus traversal, rejecting escaped focus, repeated non-date controls and
+timeouts inside native date segments. It retains five-point hit tests, proves
+keyboard focus before a trial click, and logs the synthetic focus sequence for
+the next hosted run. Counterexamples cover prolonged native-date retention and
+rejection of an actual focus cycle. No application behavior was changed merely
+to make the harness pass. The final local browser rerun passed all 56 cases
+with no skips; a separate read-only review found no blocker in the proof change.
+Linux acceptance still requires the new exact-head
+hosted result; local Windows traces alone do not establish the Linux cause.

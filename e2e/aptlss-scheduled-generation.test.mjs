@@ -316,14 +316,25 @@ for (const mode of ['create', 'reapprove']) for (const [name, goal] of blockedGo
   });
 }
 
-for (const theme of ['light', 'dark']) for (const width of [390, 1280]) test(`settled ${theme} scheduled UI at ${width}px has unobscured keyboard-reachable CTAs with app providers`, async t => {
-  const f = await fixture(t, { width, theme }); await f.scheduledTab();
-  assert.equal(await f.page.locator('html').evaluate(element => element.classList.contains('dark')), theme === 'dark');
-  const evidence = {};
-  const visibleCta = async (dialog, name) => {
+async function visibleCta(page, dialog, name, diagnose = () => {}) {
     const cta = dialog.getByRole('button', { name, exact: true });
+    const focusSequence = [];
+    const sequenceLabel = () => {
+      const runs = [];
+      for (const control of focusSequence) {
+        if (runs.at(-1)?.control === control) runs.at(-1).count++;
+        else runs.push({ control, count: 1 });
+      }
+      return runs.map(({ control, count }) => `${control}${count > 1 ? ` x${count}` : ''}`).join(' -> ') || '(none)';
+    };
+    let phase = 'enabled';
+    try {
     await expect(cta).toBeEnabled();
-    const proof = await cta.evaluate(button => {
+    phase = 'animation-settle';
+    await expect.poll(() => dialog.evaluate(element => element.getAnimations({ subtree: true })
+      .filter(animation => animation.effect?.getTiming().iterations !== Infinity)
+      .every(animation => animation.playState !== 'running' && !animation.pending)), { timeout: 5000 }).toBe(true);
+    const probe = () => cta.evaluate(button => {
       const rect = button.getBoundingClientRect();
       // Probe the painted center and edges, not the transparent corners of pill buttons.
       const midX = (rect.left + rect.right) / 2, midY = (rect.top + rect.bottom) / 2;
@@ -331,13 +342,74 @@ for (const theme of ['light', 'dark']) for (const width of [390, 1280]) test(`se
       return { withinViewport: rect.top >= 0 && rect.left >= 0 && rect.bottom <= innerHeight && rect.right <= innerWidth,
         unobscured: points.every(([x, y]) => button.contains(document.elementFromPoint(x, y))) };
     });
-    assert.deepEqual(proof, { withinViewport: true, unobscured: true });
+    phase = 'five-point-geometry';
+    await expect.poll(probe, { timeout: 5000 }).toEqual({ withinViewport: true, unobscured: true });
     await dialog.getByLabel(/Future run time/).focus();
-    let reached = false;
-    for (let i = 0; i < 8; i++) { await f.page.keyboard.press('Tab'); if (await cta.evaluate(button => button === document.activeElement)) { reached = true; break; } }
-    assert.equal(reached, true); await expect(cta).toBeFocused();
-    return { ...proof, keyboardReachable: reached, bounds: await cta.boundingBox() };
-  };
+    const seenControls = new Set();
+    phase = 'keyboard-traversal';
+    // Native datetime segments can retain the same activeElement across Tabs.
+    // Bound by elapsed time and a real focus cycle, not an OS-specific key count.
+    await expect.poll(async () => {
+      await page.keyboard.press('Tab');
+      const focus = await cta.evaluate(button => {
+        const dialog = button.closest('[role="dialog"]'), active = document.activeElement;
+        return { reached: active === button, inDialog: dialog.contains(active), nativeDateSegment: active?.matches('input[type="datetime-local"]'),
+          index: [...dialog.querySelectorAll('button,input,a,select,textarea,summary,[tabindex]')].indexOf(active),
+          description: `${active?.tagName}:${active?.getAttribute('role') ?? active?.getAttribute('type') ?? 'control'}${active === button ? ':CTA' : ''}` };
+      });
+      focusSequence.push(focus.description);
+      assert.equal(focus.inDialog, true, `Keyboard focus escaped dialog: ${focusSequence.join(' -> ')}`);
+      if (focus.reached) return true;
+      if (!focus.nativeDateSegment) {
+        assert.equal(seenControls.has(focus.index), false, `Keyboard focus cycled before CTA: ${focusSequence.join(' -> ')}`);
+        seenControls.add(focus.index);
+      }
+      return false;
+    }, { timeout: 5000, intervals: [0, 20, 50, 100], message: 'Tab traversal must reach the enabled CTA without escaping or cycling' }).toBe(true);
+    await expect(cta).toBeFocused();
+    phase = 'trial-click';
+    await cta.click({ trial: true });
+    await expect(cta).toBeFocused();
+    phase = 'five-point-geometry-after-focus';
+    const proof = await probe(); assert.deepEqual(proof, { withinViewport: true, unobscured: true });
+    diagnose(`tabs=${focusSequence.length}; sequence=${sequenceLabel()}; fivePoints=clear; viewport=inside; trialClick=passed`);
+    return { ...proof, keyboardReachable: true, keyboardTabs: focusSequence.length, focusSequence, bounds: await cta.boundingBox() };
+    } catch (error) {
+      diagnose(`FAILED phase=${phase}; tabs=${focusSequence.length}; sequence=${sequenceLabel()}`);
+      throw error;
+    }
+}
+
+test('keyboard CTA proof traverses more than eight native datetime segments without weakening focus checks', async t => {
+  const f = await fixture(t); const dialog = await f.create(); await f.approveForm(dialog);
+  await dialog.getByLabel(/Future run time/).evaluate(input => {
+    let segments = 12;
+    input.addEventListener('keydown', event => { if (event.key === 'Tab' && segments > 0) { segments--; event.preventDefault(); } });
+  });
+  const proof = await visibleCta(f.page, dialog, 'Approve schedule');
+  assert.ok(proof.keyboardTabs > 12); assert.equal(proof.keyboardReachable, true); assert.equal(f.posts().length, 0);
+});
+
+test('keyboard CTA proof still rejects a real focus cycle that cannot reach the CTA', async t => {
+  const f = await fixture(t); const dialog = await f.create(); await f.approveForm(dialog);
+  await dialog.evaluate(element => {
+    const checkbox = element.querySelector('[role="checkbox"]');
+    const close = element.querySelector('[data-slot="dialog-footer"] button');
+    element.addEventListener('keydown', event => {
+      if (event.key !== 'Tab') return;
+      if (event.target === checkbox) { event.preventDefault(); close.focus(); }
+      else if (event.target === close) { event.preventDefault(); checkbox.focus(); }
+    });
+  });
+  await assert.rejects(() => visibleCta(f.page, dialog, 'Approve schedule'), /Keyboard focus cycled before CTA/);
+  assert.equal(f.posts().length, 0);
+});
+
+for (const theme of ['light', 'dark']) for (const width of [390, 1280]) test(`settled ${theme} scheduled UI at ${width}px has unobscured keyboard-reachable CTAs with app providers`, async t => {
+  const f = await fixture(t, { width, theme }); await f.scheduledTab();
+  assert.equal(await f.page.locator('html').evaluate(element => element.classList.contains('dark')), theme === 'dark');
+  const evidence = {};
+  const focusDiagnostic = stage => message => t.diagnostic(`Focus ${theme}/${width}/${stage}: ${message}`);
   const settle = async () => {
     await f.page.bringToFront();
     await expect(f.page.locator('[data-sonner-toast]')).toHaveCount(0, { timeout: 12000 });
@@ -350,7 +422,7 @@ for (const theme of ['light', 'dark']) for (const width of [390, 1280]) test(`se
     await f.page.screenshot({ path }); evidence[name] = { path, theme, viewport: { width, height: 900 }, bounds, documentOverflow: overflow };
   };
   const bootDialog = await f.review(); await f.approveForm(bootDialog);
-  evidence.bootToastCTA = { ...(await visibleCta(bootDialog, 'Approve new run time')), toastCount: await f.page.locator('[data-sonner-toast]').count() };
+  evidence.bootToastCTA = { ...(await visibleCta(f.page, bootDialog, 'Approve new run time', focusDiagnostic('boot-review'))), toastCount: await f.page.locator('[data-sonner-toast]').count() };
   await bootDialog.locator('[data-slot="dialog-footer"]').getByRole('button', { name: 'Close', exact: true }).click();
   await settle();
   await capture('table', f.page.getByRole('table').locator('..'));
@@ -361,13 +433,13 @@ for (const theme of ['light', 'dark']) for (const width of [390, 1280]) test(`se
   for (const button of await dialog.getByRole('button').all()) {
     assert.equal(await button.evaluate(element => element.scrollWidth > element.clientWidth + 1), false);
   }
-  const reviewCta = await visibleCta(dialog, 'Approve new run time');
+  const reviewCta = await visibleCta(f.page, dialog, 'Approve new run time', focusDiagnostic('settled-review'));
   await settle();
   await capture('review', dialog);
   evidence.review.cta = reviewCta;
   await dialog.locator('[data-slot="dialog-footer"]').getByRole('button', { name: 'Close', exact: true }).click();
   const create = await f.create(); await f.approveForm(create);
-  const createCta = await visibleCta(create, 'Approve schedule');
+  const createCta = await visibleCta(f.page, create, 'Approve schedule', focusDiagnostic('settled-create'));
   await settle();
   await capture('create', create);
   evidence.create.cta = createCta;
