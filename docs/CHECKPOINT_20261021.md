@@ -26,6 +26,18 @@ to migrate an operational database, settle pay, deploy, or enable active mode.
   workers while a save is in flight. A successful build is not browser proof.
 - Complete independent review and exact-head hosted checks before merging.
 
+## Local Verification
+
+Source checkpoint `751b416` passed the full local Vitest run: 4,477 tests passed,
+418 skipped across 378 files. Skips include tests requiring absent database
+fixtures; they are not successful native database acceptance. Full project and
+database-transfer TypeScript checks, production frontend/backend builds, build
+seal, staged Gitleaks and whitespace checks passed. Browser acceptance and live
+provider/deployment behavior were not verified in this checkpoint.
+
+The checkpoint is published as draft PR #144, stacked on assignment PR #143.
+No production merge, operational migration, or deployment was performed.
+
 ## Cleanup Boundaries
 
 Only source, tests and documentation are published. Private environment files,
