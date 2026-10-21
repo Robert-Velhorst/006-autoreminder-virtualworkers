@@ -19,6 +19,24 @@ every possible dependency was recognized by the scanner.
 The scanner wrapper, report policy and promotion helper form one acceptance
 path. This document does not independently authorize a publication or deployment.
 
+## Runtime Tooling Boundary
+
+The first hosted scan (run `39555172591`) correctly rejected 18 HIGH findings:
+four in the base image's npm dependencies and fourteen in the native TypeScript
+compiler's embedded Go dependencies. None was suppressed or excepted.
+
+The final Docker stage removes npm/npx and Yarn; build/install stages retain
+their tools. Scoped pnpm overrides remove only the TypeScript compiler peer
+from tRPC's three compiled runtime packages. TypeScript 7 remains an explicit
+development dependency for type checking. The lockfile is generated with pinned
+pnpm 12.14.0, without editing installed package payloads or scanner inventory.
+
+The final-image verifier requires npm/Yarn and all TypeScript compiler packages
+to be absent, then loads tRPC's server, Express adapter, client and React entry points.
+The same image must still pass the unchanged vulnerability policy and configured
+PostgreSQL acceptance. Source changes and local mocked tests alone do not prove
+that the corrected image has passed those hosted checks.
+
 ## Pinned Scanner And Fail-Closed Policy
 
 [`scan-production-image.mjs`](../scripts/scan-production-image.mjs) downloads

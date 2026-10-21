@@ -34,6 +34,10 @@ RUN pnpm install --frozen-lockfile --prod
 # Stage 3: Minimal production image
 FROM node:26.12.0-alpine AS production
 
+# Installation tools belong in the earlier stages, not the runtime image.
+RUN rm -rf /usr/local/lib/node_modules/npm /opt/yarn-* && \
+    rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/yarn /usr/local/bin/yarnpkg
+
 # Create app user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001

@@ -9,6 +9,10 @@ patchedDependencies:
   wouter@3.13.0: patches/wouter@3.13.0.patch
 
 overrides:
+  # tRPC publishes compiled JavaScript; its compiler peer is build-time only.
+  "@trpc/client>typescript": "-"
+  "@trpc/react-query>typescript": "-"
+  "@trpc/server>typescript": "-"
   tailwindcss>nanoid: 3.3.7
   dompurify: 3.4.17
   engine.io: 6.6.11
