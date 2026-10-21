@@ -224,7 +224,7 @@ export function createRateLimiter(config: RateLimitConfig) {
  */
 
 // Strict rate limit for authentication endpoints
-export const authRateLimiter = createRateLimiter({
+export const signInAttemptRateLimiter = createRateLimiter({
   bucket: 'auth',
   windowMs: 15 * 60 * 1000, // 15 minutes
   maxRequests: 5, // 5 attempts per 15 minutes
@@ -247,7 +247,7 @@ function canonicalExpressRoutePath(path: string) {
  * They do not attempt authentication and must not exhaust the five-attempt
  * authentication budget that protects the POST endpoints.
  */
-export function isAnonymousAuthReadProbe(method: string, path: string) {
+export function isSignInReadProbe(method: string, path: string) {
   return method.toUpperCase() === "GET" && ANONYMOUS_AUTH_READ_PROBE_PATHS.has(canonicalExpressRoutePath(path));
 }
 
@@ -256,8 +256,8 @@ export function authRateLimiterWithReadProbeBypass(
   res: Response,
   next: NextFunction,
 ) {
-  if (isAnonymousAuthReadProbe(req.method, req.path)) return next();
-  return authRateLimiter(req, res, next);
+  if (isSignInReadProbe(req.method, req.path)) return next();
+  return signInAttemptRateLimiter(req, res, next);
 }
 
 // Standard rate limit for API endpoints
@@ -290,7 +290,7 @@ export function isAnonymousApiReadProbe(method: string, path: string, user: unkn
   if (user) return false;
 
   const authScopedPath = path.slice(0, 6).toLowerCase() === '/auth/' ? path.slice('/auth'.length) : path;
-  return isAnonymousAuthReadProbe(method, authScopedPath);
+  return isSignInReadProbe(method, authScopedPath);
 }
 
 export function apiRateLimiterWithAnonymousSessionProbeBypass(

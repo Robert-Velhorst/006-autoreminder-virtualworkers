@@ -8,7 +8,7 @@ import {
   consumeRedisRateLimit,
   getRateLimitIdentifier,
   isAnonymousApiReadProbe,
-  isAnonymousAuthReadProbe,
+  isSignInReadProbe,
   isAnonymousSessionProbe,
   isAptlssExpensiveRequest,
   createRateLimiter,
@@ -55,14 +55,14 @@ describe("rate-limit counter consumption", () => {
 
 describe('Express-equivalent policy selectors', () => {
   it.each(['/OWNER-BOOTSTRAP/STATUS/', '/Trello/Client-Key'])('preserves a public auth read probe alias %s', path => {
-    expect(isAnonymousAuthReadProbe('GET', path)).toBe(true);
-    expect(isAnonymousAuthReadProbe('POST', path)).toBe(false);
+    expect(isSignInReadProbe('GET', path)).toBe(true);
+    expect(isSignInReadProbe('POST', path)).toBe(false);
     expect(isAnonymousApiReadProbe('GET', `/AUTH${path}`, null)).toBe(true);
     expect(isAnonymousApiReadProbe('GET', `/AUTH${path}`, { id: 1 })).toBe(false);
   });
 
   it('does not normalize unmatched multiple slashes into a read bypass', () => {
-    expect(isAnonymousAuthReadProbe('GET', '/trello/client-key//')).toBe(false);
+    expect(isSignInReadProbe('GET', '/trello/client-key//')).toBe(false);
     expect(isAnonymousApiReadProbe('GET', '/AUTH/trello/client-key//', null)).toBe(false);
   });
 
@@ -253,12 +253,12 @@ describe("anonymous session probe rate-limit scope", () => {
 
 describe("anonymous auth read rate-limit scope", () => {
   it("exempts only the login screen's safe GET probes from the strict auth budget", () => {
-    expect(isAnonymousAuthReadProbe("GET", "/owner-bootstrap/status")).toBe(true);
-    expect(isAnonymousAuthReadProbe("GET", "/trello/client-key")).toBe(true);
-    expect(isAnonymousAuthReadProbe("POST", "/login")).toBe(false);
-    expect(isAnonymousAuthReadProbe("POST", "/owner-bootstrap")).toBe(false);
-    expect(isAnonymousAuthReadProbe("POST", "/trello/login-token")).toBe(false);
-    expect(isAnonymousAuthReadProbe("GET", "/register")).toBe(false);
+    expect(isSignInReadProbe("GET", "/owner-bootstrap/status")).toBe(true);
+    expect(isSignInReadProbe("GET", "/trello/client-key")).toBe(true);
+    expect(isSignInReadProbe("POST", "/login")).toBe(false);
+    expect(isSignInReadProbe("POST", "/owner-bootstrap")).toBe(false);
+    expect(isSignInReadProbe("POST", "/trello/login-token")).toBe(false);
+    expect(isSignInReadProbe("GET", "/register")).toBe(false);
   });
 });
 

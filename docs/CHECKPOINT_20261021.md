@@ -67,6 +67,25 @@ The two unchanged files then passed all 61 tests in a quiet one-worker rerun
 (11.24 seconds), without changing assertions or timeouts. This narrows the local
 diagnostic but does not turn the earlier full run into a passing receipt.
 
+## Rate-Limit Scan Follow-Up
+
+At source `03fa752`, CodeQL aggregate `119070700006` reported five new
+`js/missing-rate-limiting` findings on synthetic HTTP tests. Its SARIF related
+locations all identify two calls in the read-probe wrapper: the probe predicate
+and the attempt-counting middleware. Neither performs authorization. The
+[CodeQL authorization model](https://github.com/github/codeql/blob/main/javascript/ql/lib/semmle/javascript/security/SensitiveActions.qll)
+classifies calls heuristically by names containing `auth`, `login` or `verify`.
+The [rate-limit model](https://github.com/github/codeql/blob/main/javascript/ql/lib/semmle/javascript/security/dataflow/MissingRateLimiting.qll)
+then treats such calls as expensive actions; it does not model this custom
+counter middleware as a recognized limiter.
+
+The actual helpers are renamed to `isSignInReadProbe` and
+`signInAttemptRateLimiter`, with all internal references and verification scripts
+updated. No quota, middleware ordering, test assertion, CodeQL query or scan
+exclusion is changed. All 25 focused rate-limit tests and TypeScript pass.
+This is a documented model correction, not dismissal of an actual authorization
+boundary, and requires a fresh aggregate result before acceptance.
+
 ## Cleanup Boundaries
 
 Only source, tests and documentation are published. Private environment files,

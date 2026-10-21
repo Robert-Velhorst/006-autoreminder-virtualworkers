@@ -140,7 +140,7 @@ echo "-------------------------------------"
 
 # Check rate limiter implementation
 check_content "server/middleware/rate-limiter.ts" "createRateLimiter"
-check_content "server/middleware/rate-limiter.ts" "authRateLimiter"
+check_content "server/middleware/rate-limiter.ts" "signInAttemptRateLimiter"
 check_content "server/middleware/rate-limiter.ts" "apiRateLimiter"
 
 # Check logger implementation
