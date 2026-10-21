@@ -10,9 +10,9 @@ describe("server request queue capacity", () => {
     expect(getPendingRequestQueueCap({ MAX_PENDING_REQUESTS: "999999" })).toBe(10_000);
   });
 
-  it("rejects excess server requests before extending the wait queue", () => {
+  it("mounts the tested admission pipeline before body parsing", () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-    expect(source).toContain("const MAX_PENDING_REQUESTS = getPendingRequestQueueCap();");
-    expect(source).toContain("if (waitQueue.length >= MAX_PENDING_REQUESTS)");
+    expect(source).toContain("configureRequestAdmission(app);");
+    expect(source.indexOf("configureRequestAdmission(app);")).toBeLessThan(source.indexOf("app.use(express.json("));
   });
 });
