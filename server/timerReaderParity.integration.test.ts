@@ -208,11 +208,11 @@ describe.skipIf(!fixtureUrl)('native canonical timer cross-reader acceptance', {
     expect(daily.map(row => row.cardId).sort()).toEqual(expectedIds.map(id => `card-${id}`));
     expect(daily.reduce((sum, row) => sum + row.totalSeconds, 0)).toBeCloseTo(expectedSeconds, 6);
     for (const id of expectedIds) {
-      const history = await caller().getCardHistory({ cardId: `card-${id}` });
+      const history = await caller().getByCard({ cardId: `card-${id}` });
       expect(history.map(row => row.id)).toEqual([id]);
     }
-    expect(await caller().getCardHistory({ cardId: 'card-104' })).toEqual([]);
-    expect(await caller().getCardHistory({ cardId: 'card-105' })).toEqual([]);
+    expect(await caller().getByCard({ cardId: 'card-104' })).toEqual([]);
+    expect(await caller().getByCard({ cardId: 'card-105' })).toEqual([]);
   });
 
   it('loads actual operator context from canonical history, not the colliding legacy aliases', async () => {
