@@ -174,20 +174,23 @@ jobs:
           DATABASE_URL="$RESTORE_DATABASE_URL" pnpm db:verify-parity
       - name: Build the production container
         run: docker build --tag va-dashboard:ci .
+      - name: Scan the exact production image
+        id: image_scan
+        shell: bash
+        run: bash scripts/scan-production-image.sh va-dashboard:ci "$RUNNER_TEMP/image-security-ci.json"
+      - name: Retain image security evidence
+        if: ${{ always() && steps.image_scan.outcome != 'skipped' && steps.image_scan.outcome != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-security-ci-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/image-security-ci.json
+            ${{ runner.temp }}/image-security-ci.json.trivy.json
+            ${{ runner.temp }}/image-security-ci.json.database.json
+          retention-days: 7
+          if-no-files-found: warn
       - name: Smoke-test the production image runtime
-        run: |
-          docker run --rm --entrypoint node va-dashboard:ci --input-type=module -e '
-            import assert from "node:assert/strict";
-            import { existsSync } from "node:fs";
-            assert.equal(process.env.NODE_ENV, "production");
-            assert.equal(process.env.LOCAL_AUTH_BYPASS, "false");
-            assert.notEqual(process.getuid(), 0);
-            assert.equal(existsSync("/usr/local/bin/pnpm"), false);
-            assert.ok(existsSync("/app/dist/index.js"));
-            for (const dependency of ["express", "pg", "drizzle-orm"]) {
-              import.meta.resolve(dependency);
-            }
-          '
+        run: node scripts/verify-production-image.mjs va-dashboard:ci
       - name: Validate Hetzner deployment script syntax
         run: bash -n deployment/hetzner/deploy.sh
       - name: Verify migration metadata matches the schema

@@ -128,6 +128,8 @@ The operator transfer tools and data ownership rules are described in the [conso
 
 Please do not report vulnerabilities in public issues. See [SECURITY.md](SECURITY.md) for supported-version and private-reporting guidance. Secret scanning, push protection, dependency alerts, automated security updates, code scanning, and protected `main` checks are enabled or configured at the repository level; verify their current state in GitHub before relying on them.
 
+See [Container Image Security](docs/IMAGE_SECURITY.md) for the exact-artifact vulnerability gate, exception limits, and required release evidence. Documentation and historical scan previews do not prove that this gate has passed.
+
 ## Project Documentation
 
 - [Production cutover and operations](docs/PRODUCTION_CUTOVER.md)
