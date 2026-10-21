@@ -60,8 +60,10 @@ Verified 2026-10-14 UTC against PR #110 code at commit
 - The dependency audit for this PR branch reports no known vulnerabilities.
 - GitHub reports zero open Dependabot alerts and two open secret-scanning
   alerts concerning historical database credentials. Credential validity or
-  rotation has not been verified. Robert declined deletion of the related Atlas
-  database user; preserve that account. Do not dismiss the alerts until the
+  rotation has not been verified. Robert declined deletion of the related shared
+  database user; preserve that account. Follow the
+  [historical credential remediation record](docs/HISTORICAL_CREDENTIAL_REMEDIATION.md).
+  Do not dismiss the alerts until the
   exposed credentials have been safely invalidated and GitHub confirms an
   appropriate resolution.
 - GitHub `main` protection is enabled with strict required CI and CodeQL
