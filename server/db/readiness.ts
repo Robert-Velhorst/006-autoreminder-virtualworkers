@@ -1,7 +1,7 @@
 export const REQUIRED_POSTGRES_MIGRATION = {
-  tag: "0008_assignment_identity",
-  createdAt: 1792559997541n,
-  hash: "5a7f67d77a91384a486ea618fa4df7a847da0b5f2a565c89598216d34c28a2be",
+  tag: "0009_financial_ledger_authority",
+  createdAt: 1792562299754n,
+  hash: "128636b981abfdd59b032e7143da3ead5d67c84ec78c0ee1139bef9adefbeffb",
 } as const;
 
 export const READINESS_QUERY_TIMEOUT_MS = 2_000;
@@ -55,6 +55,28 @@ export async function hasRequiredPostgresSchema(
               JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=k.attnum
               ORDER BY k.position
             ) = ARRAY['founderId', 'taskId']::text[]
+        ) AND NOT EXISTS (
+          SELECT 1 FROM payment_cycles GROUP BY "founderId", "cycleStart", "cycleEnd" HAVING count(*) > 1
+        ) AND NOT EXISTS (
+          SELECT 1 FROM weekly_pay_log GROUP BY "founderId", "vaId", "weekStart" HAVING count(*) > 1
+        ) AND (
+          SELECT count(*) = 4 FROM (VALUES
+            ('payment_cycles', 'payment_cycles_founder_dates_unique', ARRAY['founderId','cycleStart','cycleEnd']::text[]),
+            ('payment_cycles', 'payment_cycles_predecessor_unique', ARRAY['predecessorCycleId']::text[]),
+            ('weekly_pay_log', 'weekly_pay_log_founder_worker_week_unique', ARRAY['founderId','vaId','weekStart']::text[]),
+            ('financial_ledger_events', 'financial_ledger_events_founder_key_unique', ARRAY['founderId','eventKey']::text[])
+          ) expected(table_name, constraint_name, column_names)
+          JOIN pg_class t ON t.relname=expected.table_name
+          JOIN pg_namespace n ON n.oid=t.relnamespace AND n.nspname='public'
+          JOIN pg_constraint co ON co.conrelid=t.oid AND co.conname=expected.constraint_name
+          JOIN pg_index i ON i.indexrelid=co.conindid
+          WHERE co.contype='u' AND co.convalidated AND NOT co.condeferrable
+            AND i.indisvalid AND i.indisunique AND i.indpred IS NULL AND i.indexprs IS NULL
+            AND i.indnkeyatts=cardinality(expected.column_names)
+            AND ARRAY(
+              SELECT a.attname::text FROM unnest(co.conkey) WITH ORDINALITY k(attnum, position)
+              JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=k.attnum ORDER BY k.position
+            ) = expected.column_names
         ) AS required_migration_applied
       `,
       values: [

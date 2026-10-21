@@ -143,7 +143,7 @@ Write-Host "-------------------------------------"
 
 # Check rate limiter implementation
 Test-ContentExists "server/middleware/rate-limiter.ts" "createRateLimiter"
-Test-ContentExists "server/middleware/rate-limiter.ts" "authRateLimiter"
+Test-ContentExists "server/middleware/rate-limiter.ts" "signInAttemptRateLimiter"
 Test-ContentExists "server/middleware/rate-limiter.ts" "apiRateLimiter"
 
 # Check logger implementation

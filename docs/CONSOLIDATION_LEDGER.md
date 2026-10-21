@@ -2,20 +2,24 @@
 
 ## Current Consolidation Checkpoint: October 21, 2026
 
-The latest accepted main source is merge
-`df5c9f3f8af3c06723fe0d1992a50d6153ed4410` from PR #141. Its tree exactly
-matches reviewed head `386aab90401312d48f818d3e8c3ccb6ab2266d76`, preserved
-under verified annotated tag `archive/canonical-timer-acceptance-20261021`.
-Reviewed-head quality `39543523895` and CodeQL `39543520471` passed. Separate
-post-merge main quality `39544579909` and CodeQL/push `39544579781` also passed.
-The timer branch was removed only after archive and merge-tree verification.
+Main now includes accepted timer PR #141, OAuth PR #142 and assignment PR #143.
+The latest merge is `7dfe3584d3855f878c7060af897f685707ed7fec`; its tree and
+reviewed assignment head `e57811c9cd40d5facb829c66074bea18e06a1f79` both equal
+`76faa0ee2839a63b4f723393e5e0bf9448a6060b`. Exact-head quality `39551621023`
+and CodeQL `39551616110` passed, including native assignment and browser gates.
+The reviewed head is preserved under verified annotated tag
+`archive/canonical-assignment-acceptance-20261021`. Assignment PR #143 was merged
+normally with its expected full head; its matching branch was then removed.
+Post-merge main quality `39553158382` and CodeQL/push `39553156950` subsequently
+passed at that exact merge. These are source gates, not Hetzner acceptance.
 
-Two temporary source branches remain: PR #135 for exact-image security and the
-browser-bound OAuth state repair. PR #135's integrated head `188dc0d` passed
-local checks and CodeQL `39545169245`, but quality `39545173841` could not
-start; the narrowly scoped Action-policy decision remains pending. The OAuth
-repair requires its own exact-head native/route checks and review. Neither
-branch is discarded to manufacture an only-main result. Consolidate each only after
+Two temporary source branches remain: PR #135 for exact-image security and
+draft PR #144 for financial authority, rate limiting and passive timeline reads.
+PR #135's integrated head `b5d8597` passed local checks, but quality
+`39551529663` could not start; the narrowly scoped Action-policy decision remains
+pending. PR #144 is retargeted to main after its assignment prerequisite merged.
+Its [checkpoint](CHECKPOINT_20261021.md) records incomplete acceptance and work.
+Neither branch is discarded to manufacture an only-main result. Consolidate each only after
 its exact-head checks and review pass, preserve the reviewed head in a verified
 archive tag, and delete only the matching branch ref. Private configuration,
 secrets and recovery archives remain outside Git.

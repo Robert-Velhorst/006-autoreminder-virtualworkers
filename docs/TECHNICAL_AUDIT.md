@@ -30,11 +30,23 @@ image acceptance, browser checks and isolated backup/restore. The repair adds
 server-owned initiation and a browser-bound single-use database transaction,
 with UTC database-clock expiry checked after acquiring its row lock, and an
 authenticated-encryption browser binding. These tests do not establish real
-provider acceptance. Founder/task assignment repair remains independently
-under review in PR143; its new migration and code must pass their own
-exact-head native and full regression gates before merge. See
+provider acceptance.
+
+PR #143's founder/task assignment repair was accepted at exact head
+`e57811c9cd40d5facb829c66074bea18e06a1f79`, with quality `39551621023` and
+CodeQL `39551616110` passing. It merged normally as
+`7dfe3584d3855f878c7060af897f685707ed7fec` with the identical tree
+`76faa0ee2839a63b4f723393e5e0bf9448a6060b`. Native assignment service/migration
+and mounted-route tests, configured image acceptance, browser and backup gates
+passed; this does not establish historical operational data acceptance. See
 [Assignment Identity Cutover](ASSIGNMENT_IDENTITY_CUTOVER.md) before operational
 migration; ambiguous historical assignments are never resolved automatically.
+
+Draft PR #144 preserves subsequent financial authority and passive-read work.
+Its local checkpoint and explicitly unverified portions are recorded in
+[Checkpoint](CHECKPOINT_20261021.md). Financial migration 0009 requires its own
+native acceptance and [cutover review](FINANCIAL_LEDGER_CUTOVER.md); a prior
+assignment or OAuth pass cannot accept later financial changes.
 
 PR [#135](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/135)
 retains the separate exact-image vulnerability and promotion gate. Its workflow

@@ -202,7 +202,7 @@ describe.skipIf(!url)("worker session lifecycle full-migration PostgreSQL", { ti
     await expect(sdk.authenticateRequest(req(await legacy("legacy-worker")))).resolves.toMatchObject({ id: 90002 });
     await migrate(db, { migrationsFolder: canonical });
     expect((await read(90002)).sessionEpoch).toBe("0");
-    expect((await pool.query("SELECT count(*)::int AS count FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")).rows[0].count).toBe(139);
+    expect((await pool.query("SELECT count(*)::int AS count FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")).rows[0].count).toBe(140);
   });
   it("defaults/clamps NEW accounts to one and prevents legacy openId delete/recreate revival", async () => {
     const old = await legacy("legacy-reused");

@@ -4,9 +4,30 @@
  */
 
 import { Request, Response, NextFunction } from 'express';
+import { getTRPCErrorShape, initTRPC, TRPCError, transformTRPCResponse } from '@trpc/server';
+import superjson from 'superjson';
 import { getRedis, isRedisAvailable } from '../services/redis';
 
+const rateLimitRpc = initTRPC.create({ transformer: superjson, isDev: false });
+
+function rateLimitBody(req: Request, message: string, retryAfter: number, limit: number, windowMs: number) {
+  const url = new URL(req.originalUrl, 'http://rate-limit.invalid');
+  const match = /^\/api\/trpc(?:\/(.*))?$/i.exec(url.pathname);
+  if (!match) return { error: message, retryAfter, limit, windowMs };
+  let path: string | undefined;
+  try { path = decodeURIComponent(match[1] ?? ''); } catch { /* Keep malformed paths throttled too. */ }
+  const batch = url.searchParams.get('batch') === '1';
+  const errors = (batch ? (path ?? '').split(',') : [path]).map(operation => {
+    const shape = getTRPCErrorShape({ config: rateLimitRpc._config,
+      error: new TRPCError({ code: 'TOO_MANY_REQUESTS', message }),
+      type: 'unknown', path: operation || undefined, input: undefined, ctx: undefined });
+    return { error: { ...shape, data: { ...shape.data, retryAfter, limit, windowMs } } };
+  });
+  return transformTRPCResponse(rateLimitRpc._config, batch ? errors : errors[0]);
+}
+
 interface RateLimitConfig {
+  bucket: string;
   windowMs: number;
   maxRequests: number;
   message?: string;
@@ -38,6 +59,7 @@ export function getRateLimitIdentifier(input: {
 
 // In-memory fallback when Redis is not available
 const memoryStore = new Map<string, RateLimitInfo>();
+const chargedRequestPolicies = new WeakMap<Request, Set<string>>();
 
 /**
  * Clean up expired entries from memory store
@@ -139,12 +161,14 @@ async function refundRateLimit(key: string): Promise<void> {
  */
 export function createRateLimiter(config: RateLimitConfig) {
   const {
+    bucket,
     windowMs,
     maxRequests,
     message = 'Too many requests, please try again later',
     skipSuccessfulRequests = false,
     skipFailedRequests = false,
   } = config;
+  if (typeof bucket !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(bucket)) throw new Error('A stable rate-limit policy bucket is required');
 
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
@@ -153,7 +177,10 @@ export function createRateLimiter(config: RateLimitConfig) {
         user: (req as Request & { user?: { id?: number | string; openId?: string } | null }).user,
         ip: req.ip,
       });
-      const key = `ratelimit:${req.path}:${identifier}`;
+      const key = `ratelimit:${bucket}:${identifier}`;
+      // A preset can be mounted globally and again on a subrouter. Charge its
+      // policy once, independent of mount-relative paths and resource IDs.
+      if (chargedRequestPolicies.get(req)?.has(key)) { next(); return; }
       
       const info = await consumeRateLimit(key, windowMs);
       const now = Date.now();
@@ -168,14 +195,12 @@ export function createRateLimiter(config: RateLimitConfig) {
         res.setHeader('X-RateLimit-Reset', info.resetTime.toString());
         res.setHeader('Retry-After', retryAfter.toString());
         
-        res.status(429).json({
-          error: message,
-          retryAfter,
-          limit: maxRequests,
-          windowMs,
-        });
+        res.status(429).json(rateLimitBody(req, message, retryAfter, maxRequests, windowMs));
         return;
       }
+      const charged = chargedRequestPolicies.get(req) ?? new Set<string>();
+      charged.add(key);
+      chargedRequestPolicies.set(req, charged);
       
       res.setHeader('X-RateLimit-Limit', maxRequests.toString());
       res.setHeader('X-RateLimit-Remaining', Math.max(0, maxRequests - info.count).toString());
@@ -184,13 +209,15 @@ export function createRateLimiter(config: RateLimitConfig) {
       // Handle skip options
       if (skipSuccessfulRequests || skipFailedRequests) {
         const originalSend = res.send;
+        let refunded = false;
         res.send = function (body: any): Response {
           const statusCode = res.statusCode;
           const shouldSkip =
             (skipSuccessfulRequests && statusCode < 400) ||
             (skipFailedRequests && statusCode >= 400);
           
-          if (shouldSkip) {
+          if (shouldSkip && !refunded) {
+            refunded = true;
             void refundRateLimit(key);
           }
           
@@ -212,7 +239,8 @@ export function createRateLimiter(config: RateLimitConfig) {
  */
 
 // Strict rate limit for authentication endpoints
-export const authRateLimiter = createRateLimiter({
+export const signInAttemptRateLimiter = createRateLimiter({
+  bucket: 'auth',
   windowMs: 15 * 60 * 1000, // 15 minutes
   maxRequests: 5, // 5 attempts per 15 minutes
   message: 'Too many authentication attempts, please try again later',
@@ -224,13 +252,18 @@ const ANONYMOUS_AUTH_READ_PROBE_PATHS = new Set([
   "/trello/client-key",
 ]);
 
+// Express's static routes are case-insensitive with one optional trailing slash.
+function canonicalExpressRoutePath(path: string) {
+  return (path.endsWith('/') ? path.slice(0, -1) : path).toLowerCase() || '/';
+}
+
 /**
  * The login form performs these two public, read-only checks on every render.
  * They do not attempt authentication and must not exhaust the five-attempt
  * authentication budget that protects the POST endpoints.
  */
-export function isAnonymousAuthReadProbe(method: string, path: string) {
-  return method.toUpperCase() === "GET" && ANONYMOUS_AUTH_READ_PROBE_PATHS.has(path);
+export function isSignInReadProbe(method: string, path: string) {
+  return method.toUpperCase() === "GET" && ANONYMOUS_AUTH_READ_PROBE_PATHS.has(canonicalExpressRoutePath(path));
 }
 
 export function authRateLimiterWithReadProbeBypass(
@@ -238,12 +271,13 @@ export function authRateLimiterWithReadProbeBypass(
   res: Response,
   next: NextFunction,
 ) {
-  if (isAnonymousAuthReadProbe(req.method, req.path)) return next();
-  return authRateLimiter(req, res, next);
+  if (isSignInReadProbe(req.method, req.path)) return next();
+  return signInAttemptRateLimiter(req, res, next);
 }
 
 // Standard rate limit for API endpoints
 export const apiRateLimiter = createRateLimiter({
+  bucket: 'api',
   windowMs: 60 * 1000, // 1 minute
   maxRequests: 60, // 60 requests per minute
   message: 'Too many requests, please slow down',
@@ -256,7 +290,9 @@ export const apiRateLimiter = createRateLimiter({
  * the login page itself report a spurious rate-limit error.
  */
 export function isAnonymousSessionProbe(method: string, path: string, user: unknown): boolean {
-  return method.toUpperCase() === "GET" && path === "/trpc/auth.me" && !user;
+  // Only the Express mount is case-insensitive; tRPC procedure names are not.
+  return method.toUpperCase() === "GET" && path.slice(0, 6).toLowerCase() === '/trpc/'
+    && path.slice(6) === 'auth.me' && !user;
 }
 
 /**
@@ -268,8 +304,8 @@ export function isAnonymousApiReadProbe(method: string, path: string, user: unkn
   if (isAnonymousSessionProbe(method, path, user)) return true;
   if (user) return false;
 
-  const authScopedPath = path.startsWith("/auth/") ? path.slice("/auth".length) : path;
-  return isAnonymousAuthReadProbe(method, authScopedPath);
+  const authScopedPath = path.slice(0, 6).toLowerCase() === '/auth/' ? path.slice('/auth'.length) : path;
+  return isSignInReadProbe(method, authScopedPath);
 }
 
 export function apiRateLimiterWithAnonymousSessionProbeBypass(
@@ -285,6 +321,7 @@ export function apiRateLimiterWithAnonymousSessionProbeBypass(
 
 // Strict rate limit for expensive operations
 export const expensiveOperationRateLimiter = createRateLimiter({
+  bucket: 'expensive',
   windowMs: 60 * 1000, // 1 minute
   maxRequests: 10, // 10 requests per minute
   message: 'Too many expensive operations, please wait before retrying',
@@ -292,6 +329,7 @@ export const expensiveOperationRateLimiter = createRateLimiter({
 
 // Lenient rate limit for read operations
 export const readRateLimiter = createRateLimiter({
+  bucket: 'read',
   windowMs: 60 * 1000, // 1 minute
   maxRequests: 120, // 120 requests per minute
   message: 'Too many requests, please slow down',
@@ -300,13 +338,14 @@ export const readRateLimiter = createRateLimiter({
 
 // Very strict rate limit for APTLSS generation
 export const aptlssRateLimiter = createRateLimiter({
+  bucket: 'aptlss',
   windowMs: 60 * 1000, // 1 minute
   maxRequests: 5, // 5 generations per minute
   message: 'Too many APTLSS generation requests, please wait before retrying',
 });
 
 export function isAptlssExpensiveRequest(method: string, path: string) {
-  return method.toUpperCase() !== 'GET' && path.startsWith('/aptlss/');
+  return method.toUpperCase() !== 'GET' && canonicalExpressRoutePath(path).startsWith('/aptlss/');
 }
 
 export const aptlssGenerationRateLimiter = (
@@ -320,6 +359,7 @@ export const aptlssGenerationRateLimiter = (
 
 // Strict rate limit for ATIS analysis
 export const atisRateLimiter = createRateLimiter({
+  bucket: 'atis',
   windowMs: 60 * 1000, // 1 minute
   maxRequests: 3, // 3 analyses per minute
   message: 'Too many ATIS analysis requests, please wait before retrying',

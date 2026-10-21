@@ -48,7 +48,7 @@ import { startManusScheduler, stopManusScheduler } from "../services/manus-sched
 import {
   apiRateLimiter,
   apiRateLimiterWithAnonymousSessionProbeBypass,
-  authRateLimiter,
+  signInAttemptRateLimiter,
   authRateLimiterWithReadProbeBypass,
   aptlssGenerationRateLimiter,
 } from "../middleware/rate-limiter.js";
@@ -148,7 +148,7 @@ async function startServer() {
   // Local auth routes (username/password login - works without Manus) with strict rate limiting
   app.use('/api/auth', authRateLimiterWithReadProbeBypass, localAuthRoutes);
   // One-time worker invitation inspection and acceptance remain public but rate-limited.
-  app.use('/api/worker-invitations', authRateLimiter, workerInvitationRoutes);
+  app.use('/api/worker-invitations', signInAttemptRateLimiter, workerInvitationRoutes);
   // Worker-scoped Google OAuth and read-only evidence connection.
   app.use("/api/google-evidence", googleEvidenceRoutes);
   // Worker-authorized Trello card actions must precede the broad legacy

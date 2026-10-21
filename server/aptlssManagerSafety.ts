@@ -47,6 +47,7 @@ export function managerSafetyDigest(root = process.cwd()) {
     "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "drizzle.config.ts", "vitest.config.ts",
     "Dockerfile", "docker-compose.yml", "deployment/shadow-pilot.yml", "deployment/codex-subscription.yml",
     "playwright.aptlss.config.ts", "e2e/aptlss-manager.spec.ts", "e2e/aptlss-manager-live.spec.ts", "e2e/aptlss-manager-review.spec.ts", "scripts/start-aptlss-test-server.ts",
+    "e2e/api-rate-window.mjs", "e2e/api-rate-window.test.mjs",
   ].sort();
   const digest = createHash("sha256");
   for (const file of files) {

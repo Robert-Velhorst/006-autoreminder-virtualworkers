@@ -1029,12 +1029,14 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
       .map((card: any) => {
       // Parse checklist JSON from stored aptlssChecklist or generate fallback
       let checklist: any[] = [];
+      let hasStoredChecklist = false;
       
       // First try to parse stored aptlssChecklist from AI understanding
       if (card.aptlssChecklist) {
         try {
           const parsed = JSON.parse(card.aptlssChecklist);
           if (Array.isArray(parsed) && parsed.length > 0) {
+            hasStoredChecklist = true;
             checklist = parsed.map((item: any) => ({
               step: item.name || item.step || item.description || 'Step',
               timeMinutes: item.estimatedMinutes || item.timeMinutes || item.time || 15,
@@ -1051,8 +1053,8 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
         checklist = [{ step: card.goal, timeMinutes: card.estimatedMinutes || 30, aptlssType: 'T' }];
       }
 
-      // Track cards that need AI analysis (no stored checklist or only 1 fallback step)
-      if (!card.aptlssChecklist || checklist.length <= 1) {
+      // A valid one-step result is complete data, not an implicit request to expand it.
+      if (!hasStoredChecklist) {
         cardsNeedingAnalysis.push(card.id);
       }
 
@@ -1119,36 +1121,6 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
       };
     });
 
-    // Auto-trigger AI analysis for cards missing detailed breakdowns (fire-and-forget)
-    if (cardsNeedingAnalysis.length > 0) {
-      console.log(`[ATIS] Auto-analyzing ${cardsNeedingAnalysis.length} cards missing AI breakdowns in parallel (5 workers)...`);
-      // Process in background - don't block the response
-      setTimeout(() => {
-        const analyzeParallel = async () => {
-          const concurrency = 5;
-          const queue = [...cardsNeedingAnalysis];
-          
-          const worker = async () => {
-            while (queue.length > 0) {
-              const cardId = queue.shift();
-              if (cardId === undefined) break;
-              try {
-                await processCardUnderstanding(cardId);
-              } catch (err: any) {
-                console.warn(`[ATIS Auto-analyze] Card ${cardId} failed: ${err.message}`);
-              }
-            }
-          };
-
-          // Start workers in parallel
-          const workers = Array.from({ length: Math.min(concurrency, queue.length) }, worker);
-          await Promise.all(workers);
-          console.log(`[ATIS] Background auto-analysis complete for ${cardsNeedingAnalysis.length} cards`);
-        };
-        analyzeParallel().catch(console.error);
-      }, 100);
-    }
-
     // Deduplicate by card name - keep only one card per unique name
     // This handles cases where the same card exists in multiple boards (e.g., template copies)
     const seenCardNames = new Map<string, typeof tasks[0]>();
@@ -1201,7 +1173,8 @@ router.get('/timeline-tasks', async (req: Request, res: Response) => {
     res.json({
       scheduled,
       overflow,
-      pendingAnalysis: cardsNeedingAnalysis.length, // Number of cards being auto-analyzed in background
+      analysisRequiredCount: cardsNeedingAnalysis.length,
+      pendingAnalysis: cardsNeedingAnalysis.length, // Compatibility: missing stored results, not running work.
       metrics: {
         totalScheduled: scheduled.length,
         totalOverflow: overflow.length,

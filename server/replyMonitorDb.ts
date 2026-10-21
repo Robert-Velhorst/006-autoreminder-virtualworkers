@@ -7,9 +7,56 @@ import { and, asc, desc, eq, inArray, isNull, lte, notInArray } from "drizzle-or
 import { replyThreads, unsignedMessageFlags, vagueReplyFlags } from "../drizzle/schema.postgres";
 import { getDb, incrementPayLogD1 } from "./db";
 
-/** Get today's date in EAT (UTC+3) as YYYY-MM-DD */
-function todayEAT(): string {
-  return new Date(Date.now() + 3 * 3600000).toISOString().slice(0, 10);
+const REPLY_FLAG_GRACE_MS = 60 * 60 * 1000;
+class FlagNoLongerChargeable extends Error {}
+
+async function chargeReplyFlag(table: typeof vagueReplyFlags | typeof unsignedMessageFlags,
+  kind: 'vague' | 'unsigned', id: number, workerUserId?: number): Promise<boolean> {
+  if (!Number.isSafeInteger(id) || id <= 0
+    || (workerUserId !== undefined && (!Number.isSafeInteger(workerUserId) || workerUserId <= 0))) {
+    throw new Error('A positive reply flag and worker identity is required');
+  }
+  const db = await getDb();
+  if (!db) throw new Error('Database not available');
+  const [observed] = await db.select().from(table).where(and(eq(table.id, id),
+    ...(workerUserId === undefined ? [] : [eq(table.vaId, workerUserId)]))).limit(1);
+  if (!observed || observed.resolvedAt !== null || observed.demeritIssued) return false;
+  const flaggedAt = observed.flaggedAt.getTime();
+  if (!Number.isFinite(flaggedAt)) throw new Error('Reply flag timestamp is invalid');
+  if (flaggedAt > Date.now() - REPLY_FLAG_GRACE_MS) return false;
+  // Preserve the existing EAT accounting convention, but bind the charge date
+  // to this event's expiry, not retry time (which may cross a day/week boundary).
+  const dateKey = new Date(flaggedAt + REPLY_FLAG_GRACE_MS + 3 * 3600000).toISOString().slice(0, 10);
+  let marked = false;
+  try {
+    await incrementPayLogD1(observed.vaId, dateKey, 1, `reply-monitor:${kind}:${id}`, async tx => {
+      // The ledger owns account/financial locks first. This callback runs inside
+      // that transaction; a ledger failure rolls back the flag marker as well.
+      const [current] = await tx.select().from(table).where(eq(table.id, id)).limit(1).for('update');
+      if (!current || current.resolvedAt !== null || current.demeritIssued) throw new FlagNoLongerChargeable();
+      if (current.vaId !== observed.vaId || current.flaggedAt.getTime() !== flaggedAt) {
+        throw new Error('Reply flag identity changed before its financial charge');
+      }
+      const now = new Date();
+      if (current.flaggedAt.getTime() > now.getTime() - REPLY_FLAG_GRACE_MS) throw new FlagNoLongerChargeable();
+      const result = await tx.update(table).set({ resolvedAt: now, resolvedBy: 'auto_demerit', demeritIssued: true,
+        demeritIssuedAt: now, updatedAt: now }).where(and(eq(table.id, id), eq(table.vaId, observed.vaId),
+        isNull(table.resolvedAt), eq(table.demeritIssued, false)));
+      if (result.rowCount !== 1) throw new Error('Reply flag charge marker was not recorded');
+      marked = true;
+    });
+    if (marked) return true;
+    // Replays do not execute the ledger callback. A concurrent successful call
+    // already marked the source; an inconsistent legacy marker needs review,
+    // not an automatic repair or a second charge.
+    const [replayed] = await db.select().from(table).where(eq(table.id, id)).limit(1);
+    if (replayed?.vaId === observed.vaId && replayed.flaggedAt.getTime() === flaggedAt
+      && replayed.demeritIssued && replayed.resolvedAt !== null && replayed.resolvedBy === 'auto_demerit') return false;
+    throw new Error('Existing financial event has no matching reply flag charge marker; owner review required');
+  } catch (error) {
+    if (error instanceof FlagNoLongerChargeable) return false;
+    throw error;
+  }
 }
 
 // ─── Shared types ─────────────────────────────────────────────────────────────
@@ -229,19 +276,8 @@ export async function resolveVagueReplyFlag(vaId: number, id: number): Promise<b
 }
 
 export async function autoDemeritVagueReplyFlag(id: number): Promise<void> {
-  const db = await getDb();
-  if (!db) return;
-  try {
-    const now = new Date();
-    await db.update(vagueReplyFlags).set({
-      resolvedAt: now, resolvedBy: "auto_demerit", demeritIssued: true,
-      demeritIssuedAt: now, updatedAt: now,
-    }).where(eq(vagueReplyFlags.id, id));
-  } catch (e) {
-    console.error("[DB] autoDemeritVagueReplyFlag failed:", e);
-  }
+  await chargeReplyFlag(vagueReplyFlags, 'vague', id);
 }
-
 export async function getAllVagueReplyFlags(vaId: number, limit = 50): Promise<VagueFlagRow[]> {
   const db = await getDb();
   if (!db) return [];
@@ -258,25 +294,20 @@ export async function getAllVagueReplyFlags(vaId: number, limit = 50): Promise<V
  * Auto-demerit any vague reply flags that have been unresolved for >1 hour.
  */
 export async function autoDemeriteExpiredVagueFlags(vaId: number): Promise<number> {
+  if (!Number.isSafeInteger(vaId) || vaId <= 0) throw new Error('A positive worker identity is required');
   const db = await getDb();
-  if (!db) return 0;
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-  try {
-    const expired = await db.select({ id: vagueReplyFlags.id }).from(vagueReplyFlags).where(and(
-      isNull(vagueReplyFlags.resolvedAt), eq(vagueReplyFlags.demeritIssued, false),
-      lte(vagueReplyFlags.flaggedAt, oneHourAgo), eq(vagueReplyFlags.vaId, vaId),
-    ));
-    for (const row of expired) {
-      await autoDemeritVagueReplyFlag(row.id);
-      await incrementPayLogD1(vaId, todayEAT(), 1).catch(() => {});
-    }
-    return expired.length;
-  } catch (e) {
-    console.error("[DB] autoDemeriteExpiredVagueFlags failed:", e);
-    return 0;
+  if (!db) throw new Error('Database not available');
+  const oneHourAgo = new Date(Date.now() - REPLY_FLAG_GRACE_MS);
+  const expired = await db.select({ id: vagueReplyFlags.id }).from(vagueReplyFlags).where(and(
+    isNull(vagueReplyFlags.resolvedAt), eq(vagueReplyFlags.demeritIssued, false),
+    lte(vagueReplyFlags.flaggedAt, oneHourAgo), eq(vagueReplyFlags.vaId, vaId),
+  ));
+  let charged = 0;
+  for (const row of expired) {
+    if (await chargeReplyFlag(vagueReplyFlags, 'vague', row.id, vaId)) charged++;
   }
+  return charged;
 }
-
 // Alias used by upworkMonitor
 export const autoDemeriteExpiredUpworkFlags = autoDemeriteExpiredVagueFlags;
 
@@ -355,19 +386,8 @@ export async function resolveUnsignedFlag(vaId: number, id: number, note?: strin
 }
 
 export async function autoDemeritUnsignedFlag(id: number): Promise<void> {
-  const db = await getDb();
-  if (!db) return;
-  try {
-    const now = new Date();
-    await db.update(unsignedMessageFlags).set({
-      resolvedAt: now, resolvedBy: "auto_demerit", demeritIssued: true,
-      demeritIssuedAt: now, updatedAt: now,
-    }).where(eq(unsignedMessageFlags.id, id));
-  } catch (e) {
-    console.error("[DB] autoDemeritUnsignedFlag failed:", e);
-  }
+  await chargeReplyFlag(unsignedMessageFlags, 'unsigned', id);
 }
-
 export async function getAllUnsignedFlags(vaId: number, limit = 50): Promise<UnsignedFlagRow[]> {
   const db = await getDb();
   if (!db) return [];
@@ -384,21 +404,17 @@ export async function getAllUnsignedFlags(vaId: number, limit = 50): Promise<Uns
  * Auto-demerit any unsigned message flags that have been unresolved for >1 hour.
  */
 export async function autoDemeriteExpiredUnsignedFlags(vaId: number): Promise<number> {
+  if (!Number.isSafeInteger(vaId) || vaId <= 0) throw new Error('A positive worker identity is required');
   const db = await getDb();
-  if (!db) return 0;
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-  try {
-    const expired = await db.select({ id: unsignedMessageFlags.id }).from(unsignedMessageFlags).where(and(
-      isNull(unsignedMessageFlags.resolvedAt), eq(unsignedMessageFlags.demeritIssued, false),
-      lte(unsignedMessageFlags.flaggedAt, oneHourAgo), eq(unsignedMessageFlags.vaId, vaId),
-    ));
-    for (const row of expired) {
-      await autoDemeritUnsignedFlag(row.id);
-      await incrementPayLogD1(vaId, todayEAT(), 1).catch(() => {});
-    }
-    return expired.length;
-  } catch (e) {
-    console.error("[DB] autoDemeriteExpiredUnsignedFlags failed:", e);
-    return 0;
+  if (!db) throw new Error('Database not available');
+  const oneHourAgo = new Date(Date.now() - REPLY_FLAG_GRACE_MS);
+  const expired = await db.select({ id: unsignedMessageFlags.id }).from(unsignedMessageFlags).where(and(
+    isNull(unsignedMessageFlags.resolvedAt), eq(unsignedMessageFlags.demeritIssued, false),
+    lte(unsignedMessageFlags.flaggedAt, oneHourAgo), eq(unsignedMessageFlags.vaId, vaId),
+  ));
+  let charged = 0;
+  for (const row of expired) {
+    if (await chargeReplyFlag(unsignedMessageFlags, 'unsigned', row.id, vaId)) charged++;
   }
+  return charged;
 }

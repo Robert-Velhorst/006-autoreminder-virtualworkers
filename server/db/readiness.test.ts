@@ -18,6 +18,22 @@ function poolReturning(requiredMigrationApplied: boolean): ReadinessPool {
 }
 
 describe("PostgreSQL readiness probe", () => {
+  it('requires exact financial uniqueness and fails closed on legacy duplicate identity', async () => {
+    const pool = poolReturning(true);
+    await hasRequiredPostgresSchema(pool);
+    const query = vi.mocked(pool.query).mock.calls[0][0].text;
+    expect(query).toContain('payment_cycles_founder_dates_unique');
+    expect(query).toContain('weekly_pay_log_founder_worker_week_unique');
+    expect(query).toContain('financial_ledger_events_founder_key_unique');
+    expect(query).toContain('payment_cycles_predecessor_unique');
+    expect(query).toContain('GROUP BY "founderId", "vaId", "weekStart" HAVING count(*) > 1');
+  });
+  it('preflights financial duplicates under a writer lock without rewriting historic rows', async () => {
+    const migration = await readFile(new URL('../../drizzle-postgres-v1/0009_financial_ledger_authority.sql', import.meta.url), 'utf8');
+    expect(migration.indexOf('LOCK TABLE')).toBeLessThan(migration.indexOf('IF EXISTS'));
+    expect(migration.indexOf('RAISE EXCEPTION')).toBeLessThan(migration.indexOf('CREATE TABLE'));
+    expect(migration).not.toMatch(/\b(?:UPDATE|DELETE|TRUNCATE)\s+"?(?:payment_cycles|weekly_pay_log)\b/i);
+  });
   it("requires the latest checked-in migration version", async () => {
     const journal = JSON.parse(
       await readFile(

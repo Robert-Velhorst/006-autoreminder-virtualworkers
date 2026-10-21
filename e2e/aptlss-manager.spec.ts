@@ -13,6 +13,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     role: "worker" | "admin",
     options: {
       unavailable?: boolean;
+      statusReadError?: { code: "TOO_MANY_REQUESTS" | "INTERNAL_SERVER_ERROR" | "FORBIDDEN"; retryAfter?: number };
       eligible?: boolean;
       realtime?: boolean;
       reviewed?: boolean;
@@ -35,7 +36,8 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
         founderNotification?: boolean;
     } = {}
   ) {
-    const calls: Array<{ method: string; input: any }> = [];
+    const calls: Array<{ method: string; input: any; httpMethod: string }> = [];
+    let statusReadError = options.statusReadError;
     let proofResolved = false;
     let founderDecisionRecorded = false;
     let founderDecisionDeferred = false;
@@ -203,7 +205,17 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
         const input = envelope && "json" in envelope
           ? superjson.deserialize(envelope)
           : undefined;
-        calls.push({ method, input });
+        calls.push({ method, input, httpMethod: route.request().method() });
+        if (method === "operator.getManagerStatus" && statusReadError) {
+          const { code, retryAfter } = statusReadError;
+          return { error: superjson.serialize({
+            message: code === "FORBIDDEN"
+              ? "Manager pilot requires an explicitly allowlisted worker, valid APTLSS_MANAGER_PILOT_WORKER_IDS, and APTLSS_MANAGER_SHADOW_ONLY=true."
+              : "Synthetic status read failure",
+            code: code === "TOO_MANY_REQUESTS" ? -32029 : code === "FORBIDDEN" ? -32003 : -32603,
+            data: { code, httpStatus: code === "TOO_MANY_REQUESTS" ? 429 : code === "FORBIDDEN" ? 403 : 500, retryAfter, path: method },
+          }) };
+        }
         if (method === "operator.getCardEvidence" && options.evidenceUnavailable) {
           return { error: superjson.serialize({ message: "Synthetic retained source unavailable", code: -32603,
             data: { code: "INTERNAL_SERVER_ERROR", httpStatus: 500, path: method } }) };
@@ -507,6 +519,7 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
     return {
       calls,
       snapshot,
+      recoverStatus: () => { statusReadError = undefined; },
       emitManagerUpdate: () =>
         managerSocket?.send(
           '42["aptlss:manager-updated",{"runId":102,"assessedAt":"2026-09-04T10:00:00Z","urgent":true}]'
@@ -1876,6 +1889,49 @@ test.describe("APTLSS CONTRACT fixtures (intercepted API)", () => {
       await expect(page.getByText(/15s elapsed/)).toBeVisible();
       await expect(page.getByText(/% complete|1s left/)).toHaveCount(0);
     } finally { release(); }
+  });
+
+  for (const code of ["TOO_MANY_REQUESTS", "INTERNAL_SERVER_ERROR"] as const) test(`status read recovery is GET-only after ${code}`, async ({ page }) => {
+    await page.clock.install();
+    const fixture = await managerFixture(page, "worker", { statusReadError: { code, retryAfter: code === "TOO_MANY_REQUESTS" ? 10 : undefined } });
+    await page.goto("/worker");
+    const manager = page.getByRole("region", { name: "APTLSS work manager" });
+    const reload = manager.getByRole("button", { name: "Reload work guidance" });
+    await expect(manager.getByText("Work guidance could not be refreshed")).toBeVisible();
+    await expect(manager.getByRole("button", { name: "Reassess now" })).toBeDisabled();
+    const readCount = () => fixture.calls.filter(call => call.method === "operator.getManagerStatus").length;
+    const failedReads = readCount();
+    if (code === "TOO_MANY_REQUESTS") {
+      await expect(reload).toBeDisabled();
+      await page.clock.fastForward(9_000);
+      await expect(reload).toBeDisabled();
+      expect(readCount()).toBe(failedReads);
+      await page.clock.fastForward(2_000);
+    }
+    await expect(reload).toBeEnabled();
+    fixture.recoverStatus();
+    await reload.click();
+    await expect(manager.getByText("Work guidance could not be refreshed")).toHaveCount(0);
+    await expect(manager.getByRole("button", { name: "Reassess now" })).toBeEnabled();
+    expect(readCount()).toBe(failedReads + 1);
+    expect(fixture.calls.filter(call => call.method === "operator.getManagerStatus").every(call => call.httpMethod === "GET")).toBe(true);
+    expect(fixture.calls.filter(call => call.httpMethod === "POST")).toEqual([]);
+    expect(browserErrors.get(page)).toEqual([expect.stringContaining("[API Query Error] TRPCClientError: Synthetic status read failure")]);
+    browserErrors.set(page, []);
+  });
+
+  test("pilot denial offers no status retry or automatic recovery requests", async ({ page }) => {
+    await page.clock.install();
+    const fixture = await managerFixture(page, "worker", { statusReadError: { code: "FORBIDDEN" } });
+    await page.goto("/worker");
+    await expect(page.getByText("APTLSS manager is unavailable for this worker.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Reload work guidance" })).toHaveCount(0);
+    const count = fixture.calls.filter(call => call.method === "operator.getManagerStatus").length;
+    await page.clock.fastForward(120_001);
+    expect(fixture.calls.filter(call => call.method === "operator.getManagerStatus")).toHaveLength(count);
+    expect(fixture.calls.filter(call => call.httpMethod === "POST")).toEqual([]);
+    expect(browserErrors.get(page)).toEqual([expect.stringContaining("[API Query Error] TRPCClientError: Manager pilot requires an explicitly allowlisted worker")]);
+    browserErrors.set(page, []);
   });
 
   test("fallback polling refreshes manager status without a socket event", async ({

@@ -1,11 +1,12 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { trpc } from "@/lib/trpc";
+import { weeklyPayRevision } from "@shared/financialRevision";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Calculator, Flame, Star, Save, History, TriangleAlert, ChevronDown, ChevronUp, ClipboardCheck,
-  TrendingUp, TrendingDown, Minus
+  TrendingUp, TrendingDown, Minus, RefreshCw
 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
@@ -215,12 +216,14 @@ function Counter({
   onIncrement,
   btnClass,
   isFounder,
+  disabled,
 }: {
   value: number;
   onDecrement: () => void;
   onIncrement: () => void;
   btnClass: string;
   isFounder?: boolean;
+  disabled?: boolean;
 }) {
   if (!isFounder) {
     return <span className="w-8 text-right font-bold text-sm text-foreground pr-1">{value}</span>;
@@ -229,11 +232,13 @@ function Counter({
     <div className="flex items-center gap-1 flex-shrink-0">
       <button
         onClick={onDecrement}
+        disabled={disabled}
         className="w-6 h-6 rounded-full bg-muted hover:bg-muted/80 flex items-center justify-center text-xs font-bold text-muted-foreground transition-colors"
       >−</button>
       <span className="w-5 text-center font-bold text-sm text-foreground">{value}</span>
       <button
         onClick={onIncrement}
+        disabled={disabled}
         className={`w-6 h-6 rounded-full ${btnClass} flex items-center justify-center text-xs font-bold text-white transition-colors`}
       >+</button>
     </div>
@@ -355,13 +360,20 @@ interface WeeklyPayCalculatorProps {
 
 export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps = {}) {
   const { user } = useAuth();
-  const isFounder = user?.role === "admin";
+  return <ScopedWeeklyPayCalculator key={`${user?.id}:${vaId ?? "self"}`} vaId={vaId} />;
+}
+
+function ScopedWeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps) {
+  const { user } = useAuth();
+  const isFounder = user?.role === "admin" && Number.isSafeInteger(vaId) && Number(vaId) > 0;
   const [weekStart] = useState(() => getWeekStart());
   const weekEnd = getWeekEnd(weekStart);
   const [counts, setCounts] = useState<Counts>(defaultCounts());
   const [notes, setNotes] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const [savedThisSession, setSavedThisSession] = useState(false);
+  const [loadedRevision, setLoadedRevision] = useState<string | null | undefined>(undefined);
+  const [saveConflict, setSaveConflict] = useState(false);
   const [mdCollapsed, setMdCollapsed] = useState(false); // merits+demerits section
   const [d1GuardPending, setD1GuardPending] = useState<number | null>(null); // pending delta when guard fires
 
@@ -392,10 +404,13 @@ export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps =
     return () => window.removeEventListener("hashchange", handleHashNavigation);
   }, [handleHashNavigation]);
 
-  const { data: existing } = trpc.payLog.getByWeek.useQuery({ weekStart, vaId });
+  const weekQuery = trpc.payLog.getByWeek.useQuery({ weekStart, vaId });
+  const { data: existing, isLoading: loadingWeek, isError: weekError } = weekQuery;
   const [loaded, setLoaded] = useState(false);
-  if (existing && !loaded && !savedThisSession) {
+  if (existing !== undefined && !loaded && !savedThisSession) {
     setLoaded(true);
+    setLoadedRevision(weeklyPayRevision(existing));
+    if (existing) {
     setCounts({
       meritM1: Number(existing.meritM1) || 0,
       meritM2: Number(existing.meritM2) || 0,
@@ -414,18 +429,26 @@ export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps =
       demeritD11: Number(existing.demeritD11) || 0,
     });
     setNotes(existing.notes ?? "");
+    } else {
+      setCounts(defaultCounts());
+      setNotes("");
+    }
   }
 
   const { data: history } = trpc.payLog.getAll.useQuery({ limit: 8, vaId });
 
   const upsert = trpc.payLog.upsert.useMutation({
-    onSuccess: () => {
+    onSuccess: saved => {
+      setLoadedRevision(weeklyPayRevision(saved));
       utils.payLog.getByWeek.invalidate({ weekStart, vaId });
       utils.payLog.getAll.invalidate({ vaId });
       setSavedThisSession(true);
       toast.success("Week saved", { description: "Pay log updated successfully." });
     },
-    onError: (err) => toast.error("Save failed", { description: err.message }),
+    onError: (err) => {
+      if (err.data?.code === "CONFLICT") setSaveConflict(true);
+      toast.error("Save failed", { description: err.message });
+    },
   });
 
   const totalMerits = useMemo(() =>
@@ -439,8 +462,10 @@ export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps =
 
   // The D1 value loaded from DB (auto-set by EOD cron) — guard against lowering below this
   const savedD1 = existing ? (Number(existing.demeritD1) || 0) : 0;
+  const canEdit = isFounder && !loadingWeek && !weekError && loadedRevision !== undefined && !upsert.isPending && !saveConflict;
 
   const adjust = (key: MeritKey | DemeritKey, delta: number) => {
+    if (!canEdit) return;
     // Guard: if decrementing D1 below the DB-saved (auto-set) value, show confirmation
     if (key === "demeritD1" && delta < 0) {
       const newVal = Math.max(0, counts.demeritD1 + delta);
@@ -453,6 +478,7 @@ export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps =
   };
 
   const confirmD1Decrease = () => {
+    if (!canEdit || vaId === undefined) return;
     if (d1GuardPending !== null) {
       const prevD1 = counts.demeritD1;
       const newD1 = Math.max(0, prevD1 + d1GuardPending);
@@ -468,7 +494,7 @@ export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps =
       setNotes(updatedNotes);
       // Auto-save so the audit trail is persisted immediately
       upsert.mutate(
-        { weekStart, weekEnd, ...counts, demeritD1: newD1, notes: updatedNotes },
+        { vaId, weekStart, weekEnd, expectedRevision: loadedRevision!, ...counts, demeritD1: newD1, notes: updatedNotes },
         { onSuccess: () => toast.info("D1 override recorded", { description: auditLine }) }
       );
     }
@@ -476,7 +502,8 @@ export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps =
   };
 
   const handleSave = () => {
-    upsert.mutate({ weekStart, weekEnd, ...counts, notes });
+    if (!canEdit || vaId === undefined) return;
+    upsert.mutate({ vaId, weekStart, weekEnd, expectedRevision: loadedRevision!, ...counts, notes });
   };
 
   return (
@@ -586,6 +613,7 @@ export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps =
                                 onIncrement={() => adjust(merit.key, 1)}
                                 btnClass={clr.btn}
                                 isFounder={isFounder}
+                                disabled={!canEdit}
                               />
                             </div>
                           }
@@ -627,6 +655,7 @@ export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps =
                                 onIncrement={() => adjust(demerit.key, 1)}
                                 btnClass="bg-red-500 hover:bg-red-600"
                                 isFounder={isFounder}
+                                disabled={!canEdit}
                               />
                             </div>
                           }
@@ -668,16 +697,30 @@ export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps =
             )
           ) : (
             <>
+              {saveConflict && (
+                <div role="alert" className="flex items-center justify-between gap-3 text-sm text-amber-700 dark:text-amber-400">
+                  <span>This week changed. Reload the saved record before saving.</span>
+                  <Button variant="outline" size="sm" onClick={async () => {
+                    const result = await weekQuery.refetch();
+                    if (!result.isError) {
+                      setLoaded(false);
+                      setSavedThisSession(false);
+                      setSaveConflict(false);
+                    }
+                  }}><RefreshCw className="mr-2 h-4 w-4" />Reload saved week</Button>
+                </div>
+              )}
               <Textarea
                 placeholder="Optional notes for this week (e.g., context for demerits, special circumstances)..."
                 value={notes}
+                disabled={!canEdit}
                 onChange={e => setNotes(e.target.value)}
                 className="text-sm resize-none"
                 rows={3}
               />
               <Button
                 onClick={handleSave}
-                disabled={upsert.isPending}
+                disabled={!canEdit}
                 className="w-full bg-gradient-to-r from-violet-500 to-indigo-600 hover:from-violet-600 hover:to-indigo-700 text-white font-semibold"
               >
                 <Save className="w-4 h-4 mr-2" />
