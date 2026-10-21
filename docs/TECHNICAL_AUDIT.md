@@ -16,14 +16,19 @@ merged canonical timer identity and worker-interface changes as
 head `386aab90401312d48f818d3e8c3ccb6ab2266d76`. That head passed quality
 `39543523895` and CodeQL `39543520471`: 4,460 Vitest cases with 22 skips,
 all 17 native cross-reader cases, configured image acceptance, browser gates
-and isolated backup/restore. Earlier failed candidates remain failed historical
-evidence. The merged-main run and any later source need their own acceptance.
+and isolated backup/restore. Post-merge main quality `39544579909` and
+CodeQL/push `39544579781` also passed. Earlier failed candidates remain failed
+historical evidence; later source changes need their own exact-head checks.
 
-Independent source review still confirms application blockers: issue #95's
-nontransactional assignment upsert lacks founder/task uniqueness, and issue
-#52's legacy OAuth callback lacks browser-bound single-use initiation. Their
-fixes require scoped native/route regression evidence; timer correctness or
-current Google OAuth protections do not establish these separate requirements.
+PR142 merged the [external OAuth login state](OAUTH_LOGIN_STATE.md) repair as
+`5965eca61a1f8967b1f940af3e947af4bcad6772`, with the same tree as reviewed
+`fc850afb4d24bb4b9be5d7fe2402d68d961abbd8`. Exact-head quality `39548283901`
+and CodeQL aggregate `119051493063` passed, as did separate post-merge main
+quality `39549562272` and Push-on-main `39549561798`. Browser-bound single-use
+state, authenticated-encryption binding and UTC database-clock expiry are now
+part of accepted main. These tests do not establish real provider acceptance.
+Founder/task assignment identity repair (#95) remains under independent review
+in PR143; its new migration and code require their own exact-head acceptance.
 
 PR [#135](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/135)
 retains the separate exact-image vulnerability and promotion gate. Its workflow

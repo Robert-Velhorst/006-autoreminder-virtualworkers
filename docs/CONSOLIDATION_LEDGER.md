@@ -2,21 +2,22 @@
 
 ## Current Consolidation Checkpoint: October 21, 2026
 
-The latest merged main source is
-`df5c9f3f8af3c06723fe0d1992a50d6153ed4410` from PR #141. Its tree exactly
-matches reviewed head `386aab90401312d48f818d3e8c3ccb6ab2266d76`, preserved
-under verified annotated tag `archive/canonical-timer-acceptance-20261021`.
-Quality run `39543523895` and CodeQL `39543520471` passed at that head,
-including 4,460 Vitest cases, all 17 native cross-reader cases, browser gates,
-configured PostgreSQL image acceptance and isolated backup/restore. The merged
-timer branch was removed with an exact-SHA lease after archive verification.
-Post-merge main run `39544579909` requires its own result; parent acceptance
-does not prove a later main run passed.
+The latest accepted main source is OAuth merge
+`5965eca61a1f8967b1f940af3e947af4bcad6772` from PR142. Its tree equals reviewed
+head `fc850afb4d24bb4b9be5d7fe2402d68d961abbd8`, preserved under verified tag
+`archive/browser-bound-oauth-acceptance-20261021`. Exact-head quality
+`39548283901` and CodeQL aggregate `119051493063` passed. Separate post-merge
+main quality `39549562272` and Push-on-main `39549561798` also passed.
+The merged OAuth branch was removed only after archive and tree verification.
 
-One temporary review branch remains: PR #135 for exact-image security. Its
-source progress is online and is not discarded to manufacture an only-main
-result. It awaits the narrowly scoped Action-policy decision and integration
-acceptance against the current main. Consolidate it into main only after
+Two temporary source branches remain: PR135 for exact-image security and PR143
+for canonical assignment identity. PR135's earlier head `188dc0d` passed local
+checks and CodeQL `39545169245`, but quality `39545173841` could not start.
+The narrowly scoped Action-policy decision remains pending. Integration with
+the newly accepted OAuth main requires its own source checks and hosted gate;
+the older receipt is not transferred. PR143 head `1035477` has local regression
+evidence and its own pending native/image/browser/security checks. Neither
+branch is discarded to manufacture an only-main result. Consolidate each only after
 its exact-head checks and review pass, preserve the reviewed head in a verified
 archive tag, and delete only the matching branch ref. Private configuration,
 secrets and recovery archives remain outside Git.
