@@ -223,7 +223,17 @@ export async function verifyPostgresProductionImage(image, dependencies = {}) {
   };
   const inspect = (type, name) => {
     const result = run('docker', [type, 'inspect', name], { timeout: 15_000 });
-    if (!result.error && result.status !== 0 && /No such (?:container|network|object)\b/i.test(result.stderr ?? '')) return null;
+    const missing = [
+      `Error: No such ${type}: ${name}`,
+      `Error response from daemon: No such ${type}: ${name}`,
+      `Error: No such object: ${name}`,
+      ...(type === 'network' ? [`Error response from daemon: network ${name} not found`] : []),
+    ];
+    // Docker's network API uses a different 404 message from container inspect.
+    // Match the exact requested identity, never arbitrary daemon error text.
+    if (!result.error && result.status === 1 &&
+      ['', '[]'].includes(String(result.stdout ?? '').trim()) &&
+      missing.includes(String(result.stderr ?? '').trim())) return null;
     assert.ok(!result.error && result.status === 0);
     const value = JSON.parse(result.stdout);
     assert.equal(value.length, 1);

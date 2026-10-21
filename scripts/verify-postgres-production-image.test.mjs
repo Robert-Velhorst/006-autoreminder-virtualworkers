@@ -6,7 +6,8 @@ import { assertApplicationRolePrivileges, configureApplicationRole, verifyPostgr
 const IMAGE = `sha256:${'a'.repeat(64)}`;
 const PG = `sha256:${'b'.repeat(64)}`;
 const ok = stdout => ({ status: 0, stdout: typeof stdout === 'string' ? stdout : JSON.stringify(stdout), stderr: '' });
-const absent = type => ({ status: 1, stdout: '', stderr: `Error: No such ${type}` });
+const absent = (type, name) => ({ status: 1, stdout: '[]\n', stderr: type === 'network'
+  ? `Error response from daemon: network ${name} not found\n` : `Error: No such ${type}: ${name}\n` });
 const valueAfter = (args, name) => args[args.indexOf(name) + 1];
 function fixture(options = {}) {
   const commands = [], requests = [], files = new Map(), removed = [], closed = [];
@@ -25,7 +26,7 @@ function fixture(options = {}) {
       Config: { Env: args[2] === 'postgres:18.6' ? ['PG_MAJOR=18', 'PG_VERSION=18.6-1'] : ['NODE_ENV=production'] } }]);
     if (args[1] === 'inspect') {
       const map = args[0] === 'network' ? networks : containers;
-      return map.has(args[2]) ? ok([map.get(args[2])]) : absent(args[0]);
+      return map.has(args[2]) ? ok([map.get(args[2])]) : absent(args[0], args[2]);
     }
     if (args[0] === 'network' && args[1] === 'create') {
       const name = args.at(-1), [key, value] = valueAfter(args, '--label').split('=');
@@ -196,6 +197,53 @@ test('does not operate on a remote Docker context', async () => {
     ? ok([{ Endpoints: { docker: { Host: 'ssh://production.invalid' } } }]) : undefined });
   await assert.rejects(verifyPostgresProductionImage('candidate:test', f.dependencies), /preflight/);
   assert.equal(f.commands.length, 1);
+});
+
+test('recognizes exact Docker network absence before creation and after cleanup', async () => {
+  let missingInspections = 0;
+  const f = fixture({ command: ({ args, networks }) => {
+    if (args[0] === 'network' && args[1] === 'inspect' && !networks.has(args[2])) {
+      missingInspections++;
+      return absent('network', args[2]);
+    }
+  } });
+  assert.equal((await verifyPostgresProductionImage('candidate:test', f.dependencies)).cleanupConfirmed, true);
+  assert.equal(missingInspections, 2);
+});
+
+test('accepts the legacy exact-name missing-resource message', async () => {
+  const f = fixture({ command: ({ args, networks }) => args[0] === 'network' && args[1] === 'inspect' && !networks.has(args[2])
+    ? { status: 1, stdout: '[]', stderr: `Error: No such network: ${args[2]}` } : undefined });
+  assert.equal((await verifyPostgresProductionImage('candidate:test', f.dependencies)).passed, true);
+});
+
+for (const [name, response] of [
+  ['another resource', resource => ({ ...absent('network', `${resource}-other`) })],
+  ['daemon unavailable', () => ({ status: 1, stdout: '[]', stderr: 'Cannot connect to the Docker daemon' })],
+  ['permission denied', () => ({ status: 1, stdout: '[]', stderr: 'permission denied while connecting to the Docker daemon' })],
+  ['empty response', () => ({ status: 1, stdout: '[]', stderr: '' })],
+  ['unexpected exit status', resource => ({ ...absent('network', resource), status: 125 })],
+  ['execution timeout', resource => ({ ...absent('network', resource), error: new Error('deadline') })],
+  ['conflicting stdout', resource => ({ ...absent('network', resource), stdout: '[{"Id":"unrelated"}]' })],
+  ['additional error', resource => ({ ...absent('network', resource), stderr: absent('network', resource).stderr + 'permission denied' })],
+]) {
+  test(`does not mistake ${name} for an absent fixture network`, async () => {
+    const f = fixture({ command: ({ args }) => args[0] === 'network' && args[1] === 'inspect' ? response(args[2]) : undefined });
+    await assert.rejects(verifyPostgresProductionImage('candidate:test', f.dependencies), /owned network/);
+    assert.equal(f.commands.some(command => command.args[0] === 'network' && command.args[1] === 'create'), false);
+    assert.equal(f.removed.length, 0);
+    assert.equal(f.files.size, 0);
+  });
+}
+
+test('does not confirm cleanup when a post-removal inspect fails ambiguously', async () => {
+  let absentChecks = 0;
+  const f = fixture({ command: ({ args, networks }) => {
+    if (args[0] === 'network' && args[1] === 'inspect' && !networks.has(args[2]) && ++absentChecks > 1) {
+      return { status: 1, stdout: '[]', stderr: 'Cannot connect to the Docker daemon' };
+    }
+  } });
+  await assert.rejects(verifyPostgresProductionImage('candidate:test', f.dependencies), /cleanup was not confirmed/);
 });
 
 test('requires preloaded images and does not create resources if PG version is wrong', async () => {
