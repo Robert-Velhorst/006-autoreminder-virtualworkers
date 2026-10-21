@@ -18,6 +18,14 @@ If a credential is committed, assume it is compromised even after removing it fr
 
 Deployments should use HTTPS, least-privilege provider credentials, private database/cache networks, restricted administrative accounts, backups, and the current supported container image. Never publish `.env` files, database dumps, tokens, or runtime state as package assets.
 
+## Output boundaries
+
+Use the shared CSV serializer for exports and escape untrusted email-template
+text before delivery. See [Output Safety](docs/OUTPUT_SAFETY.md) for structured
+link rules, regression scope and the remaining spreadsheet/mail-client
+acceptance boundary. Rendering safety does not replace recipient consent or
+authorization checks.
+
 ## Response and disclosure
 
 Reports are reviewed on a best-effort basis. No response or remediation timeframe is guaranteed. Coordinate any public disclosure with the maintainers so users have a reasonable opportunity to receive a fix.

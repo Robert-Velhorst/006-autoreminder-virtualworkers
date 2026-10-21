@@ -99,6 +99,81 @@ const worker = { id: 42, openId: 'worker-42', name: 'Worker', role: 'worker' } a
 const admin = { id: 1, openId: 'admin-1', name: 'Admin', role: 'admin' } as User;
 const founder = { id: 7, openId: 'founder-7', name: 'Founder', role: 'user' } as User;
 
+describe('reports CSV spreadsheet safety', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const prefixes = ['', ' ', '\t', '\r', '\n', '\ufeff', '\u0000', '\u001f', '\u007f', '\u0085', '\u200b', ' \ufeff\t\u0000'];
+  const formulas = prefixes.flatMap(prefix => ['=', '+', '-', '@', '\uff1d', '\uff0b', '\uff0d', '\uff20'].map(marker => `${prefix}${marker}1+1`));
+
+  it.each(formulas)('neutralizes time-entry formula strings %j', async formula => {
+    mocks.getDb.mockResolvedValue(createDatabase([], [timeEntry(51, 3, 7, formula)]).db);
+    const response = await request(appFor(admin))
+      .get('/api/reports/export?format=csv&type=time-entries')
+      .expect(200);
+
+    const safe = `'${formula}`;
+    const encoded = /[\r\n]/.test(safe) ? `"${safe}"` : safe;
+    expect(response.headers['content-type']).toMatch(/^text\/csv/);
+    expect(response.headers['content-disposition']).toContain('time-entries.csv');
+    expect(response.text).toBe('id,vaId,founderId,taskId,durationMinutes,startTime,endTime,source\r\n'
+      + `51,3,7,task-51,20,2026-09-02T09:00:00.000Z,2026-09-02T09:20:00.000Z,${encoded}`);
+  });
+
+  it.each(['=HYPERLINK("https://example.invalid","label")', ' \ufeff+1', '\t-1', '\u0000@SUM(1,2)',
+    ...['\uff1d', '\uff0b', '\uff0d', '\uff20'].flatMap(marker => [
+      `${marker}SUM(1,2)`, ` \ufeff\t${marker}SUM(1,2)`,
+    ])])(
+    'neutralizes task-summary string cells %j with RFC quoting', async formula => {
+      mocks.getDb.mockResolvedValue(createDatabase([], [], [{
+        id: 81, taskId: formula, vaId: 3, founderId: 7, status: formula,
+        assignedAt: new Date('2026-09-02T09:00:00Z'), updatedAt: new Date('2026-09-02T09:00:00Z'),
+      }]).db);
+      const response = await request(appFor(admin))
+        .get('/api/reports/export?format=csv&type=task-summary')
+        .expect(200);
+
+      const safe = `'${formula}`;
+      const encoded = /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+      expect(response.headers['content-disposition']).toContain('task-summary.csv');
+      expect(response.text).toBe('id,taskId,vaId,founderId,status,assignedAt,updatedAt\r\n'
+        + `81,${encoded},3,7,${encoded},2026-09-02T09:00:00.000Z,2026-09-02T09:00:00.000Z`);
+    });
+
+  it('preserves actual negative numbers, nulls, and ordinary quoted multiline strings', async () => {
+    mocks.getDb.mockResolvedValue(createDatabase([], [{
+      ...timeEntry(51, 3, 7, 'ordinary, "quoted"\r\nnext line'),
+      taskId: null, durationMinutes: -12.5, endTime: null,
+    }]).db);
+    const response = await request(appFor(admin))
+      .get('/api/reports/export?format=csv&type=time-entries')
+      .expect(200);
+
+    expect(response.text).toBe('id,vaId,founderId,taskId,durationMinutes,startTime,endTime,source\r\n'
+      + '51,3,7,,-12.5,2026-09-02T09:00:00.000Z,,"ordinary, ""quoted""\r\nnext line"');
+  });
+
+  it('neutralizes malicious task IDs and sources together in time-entry output', async () => {
+    mocks.getDb.mockResolvedValue(createDatabase([], [{
+      ...timeEntry(51, 3, 7, '\ufeff@SUM(1,2)'),
+      taskId: '=HYPERLINK("https://example.invalid","task")', durationMinutes: -20,
+    }]).db);
+    const response = await request(appFor(admin))
+      .get('/api/reports/export?format=csv&type=time-entries')
+      .expect(200);
+    expect(response.text).toBe('id,vaId,founderId,taskId,durationMinutes,startTime,endTime,source\r\n'
+      + '51,3,7,"\'=HYPERLINK(""https://example.invalid"",""task"")",-20,2026-09-02T09:00:00.000Z,2026-09-02T09:20:00.000Z,"\'\ufeff@SUM(1,2)"');
+  });
+
+  it('preserves ordinary strings containing non-leading formula characters', async () => {
+    mocks.getDb.mockResolvedValue(createDatabase([], [timeEntry(51, 3, 7, 'alice@example.invalid + adjustment = -1')]).db);
+    const response = await request(appFor(admin))
+      .get('/api/reports/export?format=csv&type=time-entries')
+      .expect(200);
+    expect(response.text).toContain(',alice@example.invalid + adjustment = -1');
+    expect(response.text).not.toContain("'alice");
+  });
+});
+
 describe('reports export authorization', () => {
   beforeEach(() => vi.clearAllMocks());
 
