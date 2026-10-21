@@ -72,8 +72,13 @@ After integrating main's output-safety changes, the complete test run without
 database connections passed 4,002 tests, with 297 skips, on Node 26.12.0. Focused
 socket tests and independent source reviews also passed their stated scopes.
 Earlier native tests used an older DDL checkpoint and are not acceptance of the
-final migration. Final-hash native migration, schema parity, concurrent lock
-ordering, rollback, browser and hosted full-suite checks remain required.
+final migration. Hosted source checkpoint `4da72c9` subsequently passed the
+final-hash migration, schema parity, full test and build stages in run
+`39530488560`; its remaining gates were still running at this checkpoint.
+Four additional native races now observe PostgreSQL's actual blocking graph
+for both password-reset/mint and invitation-acceptance/offboarding orders.
+Those additions were collected but not executed locally; they require a fresh
+hosted native/full-suite result before draft acceptance.
 
 The one temporary local PostgreSQL fixture subsequently stopped accepting new
 connections while Docker commands stalled. Its stop command completed, but final

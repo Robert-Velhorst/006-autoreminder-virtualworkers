@@ -13,7 +13,8 @@ const mocks = vi.hoisted(() => ({ getDb: vi.fn() }));
 vi.mock('../db', () => ({ getDb: mocks.getDb }));
 vi.mock('../services/websocket', () => ({ websocketService: { emitToUser: vi.fn() } }));
 import router from './va-management';
-import { acceptWorkerInvitation } from '../workerInvitations';
+import { acceptWorkerInvitation, createWorkerInvitation } from '../workerInvitations';
+import { withSessionIdentity } from '../sessionLifecycle';
 
 const fixtureUrl = process.env.APTLSS_TEST_DATABASE_URL;
 describe.skipIf(!fixtureUrl)('VA lifecycle native PostgreSQL transactions', () => {
@@ -157,4 +158,139 @@ describe.skipIf(!fixtureUrl)('VA lifecycle native PostgreSQL transactions', () =
     expect((await pool.query('SELECT status FROM va_profiles WHERE id=$1', [profile.id])).rows[0].status).toBe(status);
     expect((await pool.query('SELECT "passwordHash" FROM users WHERE id=$1', [account.id])).rows[0].passwordHash).toBeNull();
   });
+
+  it.each(['acceptance', 'offboarding'] as const)(
+    '%s wins the account lock against concurrent invitation acceptance/offboarding without restoring access',
+    async winner => {
+      const invitation = await createWorkerInvitation(actorId, {
+        name: 'Synthetic race invitee', email: 'race-invitee@example.test',
+      });
+      const accountBefore = (await pool.query('SELECT * FROM users WHERE id=$1', [invitation.userId])).rows[0];
+      expect(accountBefore.passwordHash).toBeNull();
+      await pool.query(`INSERT INTO time_entries ("taskId","vaId","founderId","startTime","durationMinutes")
+        VALUES ('synthetic-race-history',$1,$2,now(),45)`, [invitation.vaId, actorId]);
+      const historyBefore = (await pool.query('SELECT * FROM time_entries ORDER BY id')).rows;
+
+      const suffix = randomUUID().replaceAll('-', '');
+      const functionName = escapeIdentifier(`lifecycle_race_gate_${suffix}`);
+      const triggerName = escapeIdentifier(`lifecycle_race_gate_${suffix}`);
+      const gateKey = Number.parseInt(suffix.slice(0, 7), 16);
+      const gateNamespace = 710021;
+      const controller = await pool.connect();
+      const operations: Promise<unknown>[] = [];
+      // Attach rejection handlers immediately: losing acceptance must not create
+      // an unhandled rejection while the test observes PostgreSQL's lock graph.
+      const outcome = <T,>(operation: Promise<T>) => operation.then(
+        value => ({ ok: true as const, value }),
+        error => ({ ok: false as const, error }),
+      );
+      const startAcceptance = () => outcome(acceptWorkerInvitation(invitation.token, 'synthetic-race-password'));
+      const startOffboarding = () => outcome(request(app).delete(`/api/va/vas/${invitation.vaId}`).then(response => response));
+      type Acceptance = Awaited<ReturnType<typeof startAcceptance>>;
+      type Offboarding = Awaited<ReturnType<typeof startOffboarding>>;
+      let acceptance: Promise<Acceptance>;
+      let offboarding: Promise<Offboarding>;
+
+      // Poll actual blocking relationships, not elapsed time or operation mocks.
+      const observeBlockedBackend = async (blockerPid: number, expectedQuery: RegExp) => {
+        const deadline = performance.now() + 4000;
+        while (performance.now() < deadline) {
+          const blocked = await pool.query<{ pid: number; query: string }>(`
+            SELECT pid, query FROM pg_stat_activity
+            WHERE datname=current_database() AND $1::integer=ANY(pg_blocking_pids(pid))`, [blockerPid]);
+          const match = blocked.rows.find(row => expectedQuery.test(row.query));
+          if (match) return match.pid;
+        }
+        throw new Error('Expected lifecycle transaction did not appear in the PostgreSQL blocking graph');
+      };
+
+      try {
+        const controllerPid = (await controller.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+        await controller.query('SELECT pg_advisory_lock($1::integer,$2::integer)', [gateNamespace, gateKey]);
+        // The real functions reach their audit insert only after locking the
+        // account and applying their lifecycle writes in the same transaction.
+        await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN
+            IF NEW."userId"=TG_ARGV[0]::integer AND NEW.action=TG_ARGV[1] THEN
+              PERFORM set_config('lock_timeout','10s',true);
+              PERFORM pg_advisory_xact_lock(710021,TG_ARGV[2]::integer);
+            END IF;
+            RETURN NEW;
+          END;
+        $$`);
+        await pool.query(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON worker_lifecycle_audit
+          FOR EACH ROW EXECUTE FUNCTION ${functionName}('${invitation.userId}',
+            '${winner === 'acceptance' ? 'reactivate' : 'offboard'}','${gateKey}')`);
+
+        const first = winner === 'acceptance' ? startAcceptance() : startOffboarding();
+        operations.push(first);
+        const winnerPid = await observeBlockedBackend(controllerPid, /insert into "worker_lifecycle_audit"/i);
+        const second = winner === 'acceptance' ? startOffboarding() : startAcceptance();
+        operations.push(second);
+        // pg_stat_activity can truncate long joined SELECTs before FOR UPDATE;
+        // identify the real account query and prove its blocker by PID instead.
+        const loserPid = await observeBlockedBackend(winnerPid, /select\b[\s\S]*\busers\b/i);
+        expect(loserPid).not.toBe(winnerPid);
+        // The contender is genuinely in flight, blocked by the account-lock
+        // owner, which is itself blocked by this test's advisory gate.
+        expect((await pool.query('SELECT pg_blocking_pids($1::integer) AS blockers', [loserPid])).rows[0].blockers)
+          .toContain(winnerPid);
+        expect((await pool.query('SELECT pg_blocking_pids($1::integer) AS blockers', [winnerPid])).rows[0].blockers)
+          .toContain(controllerPid);
+        await controller.query('SELECT pg_advisory_unlock($1::integer,$2::integer)', [gateNamespace, gateKey]);
+
+        acceptance = (winner === 'acceptance' ? first : second) as Promise<Acceptance>;
+        offboarding = (winner === 'offboarding' ? first : second) as Promise<Offboarding>;
+        const [accepted, offboarded] = await Promise.all([acceptance, offboarding]);
+        expect(offboarded.ok).toBe(true);
+        if (!offboarded.ok) throw offboarded.error;
+        expect(offboarded.value.status).toBe(200);
+        const accountAfter = (await pool.query('SELECT * FROM users WHERE id=$1', [invitation.userId])).rows[0];
+        expect((await pool.query('SELECT status FROM va_profiles WHERE id=$1', [invitation.vaId])).rows[0].status).toBe('inactive');
+        expect((await pool.query('SELECT * FROM time_entries ORDER BY id')).rows).toEqual(historyBefore);
+        const storedInvitation = (await pool.query('SELECT "acceptedAt","revokedAt" FROM worker_invitations WHERE id=$1', [invitation.invitationId])).rows[0];
+        const audit = (await pool.query(`SELECT action,"actorUserId","previousStatus","nextStatus"
+          FROM worker_lifecycle_audit WHERE "userId"=$1 ORDER BY id`, [invitation.userId])).rows;
+        const allowedAction = vi.fn(async () => true);
+
+        if (winner === 'acceptance') {
+          expect(accepted.ok).toBe(true);
+          if (!accepted.ok) throw accepted.error;
+          expect(storedInvitation).toEqual({ acceptedAt: expect.any(Date), revokedAt: null });
+          expect(accountAfter.passwordHash).toEqual(expect.any(String));
+          expect(BigInt(accountAfter.sessionEpoch)).toBeGreaterThan(BigInt(accepted.value.sessionEpoch));
+          expect(audit).toEqual([
+            { action: 'create', actorUserId: actorId, previousStatus: null, nextStatus: 'inactive' },
+            { action: 'reactivate', actorUserId: invitation.userId, previousStatus: 'inactive', nextStatus: 'active' },
+            { action: 'offboard', actorUserId: actorId, previousStatus: 'active', nextStatus: 'inactive' },
+          ]);
+          await expect(withSessionIdentity(invitation.email, accepted.value, allowedAction)).rejects.toMatchObject({ statusCode: 403 });
+        } else {
+          expect(accepted.ok).toBe(false);
+          if (accepted.ok) throw new Error('Cancelled invitation unexpectedly activated a worker');
+          // A stale join may reach the invitation CAS after the lock wait;
+          // either rejection code must leave all activation writes rolled back.
+          expect(['invalid', 'used']).toContain(accepted.error.code);
+          expect(storedInvitation).toEqual({ acceptedAt: null, revokedAt: expect.any(Date) });
+          expect(accountAfter).toEqual(accountBefore);
+          expect(audit).toEqual([
+            { action: 'create', actorUserId: actorId, previousStatus: null, nextStatus: 'inactive' },
+            { action: 'offboard', actorUserId: actorId, previousStatus: 'inactive', nextStatus: 'inactive' },
+          ]);
+        }
+        // Even a fresh proof cannot bypass the inactive-profile access gate.
+        await expect(withSessionIdentity(invitation.email, undefined, allowedAction)).rejects.toMatchObject({ statusCode: 403 });
+        expect(allowedAction).not.toHaveBeenCalled();
+      } finally {
+        try {
+          await controller.query('SELECT pg_advisory_unlock($1::integer,$2::integer)', [gateNamespace, gateKey]);
+        } finally {
+          controller.release(true);
+          await Promise.allSettled(operations);
+          try { await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON worker_lifecycle_audit`); }
+          finally { await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`); }
+        }
+      }
+    }, 20000,
+  );
 });
