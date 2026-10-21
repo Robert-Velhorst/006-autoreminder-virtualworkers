@@ -149,7 +149,7 @@ jobs:
           BUILD_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          bash scripts/scan-production-image.sh "$IMAGE_REPOSITORY@$BUILD_DIGEST" "$RUNNER_TEMP/image-security-release.json"
+          bash scripts/scan-production-image.sh "$IMAGE_REPOSITORY@$BUILD_DIGEST" "$GITHUB_WORKSPACE/artifacts/image-security/image-security-release.json"
 
       - name: Retain candidate image security evidence
         if: ${{ always() && steps.image_scan.outcome != 'skipped' && steps.image_scan.outcome != '' }}
@@ -157,9 +157,9 @@ jobs:
         with:
           name: image-security-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/image-security-release.json
-            ${{ runner.temp }}/image-security-release.json.trivy.json
-            ${{ runner.temp }}/image-security-release.json.database.json
+            artifacts/image-security/image-security-release.json
+            artifacts/image-security/image-security-release.json.trivy.json
+            artifacts/image-security/image-security-release.json.database.json
           retention-days: 7
           if-no-files-found: warn
 
@@ -188,4 +188,4 @@ jobs:
           IS_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           set -euo pipefail
-          bash scripts/promote-scanned-image.sh "$IMAGE_REPOSITORY" "$BUILD_DIGEST" "$RELEASE_TAG" "$IS_PRERELEASE" "$RUNNER_TEMP/image-security-release.json"
+          bash scripts/promote-scanned-image.sh "$IMAGE_REPOSITORY" "$BUILD_DIGEST" "$RELEASE_TAG" "$IS_PRERELEASE" "$GITHUB_WORKSPACE/artifacts/image-security/image-security-release.json"

@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { evaluateImageVulnerabilityReport } from './image-vulnerability-policy.mjs';
 
@@ -11,6 +11,7 @@ export const SCANNER = Object.freeze({
 });
 export const IMAGE_REPOSITORY = 'ghcr.io/robert-velhorst/006-autoreminder-virtualworkers';
 export const IMAGE_POLICY_PATH = fileURLToPath(new URL('../security/image-vulnerability-exceptions.json', import.meta.url));
+export const IMAGE_EVIDENCE_DIR = fileURLToPath(new URL('../artifacts/image-security', import.meta.url));
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
 const indexTypes = new Set(['application/vnd.oci.image.index.v1+json', 'application/vnd.docker.distribution.manifest.list.v2+json']);
 const manifestTypes = new Set(['application/vnd.oci.image.manifest.v1+json', 'application/vnd.docker.distribution.manifest.v2+json']);
@@ -102,7 +103,7 @@ function readBounded(path) {
 
 export async function scanProductionImage(imageRef, proofPath, {
   run = command, provisionScanner = installScanner, temporaryRoot = process.env.RUNNER_TEMP,
-  policyPath = IMAGE_POLICY_PATH, now = () => new Date(),
+  policyPath = IMAGE_POLICY_PATH, evidenceRoot = IMAGE_EVIDENCE_DIR, now = () => new Date(),
 } = {}) {
   const registryPrefix = `${IMAGE_REPOSITORY}@`;
   const imageDigest = imageRef?.startsWith(registryPrefix) ? imageRef.slice(registryPrefix.length) : null;
@@ -110,9 +111,8 @@ export async function scanProductionImage(imageRef, proofPath, {
     throw new Error('Only the local CI image or a pinned VA Dashboard registry digest can be scanned');
   }
   if (!isAbsolute(proofPath ?? '') || !isAbsolute(temporaryRoot ?? '')) throw new Error('Absolute report and runner temporary paths are required');
-  const target = resolve(proofPath);
-  const withinRunner = relative(resolve(temporaryRoot), target);
-  if (!withinRunner || withinRunner.startsWith('..') || isAbsolute(withinRunner)) throw new Error('Scan reports must remain inside the runner temporary directory');
+  const target = join(evidenceRoot, imageDigest ? 'image-security-release.json' : 'image-security-ci.json');
+  if (proofPath !== target) throw new Error('Scan proof must use the canonical image evidence path');
   mkdirSync(dirname(target), { recursive: true });
   // An old successful proof must not survive an interrupted or failed new scan.
   rmSync(target, { force: true });

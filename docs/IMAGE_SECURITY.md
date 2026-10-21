@@ -141,7 +141,9 @@ The CI scan does not substitute for scanning the separately built release.
 4. [`promote-scanned-image.mjs`](../scripts/promote-scanned-image.mjs) rechecks
    the proof, raw report, database metadata and policy hashes, evaluator
    decision, manifest/config identity, and platform. It reads only the canonical
-   `image-security-release.json` evidence files under absolute `RUNNER_TEMP`;
+   `image-security-release.json` evidence files under the repository's fixed,
+   ignored `artifacts/image-security/` directory, derived from the script's
+   location rather than an environment-variable path;
    arbitrary command-line file paths are rejected. Proof age is limited to one hour and future-dated
    proofs are rejected. It promotes without rebuilding, with `latest` only
    for a stable, non-prerelease release.

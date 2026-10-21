@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,14 +24,14 @@ const report = () => ({ SchemaVersion: 2, ArtifactType: 'container_image', Artif
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'va-image-gate-test-'));
-  const proofPath = join(root, 'proof.json');
+  const proofPath = join(root, 'image-security-ci.json');
   const policyPath = join(root, 'policy.json');
   writeFileSync(policyPath, '{"version":1,"exceptions":[]}');
   const state = { calls: [], descriptor: descriptor(), image: { Id: imageId, Os: 'linux', Architecture: 'amd64' },
     leaf: { schemaVersion: 2, mediaType: imageType, config: { digest: imageId } }, report: report(),
     database: { Version: 2, UpdatedAt: '2026-10-21T00:00:00Z', NextUpdate: '2026-10-21T06:00:00Z', DownloadedAt: now.toISOString() },
     version: `Version: ${SCANNER.version}\n`, scannerFailure: false, omitReport: false, omitDatabase: false, dockerFailure: false };
-  const options = { temporaryRoot: root, policyPath, now: () => now, provisionScanner: async () => '/verified/trivy',
+  const options = { temporaryRoot: root, evidenceRoot: root, policyPath, now: () => now, provisionScanner: async () => '/verified/trivy',
     run(command, args, options = {}) {
       state.calls.push({ command, args, options });
       if (command === 'docker') {
@@ -86,7 +86,7 @@ test('binds a registry index to the single scanned runtime configuration', async
   const f = fixture();
   try {
     const source = `${IMAGE_REPOSITORY}@${imageDigest}`;
-    const proof = await scanProductionImage(source, f.proofPath, f.options);
+    const proof = await scanProductionImage(source, join(f.root, 'image-security-release.json'), f.options);
     assert.equal(proof.sourceRef, source);
     assert.equal(proof.imageDigest, imageDigest);
     assert.ok(f.state.calls.some(call => call.args.includes(`${IMAGE_REPOSITORY}@${leafDigest}`)));
@@ -111,7 +111,7 @@ for (const [name, change] of [
     writeFileSync(f.proofPath, '{"passed":true}');
     change(f);
     await assert.rejects(scanProductionImage('va-dashboard:ci', f.proofPath, f.options));
-    assert.ok(!readdirSync(f.root).includes('proof.json'));
+    assert.ok(!existsSync(f.proofPath));
     assert.ok(!readdirSync(f.root).some(name => name.endsWith('.partial') || name.startsWith('va-image-security-')));
   } finally { f.cleanup(); }
 });
@@ -120,7 +120,7 @@ test('rejects a runtime configuration unrelated to the selected registry manifes
   const f = fixture();
   try {
     f.state.leaf.config.digest = `sha256:${'9'.repeat(64)}`;
-    await assert.rejects(scanProductionImage(`${IMAGE_REPOSITORY}@${imageDigest}`, f.proofPath, f.options), /identity/);
+    await assert.rejects(scanProductionImage(`${IMAGE_REPOSITORY}@${imageDigest}`, join(f.root, 'image-security-release.json'), f.options), /identity/);
     assert.ok(!f.state.calls.some(call => call.args[1] === 'save'));
   } finally { f.cleanup(); }
 });
@@ -152,7 +152,7 @@ for (const [name, change] of [
   assert.throws(() => runtimeManifestDigest(d, imageDigest));
 });
 
-test('rejects mutable registry references and paths outside runner temporary storage before Docker', async () => {
+test('rejects mutable registry references and noncanonical evidence paths before Docker', async () => {
   const f = fixture();
   try {
     await assert.rejects(scanProductionImage(`${IMAGE_REPOSITORY}:latest`, f.proofPath, f.options));
@@ -170,11 +170,11 @@ test('actual scanner CLI rejects mutable input before any external executable is
     });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /Only the local CI image or a pinned VA Dashboard registry digest/);
-    assert.ok(!readdirSync(f.root).includes('proof.json'));
+    assert.ok(!existsSync(f.proofPath));
   } finally { f.cleanup(); }
 });
 
-test('actual scanner CLI cannot overwrite files outside its runner temporary root', () => {
+test('actual scanner CLI cannot overwrite files outside its fixed repository evidence directory', () => {
   const f = fixture();
   try {
     const runner = join(f.root, 'runner'); mkdirSync(runner);
@@ -184,7 +184,7 @@ test('actual scanner CLI cannot overwrite files outside its runner temporary roo
       encoding: 'utf8', timeout: 10_000, env: { ...process.env, PATH: '', RUNNER_TEMP: runner },
     });
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /inside the runner temporary directory/);
+    assert.match(result.stderr, /canonical image evidence path/);
     assert.equal(readFileSync(sentinel, 'utf8'), 'Retain this private fixture');
     assert.ok(!result.stderr.includes('Retain this private fixture'));
   } finally { f.cleanup(); }

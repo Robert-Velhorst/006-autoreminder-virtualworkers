@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { constants, closeSync, fstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { IMAGE_REPOSITORY, IMAGE_POLICY_PATH, SCANNER, runtimeManifestDigest, sha256 } from './scan-production-image.mjs';
+import { IMAGE_REPOSITORY, IMAGE_POLICY_PATH, IMAGE_EVIDENCE_DIR, SCANNER, runtimeManifestDigest, sha256 } from './scan-production-image.mjs';
 
 export const REPOSITORY = IMAGE_REPOSITORY;
 export const POLICY_PATH = IMAGE_POLICY_PATH;
@@ -15,11 +15,29 @@ function parseJson(value, label) {
   try { return JSON.parse(value); } catch { throw new Error(`Invalid ${label} JSON`); }
 }
 const hash = sha256;
-function readArtifact(path, maximum) {
-  check(statSync(path).isFile() && statSync(path).size <= maximum, 'Scan artifact is unavailable or too large');
-  const data = readFileSync(path);
-  check(data.length <= maximum, 'Scan artifact is too large');
-  return data;
+export function readPromotionArtifact(path, maximum, approvedRoot) {
+  if (!isAbsolute(approvedRoot)) throw new Error('An absolute approved artifact root is required');
+  const root = resolve(approvedRoot);
+  const resolved = resolve(path);
+  const withinRoot = relative(root, resolved);
+  if (!withinRoot || withinRoot.startsWith('..') || isAbsolute(withinRoot)) {
+    throw new Error('Artifact path is outside its approved root');
+  }
+  const canonicalRoot = realpathSync(root);
+  const canonicalPath = realpathSync(resolved);
+  const withinCanonicalRoot = relative(canonicalRoot, canonicalPath);
+  if (!withinCanonicalRoot || withinCanonicalRoot.startsWith('..') || isAbsolute(withinCanonicalRoot)) {
+    throw new Error('Artifact symlink escapes its approved root');
+  }
+  // Validate and read the same opened file, not two independently resolved paths.
+  const fd = openSync(canonicalPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = fstatSync(fd);
+    check(stat.isFile() && stat.size <= maximum, 'Scan artifact is unavailable or too large');
+    const data = readFileSync(fd);
+    check(data.length <= maximum, 'Scan artifact is too large');
+    return data;
+  } finally { closeSync(fd); }
 }
 
 export function dockerRunner(execute = execFileSync) {
@@ -52,17 +70,17 @@ export async function promoteScannedImage(input, dependencies = {}) {
   const prerelease = input.isPrerelease === 'true';
   check(Boolean(tag[4]) === prerelease, 'Release tag and prerelease flag disagree');
   check(typeof input.proofPath === 'string' && input.proofPath.length > 0, 'A scan proof path is required');
-  const configuredTemp = dependencies.tempRoot ?? process.env.RUNNER_TEMP;
-  check(typeof configuredTemp === 'string' && isAbsolute(configuredTemp) && !/[\0\r\n]/.test(configuredTemp),
-    'An absolute trusted RUNNER_TEMP is required');
-  const tempRoot = resolve(configuredTemp);
+  const configuredRoot = dependencies.evidenceRoot ?? IMAGE_EVIDENCE_DIR;
+  check(typeof configuredRoot === 'string' && isAbsolute(configuredRoot) && !/[\0\r\n]/.test(configuredRoot),
+    'An absolute trusted evidence root is required');
+  const evidenceRoot = resolve(configuredRoot);
   // argv is only compared, never used to construct a filesystem read path.
-  const proofPath = join(tempRoot, 'image-security-release.json');
-  const reportPath = join(tempRoot, 'image-security-release.json.trivy.json');
-  const databasePath = join(tempRoot, 'image-security-release.json.database.json');
-  check(input.proofPath === proofPath, 'Scan proof must be the canonical release artifact in RUNNER_TEMP');
+  const proofPath = join(evidenceRoot, 'image-security-release.json');
+  const reportPath = join(evidenceRoot, 'image-security-release.json.trivy.json');
+  const databasePath = join(evidenceRoot, 'image-security-release.json.database.json');
+  check(input.proofPath === proofPath, 'Scan proof must be the canonical release artifact in the repository evidence directory');
 
-  const read = dependencies.readArtifact ?? readArtifact;
+  const read = dependencies.readArtifact ?? readPromotionArtifact;
   const run = dependencies.runDocker ?? dockerRunner();
   const now = dependencies.now ?? (() => new Date());
   const sourceRef = `${REPOSITORY}@${input.builtDigest}`;
@@ -72,7 +90,7 @@ export async function promoteScannedImage(input, dependencies = {}) {
   check(typeof evaluate === 'function', 'Image vulnerability evaluator is unavailable');
 
   function validateProof() {
-    const proof = parseJson(read(proofPath, 1024 * 1024), 'scan proof');
+    const proof = parseJson(read(proofPath, 1024 * 1024, evidenceRoot), 'scan proof');
     check(proof?.version === 1 && proof.passed === true, 'A passing version-one scan proof is required');
     check(proof.sourceRef === sourceRef && proof.imageDigest === input.builtDigest, 'Scan proof does not bind the build source digest');
     check(DIGEST.test(proof.imageId) && proof.platform === 'linux/amd64', 'Scan proof image identity or platform is invalid');
@@ -83,9 +101,9 @@ export async function promoteScannedImage(input, dependencies = {}) {
     check(typeof proof.scannedAt === 'string' && Number.isFinite(scannedAt)
       && new Date(scannedAt).toISOString() === proof.scannedAt && age >= 0 && age <= 60 * 60_000,
     'Scan proof is stale, future-dated or has an invalid timestamp');
-    const reportData = read(reportPath, 32 * 1024 * 1024);
-    const databaseData = read(databasePath, 1024 * 1024);
-    const policyData = read(POLICY_PATH, 1024 * 1024);
+    const reportData = read(reportPath, 32 * 1024 * 1024, evidenceRoot);
+    const databaseData = read(databasePath, 1024 * 1024, evidenceRoot);
+    const policyData = read(POLICY_PATH, 1024 * 1024, dirname(POLICY_PATH));
     check(HASH.test(proof.reportSha256) && hash(reportData) === proof.reportSha256, 'Raw scan report hash differs from proof');
     check(HASH.test(proof.databaseMetadataSha256) && hash(databaseData) === proof.databaseMetadataSha256, 'Scanner database metadata hash differs from proof');
     check(HASH.test(proof.policySha256) && hash(policyData) === proof.policySha256, 'Current policy hash differs from proof');

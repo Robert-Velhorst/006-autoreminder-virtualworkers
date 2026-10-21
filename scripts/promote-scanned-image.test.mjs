@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { dockerRunner, POLICY_PATH, promoteScannedImage, REPOSITORY } from './promote-scanned-image.mjs';
+import { dockerRunner, POLICY_PATH, promoteScannedImage, readPromotionArtifact, REPOSITORY } from './promote-scanned-image.mjs';
 
 const digest = `sha256:${'a'.repeat(64)}`;
 const imageId = `sha256:${'b'.repeat(64)}`;
@@ -21,8 +21,8 @@ function databaseMetadata(at) {
     DownloadedAt: new Date(time - 60_000).toISOString(), NextUpdate: new Date(time + 60 * 60_000).toISOString() };
 }
 function fixture() {
-  const tempRoot = resolve(tmpdir(), 'isolated-promotion-fixture');
-  const input = { repository: REPOSITORY, builtDigest: digest, releaseTag: 'v1.2.3', isPrerelease: 'false', proofPath: join(tempRoot, 'image-security-release.json') };
+  const evidenceRoot = resolve(tmpdir(), 'isolated-promotion-fixture');
+  const input = { repository: REPOSITORY, builtDigest: digest, releaseTag: 'v1.2.3', isPrerelease: 'false', proofPath: join(evidenceRoot, 'image-security-release.json') };
   const report = Buffer.from(JSON.stringify({ Metadata: { ImageID: imageId }, Results: [] }));
   const policy = Buffer.from(JSON.stringify({ version: 1 }));
   const database = Buffer.from(JSON.stringify(databaseMetadata(now)));
@@ -39,9 +39,10 @@ function fixture() {
     promotedDigest: digest,
   };
   const dependencies = {
-    tempRoot,
+    evidenceRoot,
     now: () => now,
-    readArtifact(path, maximum) {
+    readArtifact(path, maximum, approvedRoot) {
+      assert.equal(approvedRoot, path === POLICY_PATH ? resolve(POLICY_PATH, '..') : evidenceRoot);
       state.reads.push(path);
       if (path === input.proofPath) return Buffer.from(JSON.stringify(state.proof));
       if (path === `${input.proofPath}.trivy.json`) return state.report;
@@ -73,6 +74,27 @@ function fixture() {
   return { input, state, dependencies };
 }
 const mutations = state => state.calls.filter(args => args[2] === 'create');
+
+test('bounded reader enforces lexical and realpath roots, including symlink escapes and sibling prefixes', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'promotion-reader-'));
+  try {
+    const root = join(dir, 'artifacts'); const sibling = join(dir, 'artifacts-sibling');
+    mkdirSync(root); mkdirSync(sibling); mkdirSync(join(root, 'nested'));
+    writeFileSync(join(root, 'proof.json'), 'bounded-proof');
+    writeFileSync(join(root, 'nested', 'proof.json'), 'nested-proof');
+    writeFileSync(join(sibling, 'private.json'), 'must-not-be-read');
+    assert.equal(readPromotionArtifact(join(root, 'proof.json'), 100, root).toString(), 'bounded-proof');
+    assert.throws(() => readPromotionArtifact(join(root, 'proof.json'), 1, root), /too large/);
+    assert.throws(() => readPromotionArtifact(join(sibling, 'private.json'), 100, root), /outside/);
+    assert.throws(() => readPromotionArtifact(join(root, '..', 'artifacts-sibling', 'private.json'), 100, root), /outside/);
+    assert.throws(() => readPromotionArtifact(root, 100, root), /outside/);
+    assert.throws(() => readPromotionArtifact(join(root, 'proof.json'), 100, '.'), /absolute approved/);
+    symlinkSync(sibling, join(root, 'escape'), 'junction');
+    assert.throws(() => readPromotionArtifact(join(root, 'escape', 'private.json'), 100, root), /symlink escapes/);
+    symlinkSync(join(root, 'nested'), join(root, 'internal'), 'junction');
+    assert.equal(readPromotionArtifact(join(root, 'internal', 'proof.json'), 100, root).toString(), 'nested-proof');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 function completeReport(createdAt) {
   return { SchemaVersion: 2, ArtifactType: 'container_image', CreatedAt: createdAt,
@@ -150,7 +172,7 @@ for (const [label, path] of [
 ]) {
   test(`rejects ${label} before reading any artifact or invoking Docker`, async () => {
     const { input, state, dependencies } = fixture();
-    input.proofPath = path(dependencies.tempRoot);
+    input.proofPath = path(dependencies.evidenceRoot);
     await assert.rejects(promoteScannedImage(input, dependencies), /canonical release artifact/);
     assert.equal(state.reads.length, 0);
     assert.equal(state.calls.length, 0);
@@ -158,9 +180,9 @@ for (const [label, path] of [
 }
 
 for (const root of ['', '.', 'relative/directory']) {
-  test(`rejects missing or relative trusted temporary root ${JSON.stringify(root)} before reads`, async () => {
-    const { input, state, dependencies } = fixture(); dependencies.tempRoot = root;
-    await assert.rejects(promoteScannedImage(input, dependencies), /absolute trusted RUNNER_TEMP/);
+  test(`rejects missing or relative trusted evidence root ${JSON.stringify(root)} before reads`, async () => {
+    const { input, state, dependencies } = fixture(); dependencies.evidenceRoot = root;
+    await assert.rejects(promoteScannedImage(input, dependencies), /absolute trusted evidence root/);
     assert.equal(state.reads.length, 0); assert.equal(state.calls.length, 0);
   });
 }
@@ -289,7 +311,16 @@ test('actual Node CLI validates disk proof and current policy with Docker subpro
   const dir = mkdtempSync(join(tmpdir(), 'promotion-cli-'));
   try {
     const { input, state } = fixture();
-    const proofPath = join(dir, 'image-security-release.json');
+    // Copy the actual modules into an isolated repository, preserving import.meta
+    // roots without exposing any root override through the production CLI.
+    mkdirSync(join(dir, 'scripts')); mkdirSync(join(dir, 'security'));
+    const evidenceRoot = join(dir, 'artifacts', 'image-security');
+    mkdirSync(evidenceRoot, { recursive: true });
+    for (const name of ['promote-scanned-image.mjs', 'scan-production-image.mjs', 'image-vulnerability-policy.mjs']) {
+      copyFileSync(fileURLToPath(new URL(name, import.meta.url)), join(dir, 'scripts', name));
+    }
+    copyFileSync(POLICY_PATH, join(dir, 'security', 'image-vulnerability-exceptions.json'));
+    const proofPath = join(evidenceRoot, 'image-security-release.json');
     const commandLog = join(dir, 'docker-calls.jsonl');
     const transportPath = join(dir, 'transport.json');
     const preload = join(dir, 'mock-docker.mjs');
@@ -319,9 +350,9 @@ test('actual Node CLI validates disk proof and current policy with Docker subpro
       };
       syncBuiltinESMExports();
     `);
-    const script = fileURLToPath(new URL('./promote-scanned-image.mjs', import.meta.url));
+    const script = join(dir, 'scripts', 'promote-scanned-image.mjs');
     const args = ['--import', pathToFileURL(preload).href, script, REPOSITORY, digest, input.releaseTag, input.isPrerelease, proofPath];
-    const cliOptions = { cwd: dir, encoding: 'utf8', timeout: 15_000, env: { ...process.env, RUNNER_TEMP: dir } };
+    const cliOptions = { cwd: dir, encoding: 'utf8', timeout: 15_000, env: { ...process.env, RUNNER_TEMP: join(dir, 'untrusted-runner-temp') } };
     const result = spawnSync(process.execPath, args, cliOptions);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).sourceRef, sourceRef);
@@ -333,7 +364,11 @@ test('actual Node CLI validates disk proof and current policy with Docker subpro
     const alternate = join(dir, 'other-proof.json');
     writeFileSync(alternate, JSON.stringify(state.proof));
     writeFileSync(`${alternate}.trivy.json`, report); writeFileSync(`${alternate}.database.json`, metadata);
-    for (const untrusted of [alternate, 'image-security-release.json', `${dir}/sub/../image-security-release.json`, `${dir}-sibling/image-security-release.json`, join(dir, '.env')]) {
+    mkdirSync(cliOptions.env.RUNNER_TEMP);
+    const forgedEnvironmentProof = join(cliOptions.env.RUNNER_TEMP, 'image-security-release.json');
+    writeFileSync(forgedEnvironmentProof, JSON.stringify(state.proof));
+    writeFileSync(`${forgedEnvironmentProof}.trivy.json`, report); writeFileSync(`${forgedEnvironmentProof}.database.json`, metadata);
+    for (const untrusted of [forgedEnvironmentProof, alternate, 'image-security-release.json', `${dir}/sub/../image-security-release.json`, `${dir}-sibling/image-security-release.json`, join(dir, '.env')]) {
       const denied = spawnSync(process.execPath, [...args.slice(0, -1), untrusted], cliOptions);
       assert.equal(denied.status, 1);
       assert.equal(existsSync(commandLog), false, 'Noncanonical argv proof path must not reach Docker');

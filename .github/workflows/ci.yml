@@ -177,16 +177,16 @@ jobs:
       - name: Scan the exact production image
         id: image_scan
         shell: bash
-        run: bash scripts/scan-production-image.sh va-dashboard:ci "$RUNNER_TEMP/image-security-ci.json"
+        run: bash scripts/scan-production-image.sh va-dashboard:ci "$GITHUB_WORKSPACE/artifacts/image-security/image-security-ci.json"
       - name: Retain image security evidence
         if: ${{ always() && steps.image_scan.outcome != 'skipped' && steps.image_scan.outcome != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-security-ci-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/image-security-ci.json
-            ${{ runner.temp }}/image-security-ci.json.trivy.json
-            ${{ runner.temp }}/image-security-ci.json.database.json
+            artifacts/image-security/image-security-ci.json
+            artifacts/image-security/image-security-ci.json.trivy.json
+            artifacts/image-security/image-security-ci.json.database.json
           retention-days: 7
           if-no-files-found: warn
       - name: Smoke-test the production image runtime
