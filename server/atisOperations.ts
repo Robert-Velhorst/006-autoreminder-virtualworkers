@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { scheduledJobLeases, scheduledJobRuns } from "../drizzle/schema.postgres";
 import { getDb } from "./db";
 import { runScheduledJob, ScheduledJobLeaseLostError, type ScheduledJobContext,
-  type ScheduledJobOwnershipReader } from "./scheduledJobRuntime";
+  type ScheduledJobOwnershipReader, type ScheduledJobTransaction } from "./scheduledJobRuntime";
 
 export const ATIS_JOB_KEYS = { sync: "atis:v1:sync", understanding: "atis:v1:understanding" } as const;
 export type AtisOperationKind = keyof typeof ATIS_JOB_KEYS;
@@ -14,7 +14,7 @@ export type AtisOperation = {
   error?: string;
 };
 type Metadata = { version: 1; kind: AtisOperationKind; ownerUserId: number;
-  request: { cardId?: number; limit?: number }; result?: AtisOperation["result"] };
+  request: { cardId?: number; limit?: number; analysisRequestId?: string }; result?: AtisOperation["result"] };
 type Run = typeof scheduledJobRuns.$inferSelect;
 
 export class AtisOperationRecoveryRequired extends Error {
@@ -26,6 +26,12 @@ export class AtisOperationRequestConflict extends Error {
 
 function normalizeRequest(kind: AtisOperationKind, request: Metadata["request"] = {}): Metadata["request"] {
   if (kind === "sync") return {};
+  if (request.analysisRequestId !== undefined) {
+    if (!/^[a-f0-9-]{36}$/.test(request.analysisRequestId) || request.cardId !== undefined || request.limit !== undefined) {
+      throw new Error("Invalid analysis request identity");
+    }
+    return { analysisRequestId: request.analysisRequestId };
+  }
   if (request.cardId !== undefined) {
     if (!Number.isSafeInteger(request.cardId) || request.cardId <= 0) throw new Error("Invalid card ID");
     return { cardId: request.cardId };
@@ -88,6 +94,26 @@ export async function getAtisOperation(id: number) {
   return row ? presentAtisOperation(row.run, row.live) : null;
 }
 
+export async function getAtisAnalysisOperation(ownerUserId: number, analysisRequestId: string) {
+  if (!/^[a-f0-9-]{36}$/.test(analysisRequestId)) return null;
+  const db = await getDb();
+  if (!db) throw new Error("ATIS status unavailable");
+  // Generated UUIDs contain no LIKE metacharacters. Parse and verify the bounded
+  // operation metadata after this indexed-kind search, never cast legacy text JSON.
+  const rows = await db.select({ id: scheduledJobRuns.id, detail: scheduledJobRuns.detail }).from(scheduledJobRuns)
+    .where(and(eq(scheduledJobRuns.jobKey, ATIS_JOB_KEYS.understanding),
+      sql`${scheduledJobRuns.detail} LIKE ${`%"analysisRequestId":"${analysisRequestId}"%`}`))
+    .orderBy(desc(scheduledJobRuns.id)).limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  try {
+    const metadata = JSON.parse(row.detail ?? 'null');
+    if (metadata?.version !== 1 || metadata.ownerUserId !== ownerUserId
+      || metadata.request?.analysisRequestId !== analysisRequestId) return null;
+  } catch { return null; }
+  return getAtisOperation(row.id);
+}
+
 async function latest(kind: AtisOperationKind, reader?: ScheduledJobOwnershipReader) {
   const [row] = await readOperations(reader, undefined, kind);
   return row ? presentAtisOperation(row.run, row.live) : null;
@@ -105,6 +131,7 @@ export async function getActiveAtisOperations() {
 export async function startAtisOperation(input: {
   kind: AtisOperationKind; ownerUserId: number; request?: Metadata["request"];
   acknowledgeInterruptedOperationId?: number;
+  admission?: (context: ScheduledJobContext, transaction: ScheduledJobTransaction) => Promise<void>;
 }, work: (context: ScheduledJobContext) => Promise<Record<string, unknown>>): Promise<AtisOperation> {
   if (!Number.isSafeInteger(input.ownerUserId) || input.ownerUserId <= 0) throw new Error("Invalid ATIS owner");
   const request = normalizeRequest(input.kind, input.request);
@@ -134,7 +161,12 @@ export async function startAtisOperation(input: {
   // Observe every detached completion/failure. The database, not this promise, is status authority.
   void runScheduledJob({ jobKey: ATIS_JOB_KEYS[input.kind], trigger: "manual", skipIfSuccessful: false,
     initialDetail: JSON.stringify(metadata),
-    shouldRun: async (_context, tx) => !await check(await latest(input.kind, tx), tx),
+    shouldRun: async (context, tx) => {
+      if (await check(await latest(input.kind, tx), tx)) return false;
+      await input.admission?.(context, tx);
+      await context.assertOwnership(tx);
+      return true;
+    },
   }, async context => {
     if (!context.runId) throw new Error("Durable ATIS run missing");
     resolve({ id: context.runId, kind: input.kind, state: "running" });

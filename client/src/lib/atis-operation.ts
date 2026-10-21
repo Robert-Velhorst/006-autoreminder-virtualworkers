@@ -42,6 +42,7 @@ function pause(milliseconds: number, signal: AbortSignal) {
 }
 
 type Options = {
+  chainUnderstanding?: boolean;
   onState: (view: AtisOperationView) => void;
   onCompleted: (operation: AtisOperation) => Promise<void> | void;
   fetch?: typeof fetch;
@@ -172,7 +173,7 @@ export class AtisOperationClient {
   startSync(callerSignal?: AbortSignal) {
     if (!canStartAtisOperation(this.view)) return Promise.resolve();
     return this.run(async signal => {
-      this.continueAfterSync = true;
+      this.continueAfterSync = this.options.chainUnderstanding !== false;
       await this.followAndContinue(await this.start("sync", signal), signal);
     }, callerSignal);
   }
@@ -189,7 +190,7 @@ export class AtisOperationClient {
     const operation = this.view.operation;
     if (this.view.status !== "interrupted" || !operation || !canStartAtisOperation(this.view)) return Promise.resolve();
     return this.run(async signal => {
-      this.continueAfterSync = operation.kind === "sync";
+      this.continueAfterSync = operation.kind === "sync" && this.options.chainUnderstanding !== false;
       await this.followAndContinue(await this.start(operation.kind, signal, operation.id), signal);
     }, callerSignal);
   }

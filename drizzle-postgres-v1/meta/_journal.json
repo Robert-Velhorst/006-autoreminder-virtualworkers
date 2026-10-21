@@ -71,6 +71,13 @@
       "when": 1792562299754,
       "tag": "0009_financial_ledger_authority",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1792567179124,
+      "tag": "0010_atis_analysis_admission",
+      "breakpoints": true
     }
   ]
 }

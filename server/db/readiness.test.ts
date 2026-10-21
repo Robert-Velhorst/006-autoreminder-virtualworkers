@@ -26,6 +26,8 @@ describe("PostgreSQL readiness probe", () => {
     expect(query).toContain('weekly_pay_log_founder_worker_week_unique');
     expect(query).toContain('financial_ledger_events_founder_key_unique');
     expect(query).toContain('payment_cycles_predecessor_unique');
+    expect(query).toContain('atis_analysis_owner_request_key_unique');
+    expect(query).toContain('atis_analysis_request_card_unique');
     expect(query).toContain('GROUP BY "founderId", "vaId", "weekStart" HAVING count(*) > 1');
   });
   it('preflights financial duplicates under a writer lock without rewriting historic rows', async () => {

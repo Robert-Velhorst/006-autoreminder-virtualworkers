@@ -1,5 +1,6 @@
 import { Task } from "@/types";
 import { TaskCard } from "./TaskCard";
+import { AtisAnalysisDialog } from "./AtisAnalysisDialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { TimelineSkeleton, EmptyState } from "./Skeletons";
 import { CalendarX, RefreshCw, CheckSquare, Square, Brain, Loader2, X } from "lucide-react";
@@ -30,7 +31,7 @@ export function Timeline({ tasks, onToggleTask, isLoading, onRefresh, onSync, is
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
   const [batchReanalyzing, setBatchReanalyzing] = useState(false);
-  const [reanalysisProgress, setReanalysisProgress] = useState({ current: 0, total: 0 });
+  const [analysisIds, setAnalysisIds] = useState<number[] | null>(null);
 
   // Sync with allExpanded prop
   useEffect(() => {
@@ -98,83 +99,25 @@ export function Timeline({ tasks, onToggleTask, isLoading, onRefresh, onSync, is
   };
 
   const handleBatchReanalyze = async () => {
-    if (selectedTasks.size === 0) {
-      toast.error('No tasks selected');
+    if (!selectedTasks.size || selectedTasks.size > 100) {
+      toast.error("Select between 1 and 100 cards per request. No cards were submitted.");
       return;
     }
-
     setBatchReanalyzing(true);
-    setReanalysisProgress({ current: 0, total: selectedTasks.size });
-    
-    const selectedTasksArray = Array.from(selectedTasks);
-    let successCount = 0;
-    let failCount = 0;
-
-    toast.loading(`Re-analyzing ${selectedTasks.size} cards...`, { id: 'batch-reanalyze' });
-
-    for (let i = 0; i < selectedTasksArray.length; i++) {
-      const taskId = selectedTasksArray[i];
-      const task = tasks.find(t => t.id === taskId);
-      
-      if (!task) continue;
-
-      setReanalysisProgress({ current: i + 1, total: selectedTasks.size });
-
-      try {
-        // Step 1: Re-ingest from Trello if we have cardId
-        if (task.cardId) {
-          const ingestResponse = await fetch(`/api/atis/cards/${task.cardId}/reingest`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-          });
-          
-          if (!ingestResponse.ok) {
-            throw new Error('Failed to re-ingest');
-          }
-        }
-
-        // Step 2: Re-analyze with AI
-        const atisId = task.atisCardId;
-        if (atisId) {
-          const analyzeResponse = await fetch(`/api/atis/understanding/reprocess/${atisId}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-          });
-
-          if (!analyzeResponse.ok) {
-            throw new Error('Failed to re-analyze');
-          }
-        }
-
-        successCount++;
-      } catch (error) {
-        failCount++;
-        console.error(`Failed to re-analyze task ${taskId}:`, error);
-      }
-
-      // Small delay to avoid overwhelming the server
-      await new Promise(resolve => setTimeout(resolve, 300));
-    }
-
-    setBatchReanalyzing(false);
-    setReanalysisProgress({ current: 0, total: 0 });
-
-    if (failCount === 0) {
-      toast.success(`Successfully re-analyzed ${successCount} cards`, { id: 'batch-reanalyze' });
-    } else {
-      toast.warning(`Re-analyzed ${successCount} cards, ${failCount} failed`, { id: 'batch-reanalyze' });
-    }
-
-    // Clear selection and exit selection mode
-    setSelectedTasks(new Set());
-    setSelectionMode(false);
-
-    // Refresh the task list
-    if (onRefresh) {
-      onRefresh();
-    }
+    try {
+      const ids = await Promise.all(Array.from(selectedTasks).map(async taskId => {
+        const task = tasks.find(item => item.id === taskId);
+        if (task?.atisCardId) return task.atisCardId;
+        if (!task?.cardId) throw new Error();
+        const response = await fetch(`/api/atis/cards/by-trello/${encodeURIComponent(task.cardId)}`, { credentials: "include", signal: AbortSignal.timeout(30_000) });
+        if (!response.ok) throw new Error();
+        const row = await response.json();
+        if (!Number.isSafeInteger(row.id) || row.id <= 0) throw new Error();
+        return row.id as number;
+      }));
+      setAnalysisIds([...new Set(ids)]);
+    } catch { toast.error("Some selected card identities could not be loaded. Refresh before previewing; no analysis was requested."); }
+    finally { setBatchReanalyzing(false); }
   };
 
   // Show skeleton while loading
@@ -259,6 +202,9 @@ export function Timeline({ tasks, onToggleTask, isLoading, onRefresh, onSync, is
 
   return (
     <div className="relative">
+      <AtisAnalysisDialog open={analysisIds !== null} onOpenChange={open => { if (!open) setAnalysisIds(null); }}
+        selection={{ mode: "reanalyze", cardIds: analysisIds ?? undefined, forceAll: false, limit: 100 }}
+        onCompleted={() => { onRefresh?.(); }} />
       {/* Batch Selection Controls */}
       <div className="flex items-center justify-between mb-4 px-2">
         <div className="flex items-center gap-2">
@@ -318,7 +264,7 @@ export function Timeline({ tasks, onToggleTask, isLoading, onRefresh, onSync, is
               {batchReanalyzing ? (
                 <>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  {reanalysisProgress.current}/{reanalysisProgress.total}
+                  Loading selected card identities...
                 </>
               ) : (
                 <>

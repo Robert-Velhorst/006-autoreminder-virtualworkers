@@ -23,6 +23,7 @@ import {
 import { eq, isNull, and, sql, desc } from 'drizzle-orm';
 import { invokeLLM } from '../_core/llm';
 import { ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader, type ScheduledJobTransaction } from '../scheduledJobRuntime';
+import type { AtisAnalysisGuidance } from '../../shared/atisAnalysis';
 
 // atis-understanding uses the same LLM provider chain as the rest of the app:
 // GROQ_API_KEY (free) → OPENAI_API_KEY → BUILT_IN_FORGE_API_KEY
@@ -85,18 +86,16 @@ function rethrowUnderstandingCancellation(error: unknown, context?: ScheduledJob
   if (context && (error instanceof ScheduledJobLeaseLostError || (error instanceof Error && error.name === 'AbortError'))) throw error;
 }
 
-interface InterviewGuidance {
-  goal?: string;
-  deliverable?: string;
-  successCriteria?: string[];
-}
+type InterviewGuidance = AtisAnalysisGuidance;
+export type CardUnderstandingOutcome = { kind: 'generated' | 'fallback'; understanding: TaskUnderstanding }
+  | { kind: 'missing'; understanding: null };
 
 /**
  * Build full context for a card including attachments and comments
  */
 async function buildCardContext(cardId: number): Promise<CardContext | null> {
   const db = await getDb();
-  if (!db) return null;
+  if (!db) throw new Error('Database not available');
 
   // Get the card
   const [card] = await db.select()
@@ -232,7 +231,7 @@ async function analyzeWithAI(
   extractedContent?: ExtractedContent,
   interviewGuidance?: InterviewGuidance,
   jobContext?: ScheduledJobContext
-): Promise<TaskUnderstanding> {
+): Promise<{ kind: 'generated' | 'fallback'; understanding: TaskUnderstanding }> {
   const contextText = formatContextForAI(context, extractedContent, interviewGuidance);
 
   const systemPrompt = `You are an expert task analyst for a Virtual Assistant management system. Your job is to analyze Trello cards and extract structured information to help VAs understand and complete tasks efficiently.
@@ -335,6 +334,10 @@ Return ONLY valid JSON, no markdown formatting or explanation.`;
       ],
       maxTokens: 4000, // Increased from 1500 — checklist with 5-10 steps needs ~2000-3500 tokens
       responseFormat: { type: 'json_object' },
+      ...(jobContext ? {
+        signal: jobContext.signal,
+        beforeDispatch: () => assertUnderstandingOwnership(jobContext),
+      } : {}),
     });
 
     await assertUnderstandingOwnership(jobContext);
@@ -370,14 +373,14 @@ Return ONLY valid JSON, no markdown formatting or explanation.`;
       }
     }
 
-    return parsed;
+    return { kind: 'generated', understanding: parsed };
   } catch (error: any) {
     rethrowUnderstandingCancellation(error, jobContext);
     await assertUnderstandingOwnership(jobContext);
     console.error('[ATIS Understanding] AI analysis error:', error);
 
     // Return a safe default on error
-    return {
+    return { kind: 'fallback', understanding: {
       goal: `Complete task: ${context.card.name}`,
       deliverable: 'Task completion',
       taskType: 'admin',
@@ -394,7 +397,7 @@ Return ONLY valid JSON, no markdown formatting or explanation.`;
       aptlssChecklist: [
         { name: `Review and complete: ${context.card.name.substring(0, 50)}`, estimatedMinutes: 30, priority: 'T' }
       ],
-    };
+    } };
   }
 }
 
@@ -505,12 +508,26 @@ export async function processCardUnderstanding(
     ? interviewGuidanceOrContext : undefined;
   const interviewGuidance = interviewGuidanceOrContext && !('assertOwnership' in interviewGuidanceOrContext)
     ? interviewGuidanceOrContext : undefined;
+  return (await processUnderstanding(cardId, interviewGuidance, jobContext)).understanding;
+}
+
+export async function processCardUnderstandingOutcome(cardId: number,
+  options: { context: ScheduledJobContext; guidance?: AtisAnalysisGuidance }): Promise<CardUnderstandingOutcome> {
+  if (!options?.context || typeof options.context.assertOwnership !== 'function' || !options.context.signal) {
+    throw new Error('A scheduled ownership context is required');
+  }
+  return processUnderstanding(cardId, options.guidance, options.context);
+}
+
+async function processUnderstanding(cardId: number, interviewGuidance?: InterviewGuidance,
+  jobContext?: ScheduledJobContext): Promise<CardUnderstandingOutcome> {
+  if (!Number.isSafeInteger(cardId) || cardId <= 0) throw new Error('A positive card ID is required');
   await assertUnderstandingOwnership(jobContext);
   const context = await buildCardContext(cardId);
   await assertUnderstandingOwnership(jobContext);
   if (!context) {
     console.error(`[ATIS Understanding] Card ${cardId} not found`);
-    return null;
+    return { kind: 'missing', understanding: null };
   }
 
   console.log(`[ATIS Understanding] Analyzing card: ${context.card.name.substring(0, 50)}...`);
@@ -523,10 +540,10 @@ export async function processCardUnderstanding(
     console.log(`[ATIS Understanding] Including ${attachCount} extracted attachments, ${convCount} chatbot conversations`);
   }
 
-  const understanding = await analyzeWithAI(context, extractedContent, interviewGuidance, jobContext);
-  await saveUnderstanding(cardId, context.card.trelloId, understanding, jobContext);
+  const result = await analyzeWithAI(context, extractedContent, interviewGuidance, jobContext);
+  await saveUnderstanding(cardId, context.card.trelloId, result.understanding, jobContext);
 
-  return understanding;
+  return result;
 }
 
 /**
@@ -611,7 +628,8 @@ export async function processAllCardsUnderstanding(
 
     let status: 'success' | 'failed';
     try {
-      await processCardUnderstanding(card.id, context);
+      const understanding = await processCardUnderstanding(card.id, context);
+      if (!understanding) throw new Error('Card not found');
       processed++;
       status = 'success';
 

@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, statSync, symlinkSync, utimesSync, writ
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { managerSafetyDigest, managerSafetyVerified, MANAGER_IMPLEMENTATION_VERSION } from "./aptlssManagerSafety";
+import { managerSafetyDigest, managerSafetyVerified, MANAGER_IMPLEMENTATION_VERSION, MANAGER_RUNTIME_TOOL_BUNDLES } from "./aptlssManagerSafety";
 
 const folders: string[] = [];
 afterEach(() => { for (const folder of folders.splice(0)) rmSync(folder, { recursive: true, force: true }); });
@@ -11,6 +11,8 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), "aptlss-build-test-")); folders.push(root);
   mkdirSync(join(root, "dist/public/downloads"), { recursive: true });
   writeFileSync(join(root, "dist/index.js"), "test bundle");
+  mkdirSync(join(root, "dist/tools"), { recursive: true });
+  for (const file of MANAGER_RUNTIME_TOOL_BUNDLES) writeFileSync(join(root, file), "test maintenance tool");
   const collector = Buffer.from([0, 255, 1, 128, 42]);
   writeFileSync(join(root, "dist/public/downloads/worker-browser-collector.zip"), collector);
   const manifest = {
@@ -18,6 +20,8 @@ function fixture() {
     digest: "a".repeat(64),
     bundleHash: createHash("sha256").update("test bundle").digest("hex"),
     collectorPackageHash: createHash("sha256").update(collector).digest("hex"),
+    toolBundleHashes: Object.fromEntries(MANAGER_RUNTIME_TOOL_BUNDLES.map(file => [file,
+      createHash("sha256").update("test maintenance tool").digest("hex")])),
   };
   writeFileSync(join(root, "dist/aptlss-build.json"), JSON.stringify(manifest));
   return { root, manifest };
@@ -37,6 +41,18 @@ it("identifies a source-free production bundle using its verified build manifest
 });
 it("rejects a changed production bundle", () => {
   const { root } = fixture(); writeFileSync(join(root, "dist/index.js"), "modified bundle");
+  expect(() => managerSafetyDigest(root)).toThrow("does not match");
+});
+it.each(MANAGER_RUNTIME_TOOL_BUNDLES)("rejects a changed maintenance bundle %s", file => {
+  const { root } = fixture(); writeFileSync(join(root, file), "modified tool");
+  expect(() => managerSafetyDigest(root)).toThrow("does not match");
+});
+it("rejects missing tool integrity entries or missing maintenance tools", () => {
+  const { root, manifest } = fixture();
+  writeFileSync(join(root, "dist/aptlss-build.json"), JSON.stringify({ ...manifest, toolBundleHashes: {} }));
+  expect(() => managerSafetyDigest(root)).toThrow("does not match");
+  writeFileSync(join(root, "dist/aptlss-build.json"), JSON.stringify(manifest));
+  rmSync(join(root, MANAGER_RUNTIME_TOOL_BUNDLES[0]));
   expect(() => managerSafetyDigest(root)).toThrow("does not match");
 });
 it("rejects a changed production browser collector package", () => {

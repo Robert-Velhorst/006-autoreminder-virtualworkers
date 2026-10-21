@@ -223,8 +223,6 @@ export default function FounderDashboard() {
 
   
   // Re-analysis state
-  const [isReanalyzing, setIsReanalyzing] = useState(false);
-  const [reanalysisProgress, setReanalysisProgress] = useState<{ total: number; processed: number; failed: number } | null>(null);
   const [showReanalysisModal, setShowReanalysisModal] = useState(false);
   const [selectedBoardForReanalysis, setSelectedBoardForReanalysis] = useState<{ id: string; name: string } | null>(null);
   const [selectedWorkerId, setSelectedWorkerId] = useState<number | null>(null);
@@ -564,45 +562,7 @@ export default function FounderDashboard() {
     }
   };
 
-  // Re-analyze all cards with AI
-  const handleReanalyzeAll = async () => {
-    setIsReanalyzing(true);
-    setReanalysisProgress(null);
-    
-    try {
-      toast.info('Starting AI re-analysis of all cards...', {
-        description: 'This may take several minutes. Progress will be shown below.',
-        duration: 5000,
-      });
-      
-      const res = await fetch('/api/atis/understanding/reanalyze-all', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ forceAll: true, limit: 200 }),
-      });
-      
-      if (res.ok) {
-        const data = await res.json();
-        setReanalysisProgress({
-          total: data.total,
-          processed: data.processed,
-          failed: data.failed,
-        });
-        toast.success(`Re-analysis complete!`, {
-          description: `Processed ${data.processed} cards, ${data.failed} failed`,
-          duration: 10000,
-        });
-      } else {
-        const error = await res.json();
-        toast.error('Re-analysis failed', { description: error.error });
-      }
-    } catch (error) {
-      toast.error('Failed to start re-analysis');
-    } finally {
-      setIsReanalyzing(false);
-    }
-  };
+  // All re-analysis entry points use the shared explicit preview/confirmation dialog.
 
   // Extract all unique labels from assignments
   const allLabels = useMemo(() => {
@@ -2259,10 +2219,7 @@ export default function FounderDashboard() {
         onOpenChange={setShowReanalysisModal}
         preselectedBoardId={selectedBoardForReanalysis?.id}
         preselectedBoardName={selectedBoardForReanalysis?.name}
-        onComplete={(results) => {
-          setReanalysisProgress(results);
-          toast.success(`Re-analysis complete: ${results.processed} processed, ${results.failed} failed`);
-        }}
+        onComplete={() => { void fetchAllData(); }}
       />
     </div>
   );

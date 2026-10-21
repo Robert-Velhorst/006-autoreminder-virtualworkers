@@ -1,7 +1,7 @@
 export const REQUIRED_POSTGRES_MIGRATION = {
-  tag: "0009_financial_ledger_authority",
-  createdAt: 1792562299754n,
-  hash: "128636b981abfdd59b032e7143da3ead5d67c84ec78c0ee1139bef9adefbeffb",
+  tag: "0010_atis_analysis_admission",
+  createdAt: 1792567179124n,
+  hash: "d4b149e1b05133b71a26a36f7118b2a70ee053824adc163f027a34085194032c",
 } as const;
 
 export const READINESS_QUERY_TIMEOUT_MS = 2_000;
@@ -60,11 +60,13 @@ export async function hasRequiredPostgresSchema(
         ) AND NOT EXISTS (
           SELECT 1 FROM weekly_pay_log GROUP BY "founderId", "vaId", "weekStart" HAVING count(*) > 1
         ) AND (
-          SELECT count(*) = 4 FROM (VALUES
+          SELECT count(*) = 6 FROM (VALUES
             ('payment_cycles', 'payment_cycles_founder_dates_unique', ARRAY['founderId','cycleStart','cycleEnd']::text[]),
             ('payment_cycles', 'payment_cycles_predecessor_unique', ARRAY['predecessorCycleId']::text[]),
             ('weekly_pay_log', 'weekly_pay_log_founder_worker_week_unique', ARRAY['founderId','vaId','weekStart']::text[]),
-            ('financial_ledger_events', 'financial_ledger_events_founder_key_unique', ARRAY['founderId','eventKey']::text[])
+            ('financial_ledger_events', 'financial_ledger_events_founder_key_unique', ARRAY['founderId','eventKey']::text[]),
+            ('atis_analysis_requests', 'atis_analysis_owner_request_key_unique', ARRAY['ownerUserId','requestKeyHash']::text[]),
+            ('atis_analysis_items', 'atis_analysis_request_card_unique', ARRAY['requestId','cardId']::text[])
           ) expected(table_name, constraint_name, column_names)
           JOIN pg_class t ON t.relname=expected.table_name
           JOIN pg_namespace n ON n.oid=t.relnamespace AND n.nspname='public'

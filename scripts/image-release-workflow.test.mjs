@@ -64,6 +64,7 @@ test('CI retains one built image for scanning, runtime and configured PostgreSQL
   assert.match(source, /verify-postgres-production-image\.mjs va-dashboard:ci/);
   ordered(source, ['docker build --tag va-dashboard:ci', 'scripts/scan-production-image.sh', 'scripts/verify-postgres-production-image.mjs']);
   for (const guard of ['client/src/components/timer.identity.test.mjs', 'scripts/verify-aptlss-safety.ts',
+    'e2e/financial-ui.config.ts', 'e2e/atis-analysis-ui.config.ts',
     'Verify PostgreSQL backup and isolated restore', 'Verify migration metadata matches the schema']) {
     assert.ok(source.includes(guard), `Current-main verification was lost: ${guard}`);
   }

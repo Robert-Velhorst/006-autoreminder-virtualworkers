@@ -25,14 +25,14 @@ Ordinary local deletion initially refused while the integration merge was in
 progress. After merge `be5eea6` contained the accepted source, guarded
 `git branch -d` succeeded. No forced local deletion was performed.
 
-PR #135 remains the source integration candidate, not accepted main. Earlier head
+PR #135 was the source integration candidate at the preceding checkpoint. Earlier head
 `f391013` passed full CI `39557333508`, including an exact-image scan of 633
 packages with zero vulnerabilities and no exceptions, and positive PostgreSQL
 acceptance with confirmed cleanup for that same image. The pinned official
 artifact-upload Action was the sole approved Action-policy addition; the earlier
 policy blocker is resolved without broadening the remaining allowlist.
 
-The current local PR #135 source includes generic credential documentation commit
+That local PR #135 source included generic credential documentation commit
 `0ab95ce` and completed merge `be5eea6` of the accepted main. The integration
 requires fresh exact-head quality, security, image and acceptance gates. Neither
 the earlier PR #135 receipt nor PR #144's acceptance transfers to this changed
@@ -42,6 +42,17 @@ only `main`, preserving all source and recovery history; that final branch state
 has not yet been established at this checkpoint. Private configuration, secrets
 and recovery archives remain outside Git. No external-provider, deployment or
 human shadow-trial acceptance is claimed.
+
+The integration subsequently passed quality `39560277949` and CodeQL
+`39560273868` at full head `cba207691700f51b5e88690eeb0cbfa0babac5b5`.
+Normal merge `0e18557d45452f5ef1812955eb55f959ebf822d4` and that reviewed head
+share tree `56c4fa7fd3fee89d0cc38b1b9e4dbf770c9b58bc`. The verified annotated
+remote tag `archive/exact-image-security-20261021` peels to the accepted head;
+its tag object is `c3db880dbd3fce0ccc0dd60e677fbc27bd0e183e`. The matching
+remote branch was removed with an exact-SHA lease; guarded local deletion
+succeeded. New durable-analysis source remains on its own review branch until
+its fresh gates pass. No unfinished source was discarded to manufacture an
+only-main state, and no operational deployment is implied.
 
 ### Earlier Only-Main Checkpoint
 

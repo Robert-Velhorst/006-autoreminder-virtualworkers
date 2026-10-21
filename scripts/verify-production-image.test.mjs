@@ -27,7 +27,7 @@ function driver(overrides = {}) {
 }
 
 describe("production image verification isolation", () => {
-  function executeRuntimeCheck({ installed = [], store = [], missingImport } = {}) {
+  function executeRuntimeCheck({ installed = [], store = [], missingImport, missingTool = false, badToolHelp = false } = {}) {
     const run = driver();
     verifyProductionImage("fixture:release", run);
     const script = run.mock.calls.find(([args]) => args[0] === "run")[0].at(-1);
@@ -39,9 +39,11 @@ describe("production image verification isolation", () => {
       "node:assert/strict": assert,
       "node:fs": {
         readdirSync: path => path === "/app" ? [] : store,
-        existsSync: path => installed.includes(path),
+        existsSync: path => path.startsWith("dist/tools/") ? !missingTool : installed.includes(path),
         readFileSync: path => path === "dist/aptlss-build.json"
-          ? JSON.stringify({ bundleHash: "fixture", collectorPackageHash: "fixture" })
+          ? JSON.stringify({ bundleHash: "fixture", collectorPackageHash: "fixture", toolBundleHashes: {
+            "dist/tools/reanalyze_all.js": "fixture", "dist/tools/reanalyze_active_placeholders.js": "fixture",
+          } })
           : path.endsWith(".png") ? icon : Buffer.from("fixture"),
       },
       "node:crypto": { createHash: () => ({ update: () => ({ digest: () => "fixture" }) }) },
@@ -49,6 +51,7 @@ describe("production image verification isolation", () => {
       "@trpc/server/adapters/express": { createExpressMiddleware() {} },
       "@trpc/client": { createTRPCProxyClient() {} },
       "@trpc/react-query": { createTRPCReact() {} },
+      "node:child_process": { spawnSync: (_node, args) => ({ status: args.includes("--help") ? (badToolHelp ? 1 : 0) : 2 }) },
     };
     const require = name => {
       if (!(name in modules) || name === missingImport) throw new Error("Missing module: " + name);
@@ -60,6 +63,10 @@ describe("production image verification isolation", () => {
 
   it("executes the actual runtime script for an intact minimal fixture", () => {
     expect(() => executeRuntimeCheck()).not.toThrow();
+  });
+  it("rejects missing maintenance tools or an unusable help command", () => {
+    expect(() => executeRuntimeCheck({ missingTool: true })).toThrow(/maintenance tool is missing/);
+    expect(() => executeRuntimeCheck({ badToolHelp: true })).toThrow(/Maintenance help failed/);
   });
 
   it.each(["npm", "npx", "yarn", "yarnpkg"])("rejects a runtime containing %s", tool => {

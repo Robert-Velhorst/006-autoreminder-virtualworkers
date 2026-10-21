@@ -79,6 +79,17 @@ export function verifyProductionImage(image, run = docker) {
     const seal = JSON.parse(fs.readFileSync("dist/aptlss-build.json", "utf8"));
     assert.equal(hash("dist/index.js"), seal.bundleHash);
     assert.equal(hash("dist/public/downloads/worker-browser-collector.zip"), seal.collectorPackageHash);
+    for (const tool of ["dist/tools/reanalyze_all.js", "dist/tools/reanalyze_active_placeholders.js"]) {
+      assert(fs.existsSync(tool), "A maintenance tool is missing");
+      assert.equal(hash(tool), seal.toolBundleHashes?.[tool], "Maintenance tool integrity mismatch");
+      const child = require("node:child_process");
+      const help = child.spawnSync(process.execPath, [tool, "--help"], { encoding: "utf8", timeout: 5000, maxBuffer: 65536 });
+      assert.equal(help.error, undefined, "Maintenance help must finish without network or database access");
+      assert.equal(help.status, 0, "Maintenance help failed");
+      const missingOwner = child.spawnSync(process.execPath, [tool], { encoding: "utf8", timeout: 5000, maxBuffer: 65536 });
+      assert.equal(missingOwner.error, undefined, "Missing-owner validation must not start database or provider work");
+      assert.equal(missingOwner.status, 2, "A maintenance tool must require explicit owner input");
+    }
     const icon = fs.readFileSync("dist/public/icons/va-dashboard.png");
     assert.equal(icon.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
     assert.equal(icon.readUInt32BE(16), 144);
@@ -120,6 +131,8 @@ export function verifyProductionImage(image, run = docker) {
       "no-env-files",
       "sealed-bundle",
       "collector-integrity",
+      "sealed-maintenance-tools",
+      "maintenance-help-no-network",
       "icon",
       "no-vitest",
       "no-typescript-compiler",

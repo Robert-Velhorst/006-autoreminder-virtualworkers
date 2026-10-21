@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { AtisAnalysisSelection } from "../shared/atisAnalysis";
 import {
   integer,
   bigint,
@@ -4134,3 +4135,36 @@ export const pgFeatureEnum8 = pgEnum("enum_verdict_19ukde9", ["correct","incorre
 export const pgFeatureEnum9 = pgEnum("enum_event_axqosm", ["started","closed"]);
 export const pgFeatureEnum10 = pgEnum("enum_scope_hwjjq7", ["card","worker"]);
 export const pgFeatureEnum11 = pgEnum("enum_state_iy851n", ["idle","pending","leased","failed"]);
+
+export const atisAnalysisRequests = pgTable('atis_analysis_requests', {
+  id: varchar('id', { length: 36 }).primaryKey(),
+  ownerUserId: integer('ownerUserId').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  actorEpoch: varchar('actorEpoch', { length: 20 }).notNull(),
+  selection: jsonb('selection').$type<AtisAnalysisSelection>().notNull(),
+  cards: jsonb('cards').$type<Array<{ id: number; name: string }>>().notNull(),
+  matched: integer('matched').notNull(),
+  remaining: integer('remaining').notNull(),
+  nextAfterCardId: integer('nextAfterCardId'),
+  requestKeyHash: varchar('requestKeyHash', { length: 64 }),
+  createdAt: timestamp('createdAt', { withTimezone: true }).defaultNow().notNull(),
+  expiresAt: timestamp('expiresAt', { withTimezone: true }).notNull(),
+  confirmedAt: timestamp('confirmedAt', { withTimezone: true }),
+}, table => [
+  unique('atis_analysis_owner_request_key_unique').on(table.ownerUserId, table.requestKeyHash),
+  check('atis_analysis_cards_bound', sql`jsonb_typeof(${table.cards}) = 'array' AND jsonb_array_length(${table.cards}) <= 100`),
+  check('atis_analysis_counts_nonnegative', sql`${table.matched} >= 0 AND ${table.remaining} >= 0`),
+]);
+
+export const atisAnalysisItems = pgTable('atis_analysis_items', {
+  id: integer('id').generatedByDefaultAsIdentity().primaryKey(),
+  requestId: varchar('requestId', { length: 36 }).notNull().references(() => atisAnalysisRequests.id, { onDelete: 'restrict' }),
+  // Retain the frozen identity even if source synchronization removes the card.
+  cardId: integer('cardId').notNull(),
+  cardName: varchar('cardName', { length: 512 }).notNull(),
+  state: varchar('state', { length: 16 }).notNull().default('pending'),
+  attemptedAt: timestamp('attemptedAt', { withTimezone: true }),
+  completedAt: timestamp('completedAt', { withTimezone: true }),
+}, table => [
+  unique('atis_analysis_request_card_unique').on(table.requestId, table.cardId),
+  check('atis_analysis_item_state_check', sql`${table.state} IN ('pending','calling','generated','fallback','missing','failed')`),
+]);

@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
   states: [] as any[], refs: [] as any[], stateIndex: 0, refIndex: 0,
   effects: [] as Array<() => unknown>,
   buttons: [] as Array<{ label: string; disabled?: boolean; onClick?: () => unknown }>,
-  timeline: null as any, calendar: null as any,
+  timeline: null as any, calendar: null as any, analysis: null as any,
   fetch: vi.fn(), toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() },
   cache: { get: vi.fn(), set: vi.fn(), invalidate: vi.fn() },
 }));
@@ -80,10 +80,15 @@ vi.mock("@/components/LoadingQueueIndicator", () => ({ LoadingQueueIndicator: ()
 vi.mock("@/components/ConversationDialog", () => ({ ConversationDialog: () => null }));
 vi.mock("@/components/BulkTaskActions", () => ({ BulkTaskActions: () => null }));
 vi.mock("@/components/GoalInterviewDialog", () => ({ GoalInterviewDialog: () => null }));
+vi.mock("@/components/AtisAnalysisDialog", () => ({ AtisAnalysisDialog: (props: any) => {
+  mocks.analysis = props;
+  return props.open ? React.createElement("section", { "aria-label": "Analysis preview" }, "Review analysis selection") : null;
+} }));
 
 import Home from "../client/src/pages/Home";
 import Calendar from "../client/src/pages/Calendar";
 import { ATIS_POLL_INTERVAL_MS } from "../client/src/lib/atis-operation";
+import { AtisAnalysisClient } from "../client/src/lib/atis-analysis";
 
 const previousReact = (globalThis as any).React;
 beforeAll(() => Object.assign(globalThis, { React }));
@@ -114,7 +119,7 @@ const settle = async () => {
 };
 const render = (Page: typeof Home | typeof Calendar) => {
   mocks.stateIndex = 0; mocks.refIndex = 0;
-  mocks.effects = []; mocks.buttons = []; mocks.timeline = null; mocks.calendar = null;
+  mocks.effects = []; mocks.buttons = []; mocks.timeline = null; mocks.calendar = null; mocks.analysis = null;
   return renderToStaticMarkup(React.createElement(Page));
 };
 const mount = (Page: typeof Home | typeof Calendar) => {
@@ -141,9 +146,26 @@ describe("Home async sync and analysis UI contract", () => {
   let active: Array<{ id: number; kind: string; state: string }>;
   let syncStatus: () => Response;
   let analysisStatus: () => Response;
+  const analysisId = "11111111-1111-4111-8111-111111111111";
+  const analysisJob = (state: "running" | "completed") => ({ id: analysisId, state,
+    matched: 1, total: 1, remaining: 0, processed: state === "completed" ? 1 : 0,
+    generated: state === "completed" ? 1 : 0, fallback: 0, missing: 0, failed: 0, uncertain: 0, pending: state === "completed" ? 0 : 1,
+    items: [{ cardId: 101, cardName: "Retained work", state: state === "completed" ? "generated" : "pending" }],
+  });
   const op = (kind: string, state: string, id = kind === "sync" ? 8 : 9) => ({ id, kind, state });
   const taskReads = () => mocks.fetch.mock.calls.filter(([url]) => url === "/api/atis/timeline-tasks?filter=all");
   const postCalls = () => mocks.fetch.mock.calls.filter(([, init]) => init?.method === "POST");
+  const confirmCalls = () => postCalls().filter(([, init]) => init?.body && JSON.parse(String(init.body)).phase === "confirm");
+  const previewAnalysis = async () => {
+    const dialog = mocks.analysis;
+    expect(dialog).toMatchObject({ open: true, selection: { mode: "pending", limit: 100 } });
+    const client = new AtisAnalysisClient({ actor: "7:admin", fetch: mocks.fetch, onState: vi.fn(), onCompleted: dialog.onCompleted });
+    cleanups.push(() => client.dispose());
+    await client.preview(dialog.selection);
+    expect(client.current.phase).toBe("preview");
+    expect(confirmCalls()).toHaveLength(0);
+    return client;
+  };
   const mountHome = () => {
     render(Home);
     for (const effect of [...mocks.effects]) {
@@ -155,21 +177,25 @@ describe("Home async sync and analysis UI contract", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     cleanups = []; active = [];
     syncStatus = () => json({ operation: { ...op("sync", "completed"), result: { totalBoards: 2, totalCards: 10 } } });
-    analysisStatus = () => json({ operation: { ...op("understanding", "completed"), result: { processed: 10, failed: 0 } } });
+    analysisStatus = () => json({ analysis: analysisJob("completed") });
     mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url === "/api/atis/timeline-tasks?filter=all") return json(pages[0].populated);
       if (url === "/api/atis/task-types") return json([]);
       if (url === "/api/atis/operations/active") return json({ operations: active });
       if (url === "/api/atis/operations/8") return syncStatus();
-      if (url === "/api/atis/operations/9") return analysisStatus();
+      if (url === `/api/atis/understanding/analyses/${analysisId}`) return analysisStatus();
       if (url === "/api/atis/sync" && init?.method === "POST") return json({ operation: op("sync", "running") }, 202);
-      if (url === "/api/atis/understanding/process" && init?.method === "POST") return json({ operation: op("understanding", "running") }, 202);
+      if (url === "/api/atis/understanding/preview" && init?.method === "POST") return json({ preview: {
+        id: analysisId, expiresAt: new Date(Date.now() + 600_000).toISOString(), matched: 1, total: 1, remaining: 0,
+        cards: [{ id: 101, name: "Retained work" }],
+      } });
+      if (url === "/api/atis/understanding/process" && init?.method === "POST") return json({ analysis: analysisJob("running") }, 202);
       throw new Error(`Unexpected endpoint: ${url}`);
     });
   });
   afterEach(() => { for (const cleanup of cleanups) cleanup(); vi.useRealTimers(); });
 
-  it("keeps both pending stages disabled, prevents duplicate clicks, and refreshes/toasts only after completion", async () => {
+  it("prevents duplicate sync/confirmation, previews without AI, and refreshes only after each completed job", async () => {
     mountHome(); await settle(); render(Home);
     const retained = mocks.timeline;
     expect(retained.isSyncing).toBe(false);
@@ -180,16 +206,27 @@ describe("Home async sync and analysis UI contract", () => {
     expect(taskReads()).toHaveLength(1);
     expect(mocks.toast.success).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(ATIS_POLL_INTERVAL_MS);
-    expect(render(Home)).toContain("Card analysis is running on the server.");
-    expect(mocks.timeline.isSyncing).toBe(true);
-    expect(postCalls()).toHaveLength(2);
+    expect(render(Home)).toContain("Review analysis selection");
+    expect(mocks.timeline.isSyncing).toBe(false);
+    expect(postCalls()).toHaveLength(1);
     expect(taskReads()).toHaveLength(2);
     expect(mocks.toast.success).toHaveBeenCalledExactlyOnceWith("Synced 2 boards and 10 cards from Trello");
+    const client = await previewAnalysis();
+    expect(taskReads()).toHaveLength(2);
+    expect(mocks.toast.success).toHaveBeenCalledTimes(1);
+    const confirmation = client.confirm(); await settle();
+    expect(client.current.analysis?.state).toBe("running");
+    expect(client.current.busy).toBe(true);
+    await client.confirm();
+    expect(confirmCalls()).toHaveLength(1);
+    expect(taskReads()).toHaveLength(2);
+    expect(mocks.toast.success).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(ATIS_POLL_INTERVAL_MS);
-    expect(render(Home)).toContain("Card analysis completed.");
+    await confirmation;
+    expect(client.current.analysis?.state).toBe("completed");
     expect(mocks.timeline.isSyncing).toBe(false);
     expect(taskReads()).toHaveLength(3);
-    expect(mocks.toast.success).toHaveBeenCalledTimes(2);
+    expect(mocks.toast.success).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a status timeout unconfirmed and requires explicit status recovery without retrying the POST", async () => {
@@ -227,10 +264,18 @@ describe("Home async sync and analysis UI contract", () => {
     expect(render(Home)).toContain("Trello sync completed.");
     expect(postCalls()).toHaveLength(0);
     click("Analyze synced cards"); await settle();
-    expect(postCalls()).toHaveLength(1);
-    expect(postCalls()[0][0]).toBe("/api/atis/understanding/process");
+    expect(render(Home)).toContain("Review analysis selection");
+    expect(postCalls()).toHaveLength(0);
+    const reads = taskReads().length;
+    const client = await previewAnalysis();
+    expect(taskReads()).toHaveLength(reads);
+    const confirmation = client.confirm(); await settle();
+    expect(confirmCalls()).toHaveLength(1);
+    expect(confirmCalls()[0][0]).toBe("/api/atis/understanding/process");
     await vi.advanceTimersByTimeAsync(ATIS_POLL_INTERVAL_MS);
-    expect(render(Home)).toContain("Card analysis completed.");
+    await confirmation;
+    expect(client.current.analysis?.state).toBe("completed");
+    expect(taskReads()).toHaveLength(reads + 1);
   });
 
   it("shows a retained interrupted operation on reload without refreshing or automatically posting", async () => {
@@ -257,20 +302,31 @@ describe("Home async sync and analysis UI contract", () => {
     const originalFetch = mocks.fetch.getMockImplementation()!;
     mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url === "/api/atis/understanding/process") return json({ operation: op("understanding", "running"), requestedNotStarted: true }, 409);
+      if (url === `/api/atis/understanding/analyses/${analysisId}`) return json({ error: "Analysis not found" }, 404);
       return originalFetch(url, init);
     });
     const reads = taskReads().length;
     const successes = mocks.toast.success.mock.calls.length;
     click("Analyze synced cards"); await settle();
-    expect(render(Home)).toContain("Your request was not started");
-    expect(mocks.timeline.isSyncing).toBe(true);
+    render(Home);
+    const client = await previewAnalysis();
+    expect(confirmCalls()).toHaveLength(0);
+    await client.confirm();
+    expect(client.current.phase).toBe("paused");
+    expect(client.current.analysis).toBeUndefined();
+    expect(client.current.message).toContain("Cannot confirm analysis status");
     expect(taskReads()).toHaveLength(reads);
     expect(mocks.toast.success).toHaveBeenCalledTimes(successes);
-    click("Check status"); await settle();
-    expect(render(Home)).toContain("Your different request was not started");
+    await client.resume();
+    expect(client.current.unknownOutcome).toBe(true);
+    expect(client.current.message).toContain("original request could still commit or incur usage");
     expect(taskReads()).toHaveLength(reads);
     expect(mocks.toast.success).toHaveBeenCalledTimes(successes);
-    expect(postCalls()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await client.confirm();
+    expect(confirmCalls()).toHaveLength(1);
+    expect(taskReads()).toHaveLength(reads);
+    expect(mocks.toast.success).toHaveBeenCalledTimes(successes);
   });
 });
 

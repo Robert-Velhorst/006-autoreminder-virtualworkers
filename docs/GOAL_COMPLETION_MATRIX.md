@@ -8,9 +8,11 @@ Statuses describe the repository, not provider consent outside the repository.
 accepted PR #144 source receipt is `c43dee7`. PR #144 merged as
 `b92be39f88d66e4f53fae782900b70705f9ade90`, with a tree identical to
 `12ed4cfa58c5f3a35da0f144ff92d5b65c26c279`. Quality run `39557268165`,
-CodeQL `39557267429` and the aggregate gate succeeded. The current PR #135
-integration needs fresh exact-head gates; its earlier successful image receipt
-does not certify the new merge. This supersedes older source/publication/branch
+CodeQL `39557267429` and the aggregate gate succeeded. PR #135 then passed quality
+`39560277949` and CodeQL `39560273868` at exact head `cba2076`, and merged normally
+as `0e18557d45452f5ef1812955eb55f959ebf822d4` with the same reviewed tree.
+The subsequent durable card-analysis changes require their own fresh acceptance.
+This supersedes older source/publication/branch
 observations below, not their retained historical evidence. A passed source gate
 is not a live deployment receipt or acceptance of every production path.
 
@@ -22,11 +24,11 @@ and recovery archives while consolidating source branches.
 
 | Requirement | Verified current evidence | Remaining acceptance |
 | --- | --- | --- |
-| Consolidate local source without losing history | Timer, OAuth, assignment and financial PRs were merged with reviewed-tree comparisons. PR #144's merge `b92be39f88d66e4f53fae782900b70705f9ade90` has tree `12ed4cfa58c5f3a35da0f144ff92d5b65c26c279`, matching accepted source `c43dee7`. Earlier archive/consolidation receipts remain historical evidence. | Finish PR #135 integration and fresh exact-head acceptance before claiming normal consolidation to `main`. Preserve unique source/history and its branch until authorized archival/removal; do not claim only `main` while it exists. |
-| Canonical runtime and additive data model | Persistent Node 26.12.0 application, PostgreSQL 18.6 fixtures, 140 canonical application tables and migrations through `0009_financial_ledger_authority`. Assignment and financial audit additions are additive; historical migrations are not another runtime backend. | Provision and test the actual shared PostgreSQL service, dedicated application database and least-privilege role. Reconcile any transferred data against its source and preserve rollback evidence; synthetic fixtures and transfer tooling do not prove a real import. |
+| Consolidate local source without losing history | Timer, OAuth, assignment, financial and image-security PRs were merged with reviewed-tree comparisons. PR #135's merge `0e18557d45452f5ef1812955eb55f959ebf822d4` has tree `56c4fa7fd3fee89d0cc38b1b9e4dbf770c9b58bc`, matching accepted source `cba2076`; its reviewed head has a verified archive tag. | Review and accept the subsequent durable-analysis work before removing its branch. Preserve unique source/history and its branch until authorized archival/removal; do not claim only `main` while it exists. |
+| Canonical runtime and additive data model | Persistent Node 26.12.0 application and PostgreSQL 18.6 fixtures. Accepted main has 140 tables through migration 0009; the new analysis request/item migration 0010 adds two tables and needs fresh native acceptance. Historical migrations are not another runtime backend. | Provision and test the actual shared PostgreSQL service, dedicated application database and least-privilege role. Reconcile any transferred data against its source and preserve rollback evidence; synthetic fixtures and transfer tooling do not prove a real import. |
 | Source safety and regressions | Accepted PR #144 quality run `39557268165` passed 4,952 Vitest tests with 22 skips, 99 Node tests, 1,041 manager tests, 97 manager Chromium cases, 29/29 native financial cases and 8/8 financial browser cases. CodeQL `39557267429` and the aggregate gate were green. Counts describe separate gates, not additive coverage of every feature. | Require fresh quality, native, browser, image and security gates for the current integration. Source tests do not verify real provider delivery, target-host recovery or unexamined roadmap criteria; the two ATIS gaps below remain source work. |
 | Durable notification delivery and recovery | PR #134 records exact digest membership, immutable payload/address, dispatch phases, lease fencing and audited recovery. Final provider-boundary checks cover consent, address and worker-access changes during provider preparation. Issue #75 is closed against its regression evidence. | Verify the selected live provider and operator recovery procedure. Provider acceptance is not inbox receipt; uncertain results must not become silent replay permission. |
-| Image vulnerability enforcement | PR #135 checkpoint `f391013` passed real built-image scanning: 633 packages, zero vulnerabilities and no accepted exceptions. Quality run `39557333508` also passed configured PostgreSQL image acceptance and the full CI gate; CodeQL was green. The exact-pinned action approval was applied; other action-policy entries were unchanged. | Rerun all required gates on the new integration head and retain its exact-image receipt. Require protected-main verification and a real release's exact-digest scan, configured PostgreSQL acceptance, attestation and same-digest promotion. Earlier previews are not proof of this gate or a new accepted release; do not bypass artifact/action policy. |
+| Image vulnerability enforcement | PR #135 integration `cba2076` passed quality `39560277949` and CodeQL `39560273868`. The actual image scan reported 633 packages, zero vulnerabilities and no exceptions; configured PostgreSQL acceptance used the same image. The exact-pinned action approval was applied; other action-policy entries were unchanged. | Rerun all required gates for subsequent analysis changes and retain their exact-image receipt. Require protected-main verification and a real release's exact-digest scan, configured PostgreSQL acceptance, attestation and same-digest promotion. Earlier previews are not proof of a new accepted release; do not bypass artifact/action policy. |
 | Private information and historical credentials | Accepted source has secret-scan evidence. Private configuration, recovery archives and operational data are not source publication artifacts. Provider-specific remediation documentation was removed in favor of generic historical credential-remediation guidance. Historical alerts #1 and #4 remain open; the owner declined deletion. | Do not treat documentation removal or owner-declined deletion as credential remediation or alert closure. Verify authorized rotation/revocation and record the remaining historical exposure boundary without publishing secret values. Private backups are not a data-migration receipt. |
 | Deployable release and infrastructure | The repository contains guarded deployment and exact-artifact release tooling. Existing `v1.0.0-rc.1` remains a historical, non-production preview. Synthetic configured-image acceptance exists, not an accepted target-host deployment. | Verify the actual host/domain, private runtime configuration, shared database/TLS, backups/restore and authorized deployment credentials. Publish/promote only a freshly accepted exact artifact, then perform authorized deployment, rollback and operator checks. Infrastructure and real deployment remain unverified. |
 | Real operator and integration acceptance | Authenticated synthetic browser, source-contract and database tests exist. Their account and provider scopes remain explicit. | Verify real owner/worker access, Google/Trello/browser callbacks and freshness, WebSockets, schedulers and recovery on the target environment. Mocked transports and local previews are not live-account acceptance. |
@@ -43,7 +45,7 @@ identity and atomic audited financial ledger changes with optimistic save
 revisions. Do not repeat earlier audits as if those paths were unchanged, or
 equate their bounded acceptance with all source being production-ready.
 
-The latest read-only ATIS audit against `c43dee7` retains two concrete gaps:
+The read-only ATIS audit against `c43dee7` identified two concrete gaps:
 legacy `reprocess-failed`, `reprocess/:cardId` and `reanalyze-all` routes call
 provider analysis outside durable operation admission/lease fencing, while
 their request-rate limit is not a per-card analysis quota; and bulk clients
@@ -51,8 +53,13 @@ request 200/500 cards while the server silently caps selection at 100 without
 explicit continuation. The ordinary understanding process endpoint already
 uses durable operations. Preserve the legacy features and clients while adding
 bounded confirmed selection, durable execution/quota controls and truthful
-batch completion. These gaps and unexamined criteria remain source work;
-infrastructure is not the only remaining acceptance.
+batch completion. The follow-up implements one confirmed, durable path for these
+routes, a frozen 100-card batch with explicit continuation, per-card outcomes,
+authority fencing and safe maintenance tools. See
+[Confirmed Card Analysis](CARD_ANALYSIS_ADMISSION.md). Its new migration and
+browser/native tests still require fresh exact-head CI acceptance; this is not
+evidence that all roadmap criteria or operational behavior have been verified.
+Infrastructure is not the only remaining acceptance.
 
 Use [Image Security](IMAGE_SECURITY.md),
 [Notification Delivery](NOTIFICATION_DELIVERY.md),

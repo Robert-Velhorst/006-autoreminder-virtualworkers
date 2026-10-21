@@ -6,6 +6,7 @@ import { encodeTrelloPathSegment } from '../utils/trello-path';
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
+import { z } from 'zod';
 import { getDb } from '../db';
 import { 
   atisWorkspaces,
@@ -17,7 +18,9 @@ import {
   atisCardUnderstanding,
 } from '../../drizzle/schema.postgres';
 import { eq, desc, isNull, sql, and, inArray } from 'drizzle-orm';
-import { processCardUnderstanding, processAllCardsUnderstanding, getUnderstandingStats } from '../services/atis-understanding';
+import { getUnderstandingStats } from '../services/atis-understanding';
+import { createAtisAnalysisPreview, confirmAtisAnalysisPreview, getAtisAnalysisJob, normalizeAtisAnalysisSelection, AtisAnalysisAdmissionError } from '../atisAnalysisAdmission';
+import type { AtisAnalysisSelection } from '../../shared/atisAnalysis';
 import { createChecklistSyncService } from '../services/trello-checklist-sync';
 import { createAttachmentExtractor } from '../services/attachment-extractor';
 import { createChatbotExtractor } from '../services/chatbot-extractor';
@@ -52,6 +55,91 @@ function requireAtisAdmin(req: AuthenticatedAtisRequest, res: Response, next: Ne
 }
 
 router.use(requireAtisAdmin);
+
+const analysisId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const analysisToken = z.string().regex(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/);
+const analysisGuidance = z.object({ goal: z.string().max(4000).optional(), deliverable: z.string().max(4000).optional(),
+  successCriteria: z.array(z.string().trim().min(1).max(500)).max(20).optional() }).strict();
+const analysisFields = {
+  cardId: analysisId.optional(), cardIds: z.array(analysisId).min(1).max(1000).refine(ids => new Set(ids).size === ids.length).optional(),
+  boardId: analysisId.optional(), forceAll: z.boolean().optional(), minConfidence: z.number().int().min(0).max(100).optional(),
+  limit: z.number().int().min(1).max(100).optional(), afterCardId: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), guidance: analysisGuidance.optional(),
+};
+const analysisSelection = z.object({ mode: z.enum(['single', 'pending', 'low_confidence', 'reanalyze', 'active_placeholders']),
+  ...analysisFields }).strict().superRefine((value, issue) => {
+    if (value.mode === 'single' ? value.cardId === undefined || value.cardIds !== undefined || value.boardId !== undefined
+      || value.forceAll !== undefined || value.minConfidence !== undefined || value.afterCardId !== undefined
+      : value.cardId !== undefined) issue.addIssue({ code: 'custom', message: 'Selection does not match its mode' });
+  });
+const legacyAnalysis = z.object({ ...analysisFields,
+  boardId: z.union([analysisId, z.string().regex(/^\d+$/).transform(Number).pipe(analysisId)]).optional(),
+  phase: z.literal('preview').optional(), interviewGoal: z.string().max(4000).optional(),
+  interviewDeliverable: z.string().max(4000).optional(),
+  interviewSuccessCriteria: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
+}).strict();
+const analysisConfirmation = z.object({ phase: z.literal('confirm'), previewId: analysisToken,
+  requestKey: z.string().min(1).max(128).refine(value => value.trim() === value),
+  acknowledgeInterruptedOperationId: analysisId.optional() }).strict();
+
+function analysisFailure(res: Response, error: unknown) {
+  if (error instanceof z.ZodError) return res.status(400).json({ error: 'Invalid analysis request' });
+  if (error instanceof AtisAnalysisAdmissionError) return res.status(error.status).json({ error: error.message, code: error.code });
+  return operationFailure(res, error);
+}
+
+function analysisConfirmLimit(req: Request, res: Response, next: NextFunction) {
+  return req.body?.phase === 'confirm' ? atisRateLimiter(req, res, next) : next();
+}
+
+function analysisStart(mode?: AtisAnalysisSelection['mode']) {
+  return async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const actor = (req as AuthenticatedAtisRequest).user!;
+      if (req.params.cardId !== undefined && (!/^[1-9]\d*$/.test(req.params.cardId)
+        || !Number.isSafeInteger(Number(req.params.cardId)))) return res.status(400).json({ error: 'Invalid card ID' });
+      // The explicit preview endpoint cannot start work. Legacy confirmation
+      // submits only the frozen preview identity, never a fresh filter selection.
+      if (mode && req.body?.phase === 'confirm') {
+        const { phase: _phase, previewId, ...confirmation } = analysisConfirmation.parse(req.body);
+        return res.status(202).json({ analysis: await confirmAtisAnalysisPreview(actor.id, previewId, confirmation) });
+      }
+      let selection: AtisAnalysisSelection;
+      if (!mode) {
+        const explicit = z.object({ phase: z.literal('preview').optional(), selection: analysisSelection }).strict().parse(req.body);
+        selection = explicit.selection;
+      } else {
+        const body = legacyAnalysis.parse(req.body ?? {});
+        const { phase: _phase, interviewGoal, interviewDeliverable, interviewSuccessCriteria, ...fields } = body;
+        if (fields.guidance && [interviewGoal, interviewDeliverable, interviewSuccessCriteria].some(value => value !== undefined)) {
+          return res.status(400).json({ error: 'Use one guidance representation' });
+        }
+        const guidance = fields.guidance ?? ([interviewGoal, interviewDeliverable, interviewSuccessCriteria].some(value => value !== undefined)
+          ? { goal: interviewGoal, deliverable: interviewDeliverable, successCriteria: interviewSuccessCriteria } : undefined);
+        let cardId = fields.cardId;
+        if (req.params.cardId !== undefined) {
+          if (!/^[1-9]\d*$/.test(req.params.cardId)) return res.status(400).json({ error: 'Invalid card ID' });
+          const pathId = analysisId.parse(Number(req.params.cardId));
+          if (cardId !== undefined && cardId !== pathId) return res.status(400).json({ error: 'Conflicting card IDs' });
+          cardId = pathId;
+        }
+        selection = analysisSelection.parse({ ...fields, mode: cardId === undefined ? mode : 'single', cardId,
+          limit: fields.limit ?? (cardId !== undefined ? 1 : mode === 'low_confidence' ? 50 : 100), guidance });
+      }
+      return res.json({ preview: await createAtisAnalysisPreview(actor.id, normalizeAtisAnalysisSelection(selection)) });
+    } catch (error) { return analysisFailure(res, error); }
+  };
+}
+
+router.post('/understanding/preview', analysisStart());
+router.get('/understanding/analyses/:id', async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const id = analysisToken.parse(req.params.id);
+    const analysis = await getAtisAnalysisJob((req as AuthenticatedAtisRequest).user!.id, id);
+    return analysis ? res.json({ analysis }) : res.status(404).json({ error: 'Analysis not found' });
+  } catch (error) { return analysisFailure(res, error); }
+});
 
 function operationFailure(res: Response, error: unknown) {
   if (error instanceof RangeError) return res.status(400).json({ error: 'acknowledgeInterruptedOperationId must be a positive integer' });
@@ -366,29 +454,7 @@ router.get('/understanding/stats', async (req: Request, res: Response) => {
  * POST /api/atis/understanding/process
  * Process cards with AI understanding
  */
-router.post('/understanding/process', atisRateLimiter, async (req: Request, res: Response) => {
-  try {
-    const cardId = req.body?.cardId;
-    if (cardId !== undefined && (!Number.isSafeInteger(cardId) || cardId <= 0)) {
-      return res.status(400).json({ error: 'cardId must be a positive integer' });
-    }
-    const { limit } = parseLimitOffset({ limit: req.body?.limit }, { defaultLimit: 100, maxLimit: 100 });
-    const operation = await startAtisOperation({ kind: 'understanding', ownerUserId: (req as AuthenticatedAtisRequest).user!.id,
-      request: cardId ? { cardId } : { limit }, acknowledgeInterruptedOperationId: recoveryAcknowledgement(req.body),
-    }, async context => {
-      if (cardId) {
-        const understanding = await processCardUnderstanding(cardId, context);
-        if (!understanding) throw new Error('Card not found');
-        return { success: true, cardId };
-      }
-      const result = await processAllCardsUnderstanding(undefined, limit, context);
-      return { success: true, processed: result.processed, failed: result.failed };
-    });
-    return res.status(202).json({ operation });
-  } catch (error: any) {
-    return operationFailure(res, error);
-  }
-});
+router.post('/understanding/process', analysisConfirmLimit, analysisStart('pending'));
 
 /**
  * GET /api/atis/card/:id/understanding
@@ -431,91 +497,13 @@ router.get('/card/:id/understanding', async (req: Request, res: Response) => {
  * POST /api/atis/understanding/reprocess-failed
  * Reprocess cards with low confidence (fallback results)
  */
-router.post('/understanding/reprocess-failed', atisRateLimiter, async (req: Request, res: Response) => {
-  try {
-    const db = await getDb();
-    if (!db) {
-      return res.status(500).json({ error: 'Database not available' });
-    }
-
-    const { limit } = parseLimitOffset({ limit: req.body?.limit }, { defaultLimit: 50, maxLimit: 100 });
-
-    // Get cards with low confidence (fallback results)
-    const lowConfidenceCards = await db.select({
-      id: atisCardUnderstanding.cardId,
-    })
-      .from(atisCardUnderstanding)
-      .where(sql`${atisCardUnderstanding.confidenceScore} < 30`)
-      .limit(limit);
-
-    console.log(`[ATIS] Reprocessing ${lowConfidenceCards.length} low-confidence cards...`);
-
-    let processed = 0;
-    let failed = 0;
-
-    for (const card of lowConfidenceCards) {
-      try {
-        await processCardUnderstanding(card.id);
-        processed++;
-        console.log(`[ATIS Reprocess] [${processed}/${lowConfidenceCards.length}] Reprocessed card ${card.id}`);
-      } catch (error: any) {
-        failed++;
-        console.error(`[ATIS Reprocess] Failed to reprocess card ${card.id}:`, error.message);
-      }
-      // Rate limiting
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-
-    res.json({
-      success: true,
-      processed,
-      failed,
-      remaining: lowConfidenceCards.length - processed,
-    });
-  } catch (error: any) {
-    console.error('[ATIS] Reprocess failed error:', error);
-    sendAtisFailure(res, 'reprocess cards');
-  }
-});
+router.post('/understanding/reprocess-failed', analysisConfirmLimit, analysisStart('low_confidence'));
 
 /**
  * POST /api/atis/understanding/reprocess/:cardId
  * Re-analyze a single card with AI (regenerate checklist & timeline)
  */
-router.post('/understanding/reprocess/:cardId', atisRateLimiter, async (req: Request, res: Response) => {
-  try {
-    const { cardId } = req.params;
-    const cardIdNum = parseInt(cardId);
-    const {
-      interviewGoal,
-      interviewDeliverable,
-      interviewSuccessCriteria,
-    } = req.body || {};
-    
-    if (isNaN(cardIdNum)) {
-      return res.status(400).json({ error: 'Invalid card ID' });
-    }
-
-    console.log(`[ATIS] Re-analyzing single card ${cardIdNum}...`);
-    
-    const understanding = await processCardUnderstanding(cardIdNum, {
-      goal: typeof interviewGoal === 'string' ? interviewGoal : undefined,
-      deliverable: typeof interviewDeliverable === 'string' ? interviewDeliverable : undefined,
-      successCriteria: Array.isArray(interviewSuccessCriteria)
-        ? interviewSuccessCriteria.filter((item): item is string => typeof item === 'string')
-        : undefined,
-    });
-    
-    res.json({
-      success: true,
-      cardId: cardIdNum,
-      understanding,
-    });
-  } catch (error: any) {
-    console.error(`[ATIS] Failed to reprocess card:`, error);
-    sendAtisFailure(res, 'reprocess the card');
-  }
-});
+router.post('/understanding/reprocess/:cardId', analysisConfirmLimit, analysisStart('single'));
 
 /**
  * POST /api/atis/cards/:trelloId/reingest
@@ -1762,126 +1750,6 @@ router.post('/chatbot/extract-url', async (req: Request, res: Response) => {
  * Re-analyze cards with the updated AI prompt (comprehensive checklists)
  * Supports filtering by board, specific cards, or all cards
  */
-router.post('/understanding/reanalyze-all', atisRateLimiter, async (req: Request, res: Response) => {
-  try {
-    const db = await getDb();
-    if (!db) {
-      return res.status(500).json({ error: 'Database not available' });
-    }
-
-    const { 
-      minConfidence = 0, 
-      forceAll = false,
-      boardId,  // Filter by specific board
-    } = req.body;
-    if (req.body?.cardIds !== undefined && !Array.isArray(req.body.cardIds)) {
-      return res.status(400).json({ error: 'cardIds must be an array of positive integer card IDs' });
-    }
-    const cardIds = normalizeChecklistSyncCardIds(req.body?.cardIds);
-    if (Array.isArray(req.body?.cardIds) && (cardIds.length === 0 || cardIds.length !== req.body.cardIds.length)) {
-      return res.status(400).json({ error: 'cardIds must contain unique positive integer card IDs' });
-    }
-    const { limit } = parseLimitOffset({ limit: req.body?.limit }, { defaultLimit: 100, maxLimit: 100 });
-
-    // Get cards to reprocess based on filters
-    let cardsToProcess: Array<{ id: number; cardName?: string }>;
-    
-    const excludeInactiveSql = sql`LOWER(${atisCards.listName}) NOT LIKE '%done%' 
-      AND LOWER(${atisCards.listName}) NOT LIKE '%completed%' 
-      AND LOWER(${atisCards.listName}) NOT LIKE '%complete%' 
-      AND LOWER(${atisCards.listName}) NOT LIKE '%archive%' 
-      AND LOWER(${atisCards.listName}) NOT LIKE '%archived%' 
-      AND LOWER(${atisCards.listName}) NOT LIKE '%info%'`;
-
-    if (cardIds.length > 0) {
-      // Specific cards requested
-      cardsToProcess = await db.select({
-        id: atisCards.id,
-      })
-        .from(atisCards)
-        .where(and(
-          eq(atisCards.isArchived, 0),
-          excludeInactiveSql,
-          sql`${atisCards.id} IN (${sql.join(cardIds.map((id: number) => sql`${id}`), sql`, `)})`
-        ))
-        .limit(limit);
-    } else if (boardId) {
-      // Filter by board
-      cardsToProcess = await db.select({
-        id: atisCards.id,
-      })
-        .from(atisCards)
-        .where(and(
-          eq(atisCards.isArchived, 0),
-          excludeInactiveSql,
-          eq(atisCards.boardId, parseInt(boardId))
-        ))
-        .limit(limit);
-    } else if (forceAll) {
-      // Get all active cards
-      cardsToProcess = await db.select({
-        id: atisCards.id,
-      })
-        .from(atisCards)
-        .where(and(
-          eq(atisCards.isArchived, 0),
-          excludeInactiveSql
-        ))
-        .limit(limit);
-    } else {
-      // Get cards with low confidence, no checklist, or no understanding record at all
-      cardsToProcess = await db.select({
-        id: atisCards.id,
-      })
-        .from(atisCards)
-        .leftJoin(atisCardUnderstanding, eq(atisCards.id, atisCardUnderstanding.cardId))
-        .where(and(
-          eq(atisCards.isArchived, 0),
-          excludeInactiveSql,
-          sql`${atisCardUnderstanding.id} IS NULL OR ${atisCardUnderstanding.confidenceScore} <= ${minConfidence} OR ${atisCardUnderstanding.aptlssChecklist} IS NULL`
-        ))
-        .limit(limit);
-    }
-
-    const filterDesc = cardIds.length > 0 ? `${cardIds.length} specific cards` : boardId ? `board ${boardId}` : 'all cards';
-    console.log(`[ATIS] Re-analyzing ${cardsToProcess.length} cards (${filterDesc}) with updated AI prompt...`);
-
-    let processed = 0;
-    let failed = 0;
-    const results: Array<{ cardId: number; cardName?: string; success: boolean; error?: string }> = [];
-
-    for (const card of cardsToProcess) {
-      try {
-        // Get card name for better results display
-        const [cardInfo] = await db.select({ name: atisCards.name })
-          .from(atisCards)
-          .where(eq(atisCards.id, card.id))
-          .limit(1);
-        
-        await processCardUnderstanding(card.id);
-        processed++;
-        results.push({ cardId: card.id, cardName: cardInfo?.name, success: true });
-        console.log(`[ATIS Reanalyze] [${processed}/${cardsToProcess.length}] Reanalyzed card ${card.id}: ${cardInfo?.name || 'Unknown'}`);
-      } catch (error: any) {
-        failed++;
-        results.push({ cardId: card.id, success: false, error: 'Reanalysis failed. Check the server logs or retry.' });
-        console.error(`[ATIS Reanalyze] Failed to reanalyze card ${card.id}:`, error.message);
-      }
-      // Rate limiting - 500ms between requests
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-
-    res.json({
-      success: true,
-      total: cardsToProcess.length,
-      processed,
-      failed,
-      results, // Return all results for the modal
-    });
-  } catch (error: any) {
-    console.error('[ATIS] Reanalyze all error:', error);
-    sendAtisFailure(res, 'reanalyze cards');
-  }
-});
+router.post('/understanding/reanalyze-all', analysisConfirmLimit, analysisStart('reanalyze'));
 
 export default router;
