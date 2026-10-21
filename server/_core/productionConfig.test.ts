@@ -130,16 +130,15 @@ it.each([undefined, "", "  ", "codex-subscription", " codex-subscription "])(
       expect(() => assertProductionConfiguration(env)).not.toThrow();
     },
   );
-it.each([undefined, "", "  "])("requires a nonempty key when the paid provider is explicitly selected (%s)", key => {
+it.each([undefined, "", "  ", "configured-but-not-permitted"])("rejects paid routing regardless of configured credentials (%s)", key => {
     expect(getProductionConfigurationErrors({
       ...validProductionEnvironment, APTLSS_MANAGER_PROVIDER: " openai-api ", OPENAI_API_KEY: key,
-    })).toEqual(["OPENAI_API_KEY is required"]);
+    })).toEqual(["APTLSS_MANAGER_PROVIDER must be codex-subscription; paid API routing is not permitted in production"]);
   });
-it("accepts an explicitly configured API provider and rejects unknown providers without leaking their values", () => {
-    expect(getProductionConfigurationErrors({ ...validProductionEnvironment, APTLSS_MANAGER_PROVIDER: "openai-api" })).toEqual([]);
+it("rejects unsupported providers without leaking their values", () => {
     const env = { ...validProductionEnvironment, APTLSS_MANAGER_PROVIDER: "invalid-private-value" };
-    expect(getProductionConfigurationErrors(env)).toEqual(["APTLSS_MANAGER_PROVIDER must be codex-subscription or openai-api"]);
-    expect(() => assertProductionConfiguration(env)).toThrow("APTLSS_MANAGER_PROVIDER must be codex-subscription or openai-api");
+    expect(getProductionConfigurationErrors(env)).toEqual(["APTLSS_MANAGER_PROVIDER must be codex-subscription; paid API routing is not permitted in production"]);
+    expect(() => assertProductionConfiguration(env)).toThrow("APTLSS_MANAGER_PROVIDER must be codex-subscription; paid API routing is not permitted in production");
     expect(() => assertProductionConfiguration(env)).not.toThrow("invalid-private-value");
   });
 it("rejects a Vercel request-only production runtime", () => {

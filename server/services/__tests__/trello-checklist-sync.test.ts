@@ -11,6 +11,7 @@ vi.mock('../../db', () => ({ getDb: mocks.getDb }));
 vi.mock('../../utils/retry', () => ({ fetchWithRetry: mocks.fetchWithRetry }));
 
 import { TrelloChecklistSyncService } from '../trello-checklist-sync';
+import { ScheduledJobLeaseLostError } from '../../scheduledJobRuntime';
 
 beforeEach(() => {
   vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '');
@@ -535,12 +536,14 @@ describe('Trello Checklist Sync Service', () => {
 
       expect(result.success).toBe(true);
       expect(db.transaction).toHaveBeenCalledTimes(1);
-      expect(txExecute).toHaveBeenCalledTimes(2);
+      expect(txExecute).toHaveBeenCalledTimes(3);
       const queries = txExecute.mock.calls.map(([statement]) => new PgDialect().sqlToQuery(statement));
       expect(queries[0].sql).toContain("set_config('lock_timeout'");
       expect(queries[0].params).toEqual(['10s']);
       expect(queries[1].sql).toContain('pg_advisory_xact_lock(hashtextextended(');
       expect(queries[1].params[0]).toMatch(/^aptlss-checklist-[a-f0-9]{40}$/);
+      expect(queries[2].sql).toContain('INSERT INTO atis_checklist_sync');
+      expect(db.execute).not.toHaveBeenCalled();
       expect(txExecute.mock.invocationCallOrder[1]).toBeLessThan(mocks.fetchWithRetry.mock.invocationCallOrder[0]);
     });
 
@@ -855,5 +858,130 @@ describe('Trello Checklist Sync Service', () => {
       expect(syncStatus.synced).toBe(false);
       expect(syncStatus.reason).toBe('No Trello ID');
     });
+  });
+});
+
+describe('checklist transaction reader propagation', () => {
+  function singleConnection(cardId: string) {
+    let active = false;
+    const reader = createOwnershipDb([{ taskId: cardId, vaId: 2, status: 'assigned' }]);
+    const select = vi.spyOn(reader, 'select');
+    const db = { ...reader, transaction: vi.fn(async (work: (tx: typeof reader) => Promise<unknown>) => {
+      if (active) throw new Error('Unexpected nested transaction checkout');
+      active = true;
+      try { return await work(reader); }
+      finally { active = false; }
+    }) };
+    mocks.getDb.mockImplementation(async () => {
+      if (active) throw new Error('Unexpected pool acquisition inside card transaction');
+      return db;
+    });
+    const assertOwnership = vi.fn(async (provided?: unknown) => {
+      if (active) {
+        expect(provided).toBe(reader);
+        await reader.select().from(taskAssignments).where().limit(1);
+      } else expect(provided).toBeUndefined();
+    });
+    vi.stubEnv('APTLSS_MANAGER_PILOT_WORKER_IDS', '1');
+    const service = new TrelloChecklistSyncService({ apiKey: 'synthetic', token: 'synthetic' }, {
+      signal: new AbortController().signal, assertOwnership,
+    });
+    return { service, reader, db, select, assertOwnership };
+  }
+
+  it('reuses the active reader for all safeguards, ownership checks and persisted full-sync verification', async () => {
+    const cardId = 'reader-full-sync';
+    const remote = installTrelloState(cardId);
+    const f = singleConnection(cardId);
+    expect(await f.service.syncChecklistToCard(cardId, [{ step: 'Review', timeMinutes: 10, aptlssType: 'T' }]))
+      .toMatchObject({ success: true, itemsCreated: 1 });
+    expect(remote.checklists[0].checkItems).toHaveLength(1);
+    expect(f.db.transaction).toHaveBeenCalledTimes(1);
+    expect(f.select).toHaveBeenCalled();
+    expect(f.assertOwnership.mock.calls.some(([reader]) => reader === f.reader)).toBe(true);
+    const sql = f.reader.execute.mock.calls.map(([query]) => new PgDialect().sqlToQuery(query).sql).join('\n');
+    expect(sql).toContain('pg_advisory_xact_lock');
+    expect(sql).toContain('INSERT INTO atis_checklist_sync');
+  });
+
+  it('keeps the active reader through lost-response recovery without duplicating accepted items', async () => {
+    const cardId = 'reader-response-loss';
+    const remote = installTrelloState(cardId);
+    remote.loseNextChecklistResponse(); remote.loseNextItemResponse();
+    const f = singleConnection(cardId);
+    expect(await f.service.syncChecklistToCard(cardId, [{ step: 'Review', timeMinutes: 10, aptlssType: 'T' }]))
+      .toMatchObject({ success: true, itemsCreated: 1 });
+    expect(remote.checklists).toHaveLength(1);
+    expect(remote.checklists[0].checkItems).toHaveLength(1);
+  });
+
+  it('propagates revocation on the scoped reader before another provider mutation or success record', async () => {
+    const cardId = 'reader-revoked';
+    const remote = installTrelloState(cardId);
+    const f = singleConnection(cardId);
+    let revoked = false;
+    f.assertOwnership.mockImplementation(async provided => {
+      if (provided) expect(provided).toBe(f.reader);
+      if (revoked) throw new ScheduledJobLeaseLostError();
+    });
+    const fetch = mocks.fetchWithRetry.getMockImplementation()!;
+    mocks.fetchWithRetry.mockImplementation(async (...args) => {
+      const result = await fetch(...args);
+      if (args[1]?.method === 'POST') revoked = true;
+      return result;
+    });
+    await expect(f.service.syncChecklistToCard(cardId, [{ step: 'Review', timeMinutes: 10, aptlssType: 'T' }]))
+      .rejects.toBeInstanceOf(ScheduledJobLeaseLostError);
+    expect(remote.checklists).toHaveLength(1);
+    expect(remote.checklists[0].checkItems).toHaveLength(0);
+    const sql = f.reader.execute.mock.calls.map(([query]) => new PgDialect().sqlToQuery(query).sql).join('\n');
+    expect(sql).not.toContain('INSERT INTO atis_checklist_sync');
+  });
+
+  it('threads the reader through standalone create/add/update/delete operations', async () => {
+    const cardId = 'reader-mutations';
+    const remote = installTrelloState(cardId);
+    const f = singleConnection(cardId);
+    const checklist = await f.service.createChecklist(cardId, 'Synthetic');
+    const item = await f.service.addChecklistItem(checklist.id, 'Review', 'bottom', cardId);
+    await f.service.updateChecklistItemState(cardId, item.id, 'complete');
+    expect(remote.checklists[0].checkItems[0].state).toBe('complete');
+    await f.service.deleteChecklist(checklist.id, cardId);
+    expect(remote.checklists).toEqual([]);
+    expect(f.db.transaction).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not share a transaction reader between overlapping cards on one service instance', async () => {
+    const entered = deferred(), release = deferred();
+    const active = new Set<unknown>();
+    const persisted: string[] = [];
+    const db = { transaction: vi.fn(async (work: (tx: unknown) => Promise<unknown>) => {
+      const reader = { execute: vi.fn(async (statement: any) => {
+        const query = new PgDialect().sqlToQuery(statement);
+        if (query.sql.includes('INSERT INTO atis_checklist_sync')) persisted.push(String(query.params[0]));
+        return { rows: [], rowCount: 1 };
+      }) };
+      active.add(reader);
+      try { return await work(reader); } finally { active.delete(reader); }
+    }) };
+    mocks.getDb.mockResolvedValue(db);
+    const ownership = vi.fn(async reader => { if (reader) expect(active.has(reader)).toBe(true); });
+    const service = new TrelloChecklistSyncService({ apiKey: 'synthetic', token: 'synthetic' }, {
+      signal: new AbortController().signal, assertOwnership: ownership,
+    });
+    mocks.fetchWithRetry.mockImplementation(async (raw: string) => {
+      if (new URL(raw).pathname.includes('reader-card-a')) { entered.resolve(); await release.promise; }
+      return jsonResponse([{ id: 'existing', name: 'Synthetic', checkItems: [] }]);
+    });
+    const first = service.syncChecklistToCard('reader-card-a', [], { checklistName: 'Synthetic' });
+    const observed = first.then(value => ({ value }), error => ({ error }));
+    await entered.promise;
+    try {
+      expect(await service.syncChecklistToCard('reader-card-b', [], { checklistName: 'Synthetic' }))
+        .toMatchObject({ success: true });
+    } finally { release.resolve(); }
+    expect(await observed).toMatchObject({ value: { success: true } });
+    expect(persisted.sort()).toEqual(['reader-card-a', 'reader-card-b']);
+    expect(new Set(ownership.mock.calls.map(([reader]) => reader).filter(Boolean)).size).toBe(2);
   });
 });

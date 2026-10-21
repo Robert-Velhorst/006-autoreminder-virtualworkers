@@ -22,6 +22,7 @@ export async function assertAptlssJobOwnership(context?: ScheduledJobContext, re
 }
 
 const TRELLO_API_BASE = 'https://api.trello.com/1';
+type ChecklistReader = Pick<NonNullable<Awaited<ReturnType<typeof getDb>>>, 'select' | 'execute'>;
 
 interface TrelloCredentials {
   apiKey: string;
@@ -193,6 +194,7 @@ export type AptlssChecklistWriteAuthorization = {
  */
 export async function getAptlssChecklistWriteAuthorization(
   cardId?: string | null,
+  reader?: Pick<ChecklistReader, 'select'>,
 ): Promise<AptlssChecklistWriteAuthorization> {
   const configuredPilotIds = process.env.APTLSS_MANAGER_PILOT_WORKER_IDS;
   const safeguardsConfigured = Boolean(configuredPilotIds?.trim())
@@ -216,7 +218,7 @@ export async function getAptlssChecklistWriteAuthorization(
   }
 
   try {
-    const db = await getDb();
+    const db = reader ?? await getDb();
     if (!db) {
       return {
         allowed: false,
@@ -232,7 +234,7 @@ export async function getAptlssChecklistWriteAuthorization(
       inArray(taskAssignments.status, [...ACTIVE_ASSIGNMENT_STATUSES]),
       or(
         eq(taskAssignments.taskId, cardId),
-        sql`LEFT(${taskAssignments.taskId}, ${cardId.length + 1}) = CONCAT(${cardId}, ':')`,
+        sql`LEFT(${taskAssignments.taskId}, ${cardId.length + 1}) = ${`${cardId}:`}`,
       ),
     )).limit(MAX_CARD_ASSIGNMENTS + 1);
 
@@ -297,12 +299,13 @@ export async function getAptlssChecklistWriteAuthorization(
 export class TrelloChecklistSyncService {
   private credentials: TrelloCredentials;
 
-  constructor(credentials: TrelloCredentials, private readonly context?: ScheduledJobContext) {
+  constructor(credentials: TrelloCredentials, private readonly context?: ScheduledJobContext,
+    private readonly reader?: ChecklistReader) {
     this.credentials = credentials;
   }
 
   private async assertChecklistWriteAllowed(cardId?: string | null) {
-    const authorization = await getAptlssChecklistWriteAuthorization(cardId);
+    const authorization = await getAptlssChecklistWriteAuthorization(cardId, this.reader);
     if (!authorization.allowed) throw new Error(authorization.reason || 'Trello checklist write is not authorized.');
   }
 
@@ -325,10 +328,10 @@ export class TrelloChecklistSyncService {
     }
   }
 
-  private async withCardSyncLock<T>(cardId: string, operation: () => Promise<T>): Promise<T> {
+  private async withCardSyncLock<T>(cardId: string, operation: (service: TrelloChecklistSyncService) => Promise<T>): Promise<T> {
     const db = await getDb();
     if (!db || typeof db.transaction !== 'function') {
-      return withLocalCardSyncLock(cardId, operation);
+      return withLocalCardSyncLock(cardId, () => operation(this));
     }
 
     const lockName = `aptlss-checklist-${createHash('sha256').update(cardId).digest('hex').slice(0, 40)}`;
@@ -338,14 +341,15 @@ export class TrelloChecklistSyncService {
       // no session lock can leak into the next borrower after a provider error.
       await tx.execute(sql`SELECT set_config('lock_timeout', ${`${CHECKLIST_SYNC_LOCK_TIMEOUT_SECONDS}s`}, true)`);
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockName}, 0))`);
-      return operation();
+      // A separate immutable instance keeps simultaneous cards' readers isolated.
+      return operation(new TrelloChecklistSyncService(this.credentials, this.context, tx));
     });
   }
 
   private async renameChecklist(checklistId: string, cardId: string, name: string): Promise<void> {
     await this.assertChecklistWriteAllowed(cardId);
     await this.assertChecklistBelongsToCard(checklistId, cardId);
-    await assertAptlssJobOwnership(this.context);
+    await assertAptlssJobOwnership(this.context, this.reader);
     const response = await fetchWithRetry(this.buildUrl(`/checklists/${checklistId}`, { name }), {
       method: 'PUT',
       signal: this.writeSignal(),
@@ -363,7 +367,7 @@ export class TrelloChecklistSyncService {
       await this.deleteChecklistUnlocked(checklist.id, cardId);
     } catch (error) {
       if (error instanceof ScheduledJobLeaseLostError) throw error;
-      await assertAptlssJobOwnership(this.context);
+      await assertAptlssJobOwnership(this.context, this.reader);
       const current = await this.getCardChecklists(cardId);
       if (current.some(candidate => candidate.id === checklist.id)) throw error;
     }
@@ -390,12 +394,12 @@ export class TrelloChecklistSyncService {
    * Get existing checklists on a card
    */
   async getCardChecklists(cardId: string): Promise<ExistingChecklist[]> {
-    await assertAptlssJobOwnership(this.context);
+    await assertAptlssJobOwnership(this.context, this.reader);
     const url = this.buildUrl(`/cards/${cardId}/checklists`);
     const response = this.context
       ? await fetchWithRetry(url, { signal: this.writeSignal() }, { maxRetries: 0 })
       : await fetchWithRetry(url);
-    await assertAptlssJobOwnership(this.context);
+    await assertAptlssJobOwnership(this.context, this.reader);
     
     if (!response.ok) {
       throw new Error(`Failed to get checklists: ${response.statusText}`);
@@ -408,13 +412,13 @@ export class TrelloChecklistSyncService {
    * Create a new checklist on a card
    */
   async createChecklist(cardId: string, name: string): Promise<{ id: string; name: string }> {
-    return this.withCardSyncLock(cardId, () => this.createChecklistUnlocked(cardId, name));
+    return this.withCardSyncLock(cardId, service => service.createChecklistUnlocked(cardId, name));
   }
 
   private async createChecklistUnlocked(cardId: string, name: string): Promise<{ id: string; name: string }> {
     await this.assertChecklistWriteAllowed(cardId);
     const url = this.buildUrl(`/cards/${cardId}/checklists`);
-    await assertAptlssJobOwnership(this.context);
+    await assertAptlssJobOwnership(this.context, this.reader);
     
     const response = await fetchWithRetry(url, {
       method: 'POST',
@@ -440,7 +444,7 @@ export class TrelloChecklistSyncService {
     cardId?: string,
   ): Promise<{ id: string; name: string }> {
     if (!cardId) return this.addChecklistItemUnlocked(checklistId, name, position, cardId);
-    return this.withCardSyncLock(cardId, () => this.addChecklistItemUnlocked(checklistId, name, position, cardId));
+    return this.withCardSyncLock(cardId, service => service.addChecklistItemUnlocked(checklistId, name, position, cardId));
   }
 
   private async addChecklistItemUnlocked(
@@ -452,7 +456,7 @@ export class TrelloChecklistSyncService {
     await this.assertChecklistWriteAllowed(cardId);
     if (cardId) await this.assertChecklistBelongsToCard(checklistId, cardId);
     const url = this.buildUrl(`/checklists/${checklistId}/checkItems`);
-    await assertAptlssJobOwnership(this.context);
+    await assertAptlssJobOwnership(this.context, this.reader);
     
     const response = await fetchWithRetry(url, {
       method: 'POST',
@@ -487,11 +491,11 @@ export class TrelloChecklistSyncService {
       originalChecklistBaseName = checklistBaseName(sourceChecklist!.name);
     }
 
-    await this.withCardSyncLock(cardId, async () => {
-      await this.assertChecklistWriteAllowed(cardId);
+    await this.withCardSyncLock(cardId, async service => {
+      await service.assertChecklistWriteAllowed(cardId);
       let targetItemId = checkItemId;
       if (this.checklistWriteSafeguardsEnabled()) {
-        const checklists = await this.getCardChecklists(cardId);
+        const checklists = await service.getCardChecklists(cardId);
         const itemStillExists = checklists.some(checklist =>
           (checklist.checkItems ?? []).some(item => item.id === checkItemId),
         );
@@ -506,7 +510,7 @@ export class TrelloChecklistSyncService {
           targetItemId = replacementItems[0].id;
         }
       }
-      await this.updateChecklistItemStateUnlocked(cardId, targetItemId, state);
+      await service.updateChecklistItemStateUnlocked(cardId, targetItemId, state);
     });
   }
 
@@ -517,7 +521,7 @@ export class TrelloChecklistSyncService {
   ): Promise<void> {
     await this.assertChecklistWriteAllowed(cardId);
     const url = this.buildUrl(`/cards/${cardId}/checkItem/${checkItemId}`, { state });
-    await assertAptlssJobOwnership(this.context);
+    await assertAptlssJobOwnership(this.context, this.reader);
     
     const response = await fetchWithRetry(url, {
       method: 'PUT',
@@ -534,14 +538,14 @@ export class TrelloChecklistSyncService {
    */
   async deleteChecklist(checklistId: string, cardId?: string): Promise<void> {
     if (!cardId) return this.deleteChecklistUnlocked(checklistId, cardId);
-    return this.withCardSyncLock(cardId, () => this.deleteChecklistUnlocked(checklistId, cardId));
+    return this.withCardSyncLock(cardId, service => service.deleteChecklistUnlocked(checklistId, cardId));
   }
 
   private async deleteChecklistUnlocked(checklistId: string, cardId?: string): Promise<void> {
     await this.assertChecklistWriteAllowed(cardId);
     if (cardId) await this.assertChecklistBelongsToCard(checklistId, cardId);
     const url = this.buildUrl(`/checklists/${checklistId}`);
-    await assertAptlssJobOwnership(this.context);
+    await assertAptlssJobOwnership(this.context, this.reader);
     
     const response = await fetchWithRetry(url, {
       method: 'DELETE',
@@ -585,7 +589,7 @@ export class TrelloChecklistSyncService {
     items: ChecklistItem[],
     options: ChecklistSyncOptions = {}
   ): Promise<SyncResult> {
-    await assertAptlssJobOwnership(this.context);
+    await assertAptlssJobOwnership(this.context, this.reader);
     const {
       checklistName = '✨ APTLSS Checklist (AI-Generated)',
       replaceExisting = false,
@@ -601,10 +605,10 @@ export class TrelloChecklistSyncService {
 
     try {
       await this.assertChecklistWriteAllowed(cardId);
-      return await this.withCardSyncLock(cardId, async () => {
+      return await this.withCardSyncLock(cardId, async service => {
         this.assertCurrentIntent(cardId, intent);
-        await this.assertChecklistWriteAllowed(cardId);
-        let existingChecklists = await this.getCardChecklists(cardId);
+        await service.assertChecklistWriteAllowed(cardId);
+        let existingChecklists = await service.getCardChecklists(cardId);
         this.assertCurrentIntent(cardId, intent);
         let managedChecklists = existingChecklists.filter(checklist =>
           isManagedChecklistName(checklist.name, checklistName),
@@ -693,7 +697,7 @@ export class TrelloChecklistSyncService {
         if (candidate && !candidate.name.startsWith(`${checklistName} [sync `)
           && checklistMatchesNames(candidate, expectedNames)) {
           if (!replaceExisting && (sourceRevision === undefined || candidate.name === targetName)) {
-            await this.recordSync(cardId, candidate.id, candidate.checkItems?.length ?? 0);
+            await service.recordSync(cardId, candidate.id, candidate.checkItems?.length ?? 0);
             return {
               success: true,
               checklistId: candidate.id,
@@ -715,12 +719,12 @@ export class TrelloChecklistSyncService {
         if (!candidate) {
           this.assertCurrentIntent(cardId, intent);
           try {
-            const created = await this.createChecklistUnlocked(cardId, stageName);
+            const created = await service.createChecklistUnlocked(cardId, stageName);
             candidate = { ...created, checkItems: [] };
           } catch (error) {
             if (error instanceof ScheduledJobLeaseLostError) throw error;
-            await assertAptlssJobOwnership(this.context);
-            existingChecklists = await this.getCardChecklists(cardId);
+            await assertAptlssJobOwnership(service.context, service.reader);
+            existingChecklists = await service.getCardChecklists(cardId);
             candidate = existingChecklists.find(checklist => checklist.name === stageName);
             if (!candidate) throw error;
           }
@@ -738,13 +742,13 @@ export class TrelloChecklistSyncService {
           let checklistItem = candidate.checkItems.find(item => item.name === itemName);
           if (!knownNames.has(itemName)) {
             try {
-              const createdItem = await this.addChecklistItemUnlocked(candidateId, itemName, 'bottom', cardId);
+              const createdItem = await service.addChecklistItemUnlocked(candidateId, itemName, 'bottom', cardId);
               checklistItem = { ...createdItem, state: 'incomplete' };
               candidate.checkItems.push(checklistItem);
             } catch (error) {
               if (error instanceof ScheduledJobLeaseLostError) throw error;
-              await assertAptlssJobOwnership(this.context);
-              const refreshed = await this.getCardChecklists(cardId);
+              await assertAptlssJobOwnership(service.context, service.reader);
+              const refreshed = await service.getCardChecklists(cardId);
               const refreshedCandidate = refreshed.find(checklist => checklist.id === candidateId);
               checklistItem = refreshedCandidate?.checkItems.find(item => item.name === itemName);
               if (!checklistItem || !refreshedCandidate) throw error;
@@ -761,14 +765,14 @@ export class TrelloChecklistSyncService {
             }
             if (checklistItem.state !== 'complete') {
               this.assertCurrentIntent(cardId, intent);
-              await this.updateChecklistItemStateUnlocked(cardId, checklistItem.id, 'complete');
+              await service.updateChecklistItemStateUnlocked(cardId, checklistItem.id, 'complete');
               checklistItem.state = 'complete';
             }
           }
         }
 
         this.assertCurrentIntent(cardId, intent);
-        existingChecklists = await this.getCardChecklists(cardId);
+        existingChecklists = await service.getCardChecklists(cardId);
         candidate = existingChecklists.find(checklist => checklist.id === candidateId);
         if (!candidate || !checklistMatchesNames(candidate, expectedNames)) {
           throw new Error('APTLSS checklist verification failed. The previous checklist was retained.');
@@ -777,12 +781,12 @@ export class TrelloChecklistSyncService {
         if (candidate.name !== targetName) {
           this.assertCurrentIntent(cardId, intent);
           try {
-            await this.renameChecklist(candidate.id, cardId, targetName);
+            await service.renameChecklist(candidate.id, cardId, targetName);
             candidate.name = targetName;
           } catch (error) {
             if (error instanceof ScheduledJobLeaseLostError) throw error;
-            await assertAptlssJobOwnership(this.context);
-            const refreshed = await this.getCardChecklists(cardId);
+            await assertAptlssJobOwnership(service.context, service.reader);
+            const refreshed = await service.getCardChecklists(cardId);
             const renamed = refreshed.find(checklist => checklist.id === candidateId && checklist.name === targetName);
             if (!renamed) throw error;
             candidate = renamed;
@@ -799,11 +803,11 @@ export class TrelloChecklistSyncService {
             throw new Error('Other APTLSS checklists differ from this plan. A source revision is required before replacing them.');
           }
           for (const oldChecklist of managedChecklists) {
-            await this.deleteChecklistAfterVerification(oldChecklist, cardId, intent);
+            await service.deleteChecklistAfterVerification(oldChecklist, cardId, intent);
           }
         }
 
-        await this.recordSync(cardId, candidateId, candidate.checkItems?.length ?? expectedNames.length);
+        await service.recordSync(cardId, candidateId, candidate.checkItems?.length ?? expectedNames.length);
         return {
           success: true,
           checklistId: candidateId,
@@ -813,7 +817,7 @@ export class TrelloChecklistSyncService {
       });
     } catch (error: any) {
       if (error instanceof ScheduledJobLeaseLostError) throw error;
-      await assertAptlssJobOwnership(this.context);
+      await assertAptlssJobOwnership(this.context, this.reader);
       console.error('[TrelloChecklistSync] Error syncing checklist:', error);
       return { success: false, error: error?.message ?? 'Checklist synchronization failed.' };
     } finally {
@@ -826,10 +830,10 @@ export class TrelloChecklistSyncService {
    */
   private async recordSync(cardId: string, checklistId: string, itemCount: number): Promise<void> {
     try {
-      const db = await getDb();
+      const db = this.reader ?? await getDb();
       if (!db) return;
 
-      await assertAptlssJobOwnership(this.context);
+      await assertAptlssJobOwnership(this.context, this.reader);
       await db.execute(sql`
         INSERT INTO atis_checklist_sync (trello_card_id, trello_checklist_id, items_synced, synced_at)
         VALUES (${cardId}, ${checklistId}, ${itemCount}, NOW())
@@ -840,7 +844,7 @@ export class TrelloChecklistSyncService {
       `);
     } catch (error) {
       if (error instanceof ScheduledJobLeaseLostError) throw error;
-      await assertAptlssJobOwnership(this.context);
+      await assertAptlssJobOwnership(this.context, this.reader);
       console.error('[TrelloChecklistSync] Failed to record sync:', error);
     }
   }
@@ -855,7 +859,7 @@ export class TrelloChecklistSyncService {
     itemCount?: number;
   }> {
     try {
-      const db = await getDb();
+      const db = this.reader ?? await getDb();
       if (!db) return { synced: false };
 
       const result = await db.execute(sql`

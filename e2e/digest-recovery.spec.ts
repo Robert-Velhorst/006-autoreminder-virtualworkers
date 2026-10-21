@@ -175,13 +175,26 @@ test("required trimmed fields and duplicate acknowledgement gate one explicit PO
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText("Digest cannot be reconciled");
   await expect(page.getByLabel("Review note")).toHaveValue("  Reviewed delivery evidence carefully.  ");
   await expect(page.getByLabel("Evidence reference")).toHaveValue("  ticket-123  ");
-  await page.clock.runFor(31_000);
+  // Virtual time must not outrun the intercepted response body or reload it mid-read.
+  for (let poll = 0; poll < 2; poll++) {
+    const reads = f.reads().length;
+    const response = page.waitForResponse(response => new URL(response.url()).pathname === `${root}/attention`);
+    await page.clock.runFor(15_100);
+    const completed = await response;
+    expect(completed.status()).toBe(200);
+    expect(await completed.finished()).toBeNull();
+    await expect(page.locator('button[aria-label="Refresh digest attention"]')).toBeEnabled();
+    expect(f.reads()).toHaveLength(reads + 1);
+    expect(f.posts()).toHaveLength(1);
+  }
+  await page.clock.runFor(800);
   expect(f.posts()).toHaveLength(1);
   expect(f.posts()[0].body).toEqual({ outcome: "retry", note: "Reviewed delivery evidence carefully.", evidenceReference: "ticket-123", acknowledgeDuplicateRisk: true });
   await f.proof("conflict-inputs-retained");
   await page.reload();
   await page.getByRole("tab", { name: "Maintenance", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Digest recovery", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review digest #51", exact: true })).toBeVisible();
   expect(f.posts()).toHaveLength(1);
   await f.verify();
 });

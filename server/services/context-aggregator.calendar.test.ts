@@ -33,7 +33,7 @@ describe('context totals use the effective worker calendar', () => {
       const rows = new Map<unknown, any[]>([
         [users, [{ id: 41, role: 'worker' }, { id: 9, role: 'admin' }]],
         [vaProfiles, [{ id: 6, userId: 41, founderId: 99, status: 'inactive', timezone: 'UTC' },
-          { id: 7, userId: 41, founderId: 9, status: 'active', timezone: 'UTC', name: 'Synthetic worker' }]],
+          { id: 7, userId: 41, founderId: 9, status: 'active', timezone: fallback ? null : 'UTC', name: 'Synthetic worker' }]],
         [userWorkingHours, [{ userId: fallback ? 9 : 41, timezone, workStartHour: 9, workEndHour: 18,
           workStartMinute: 0, workEndMinute: 0, enableBreaks: 0, workingDays: '1,2,3,4,5' }]],
         [timeEntries, entries],

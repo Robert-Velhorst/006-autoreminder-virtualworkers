@@ -15,7 +15,7 @@ const founder = { id: 8, openId: 'synthetic-zone-founder', role: 'admin' };
 function fixture(zone: string, start: string, minutes: number, founderFallback = false) {
   const rows = new Map<unknown, Record<string, any>[]>([
     [users, [worker, founder]],
-    [vaProfiles, [{ id: 7, userId: worker.id, founderId: founder.id, status: 'active', timezone: 'UTC' }]],
+    [vaProfiles, [{ id: 7, userId: worker.id, founderId: founder.id, status: 'active', timezone: founderFallback ? null : 'UTC' }]],
     [userWorkingHours, [{ userId: founderFallback ? founder.id : worker.id, timezone: zone,
       weeklyHoursMin: 25, weeklyHoursMax: 30, dailyHoursMin: '5', dailyHoursMax: '6' }]],
     [timeEntries, [{ id: 55, trackedUserId: worker.id, trackedProfileId: 7, vaId: null,

@@ -15,7 +15,7 @@ function fixture(timezone: string, founderFallback = false) {
   const now = new Date();
   const rows = new Map<unknown, any[]>([
     [users, [{ id: 41, role: 'worker' }, { id: 9, role: 'admin' }]],
-    [vaProfiles, [{ id: 7, userId: 41, founderId: 9, status: 'active', timezone: 'UTC', name: 'Synthetic worker' }]],
+    [vaProfiles, [{ id: 7, userId: 41, founderId: 9, status: 'active', timezone: founderFallback ? null : 'UTC', name: 'Synthetic worker' }]],
     [userWorkingHours, [{ userId: founderFallback ? 9 : 41, timezone, workStartHour: 9, workEndHour: 18,
       workStartMinute: 0, workEndMinute: 0, workingDays: '1,2,3,4,5', enableBreaks: 0 }]],
     [timeEntries, [{ id: 1, trackedUserId: 41, trackedProfileId: 7, founderId: 9, vaId: null, taskId: 'synthetic-card',

@@ -7,7 +7,7 @@ import path from "node:path";
 import { test } from "node:test";
 
 const script = path.resolve("scripts/doctor.mjs");
-const baseline = "DATABASE_URL=mysql://fixture:unused@localhost/recovery_test\nJWT_SECRET=fixture-secret\nTRELLO_API_KEY=fixture-key\nTRELLO_TOKEN=fixture-token\n";
+const baseline = "DATABASE_URL=postgresql://fixture:unused@localhost/recovery_test?sslmode=disable\nJWT_SECRET=fixture-secret\nTRELLO_API_KEY=fixture-key\nTRELLO_TOKEN=fixture-token\n";
 
 async function doctor(content, overrides = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "va-doctor-"));
@@ -51,16 +51,24 @@ test("doctor accepts default subscription mode without an API key", async () => 
   assert(!result.report.checks.some(check => check.name === "config:OPENAI_API_KEY"));
 });
 
-test("doctor reads explicit API provider from dotenv and rejects a quoted blank key", async () => {
+test("doctor rejects explicit paid API routing even with an empty key", async () => {
   const result = await doctor(baseline + 'APTLSS_MANAGER_PROVIDER="openai-api"\nOPENAI_API_KEY="   "\n');
   assert.equal(result.code, 1);
-  assert(result.report.checks.some(check => check.name === "config:OPENAI_API_KEY" && check.status === "error"));
+  assert(result.report.checks.some(check => check.name === "config:APTLSS_MANAGER_PROVIDER" && check.status === "error"));
 });
 
-test("doctor accepts a configured API key without exposing it", async () => {
+test("doctor rejects paid routing with configured credentials without exposing them", async () => {
   const result = await doctor(baseline + "APTLSS_MANAGER_PROVIDER=openai-api\nOPENAI_API_KEY=fixture-private-api-value\n");
-  assert.equal(result.code, 0);
+  assert.equal(result.code, 1);
   assert(!result.stdout.includes("fixture-private-api-value"));
+});
+
+test("doctor never treats a configured queue as live account acceptance", async () => {
+  const result = await doctor(baseline + 'APTLSS_CODEX_QUEUE_DIR=/private/fixture-queue\n');
+  assert.equal(result.code, 0);
+  assert(result.report.checks.some(check => check.name === 'config:subscription-bridge'
+    && check.status === 'warning' && /require verification/.test(check.detail)));
+  assert(!result.stdout.includes('/private/fixture-queue'));
 });
 
 test("doctor rejects blank required settings instead of counting their names", async () => {

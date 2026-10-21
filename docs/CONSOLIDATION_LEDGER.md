@@ -1,5 +1,57 @@
 # Consolidation Ledger
 
+## Active Review: PR #148
+
+PR #148 contains the complete PR #147 history plus scheduled creator approval.
+PR #147 was closed as superseded, not merged or accepted. Its candidate head
+`53feeb8ddebf7dff38c47ec2374c2068a6790870` is preserved by remote annotated tag
+`archive/batch-history-authority-candidate-20261021`, object
+`03f28eea00dcc0c2962410b77e2e614802c706d2`, with the peeled head verified before
+removing its matching branch using an expected-SHA lease.
+
+The remote branch inventory now consists of `main` and the PR #148 branch.
+All six registered local worktrees were inspected: no tracked changes or
+untracked application source were found at that checkpoint. Detached candidate
+heads remain preserved by remote archive tags. Runtime/evidence artifacts are
+not a claim that operational data or credentials were uploaded to GitHub.
+PR #148 head `888670944860a9af9da3ef106d3a5f8c97465f63` passed complete quality
+run `39583874282`. The owner explicitly approved dismissing only CodeQL alerts
+135 and 136 as false positives. Both dismissals were verified and the aggregate
+CodeQL check became successful; no unrelated alerts or security policy changed.
+
+A separate unresolved P1 review identified a post-commit Trello check in interview
+start/respond that could return failure after saving an answer. The follow-up
+retains the final external check before the identity-locked transaction and
+returns the successful commit without another external read. Native PostgreSQL
+verification passed the same 51 cases on PostgreSQL 18.6 and 17.11 across five suites, including provider failure
+before commit, provider loss after commit and final-goal role/epoch revocation.
+Temporary fixtures were removed without persistent volumes; the newly downloaded
+PostgreSQL 17 image was also removed and image-ID absence verified. Local broad
+checks passed 5,010 Vitest cases (473 skipped) and 315 Node cases (three skipped),
+with build and type checks passing. Skips are not acceptance. The updated head
+requires its own full hosted gates; the earlier green head does not accept these
+later edits. This closes a specific post-commit failure path, not every possible
+transport-loss or replay scenario.
+
+## Superseded Candidate Archive: October 21, 2026
+
+PR #146 head `dd23e75df25e229a3acaa0d153ecc4ddc34e9061` is fully contained in
+published PR #147 head `53feeb8ddebf7dff38c47ec2374c2068a6790870`. Ancestry and
+the intervening source changes were checked before closing the redundant PR.
+The exact candidate is retained by annotated remote tag
+`archive/subscription-authority-candidate-20261021`, tag object
+`073669e56400fa25f0d1530121be50f0557591bd`, verified peeled head `dd23e75`.
+Only the matching remote ref was removed, with its expected-SHA lease; guarded
+local branch deletion succeeded. This was supersession, not a production or
+security-acceptance merge.
+
+PR #147 quality `39575196607` completed successfully at its exact published
+head. Its CodeQL aggregate still has two unaccepted executable-configuration
+findings. The launch-root finding is absent from the newer branch analysis.
+Subsequent scheduled-approval source remains separate until its own gates pass;
+neither candidate's tests accept those later edits. Only-main consolidation is
+not complete while the current review/follow-up branches remain.
+
 ## Current Consolidation Checkpoint: October 21, 2026
 
 Main now includes accepted timer PR #141, OAuth PR #142 and assignment PR #143.
@@ -53,6 +105,16 @@ remote branch was removed with an exact-SHA lease; guarded local deletion
 succeeded. New durable-analysis source remains on its own review branch until
 its fresh gates pass. No unfinished source was discarded to manufacture an
 only-main state, and no operational deployment is implied.
+
+Confirmed-analysis PR #145 subsequently passed quality `39565591698`, CodeQL
+`39565587914` and its aggregate at `ce2f95cf61e675939363eee76e284e0324d8db5a`.
+Normal merge `820ee121fb137b122727560b9e0deeab71a44bfb` and that reviewed head
+share tree `c6f3ce1635fdefc92a3e03895200590d02850376`. Verified archive tag
+`archive/atis-admission-acceptance-20261021` has object
+`5e2da5f009af43538c3d139861cda80a2fc0659c` and peels to the accepted head.
+The remote branch was deleted with the exact-head lease and its contained local
+branch with guarded deletion. Subsequent subscription, calendar and authority
+work stays separate until its own exact-head acceptance.
 
 ### Earlier Only-Main Checkpoint
 

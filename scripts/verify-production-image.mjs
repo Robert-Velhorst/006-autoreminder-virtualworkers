@@ -90,6 +90,14 @@ export function verifyProductionImage(image, run = docker) {
       assert.equal(missingOwner.error, undefined, "Missing-owner validation must not start database or provider work");
       assert.equal(missingOwner.status, 2, "A maintenance tool must require explicit owner input");
     }
+    for (const tool of ["run-codex-bridge", "run-manager-codex", "run-codex-llm", "manager-codex-supervisor"]) {
+      const path = "dist/bridge/" + tool + ".js";
+      assert(fs.existsSync(path), "A private bridge bundle is missing");
+      assert.equal(hash(path), seal.toolBundleHashes?.[path], "Private bridge integrity mismatch");
+    }
+    const bridgeHelp = require("node:child_process").spawnSync(process.execPath, ["dist/bridge/run-codex-bridge.js", "--help"], { encoding: "utf8", timeout: 5000, maxBuffer: 65536 });
+    assert.equal(bridgeHelp.error, undefined, "Bridge help must not require authentication or a network");
+    assert.equal(bridgeHelp.status, 0, "Source-free bridge help failed");
     const icon = fs.readFileSync("dist/public/icons/va-dashboard.png");
     assert.equal(icon.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
     assert.equal(icon.readUInt32BE(16), 144);
@@ -133,6 +141,7 @@ export function verifyProductionImage(image, run = docker) {
       "collector-integrity",
       "sealed-maintenance-tools",
       "maintenance-help-no-network",
+      "sealed-private-bridge",
       "icon",
       "no-vitest",
       "no-typescript-compiler",

@@ -7,6 +7,10 @@ export const MANAGER_IMPLEMENTATION_VERSION = "joyce-shadow-3";
 export const MANAGER_RUNTIME_TOOL_BUNDLES = [
   "dist/tools/reanalyze_all.js",
   "dist/tools/reanalyze_active_placeholders.js",
+  "dist/bridge/run-codex-bridge.js",
+  "dist/bridge/run-manager-codex.js",
+  "dist/bridge/run-codex-llm.js",
+  "dist/bridge/manager-codex-supervisor.js",
 ] as const;
 
 function fileDigest(path: string) {
@@ -53,6 +57,8 @@ export function managerSafetyDigest(root = process.cwd()) {
     "scripts/package-browser-collector.ps1", "scripts/aptlss-pilot-compose.mjs",
     "scripts/aptlss-pilot-validation.mjs",
     "scripts/run-manager-codex.ts", "scripts/Start-ManagerCodex.ps1",
+    "scripts/run-codex-bridge.ts", "scripts/run-codex-llm.ts",
+    "scripts/build-codex-bridge.mjs", "scripts/manager-codex-supervisor.mjs",
     "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "drizzle.config.ts", "vitest.config.ts",
     "Dockerfile", "docker-compose.yml", "deployment/shadow-pilot.yml", "deployment/codex-subscription.yml",
     "playwright.aptlss.config.ts", "e2e/aptlss-manager.spec.ts", "e2e/aptlss-manager-live.spec.ts", "e2e/aptlss-manager-review.spec.ts", "scripts/start-aptlss-test-server.ts",

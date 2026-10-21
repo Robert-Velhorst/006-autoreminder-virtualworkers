@@ -1,9 +1,10 @@
 import { encodeTrelloPathSegment } from '../utils/trello-path';
 import { Router } from 'express';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
 import { getDb } from '../db';
 import { generationJobs, generationItems, scheduledJobs, userWorkingHours, holidays, vaProfiles, taskAssignments, taskDependencies, clients, users } from '../../drizzle/schema.postgres';
-import { eq, desc, and, inArray } from 'drizzle-orm';
+import { eq, desc, and, inArray, or, isNull } from 'drizzle-orm';
 import { fetchWithRetry } from '../utils/retry';
 import { getCachedTasks, setCachedTasks, invalidateCache } from '../services/trello-cache';
 import { requestQueue } from '../services/request-queue';
@@ -13,8 +14,19 @@ import {
   fetchAptlssSourceCard,
   generateAptlssForCard,
 } from '../services/aptlss-generation';
-import { executeAptlssGenerationBatch } from '../services/aptlss-scheduled-generation';
+import { approvalSnapshotHash, executeAptlssGenerationBatch } from '../services/aptlss-scheduled-generation';
 import { AssignmentError, MAX_ASSIGNMENT_TASKS, assignmentFailure, readCanonicalAssignments } from '../taskAssignmentMutation';
+import { withSessionIdentity } from '../sessionLifecycle';
+import { sessionIdentityProof } from '../_core/sessionIdentity';
+import { ForbiddenError, HttpError } from '../../shared/_core/errors';
+import { runScheduledJob, ScheduledJobLeaseLostError, type ScheduledJobContext } from '../scheduledJobRuntime';
+import { isDatabaseUnavailable } from '../databaseAvailability';
+import { z } from 'zod';
+
+function canonicalRetryJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
+}
 
 export async function readSchedulingAssignmentSnapshot(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, founderId: number, taskIds: string[]) {
   if (!Number.isSafeInteger(founderId) || founderId <= 0) throw new AssignmentError(400, 'Invalid scheduling founder');
@@ -199,16 +211,50 @@ async function fetchUserWorkspaceBoards(apiKey: string, token: string) {
   return boards;
 }
 
-async function fetchCardForAptlss(cardId: string) {
+async function fetchCardForAptlss(cardId: string, context?: ScheduledJobContext) {
   if (!encodeTrelloPathSegment(cardId)) throw new Error("Invalid Trello card ID");
-  return fetchAptlssSourceCard(cardId);
+  return fetchAptlssSourceCard(cardId, context);
 }
 
-async function generateAptlssChecklist(card: any, settings: any) {
-  return generateAptlssForCard(card, {
-    ...(settings && typeof settings === 'object' ? settings : {}),
-    applyToTrello: true,
-  });
+export function generationRequestContext(req: Request, res: Response) {
+  const actor = requestUser(req);
+  if (!actor || actor.role !== 'admin') throw ForbiddenError('An active administrator account is required');
+  const expected = sessionIdentityProof(actor), openId = actor.openId;
+  const controller = new AbortController();
+  let failureStatus = 409;
+  const cancel = () => controller.abort();
+  const close = () => { if (!res.writableEnded) cancel(); };
+  req.once('aborted',cancel); res.once('close',close);
+  if (req.aborted || res.destroyed) cancel();
+  const context: ScheduledJobContext = {
+    signal: controller.signal,
+    assertOwnership: async reader => {
+      if (controller.signal.aborted) throw new ScheduledJobLeaseLostError();
+      try {
+        if (reader) {
+          // Reuse the caller's connection. This is a fresh, nonlocking checkpoint:
+          // a card transaction may span provider awaits and must not pin account authority.
+          const [current] = await reader.select().from(users).where(eq(users.openId,openId)).limit(1);
+          if (!current || current.id !== expected.userId || current.sessionEpoch !== expected.sessionEpoch || current.role !== 'admin') {
+            throw ForbiddenError('Administrator authority changed');
+          }
+        } else {
+          // Without an existing reader, the canonical identity transaction remains short-lived.
+          await withSessionIdentity(openId,expected,async current => {
+            if (current.role !== 'admin') throw ForbiddenError('Administrator authority changed');
+          });
+        }
+      } catch (error) {
+        failureStatus = error instanceof HttpError && error.statusCode === 403 ? 403 : 503;
+        cancel();
+        throw new ScheduledJobLeaseLostError();
+      }
+      if (controller.signal.aborted) throw new ScheduledJobLeaseLostError();
+    },
+  };
+  return { context,get failureStatus() { return failureStatus; },dispose: () => {
+    req.removeListener('aborted',cancel); res.removeListener('close',close);
+  } };
 }
 
 // Enhanced task scheduling algorithm with break times and task type optimization
@@ -893,6 +939,7 @@ router.post('/trello/boards/:boardId/cache/clear', async (req: Request, res: Res
 
 // Generate APTLSS for a card
 router.post('/aptlss/generate', async (req: Request, res: Response) => {
+  let operation: ReturnType<typeof generationRequestContext> | undefined;
   try {
     const { cardId, cardData, settings } = req.body;
 
@@ -900,7 +947,10 @@ router.post('/aptlss/generate', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Card ID or card data is required' });
     }
 
-    const card = cardId ? await fetchCardForAptlss(cardId) : cardData;
+    operation = generationRequestContext(req,res);
+    await operation.context.assertOwnership();
+    const card = cardId ? await fetchCardForAptlss(cardId,operation.context) : cardData;
+    await operation.context.assertOwnership();
 
     // Content sufficiency check — per docs: do NOT generate for cards with just a title
     const hasDescription = card.desc && card.desc.trim().length > 0;
@@ -920,11 +970,18 @@ router.post('/aptlss/generate', async (req: Request, res: Response) => {
     const result = await generateAptlssForCard(card, {
       ...(settings && typeof settings === 'object' ? settings : {}),
       applyToTrello: Boolean(cardId),
-    });
+    }, operation.context);
+    await operation.context.assertOwnership();
     res.json(result);
   } catch (error: any) {
+    if (res.destroyed || res.headersSent) return;
+    if (error instanceof ScheduledJobLeaseLostError) {
+      return res.status(operation?.failureStatus ?? 409).json({ error: 'Generation authority changed or was cancelled; review before retrying.' });
+    }
     console.error('Error generating APTLSS:', error);
     res.status(500).json({ error: 'Failed to generate APTLSS. Retry shortly or check the service configuration.' });
+  } finally {
+    operation?.dispose();
   }
 });
 
@@ -935,7 +992,8 @@ router.get('/aptlss/history', async (req: Request, res: Response) => {
     if (!db) {
       return res.status(503).json({ error: 'Database not available' });
     }
-    const jobs = await db.select().from(generationJobs).orderBy(desc(generationJobs.createdAt));
+    const jobs = await db.select().from(generationJobs)
+      .where(eq(generationJobs.createdBy, requestUser(req)!.openId)).orderBy(desc(generationJobs.createdAt));
     res.json(jobs);
   } catch (error) {
     console.error('Error fetching history:', error);
@@ -953,7 +1011,9 @@ router.get('/aptlss/history/:jobId', async (req: Request, res: Response) => {
     
     const { jobId } = req.params;
     
-    const job = await db.select().from(generationJobs).where(eq(generationJobs.id, jobId)).limit(1);
+    const job = await db.select().from(generationJobs).where(and(
+      eq(generationJobs.id, jobId), eq(generationJobs.createdBy, requestUser(req)!.openId),
+    )).limit(1);
     
     if (!job || job.length === 0) {
       return res.status(404).json({ error: 'Job not found' });
@@ -973,6 +1033,8 @@ router.get('/aptlss/history/:jobId', async (req: Request, res: Response) => {
 
 // Retry failed items
 router.post('/aptlss/history/:jobId/retry', async (req: Request, res: Response) => {
+  let operation: ReturnType<typeof generationRequestContext> | undefined;
+  let retryJobId: string | undefined;
   try {
     const db = await getDb();
     if (!db) {
@@ -986,110 +1048,100 @@ router.post('/aptlss/history/:jobId/retry', async (req: Request, res: Response) 
       return res.status(401).json({ error: 'Unauthorized' });
     }
     
-    // Get failed items
-    const failedItems = await db.select()
-      .from(generationItems)
-      .where(eq(generationItems.jobId, jobId));
-    
-    const failed = failedItems.filter((item: any) => item.status === 'failed');
-    
-    if (failed.length === 0) {
-      return res.json({ message: 'No failed items to retry' });
-    }
-    
-    // Create new job for retries
-    const newJobId = `retry_${jobId}_${Date.now()}`;
-    
-    await db.insert(generationJobs).values({
-      id: newJobId,
-      totalCards: failed.length,
-      completedCards: 0,
-      failedCards: 0,
-      status: 'running',
-      settings: '{}',
-      createdBy: user.openId,
-    });
+    operation = generationRequestContext(req, res);
+    await operation.context.assertOwnership();
+    const [parent] = await db.select().from(generationJobs).where(and(
+      eq(generationJobs.id, jobId), eq(generationJobs.createdBy, user.openId),
+    )).limit(1);
+    if (!parent) return res.status(404).json({ error: 'Job not found' });
 
-    const retryResults: any[] = [];
-    let completedCards = 0;
-    let failedCards = 0;
-
-    for (const [index, item] of failed.entries()) {
-      const itemId = `item_${newJobId}_${index}`;
+    const childId = `retry_${createHash('sha256').update(JSON.stringify([user.openId, jobId])).digest('hex').slice(0, 58)}`;
+    retryJobId = childId;
+    const requestContext = operation.context;
+    let result: Awaited<ReturnType<typeof executeAptlssGenerationBatch>> | undefined;
+    let nothingToRetry = false;
+    const run = await runScheduledJob({ jobKey: `aptlss-retry:${childId}`, trigger: 'manual',
+      leaseMs: 60 * 60_000, skipIfSuccessful: false,
+      shouldRun: async (_lease, tx) => { await requestContext.assertOwnership(tx); return true; },
+    }, async lease => {
+      const context: ScheduledJobContext = { signal: AbortSignal.any([requestContext.signal, lease.signal]),
+        assertOwnership: async reader => {
+          await requestContext.assertOwnership(reader);
+          await lease.assertOwnership(reader);
+        } };
+      await context.assertOwnership();
+      const [currentParent] = await db.select().from(generationJobs).where(and(
+        eq(generationJobs.id, jobId), eq(generationJobs.createdBy, user.openId),
+      )).limit(1);
+      if (!currentParent) throw new HttpError(404, 'Job not found');
+      const [child] = await db.select().from(generationJobs).where(eq(generationJobs.id, childId)).limit(1);
+      const parentItems = await db.select().from(generationItems).where(eq(generationItems.jobId, jobId));
+      const failed = parentItems.filter(item => item.status === 'failed');
+      if (!child && failed.length === 0) { nothingToRetry = true; return { recordsProcessed: 0 }; }
+      const cardIds = [...new Set(failed.map(item => item.cardId.trim()))].sort();
+      const conflict = () => new HttpError(409, 'Retry history or settings changed; review before retrying');
+      if (cardIds.length === 0 || cardIds.length > 250 || cardIds.some(id => !id || id.length > 64)
+        || parentItems.some(item => item.status === 'outcome_unknown' && cardIds.includes(item.cardId))) throw conflict();
+      let settings: Record<string, unknown> = {};
       try {
-        const card = await fetchCardForAptlss(item.cardId);
-        const result = await generateAptlssChecklist(card, {});
-
-        await db.insert(generationItems).values({
-          id: itemId,
-          jobId: newJobId,
-          cardId: card.id,
-          cardName: card.name,
-          boardName: card.board?.name ?? null,
-          status: 'completed',
-          attempts: 1,
-          maxAttempts: 3,
-          result: JSON.stringify(result),
-        });
-
-        completedCards++;
-        retryResults.push({
-          cardId: card.id,
-          success: true,
-          checklistId: result.checklistId || null,
-        });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        failedCards++;
-        retryResults.push({
-          cardId: item.cardId,
-          success: false,
-          error: errorMessage,
-        });
-
-        await db.insert(generationItems).values({
-          id: itemId,
-          jobId: newJobId,
-          cardId: item.cardId,
-          cardName: item.cardName,
-          boardName: item.boardName || null,
-          status: 'failed',
-          attempts: 1,
-          maxAttempts: 3,
-          error: errorMessage,
-          result: null,
-        });
+        const parsed: unknown = currentParent.settings ? JSON.parse(currentParent.settings) : {};
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw conflict();
+        settings = parsed as Record<string, unknown>;
+      } catch { throw conflict(); }
+      const boundSettings: Record<string, unknown> & NonNullable<Parameters<typeof executeAptlssGenerationBatch>[0]['settings']> = { ...settings, _retryBinding: { version: 1, parentJobId: jobId,
+        actorUserId: user.id, ownerOpenId: user.openId, cardIds,
+        settingsHash: createHash('sha256').update(canonicalRetryJson(settings)).digest('hex') } };
+      const childItems = await db.select().from(generationItems).where(eq(generationItems.jobId, childId));
+      if ((!child && childItems.length > 0) || child && (child.createdBy !== user.openId
+        || child.totalCards !== cardIds.length || !child.settings)) throw conflict();
+      if (child) {
+        try { if (canonicalRetryJson(JSON.parse(child.settings!)) !== canonicalRetryJson(boundSettings)) throw conflict(); }
+        catch { throw conflict(); }
       }
-
-      await db.update(generationJobs).set({
-        completedCards,
-        failedCards,
-      }).where(eq(generationJobs.id, newJobId));
-    }
-
-    await db.update(generationJobs).set({
-      status: failedCards > 0 ? 'completed_with_errors' : 'completed',
-      completedCards,
-      failedCards,
-      completedAt: new Date(),
-    }).where(eq(generationJobs.id, newJobId));
+      if (new Set(childItems.map(item => item.cardId)).size !== childItems.length
+        || childItems.some(item => !cardIds.includes(item.cardId))) throw conflict();
+      await context.assertOwnership();
+      result = await executeAptlssGenerationBatch({ jobId: childId, cardIds, settings: boundSettings,
+        createdBy: user.openId, context });
+      await context.assertOwnership();
+      return { recordsProcessed: result.completed };
+    });
+    if (run.state === 'skipped') return res.status(409).json({
+      error: 'Retry is already running; inspect the existing retry job', jobId: childId,
+    });
+    await operation.context.assertOwnership();
+    if (nothingToRetry) return res.json({ message: 'No failed items to retry' });
+    if (!result) throw new Error('Retry did not produce a verified result');
     
     res.json({
       success: true,
-      jobId: newJobId,
-      itemsToRetry: failed.length,
-      completed: completedCards,
-      failed: failedCards,
-      results: retryResults,
+      jobId: childId,
+      itemsToRetry: result.total,
+      completed: result.completed,
+      failed: result.failed,
+      needsReview: result.needsReview,
+      results: result.results.map(item => item.success
+        ? { cardId: item.cardId, success: true, checklistId: item.checklistId ?? null,
+          needsReview: item.needsReview, appliedToTrello: item.appliedToTrello }
+        : { cardId: item.cardId, success: false, error: item.error }),
     });
   } catch (error) {
+    if (res.destroyed || res.headersSent) return;
+    if (error instanceof HttpError && [404, 409].includes(error.statusCode)) {
+      return res.status(error.statusCode).json({ error: error.message,
+        ...(error.statusCode === 409 && retryJobId ? { jobId: retryJobId } : {}) });
+    }
+    if (error instanceof ScheduledJobLeaseLostError) {
+      return res.status(operation?.failureStatus ?? 409).json({ error: 'Generation authority changed or was cancelled; review before retrying.' });
+    }
     console.error('Error retrying failed items:', error);
     res.status(500).json({ error: 'Failed to retry items' });
-  }
+  } finally { operation?.dispose(); }
 });
 
 // Batch generate APTLSS
 router.post('/aptlss/generate-batch', async (req: Request, res: Response) => {
+  let operation: ReturnType<typeof generationRequestContext> | undefined;
   try {
     const { cardIds, settings } = req.body;
     const user = (req as any).user;
@@ -1103,17 +1155,25 @@ router.post('/aptlss/generate-batch', async (req: Request, res: Response) => {
     }
 
     const jobId = `aptlss_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    operation = generationRequestContext(req, res);
+    await operation.context.assertOwnership();
     const result = await executeAptlssGenerationBatch({
       jobId,
       cardIds,
       settings: settings && typeof settings === 'object' ? settings : {},
       createdBy: user.openId,
+      context: operation.context,
     });
+    await operation.context.assertOwnership();
     res.json(result);
   } catch (error) {
+    if (res.destroyed || res.headersSent) return;
+    if (error instanceof ScheduledJobLeaseLostError) {
+      return res.status(operation?.failureStatus ?? 409).json({ error: 'Generation authority changed or was cancelled; review before retrying.' });
+    }
     console.error('Error in batch generation:', error);
     res.status(500).json({ error: 'Failed to batch generate APTLSS' });
-  }
+  } finally { operation?.dispose(); }
 });
 
 // Get generation status
@@ -1125,7 +1185,9 @@ router.get('/aptlss/status/:jobId', async (req: Request, res: Response) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    const job = await db.select().from(generationJobs).where(eq(generationJobs.id, jobId)).limit(1);
+    const job = await db.select().from(generationJobs).where(and(
+      eq(generationJobs.id, jobId), eq(generationJobs.createdBy, requestUser(req)!.openId),
+    )).limit(1);
     if (job.length === 0) {
       return res.status(404).json({ error: 'Job not found' });
     }
@@ -1560,108 +1622,223 @@ router.get('/trello/tasks', async (req: any, res: Response) => {
   }
 });
 
-// Schedule generation endpoint
+type ScheduleRow = typeof scheduledJobs.$inferSelect;
+type ScheduleTransaction = Parameters<Parameters<NonNullable<Awaited<ReturnType<typeof getDb>>>['transaction']>[0]>[0];
+
+function scheduleSelection(value: unknown, status = 400): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 250
+    || value.some(cardId => typeof cardId !== 'string' || !encodeTrelloPathSegment(cardId.trim()))) {
+    throw new HttpError(status, 'Select between 1 and 250 valid Trello card IDs');
+  }
+  const cards = value.map(cardId => cardId.trim());
+  if (new Set(cards).size !== cards.length) throw new HttpError(status, 'Duplicate Trello card IDs are not allowed');
+  return cards;
+}
+
+const scheduleTimestamp = z.string().datetime({ offset: true });
+function futureScheduleTime(value: unknown, requireFuture = true): Date {
+  if (typeof value !== 'string' || !scheduleTimestamp.safeParse(value).success) {
+    throw new HttpError(400, 'A future scheduledTime with an explicit timezone is required');
+  }
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime()) || (requireFuture && date.getTime() <= Date.now())) throw new HttpError(400, 'scheduledTime must be in the future');
+  return date;
+}
+
+function newScheduleSettings(value: unknown): Record<string, unknown> {
+  if (value !== undefined && (!value || typeof value !== 'object' || Array.isArray(value))) {
+    throw new HttpError(400, 'Generation settings must be an object');
+  }
+  const input = (value ?? {}) as Record<string, unknown>, settings: Record<string, unknown> = {};
+  for (const key of ['applyToTrello','skipExisting','replaceExisting','validateBeforeGenerate']) {
+    if (input[key] !== undefined) {
+      if (typeof input[key] !== 'boolean') throw new HttpError(400, `Invalid generation setting: ${key}`);
+      settings[key] = input[key];
+    }
+  }
+  for (const [key,min,max] of [['minimumConfidence',0,100],['maxRetries',1,3]] as const) {
+    if (input[key] !== undefined) {
+      if (typeof input[key] !== 'number' || !Number.isInteger(input[key]) || input[key] < min || input[key] > max) {
+        throw new HttpError(400, `Invalid generation setting: ${key}`);
+      }
+      settings[key] = input[key];
+    }
+  }
+  if (input.clarifiedGoal !== undefined) {
+    if (input.clarifiedGoal !== null && typeof input.clarifiedGoal !== 'string' && typeof input.clarifiedGoal !== 'object') {
+      throw new HttpError(400, 'clarifiedGoal must be text or structured JSON');
+    }
+    const pending: Array<{ value: unknown; depth: number }> = [{ value: input.clarifiedGoal,depth: 0 }];
+    let nodes = 0;
+    while (pending.length) {
+      const current = pending.pop()!;
+      if (++nodes > 5000 || current.depth > 16) throw new HttpError(400, 'clarifiedGoal exceeds its structure limit');
+      if (current.value === null || typeof current.value === 'string' || typeof current.value === 'boolean'
+        || (typeof current.value === 'number' && Number.isFinite(current.value))) continue;
+      if (typeof current.value !== 'object' || (!Array.isArray(current.value)
+        && Object.getPrototypeOf(current.value) !== Object.prototype && Object.getPrototypeOf(current.value) !== null)) {
+        throw new HttpError(400, 'clarifiedGoal must contain only JSON data');
+      }
+      const children = Object.values(current.value);
+      if (children.length + nodes + pending.length > 5000) throw new HttpError(400, 'clarifiedGoal exceeds its structure limit');
+      for (const child of children) pending.push({ value: child,depth: current.depth+1 });
+    }
+    settings.clarifiedGoal = input.clarifiedGoal;
+  }
+  if (Buffer.byteLength(JSON.stringify(settings)) > 65_536) throw new HttpError(400, 'Generation settings exceed 64 KiB');
+  return settings;
+}
+
+async function withScheduleIdentity<T>(req: Request, work: (user: typeof users.$inferSelect, tx: ScheduleTransaction) => Promise<T>) {
+  const user = requestUser(req);
+  if (!user) throw new HttpError(401, 'Unauthorized');
+  return withSessionIdentity(user.openId,sessionIdentityProof(user),async (fresh,tx) => {
+    if (fresh.role !== 'admin') throw ForbiddenError('An active administrator account is required');
+    return work(fresh,tx);
+  });
+}
+
+function scheduleOwnerWhere(id: string, user: typeof users.$inferSelect) {
+  return and(eq(scheduledJobs.id,id),eq(scheduledJobs.createdBy,user.openId),
+    or(isNull(scheduledJobs.approvedByUserId),eq(scheduledJobs.approvedByUserId,user.id)));
+}
+
+function scheduleRouteFailure(res: Response, error: unknown) {
+  if (error instanceof HttpError) return res.status(error.statusCode).json({ error: error.message });
+  if (isDatabaseUnavailable(error)) return res.status(503).json({ error: 'Database not available' });
+  // Do not expose stored business inputs, SQL, credentials or driver objects.
+  console.error('Scheduled generation request failed');
+  return res.status(500).json({ error: 'Scheduled generation request failed' });
+}
+
+// A review revision includes nullable legacy proof and status. It is not execution approval.
+function schedulePreviewRevisionHash(row: ScheduleRow) {
+  return createHash('sha256').update(canonicalRetryJson({ version: 1,id: row.id,createdBy: row.createdBy,
+    cardIds: row.cardIds,settings: row.settings,scheduledTime: row.scheduledTime.toISOString(),status: row.status,
+    approvedByUserId: row.approvedByUserId,approvedSessionEpoch: row.approvedSessionEpoch,
+    approvedAt: row.approvedAt?.toISOString() ?? null,approvalHash: row.approvalHash })).digest('hex');
+}
+
+async function approvalPreview(tx: ScheduleTransaction, row: ScheduleRow) {
+  let cardIds: string[], settings: Record<string, unknown>;
+  try {
+    cardIds = scheduleSelection(JSON.parse(row.cardIds),409);
+    const parsed: unknown = JSON.parse(row.settings);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid stored settings');
+    settings = parsed as Record<string, unknown>;
+  } catch { throw new HttpError(409, 'Stored generation inputs require review before approval'); }
+  const items = await tx.select({ status: generationItems.status }).from(generationItems).where(eq(generationItems.jobId,row.id));
+  const count = (status: string) => items.filter(item => item.status === status).length;
+  return { jobId: row.id,status: row.status,createdBy: row.createdBy,cardIds,settings,scheduledTime: row.scheduledTime,
+    approvedByUserId: row.approvedByUserId,approvedSessionEpoch: row.approvedSessionEpoch,approvedAt: row.approvedAt,
+    expectedSnapshotHash: schedulePreviewRevisionHash(row),
+    progress: { total: items.length,completed: count('completed'),needsReview: count('needs_review'),
+      outcomeUnknown: count('outcome_unknown'),failed: count('failed') } };
+}
+
+// Schedule generation endpoint. Proof is bound while the fresh account lock is held.
 router.post('/aptlss/schedule', async (req: any, res: Response) => {
   try {
-    const { cardIds, scheduledTime, settings } = req.body;
-    const user = req.user;
-
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    const { cardIds, scheduledTime, settings, requestKey } = req.body ?? {};
+    if (requestKey !== undefined && (typeof requestKey !== 'string'
+      || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestKey))) {
+      throw new HttpError(400, 'requestKey must be a UUID');
     }
-
-    const normalizedCardIds = Array.isArray(cardIds)
-      ? Array.from(new Set(cardIds.map((value: unknown) => typeof value === 'string' ? value.trim() : '').filter(Boolean))).slice(0, 250)
-      : [];
-    if (normalizedCardIds.length === 0) {
-      return res.status(400).json({ error: 'At least one valid Trello card ID is required' });
-    }
-    const runAt = new Date(scheduledTime);
-    if (!scheduledTime || Number.isNaN(runAt.getTime())) {
-      return res.status(400).json({ error: 'A valid scheduledTime is required' });
-    }
-    if (runAt.getTime() < Date.now() - 60_000) {
-      return res.status(400).json({ error: 'scheduledTime cannot be in the past' });
-    }
-
-    const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-
-    const jobId = `sched_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-    await db.insert(scheduledJobs).values({
-      id: jobId,
-      cardIds: JSON.stringify(normalizedCardIds),
-      scheduledTime: runAt,
-      status: 'pending',
-      settings: JSON.stringify(settings && typeof settings === 'object' ? settings : {}),
-      createdBy: user.openId
+    const cards = scheduleSelection(cardIds).sort(), serializedSettings = canonicalRetryJson(newScheduleSettings(settings));
+    const selectedTime = futureScheduleTime(scheduledTime,requestKey === undefined);
+    const result = await withScheduleIdentity(req,async (user,tx) => {
+      const id = requestKey === undefined ? `sched_${randomUUID()}`
+        : `sched_${createHash('sha256').update(String(user.id)).update('\0').update(requestKey.toLowerCase()).digest('hex').slice(0,58)}`;
+      const reuse = (existing: ScheduleRow) => {
+        if (existing.createdBy !== user.openId || existing.approvedByUserId !== user.id) throw new HttpError(404, 'Scheduled job not found');
+        let same = false;
+        try { same = canonicalRetryJson(scheduleSelection(JSON.parse(existing.cardIds),409).sort()) === canonicalRetryJson(cards)
+          && canonicalRetryJson(JSON.parse(existing.settings)) === serializedSettings && existing.scheduledTime.getTime() === selectedTime.getTime(); }
+        catch { /* Invalid persisted inputs cannot be accepted as an idempotent match. */ }
+        if (!same) throw new HttpError(409, 'requestKey was already used with different schedule inputs');
+        let reviewNeeded = existing.status === 'awaiting_approval' || existing.approvedSessionEpoch !== user.sessionEpoch;
+        try { reviewNeeded ||= existing.approvalHash !== approvalSnapshotHash(existing); }
+        catch { reviewNeeded = true; }
+        return { jobId: id,status: existing.status,replayed: true,reviewNeeded };
+      };
+      if (requestKey !== undefined) {
+        const [existing] = await tx.select().from(scheduledJobs).where(eq(scheduledJobs.id,id)).limit(1).for('update');
+        if (existing) return reuse(existing);
+      }
+      const approvedAt = new Date();
+      const row: ScheduleRow = { id,cardIds: JSON.stringify(cards),settings: serializedSettings,
+        scheduledTime: futureScheduleTime(scheduledTime),status: 'pending',createdBy: user.openId,
+        approvedByUserId: user.id,approvedSessionEpoch: user.sessionEpoch,approvedAt,approvalHash: null,
+        createdAt: approvedAt,completedAt: null,error: null };
+      row.approvalHash = approvalSnapshotHash(row);
+      const inserted = await tx.insert(scheduledJobs).values(row).onConflictDoNothing({ target: scheduledJobs.id }).returning({ id: scheduledJobs.id });
+      if (!inserted.length) {
+        const [existing] = await tx.select().from(scheduledJobs).where(eq(scheduledJobs.id,id)).limit(1).for('update');
+        if (!existing) throw new HttpError(409, 'Schedule creation conflicted; review the schedule list');
+        return reuse(existing);
+      }
+      return { jobId: id,status: row.status,replayed: false,reviewNeeded: false };
     });
-
-    res.json({ success: true, jobId });
-  } catch (error) {
-    console.error('Error scheduling generation:', error);
-    res.status(500).json({ error: 'Failed to schedule generation' });
-  }
+    res.status(result.reviewNeeded ? 409 : 200).json({ success: !result.reviewNeeded,...result,
+      ...(result.reviewNeeded ? { error: 'The existing schedule requires explicit approval review' } : {}) });
+  } catch (error) { scheduleRouteFailure(res,error); }
 });
 
 // Get scheduled jobs endpoint
 router.get('/aptlss/scheduled', async (req: any, res: Response) => {
   try {
-    const user = req.user;
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-
-    const jobs = await db.select().from(scheduledJobs)
-      .where(eq(scheduledJobs.createdBy, user.openId))
-      .orderBy(desc(scheduledJobs.createdAt));
-
+    const jobs = await withScheduleIdentity(req,async (user,tx) => tx.select().from(scheduledJobs)
+      .where(and(eq(scheduledJobs.createdBy,user.openId),or(isNull(scheduledJobs.approvedByUserId),eq(scheduledJobs.approvedByUserId,user.id))))
+      .orderBy(desc(scheduledJobs.createdAt)));
     res.json(jobs);
-  } catch (error) {
-    console.error('Error fetching scheduled jobs:', error);
-    res.status(500).json({ error: 'Failed to fetch scheduled jobs' });
-  }
+  } catch (error) { scheduleRouteFailure(res,error); }
 });
 
-// Ca// Cancel scheduled job endpoint
+router.get('/aptlss/scheduled/:id/approval', async (req: Request,res: Response) => {
+  try {
+    const approval = await withScheduleIdentity(req,async (user,tx) => {
+      const [row] = await tx.select().from(scheduledJobs).where(scheduleOwnerWhere(req.params.id,user)).limit(1).for('share');
+      if (!row) throw new HttpError(404, 'Scheduled job not found');
+      return approvalPreview(tx,row);
+    });
+    res.json({ approval });
+  } catch (error) { scheduleRouteFailure(res,error); }
+});
+
+router.post('/aptlss/scheduled/:id/approval', async (req: Request,res: Response) => {
+  try {
+    const { expectedSnapshotHash,scheduledTime } = req.body;
+    if (typeof expectedSnapshotHash !== 'string' || !/^[a-f0-9]{64}$/.test(expectedSnapshotHash)) {
+      throw new HttpError(400, 'A valid expectedSnapshotHash is required');
+    }
+    futureScheduleTime(scheduledTime);
+    await withScheduleIdentity(req,async (user,tx) => {
+      const [row] = await tx.select().from(scheduledJobs).where(scheduleOwnerWhere(req.params.id,user)).limit(1).for('update');
+      if (!row) throw new HttpError(404, 'Scheduled job not found');
+      if (!['pending','awaiting_approval'].includes(row.status)) throw new HttpError(409, 'Only pending or awaiting-approval jobs can be approved');
+      if (schedulePreviewRevisionHash(row) !== expectedSnapshotHash) throw new HttpError(409, 'Scheduled inputs changed; review a fresh approval preview');
+      await approvalPreview(tx,row);
+      const next = { ...row,scheduledTime: futureScheduleTime(scheduledTime),approvedByUserId: user.id,
+        approvedSessionEpoch: user.sessionEpoch,approvedAt: new Date(),status: 'pending',error: null,completedAt: null };
+      await tx.update(scheduledJobs).set({ scheduledTime: next.scheduledTime,approvedByUserId: next.approvedByUserId,
+        approvedSessionEpoch: next.approvedSessionEpoch,approvedAt: next.approvedAt,approvalHash: approvalSnapshotHash(next),
+        status: 'pending',error: null,completedAt: null }).where(eq(scheduledJobs.id,row.id));
+    });
+    res.json({ success: true,jobId: req.params.id });
+  } catch (error) { scheduleRouteFailure(res,error); }
+});
+
+// Cancel eligible jobs under the same identity-before-job lock order as approval.
 router.delete('/aptlss/scheduled/:id', async (req: any, res: Response) => {
   try {
-    const { id } = req.params;
-    const user = req.user;
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    const db = await getDb();
-    if (!db) {
-      return res.status(503).json({ error: 'Database not available' });
-    }
-    const [existing] = await db.select({ status: scheduledJobs.status }).from(scheduledJobs)
-      .where(and(eq(scheduledJobs.id, id), eq(scheduledJobs.createdBy, user.openId)))
-      .limit(1);
-    if (!existing) return res.status(404).json({ error: 'Scheduled job not found' });
-    if (existing.status !== 'pending') {
-      return res.status(409).json({ error: `Only pending jobs can be cancelled (current status: ${existing.status})` });
-    }
-    await db.update(scheduledJobs)
-      .set({ status: 'cancelled' })
-      .where(and(
-        eq(scheduledJobs.id, id),
-        eq(scheduledJobs.createdBy, user.openId),
-        eq(scheduledJobs.status, 'pending')
-      ));
+    await withScheduleIdentity(req,async (user,tx) => {
+      const [row] = await tx.select().from(scheduledJobs).where(scheduleOwnerWhere(req.params.id,user)).limit(1).for('update');
+      if (!row) throw new HttpError(404, 'Scheduled job not found');
+      if (!['pending','awaiting_approval'].includes(row.status)) throw new HttpError(409, 'Only pending or awaiting-approval jobs can be cancelled');
+      await tx.update(scheduledJobs).set({ status: 'cancelled' }).where(eq(scheduledJobs.id,row.id));
+    });
     res.json({ success: true });
-  } catch (error) {
-    console.error('Error cancelling scheduled job:', error);
-    res.status(500).json({ error: 'Failed to cancel scheduled job' });
-  }
+  } catch (error) { scheduleRouteFailure(res,error); }
 });
 
 export default router;

@@ -2,12 +2,77 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, symlink, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve, sep } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
-import { healthyHeartbeat, supervise, releaseSupervisorLease } from './manager-codex-supervisor.mjs';
+import { bridgeLaunchArgs, healthyHeartbeat, healthyLlmHeartbeat, supervise, releaseSupervisorLease } from './manager-codex-supervisor.mjs';
+import { resolveCodexBridgePaths } from '../shared/codex-bridge-paths.mjs';
+
+test('relative bridge paths are canonicalized against one explicit workspace before child launch', () => {
+  const root = resolve('mock-codex-workspace');
+  const paths = resolveCodexBridgePaths({ APTLSS_CODEX_BRIDGE_ROOT: root, APTLSS_CODEX_QUEUE_DIR: 'queue',
+    APTLSS_CODEX_PRIVATE_DIR: 'private/manager', APTLSS_CODEX_LLM_PRIVATE_DIR: 'private/conversations' });
+  assert.deepEqual(paths, { root, queue: join(root, 'queue'), managerWork: join(root, 'private/manager'), llmWork: join(root, 'private/conversations') });
+});
+
+test('private execution directories cannot overlap the whole shared queue or each other', () => {
+  const base = { APTLSS_CODEX_BRIDGE_ROOT: resolve('mock-codex-workspace'), APTLSS_CODEX_QUEUE_DIR: 'queue',
+    APTLSS_CODEX_PRIVATE_DIR: 'manager-private', APTLSS_CODEX_LLM_PRIVATE_DIR: 'llm-private' };
+  for (const overrides of [
+    { APTLSS_CODEX_PRIVATE_DIR: 'queue' }, { APTLSS_CODEX_LLM_PRIVATE_DIR: 'queue/sibling' },
+    { APTLSS_CODEX_PRIVATE_DIR: 'queue/llm-v1' }, { APTLSS_CODEX_QUEUE_DIR: 'manager-private/queue' },
+    { APTLSS_CODEX_LLM_PRIVATE_DIR: 'manager-private' }, { APTLSS_CODEX_LLM_PRIVATE_DIR: 'manager-private/nested' },
+  ]) assert.throws(() => resolveCodexBridgePaths({ ...base, ...overrides }), /must be separate/);
+});
+
+test('explicit or default Codex authentication cannot enter the shared transport', () => {
+  const root = resolve('mock-codex-workspace');
+  const base = { APTLSS_CODEX_BRIDGE_ROOT: root, APTLSS_CODEX_QUEUE_DIR: 'queue',
+    APTLSS_CODEX_PRIVATE_DIR: 'manager-private', APTLSS_CODEX_LLM_PRIVATE_DIR: 'llm-private' };
+  assert.throws(() => resolveCodexBridgePaths({ ...base, CODEX_HOME: join(root, 'queue/auth') }), /authentication must remain outside/);
+  assert.throws(() => resolveCodexBridgePaths({ ...base, HOME: join(root, 'queue/home') }), /authentication must remain outside/);
+  assert.throws(() => resolveCodexBridgePaths({ ...base, CODEX_HOME: root }), /authentication must remain outside/);
+  assert.throws(() => resolveCodexBridgePaths({ ...base, CODEX_HOME: 'relative-auth' }), /home paths must be absolute/);
+  assert.doesNotThrow(() => resolveCodexBridgePaths({ ...base, CODEX_HOME: join(root, 'authentication') }));
+});
+
+test('missing authentication descendants beneath an outside junction cannot enter the queue', async () => {
+  const parent = resolve(tmpdir());
+  const root = await mkdtemp(join(parent, 'va-bridge-auth-alias-'));
+  const previous = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'test';
+  try {
+    await mkdir(join(root, 'queue'));
+    await symlink(join(root, 'queue'), join(root, 'outside-auth-alias'), process.platform === 'win32' ? 'junction' : 'dir');
+    assert.throws(() => resolveCodexBridgePaths({ APTLSS_CODEX_BRIDGE_ROOT: root,
+      APTLSS_CODEX_QUEUE_DIR: 'queue', APTLSS_CODEX_PRIVATE_DIR: 'manager-private',
+      APTLSS_CODEX_LLM_PRIVATE_DIR: 'llm-private', CODEX_HOME: join(root, 'outside-auth-alias/missing/auth'),
+    }), /authentication must remain outside/);
+  } finally {
+    if (previous === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previous;
+    const target = resolve(root);
+    assert(target.startsWith(parent + sep) && basename(target).startsWith('va-bridge-auth-alias-'));
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
+test('source-free supervisor selects the bundled entry without a compiler or source paths', () => {
+  const root = resolve('mock-bridge');
+  const directory = resolve(root, 'dist/bridge');
+  assert.deepEqual(bridgeLaunchArgs(root, directory, () => true), [resolve(directory, 'run-codex-bridge.js')]);
+  assert.deepEqual(bridgeLaunchArgs(root, directory, () => false), ['--import', 'tsx', resolve(root, 'scripts/run-codex-bridge.ts')]);
+});
+
+test('generic heartbeat must independently prove its protocol, model, efforts and freshness', () => {
+  const now = Date.now();
+  const heartbeat = { version: 1, at: new Date(now).toISOString(), model: 'gpt-5.6-luna', efforts: ['low', 'medium', 'high'], protocol: 'generic-luna-v1' };
+  assert.equal(healthyLlmHeartbeat(heartbeat, now - 1000, now), true);
+  for (const defect of [{ version: undefined }, { version: 2 }, { protocol: 'manager-only' }, { model: 'different-model' }, { efforts: ['high'] }, { at: new Date(now - 20_000).toISOString() }]) {
+    assert.equal(healthyLlmHeartbeat({ ...heartbeat, ...defect }, now - 1000, now), false);
+  }
+});
 
 test('supervisor lease remains after unconfirmed shutdown and never removes another owner', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aptlss-supervisor-lease-'));

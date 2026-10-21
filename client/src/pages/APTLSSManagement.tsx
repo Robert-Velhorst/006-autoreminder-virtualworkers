@@ -45,11 +45,13 @@ import {
   MessageSquare,
   X,
   AlertTriangle,
+  Calendar,
 } from "lucide-react";
 import { GoalInterviewDialog } from "@/components/GoalInterviewDialog";
 import { AresConfigurationPanel } from "@/components/AresConfigurationPanel";
 import { Link } from "wouter";
 import { useLoadingQueue } from "@/contexts/LoadingQueueContext";
+import { CreateScheduledGenerationDialog, ScheduledGenerationView, generationSettingsOnly, type ScheduledGenerationJob } from "@/components/ScheduledGeneration";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -580,6 +582,13 @@ export default function APTLSSManagement() {
   const [history, setHistory] = useState<any[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [jobDetails, setJobDetails] = useState<any>(null);
+  const retryInFlight = useRef(false);
+  const [retryPending, setRetryPending] = useState(false);
+  const [scheduledJobs, setScheduledJobs] = useState<ScheduledGenerationJob[]>([]);
+  const [scheduledLoading, setScheduledLoading] = useState(false);
+  const [scheduledError, setScheduledError] = useState<string | null>(null);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const scheduledRead = useRef(0);
 
   //  Settings
   const [settings, setSettings] = useState({
@@ -896,12 +905,19 @@ export default function APTLSSManagement() {
   };
 
   const loadScheduledJobs = async () => {
+    const sequence = ++scheduledRead.current;
+    setScheduledLoading(true);
+    setScheduledError(null);
     try {
-      const res = await fetch("/api/aptlss/scheduled");
-      const jobs = await res.json();
-      setSettings(prev => ({ ...prev, scheduledJobs: jobs }));
+      const res = await fetch("/api/aptlss/scheduled", { signal: AbortSignal.timeout(30_000) });
+      const jobs = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(typeof jobs?.error === "string" ? jobs.error : `Could not load scheduled jobs (HTTP ${res.status}).`);
+      if (!Array.isArray(jobs) || jobs.some(job => !job || typeof job.id !== "string" || typeof job.status !== "string" || typeof job.scheduledTime !== "string")) throw new Error("Could not verify scheduled jobs. Reload before taking an action.");
+      if (sequence === scheduledRead.current) setScheduledJobs(jobs);
     } catch (err) {
-      console.error("Error loading scheduled jobs:", err);
+      if (sequence === scheduledRead.current) setScheduledError(err instanceof Error && err.name !== "TypeError" && err.name !== "TimeoutError" ? err.message : "Could not load scheduled jobs. Reload to check their status.");
+    } finally {
+      if (sequence === scheduledRead.current) setScheduledLoading(false);
     }
   };
 
@@ -923,20 +939,57 @@ export default function APTLSSManagement() {
   };
 
   const retryFailedItems = async (jobId: string) => {
+    if (retryInFlight.current) return;
+    retryInFlight.current = true;
+    setRetryPending(true);
     try {
       const res = await fetch(`/api/aptlss/history/${jobId}/retry`, {
         method: "POST",
       });
-      const result = await res.json();
-      if (result.success) {
-        toast.success(`Retrying ${result.itemsToRetry} failed items`);
-        void loadHistory();
-      } else {
-        toast.info(result.message || "No items to retry");
+      const result = await res.json().catch(() => null);
+      if (!res.ok) {
+        toast.error(
+          typeof result?.error === "string"
+            ? result.error
+            : `Retry request returned HTTP ${res.status}. Check History before retrying.`
+        );
+        return;
       }
-    } catch (err) {
-      console.error("Error retrying items:", err);
-      toast.error("Failed to retry items");
+      if (result?.success !== true) {
+        if (result?.message === "No failed items to retry") {
+          toast.info(result.message);
+          void loadHistory();
+          return;
+        }
+        throw new Error("Unconfirmed retry result");
+      }
+      const { itemsToRetry, completed, failed } = result;
+      const needsReview = result.needsReview;
+      const reviewReported = Object.prototype.hasOwnProperty.call(result, "needsReview");
+      if (
+        ![itemsToRetry, completed, failed].every(
+          count => Number.isSafeInteger(count) && count >= 0
+        ) ||
+        completed + failed !== itemsToRetry ||
+        (reviewReported && (!Number.isSafeInteger(needsReview) || needsReview < 0 || needsReview > completed))
+      ) throw new Error("Unconfirmed retry counts");
+      let message = reviewReported
+        ? `Retry results: ${completed - needsReview} completed without review, ${needsReview} need review, ${failed} failed.`
+        : `Retry results: ${completed} completed, ${failed} failed. Review status not reported.`;
+      const successful = Array.isArray(result.results)
+        ? result.results.filter((item: any) => item?.success === true)
+        : null;
+      if (successful?.length === completed && successful.every((item: any) => typeof item.appliedToTrello === "boolean")) {
+        message += ` ${successful.filter((item: any) => item.appliedToTrello).length} applied to Trello.`;
+      }
+      if (failed > 0 || !reviewReported || needsReview > 0) toast.warning(message);
+      else toast.success(message);
+      void loadHistory();
+    } catch {
+      toast.error("Retry outcome unknown. Server work may have started. Check History before submitting another retry.");
+    } finally {
+      retryInFlight.current = false;
+      setRetryPending(false);
     }
   };
 
@@ -1284,6 +1337,11 @@ export default function APTLSSManagement() {
   };
 
   //  Generation
+  const selectedGenerationSettings = () => generationSettingsOnly({
+    ...settings,
+    ...(cards.filter(card => card.selected).length === 1 && cards.some(card => card.selected && card.id === clarifiedCardId) && clarifiedGoal != null
+      ? { clarifiedGoal } : {}),
+  });
   const startGeneration = async () => {
     const selected = cards.filter(c => c.selected);
     if (selected.length === 0) {
@@ -1306,7 +1364,7 @@ export default function APTLSSManagement() {
         credentials: "include",
         body: JSON.stringify({
           cardIds: selected.map(c => c.id),
-          settings: { ...settings, clarifiedGoal },
+          settings: selectedGenerationSettings(),
         }),
       });
 
@@ -1465,6 +1523,7 @@ export default function APTLSSManagement() {
                 variant="outline"
                 size="sm"
                 onClick={() => retryFailedItems(activeJob.id)}
+                disabled={retryPending}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Retry {activeJob.failedCards} Failed Items
@@ -1478,7 +1537,7 @@ export default function APTLSSManagement() {
       <Tabs defaultValue="workspaces" className="flex-1">
         <Card>
           <CardHeader>
-            <TabsList className="grid w-full grid-cols-4">
+            <TabsList className="grid w-full grid-cols-2 sm:grid-cols-5 h-auto gap-1">
               <TabsTrigger value="workspaces">Workspaces</TabsTrigger>
               <TabsTrigger value="cards">
                 Cards
@@ -1489,6 +1548,7 @@ export default function APTLSSManagement() {
                 )}
               </TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
+              <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
               <TabsTrigger value="settings">Settings</TabsTrigger>
             </TabsList>
           </CardHeader>
@@ -1869,6 +1929,9 @@ export default function APTLSSManagement() {
                       )}
                       Generate ({selectedCount})
                     </Button>
+                    <Button variant="outline" size="sm" disabled={selectedCount === 0 || selectedCount > 250} onClick={() => setScheduleOpen(true)}>
+                      <Calendar className="h-4 w-4 mr-2" />Schedule selected ({selectedCount})
+                    </Button>
                   </div>
                 </CardContent>
               </Card>
@@ -1982,6 +2045,7 @@ export default function APTLSSManagement() {
                               variant="outline"
                               size="sm"
                               onClick={() => retryFailedItems(job.id)}
+                              disabled={retryPending}
                             >
                               <RefreshCw className="h-4 w-4 mr-2" />
                               Retry {job.failedCards} Failed Items
@@ -2042,6 +2106,10 @@ export default function APTLSSManagement() {
                   ))
                 )}
               </div>
+            </TabsContent>
+
+            <TabsContent value="scheduled" className="space-y-4">
+              <ScheduledGenerationView jobs={scheduledJobs} loading={scheduledLoading} error={scheduledError} onRefresh={() => void loadScheduledJobs()} />
             </TabsContent>
 
             {/*  Settings Tab  */}
@@ -2128,6 +2196,9 @@ export default function APTLSSManagement() {
       </Tabs>
 
       {/*  Workspace Selector Dialog  */}
+      <CreateScheduledGenerationDialog open={scheduleOpen} onOpenChange={setScheduleOpen}
+        cards={cards.filter(card => card.selected).map(card => ({ id: card.id, name: card.name }))}
+        settings={selectedGenerationSettings()} onSaved={() => void loadScheduledJobs()} />
       <WorkspaceSelectorDialog
         open={showWorkspaceSelector}
         onClose={() => setShowWorkspaceSelector(false)}

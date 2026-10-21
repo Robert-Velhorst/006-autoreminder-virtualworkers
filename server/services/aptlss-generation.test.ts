@@ -77,6 +77,31 @@ describe("APTLSS plan normalization", () => {
 });
 
 describe("APTLSS generation retries", () => {
+  it("passes the actual caller signal and awaited ownership checkpoint into every inference dispatch", async () => {
+    const controller = new AbortController();
+    const assertOwnership = vi.fn().mockResolvedValue(undefined);
+    const context = { signal: controller.signal, assertOwnership };
+    mocks.invokeLLM.mockImplementation(async options => {
+      expect(options.signal).toBe(controller.signal);
+      const previousChecks = assertOwnership.mock.calls.length;
+      await options.beforeDispatch();
+      expect(assertOwnership).toHaveBeenCalledTimes(previousChecks + 1);
+      return { choices: [{ message: { content: JSON.stringify({ steps: [{ title: "Review" }] }) } }] };
+    });
+    await generateAptlssForCard({ id: "card-context", name: "Guarded plan" }, { applyToTrello: false }, context);
+    expect(mocks.invokeLLM).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchWithRetry).not.toHaveBeenCalled();
+  });
+
+  it("propagates dispatch ownership loss without a fallback or checklist synchronization", async () => {
+    const lost = new ScheduledJobLeaseLostError();
+    let revoked = false;
+    const context = { signal: new AbortController().signal, assertOwnership: vi.fn(async () => { if (revoked) throw lost; }) };
+    mocks.invokeLLM.mockImplementation(async options => { revoked = true; await options.beforeDispatch(); });
+    await expect(generateAptlssForCard({ id: "card-revoked", name: "Revoked plan" }, {}, context)).rejects.toBe(lost);
+    expect(mocks.fetchWithRetry).not.toHaveBeenCalled();
+  });
+
   it("fences a late LLM result before checklist synchronization", async () => {
     const controller = new AbortController();
     mocks.invokeLLM.mockImplementation(async () => {

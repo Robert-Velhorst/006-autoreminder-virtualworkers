@@ -1,13 +1,25 @@
 import { spawn } from 'node:child_process';
-import { readFile, writeFile, unlink } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { resolveCodexBridgePaths } from '../shared/codex-bridge-paths.mjs';
 
 export function healthyHeartbeat(heartbeat, started, now = Date.now()) {
   const at = Date.parse(heartbeat?.at);
   return Number.isFinite(at) && at >= started && now - at <= 15_000 && at - now <= 5000 &&
     heartbeat.model === 'gpt-5.6-luna' && heartbeat.route === 'luna-adaptive-v1' &&
     Array.isArray(heartbeat.efforts) && heartbeat.efforts.join(',') === 'low,medium,high';
+}
+
+export function healthyLlmHeartbeat(heartbeat, started, now = Date.now()) {
+  return heartbeat?.version === 1 && healthyHeartbeat({ ...heartbeat, route: 'luna-adaptive-v1' }, started, now) &&
+    heartbeat?.protocol === 'generic-luna-v1';
+}
+
+export function bridgeLaunchArgs(root, moduleDirectory, exists = existsSync) {
+  const bundled = resolve(moduleDirectory, 'run-codex-bridge.js');
+  return exists(bundled) ? [bundled] : ['--import', 'tsx', resolve(root, 'scripts/run-codex-bridge.ts')];
 }
 
 export async function releaseSupervisorLease(lock, owner, shutdownConfirmed) {
@@ -70,9 +82,7 @@ export async function supervise({ launch, wait, signal, report = () => {}, now =
 
 async function main() {
   if (!process.env.APTLSS_CODEX_EXECUTABLE) throw new Error('APTLSS_CODEX_EXECUTABLE is required');
-  const root = resolve(import.meta.dirname, '..');
-  const privateDir = resolve(root, '.local/pilot/codex-private');
-  const runnerLock = resolve(privateDir, 'runner.lock');
+  const { root, queue, managerWork: privateDir, llmWork: llmPrivateDir } = resolveCodexBridgePaths(process.env);
   const alive = pid => {
     if (!Number.isSafeInteger(pid) || pid <= 0) return false;
     try { process.kill(pid, 0); return true; } catch (error) {
@@ -80,11 +90,14 @@ async function main() {
       throw error;
     }
   };
-  try {
-    if (alive(Number((await readFile(runnerLock, 'utf8')).trim()))) {
-      throw new Error('An existing runner is active; no takeover is permitted');
-    }
-  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  for (const directory of [privateDir, llmPrivateDir]) {
+    try {
+      if (alive(Number((await readFile(resolve(directory, 'runner.lock'), 'utf8')).trim()))) {
+        throw new Error('An existing runner is active; no takeover is permitted');
+      }
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  await mkdir(privateDir, { recursive: true, mode: 0o700 });
   // Never steal a supervisor lease, even when it looks stale; operator review is required.
   const lock = resolve(privateDir, 'supervisor.lock');
   const owner = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() });
@@ -97,11 +110,15 @@ async function main() {
   try {
     await supervise({
       signal: controller.signal,
-      launch: () => spawn(process.execPath, ['--import', 'tsx', 'scripts/run-manager-codex.ts'], {
-        cwd: root, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], env: process.env,
+      launch: () => spawn(process.execPath, bridgeLaunchArgs(root, import.meta.dirname), {
+        cwd: root, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], env: {
+          ...process.env, APTLSS_CODEX_BRIDGE_ROOT: root, APTLSS_CODEX_QUEUE_DIR: queue,
+          APTLSS_CODEX_PRIVATE_DIR: privateDir, APTLSS_CODEX_LLM_PRIVATE_DIR: llmPrivateDir,
+        },
       }),
       report: event => process.stdout.write(`${JSON.stringify(event)}\n`),
-      health: async started => healthyHeartbeat(JSON.parse(await readFile(resolve(root, '.local/pilot/codex-queue/heartbeat.json'), 'utf8')), started),
+      health: async started => healthyHeartbeat(JSON.parse(await readFile(resolve(queue, 'heartbeat.json'), 'utf8')), started) &&
+        healthyLlmHeartbeat(JSON.parse(await readFile(resolve(queue, 'llm-v1/heartbeat.json'), 'utf8')), started),
       wait: (ms, signal) => new Promise(done => {
         const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); done(); };
         const timer = setTimeout(finish, ms);

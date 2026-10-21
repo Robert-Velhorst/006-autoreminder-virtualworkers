@@ -1,122 +1,88 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFile, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { ScheduledJobLeaseLostError } from '../scheduledJobRuntime';
+import { codexLlmFixture } from '../test/codexLlmFixture';
+import { invokeLLM } from './llm';
 
 const messages = [{ role: 'user' as const, content: 'Fixture prompt' }];
-const result = { choices: [{ message: { content: 'Fixture response' } }] };
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>(done => { resolve = done; });
-  return { promise, resolve };
+const fixtures: Array<Awaited<ReturnType<typeof codexLlmFixture>>> = [];
+async function fixture(plan: Parameters<typeof codexLlmFixture>[0] = {}) {
+  const f = await codexLlmFixture(plan); fixtures.push(f); return f;
 }
-beforeEach(() => {
-  vi.resetModules();
-  vi.stubEnv('OPENAI_API_KEY', 'fixture-only-dispatch-key');
-  vi.stubEnv('OPENAI_MODEL', '');
-  vi.spyOn(console, 'warn').mockImplementation(() => {});
+afterEach(async () => {
+  for (const f of fixtures.splice(0)) await f.close();
+  vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restoreAllMocks();
 });
-afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
-describe('LLM completion dispatch boundary', () => {
-  it('does not even discover models for an already cancelled caller', async () => {
-    const controller = new AbortController();
+describe('subscription LLM dispatch ownership boundary', () => {
+  it('does not publish anything for an already cancelled caller', async () => {
+    const f = await fixture(), controller = new AbortController();
     controller.abort();
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-    const { invokeLLM } = await import('./llm');
     await expect(invokeLLM({ messages, signal: controller.signal })).rejects.toBe(controller.signal.reason);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await f.calls()).toEqual([]);
+    expect(await readdir(join(f.root,'requests'))).toEqual([]);
   });
 
-  it.each([false, true])('preserves native AbortError during %s completion rather than classifying it as provider failure', async completion => {
-    const failure = new DOMException('Fixture cancellation', 'AbortError');
-    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
-      if (!completion || init?.method === 'POST') throw failure;
-      return new Response(JSON.stringify({ data: [] }));
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    const { invokeLLM } = await import('./llm');
-    await expect(invokeLLM({ messages })).rejects.toBe(failure);
-    expect(fetchMock).toHaveBeenCalledTimes(completion ? 2 : 1);
-  });
-
-  it.each(['lease', 'abort', 'guard-read'])('propagates %s guard failure after deferred discovery without a completion POST', async kind => {
-    const entered = deferred(), release = deferred();
+  it.each(['lease', 'abort', 'guard-read'])('propagates %s guard failure after deferred subscription readiness without a completion', async kind => {
+    const f = await fixture({ holdLogin: true });
     const failure = kind === 'lease' ? new ScheduledJobLeaseLostError()
-      : kind === 'abort' ? new DOMException('Fixture cancellation', 'AbortError') : new Error('Fixture guard unavailable');
-    const fetchMock = vi.fn(async () => {
-      entered.resolve(); await release.promise;
-      return new Response(JSON.stringify({ data: [{ id: 'gpt-5-mini' }] }));
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    const { invokeLLM } = await import('./llm');
-    const guard = vi.fn(async () => { throw failure; });
-    const pending = invokeLLM({ messages, beforeDispatch: guard });
+      : kind === 'abort' ? new DOMException('Fixture cancellation','AbortError') : new Error('Fixture guard unavailable');
+    let revoked = false;
+    const guard = vi.fn(async () => { if (revoked) throw failure; });
+    const pending = invokeLLM({ messages,beforeDispatch: guard });
     const rejected = expect(pending).rejects.toBe(failure);
-    await entered.promise;
-    expect(guard).not.toHaveBeenCalled();
-    release.resolve(); await rejected;
-    expect(guard).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await f.waitFile('login-ready');
+    revoked = true; await f.release('allow-login'); await rejected;
+    expect(guard).toHaveBeenCalledTimes(2); // publication and post-readiness dispatch
+    expect(await f.calls()).toEqual([]);
   });
 
-  it('rechecks the caller signal after the awaited guard', async () => {
-    const controller = new AbortController();
-    const failure = new DOMException('Fixture cancellation', 'AbortError');
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: [] })));
-    vi.stubGlobal('fetch', fetchMock);
-    const { invokeLLM } = await import('./llm');
-    await expect(invokeLLM({ messages, signal: controller.signal,
-      beforeDispatch: async () => { controller.abort(failure); } })).rejects.toBe(failure);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+  it('rechecks the caller signal after the awaited dispatch guard', async () => {
+    const f = await fixture(), controller = new AbortController();
+    const failure = new DOMException('Fixture cancellation','AbortError');
+    let checks = 0;
+    await expect(invokeLLM({ messages,signal: controller.signal,beforeDispatch: async () => {
+      if (++checks === 2) controller.abort(failure);
+    } })).rejects.toBe(failure);
+    expect(await f.calls()).toEqual([]);
   });
 
-  it('aborts model discovery without falling back to a completion', async () => {
-    const entered = deferred();
-    const controller = new AbortController();
-    const failure = new DOMException('Fixture cancellation', 'AbortError');
-    const fetchMock = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true });
-      entered.resolve();
-    }));
-    vi.stubGlobal('fetch', fetchMock);
-    const { invokeLLM } = await import('./llm');
-    const pending = invokeLLM({ messages, signal: controller.signal });
-    const rejected = expect(pending).rejects.toBe(failure);
-    await entered.promise; controller.abort(failure); await rejected;
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+  it('cancels readiness and removes transport rather than dispatching after delayed login', async () => {
+    const f = await fixture({ holdLogin: true }), controller = new AbortController();
+    const pending = invokeLLM({ messages,signal: controller.signal });
+    const rejected = expect(pending).rejects.toHaveProperty('name','AbortError');
+    await f.waitFile('login-ready');
+    controller.abort(); await rejected;
+    expect(await readdir(join(f.root,'requests'))).toEqual([]);
+    expect(await f.calls()).toEqual([]);
   });
 
-  it.each([false, true])('preserves successful callers with optional guard=%s and forwards cancellation to POST', async guarded => {
-    const controller = new AbortController();
-    const events: string[] = [];
-    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
-      events.push(init?.method === 'POST' ? 'post' : 'models');
-      return new Response(JSON.stringify(init?.method === 'POST' ? result : { data: [] }));
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    const { invokeLLM } = await import('./llm');
-    expect(await invokeLLM({ messages, ...(guarded ? { signal: controller.signal,
-      beforeDispatch: async () => { events.push('guard'); } } : {}) })).toEqual(result);
-    expect(events).toEqual(guarded ? ['models', 'guard', 'post'] : ['models', 'post']);
-    if (guarded) {
-      const signal = fetchMock.mock.calls[1][1]!.signal!;
-      controller.abort(); expect(signal.aborted).toBe(true);
-    }
-    const payload = JSON.parse(fetchMock.mock.calls[1][1]!.body as string);
-    expect(payload).not.toHaveProperty('beforeDispatch');
-    expect(payload).not.toHaveProperty('signal');
+  it.each([false,true])('preserves successful callers with optional guard=%s without any API fetch', async guarded => {
+    const f = await fixture(), guard = vi.fn(async () => {}), fetchMock = vi.fn();
+    vi.stubGlobal('fetch',fetchMock);
+    const result = await invokeLLM({ messages,...(guarded ? { beforeDispatch: guard } : {}) });
+    expect(result.choices[0].message.content).toBe('Fixture response');
+    expect(await f.calls()).toHaveLength(1); expect(fetchMock).not.toHaveBeenCalled();
+    expect(guard).toHaveBeenCalledTimes(guarded ? 3 : 0);
   });
 
-  it('propagates caller cancellation after dispatch without another attempt', async () => {
-    const controller = new AbortController();
+  it('propagates cancellation after dispatch without another attempt and terminates the owned CLI child', async () => {
+    const f = await fixture({ turns: [{ hold: true }] }), controller = new AbortController();
     const failure = new ScheduledJobLeaseLostError();
-    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
-      if (init?.method === 'POST') { controller.abort(failure); throw failure; }
-      return new Response(JSON.stringify({ data: [] }));
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    const { invokeLLM } = await import('./llm');
-    await expect(invokeLLM({ messages, signal: controller.signal })).rejects.toBe(failure);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const pending = invokeLLM({ messages,signal: controller.signal });
+    const rejected = expect(pending).rejects.toHaveProperty('name','AbortError');
+    await f.waitFile('calls.jsonl');
+    const pid = (await f.calls())[0].pid;
+    controller.abort(failure); await rejected;
+    await vi.waitFor(() => expect(() => process.kill(pid,0)).toThrow(),{ timeout: 5000 });
+    expect(await f.calls()).toHaveLength(1);
+  });
+
+  it('rejects a revoked result even after its CLI completion succeeds', async () => {
+    const f = await fixture(), failure = new ScheduledJobLeaseLostError();
+    let checks = 0;
+    await expect(invokeLLM({ messages,beforeDispatch: async () => { if (++checks === 3) throw failure; } })).rejects.toBe(failure);
+    expect(await f.calls()).toHaveLength(1);
   });
 });

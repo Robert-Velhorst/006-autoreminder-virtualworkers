@@ -7,6 +7,6 @@ describe('Trello webhook administration error boundary', () => {
 
     expect(source).not.toContain('res.status(500).json({ error: error.message });');
     expect(source).not.toContain("error: error instanceof Error ? error.message : 'OpenAI connection test failed'");
-    expect(source).toContain("error: 'Could not test the OpenAI connection'");
+    expect(source).toContain("error: 'Could not test the Codex subscription connection'");
   });
 });

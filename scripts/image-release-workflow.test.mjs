@@ -51,7 +51,7 @@ test('the ordinary test command retains both current-main and image-security Nod
   const command = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).scripts.test;
   for (const file of ['e2e/api-rate-window.test.mjs', 'operator-data-transfer-utils.test.mjs', 'verify-postgres-production-image.test.mjs',
     'image-vulnerability-policy.test.mjs', 'scan-production-image.test.mjs', 'promote-scanned-image.test.mjs',
-    'image-release-workflow.test.mjs', 'deployment/hetzner/production-gate.test.mjs',
+    'image-release-workflow.test.mjs', 'scripts/manager-codex-supervisor.test.mjs', 'scripts/doctor.test.mjs', 'deployment/hetzner/production-gate.test.mjs',
     'deployment/hetzner/deploy-script.test.mjs', 'deployment/hetzner/deploy-script.integration.test.mjs']) {
     assert.ok(command.includes(file), `Required executable contract was dropped: ${file}`);
   }

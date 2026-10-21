@@ -65,6 +65,14 @@ Before financial migration 0009, follow
 identities abort unchanged. Existing ownership, settlement values and linked
 history require explicit review; the migration is not financial reconciliation.
 
+Migration `0011_generation_status_width` widens the generation and scheduled-job
+status columns to 32 characters. The existing `completed_with_errors` value is
+21 characters and cannot fit the former 20-character columns. Apply this
+additive migration before running the new application: readiness requires its
+exact ledger entry. No existing job values or history are rewritten. Retain the
+normal backup/restore and schema-parity gates rather than editing old migrations
+or shortening existing terminal status names to hide the failure.
+
 Production deployment is started manually from protected `main`. The selected
 release must be a published stable `vMAJOR.MINOR.PATCH` tag whose commit is
 contained in `main`. The workflow verifies the GHCR image's provenance against
@@ -110,8 +118,13 @@ Configure these values in the deployment platform's secret store:
 - `TRELLO_TOKEN`: active Trello member token.
 
 Set `DATABASE_URL` in `.env` to the separately provisioned PostgreSQL service.
-For PostgreSQL installed on the Docker host, use `host.docker.internal`; for
-production, use private networking and add one `sslmode=verify-full` option to
+For PostgreSQL installed on the Docker host, `host.docker.internal` names the
+configured host gateway; it does not make a loopback-only PostgreSQL listener
+reachable from a bridge-network container. Verify an approved private route
+and the certificate's DNS identity before configuring that address. Do not
+open a shared database port, replace its certificates or change other apps'
+listeners merely to pass a connection test. For production, use private
+networking and add one `sslmode=verify-full` option to
 the URL without an `ssl` override. Node.js then verifies the certificate and
 hostname using its TLS trust configuration. Set `REDIS_URL` only
 when an external Redis service is configured. Do not commit `.env`.
@@ -182,11 +195,12 @@ uppercase names.
 
 ## Optional Integrations
 
-- AI provider API keys are optional and are not enabled by default. The
-  self-hosted server does not currently authenticate with Codex subscription
-  credentials; do not assume subscription-backed AI is available in Hetzner.
-  AI-dependent features are not part of the production acceptance gate unless
-  an explicitly supported provider is configured and its behavior is verified.
+- AI uses the [private Codex subscription bridge](CODEX_SUBSCRIPTION_BRIDGE.md).
+  Production rejects paid API routing. Keep the CLI executable, personal login
+  and private work outside the app container; mount only the private queue.
+  Verify real text/structured generation, permissions, allowance failure and
+  recovery on the approved host. Source tests, startup, a configured queue or
+  its heartbeat do not establish live subscription acceptance.
 - `REDIS_URL` is optional and enables shared cache/realtime coordination when
   an external Redis service is provisioned.
 - `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, and

@@ -1,19 +1,15 @@
 import { encodeTrelloPathSegment } from '../utils/trello-path';
 /**
  * Enhanced Interview Route
- * 
+ *
  * Handles all ATIS interview phases (1-10) with database persistence.
  * Replaces the in-memory interview system with persistent storage.
  */
 
 import { Router, Request, Response } from 'express';
-import { z } from 'zod';
+import { TRPCError } from '@trpc/server';
 import {
-  createInterviewSession,
   getInterviewSession,
-  updateInterviewSessionState,
-  recordInterviewResponse,
-  completeInterview,
   getInterviewHistory,
   getInterviewResults,
   getUserInterviewSessions,
@@ -21,21 +17,28 @@ import {
   abandonInterviewSession,
   getUserInterviewStats,
 } from '../services/interview-persistence';
-import { analyzeCardBeforeInterview } from '../services/pre-interview-analysis';
-import { startInterview, processResponse } from '../services/conversational-interview';
 import { requireAdmin } from '../middleware/auth';
-import { fetchAuthorizedTrelloCardWithComments, TrelloAccessError } from '../trelloCardAccess';
-import type { User } from '../../drizzle/schema.postgres';
+import { interviewRouter } from './interview';
 
 const router = Router();
 router.use(requireAdmin);
 
-/**
- * Helper to get Trello card with all details
- */
-async function getTrelloCard(cardId: string, user: User) {
-  if (!encodeTrelloPathSegment(cardId)) throw new TrelloAccessError(400, "Invalid Trello card ID");
-  return fetchAuthorizedTrelloCardWithComments<any>(user, cardId);
+function respondInterviewError(res: Response, error: unknown, fallback: string) {
+  if (res.destroyed || res.headersSent) return;
+  if (error instanceof TRPCError) {
+    const known = {
+      BAD_REQUEST: [400, 'Invalid interview request'],
+      UNAUTHORIZED: [401, 'Unauthorized'],
+      FORBIDDEN: [403, 'Interview access denied or authority changed'],
+      NOT_FOUND: [404, 'Interview session or card not found'],
+      CONFLICT: [409, 'Interview changed; reload before responding'],
+      SERVICE_UNAVAILABLE: [503, 'Interview storage unavailable'],
+      BAD_GATEWAY: [502, 'Could not verify interview card access'],
+    } as const;
+    const entry = known[error.code as keyof typeof known];
+    if (entry) return res.status(entry[0]).json({ error: entry[1] });
+  }
+  return res.status(500).json({ error: fallback });
 }
 
 /**
@@ -54,50 +57,15 @@ router.post('/start', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'A valid Trello card ID is required' });
     }
 
-    // Get card data from Trello
-    const card = await getTrelloCard(cardId, user);
-    if (!card) {
-      return res.status(404).json({ error: 'Card not found' });
-    }
-
-    // Perform pre-interview analysis
-    const preAnalysis = await analyzeCardBeforeInterview(card);
-
-    // Create interview session in database
-    const sessionId = await createInterviewSession(
-      cardId,
-      user.id,
-      user.openId,
-      preAnalysis.summary
-    );
-
-    // Start interview conversation
-    const { state, firstMessage } = await startInterview(card.name, preAnalysis);
-
-    await updateInterviewSessionState(sessionId, {
-      currentPhase: 1,
-      currentQuestion: 0,
-      questionsAsked: 0,
-      responsesProvided: 0,
-      overallConfidence: state.overallConfidence,
-      preAnalysisSummary: preAnalysis.summary,
-      sessionData: state,
-      status: 'active',
-    });
-
-    return res.json({
-      sessionId,
-      firstMessage,
-      confidence: state.overallConfidence,
-      preAnalysisSummary: preAnalysis.summary,
-      phase: 1,
-    });
+    const result = await interviewRouter.createCaller({ req, res, user }).start({ cardId });
+    return res.json({ ...result, phase: 1 });
   } catch (error) {
     console.error('[Interview] Error starting interview:', error);
-    if (error instanceof TrelloAccessError) {
-      return res.status(error.status).json({ error: error.message });
-    }
-    return res.status(500).json({ error: 'Failed to start interview. Retry shortly or check the service configuration.' });
+    return respondInterviewError(
+      res,
+      error,
+      'Failed to start interview. Retry shortly or check the service configuration.',
+    );
   }
 });
 
@@ -115,7 +83,7 @@ router.post('/:sessionId/respond', async (req: Request, res: Response) => {
     const { sessionId } = req.params;
     const { response } = req.body;
 
-    if (!response) {
+    if (typeof response !== 'string' || !response.trim()) {
       return res.status(400).json({ error: 'Missing response' });
     }
 
@@ -125,60 +93,22 @@ router.post('/:sessionId/respond', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Interview session not found' });
     }
 
-    if (session.userOpenId !== user.openId) {
+    if (
+      session.userOpenId !== user.openId ||
+      session.userId !== user.id ||
+      (req.body.cardId !== undefined && req.body.cardId !== session.cardId)
+    ) {
       return res.status(403).json({ error: 'Unauthorized' });
     }
 
-    // Get card for context
-    const card = await getTrelloCard(session.cardId, user);
-    const preAnalysis = await analyzeCardBeforeInterview(card);
-
-    // Parse stored session data
-    let sessionData: any = {};
-    try {
-      if (session.sessionData) {
-        sessionData = typeof session.sessionData === 'string'
-          ? JSON.parse(session.sessionData)
-          : session.sessionData;
-      }
-    } catch (parseError) {
-      console.error('[Interview] Error parsing sessionData:', parseError, 'raw:', session.sessionData);
-      sessionData = {};
-    }
-
-    // Process response
-    const result = await processResponse(sessionData, response, preAnalysis);
-
-    // Record response in database
-    await recordInterviewResponse(
+    const result = await interviewRouter.createCaller({ req, res, user }).respond({
+      cardId: session.cardId,
       sessionId,
-      session.currentPhase || 1,
-      session.currentQuestion || 0,
-      result.nextMessage || '',
       response,
-      true,
-      75,
-      undefined,
-      50,
-      false,
-      sessionData
-    );
+    });
 
     // Check if interview is complete
     if (result.isComplete && result.finalGoal) {
-      // Complete the interview
-      await completeInterview(
-        sessionId,
-        result.finalGoal.goal || '',
-        result.finalGoal.successCriteria?.join('; ') || '',
-        [], // APTLSS checklist will be generated separately
-        result.finalGoal.confidence || 0,
-        0, // clarity score
-        0, // completeness score
-        result.finalGoal,
-        0 // estimated duration
-      );
-
       return res.json({
         isComplete: true,
         finalGoal: result.finalGoal,
@@ -193,13 +123,14 @@ router.post('/:sessionId/respond', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[Interview] Error processing response:', error);
-    if (error instanceof TrelloAccessError) {
-      return res.status(error.status).json({ error: error.message });
-    }
     if (error instanceof Error) {
       console.error('[Interview] Error stack:', error.stack);
     }
-    return res.status(500).json({ error: 'Failed to process response. Retry shortly or check the service configuration.' });
+    return respondInterviewError(
+      res,
+      error,
+      'Failed to process response. Retry shortly or check the service configuration.',
+    );
   }
 });
 
@@ -219,7 +150,10 @@ router.get('/card/:cardId/latest', async (req: Request, res: Response) => {
     const sessions = await getCardInterviewSessions(cardId);
     const userSessions = sessions
       .filter((session: any) => session.userOpenId === user.openId)
-      .sort((a: any, b: any) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime());
+      .sort(
+        (a: any, b: any) =>
+          new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime(),
+      );
 
     const preferredSession =
       userSessions.find((session: any) => session.status === 'active') ||
@@ -233,9 +167,10 @@ router.get('/card/:cardId/latest', async (req: Request, res: Response) => {
     let sessionData: any = null;
     try {
       if (preferredSession.sessionData) {
-        const parsed = typeof preferredSession.sessionData === 'string' 
-          ? JSON.parse(preferredSession.sessionData) 
-          : preferredSession.sessionData;
+        const parsed =
+          typeof preferredSession.sessionData === 'string'
+            ? JSON.parse(preferredSession.sessionData)
+            : preferredSession.sessionData;
         sessionData = parsed;
       }
     } catch (parseError) {
@@ -248,9 +183,10 @@ router.get('/card/:cardId/latest', async (req: Request, res: Response) => {
       try {
         const results = await getInterviewResults(preferredSession.id);
         if (results?.executionPlan) {
-          executionPlan = typeof results.executionPlan === 'string'
-            ? JSON.parse(results.executionPlan)
-            : results.executionPlan;
+          executionPlan =
+            typeof results.executionPlan === 'string'
+              ? JSON.parse(results.executionPlan)
+              : results.executionPlan;
         }
       } catch (parseError) {
         console.error('[Interview] Error parsing executionPlan:', parseError);
@@ -273,7 +209,11 @@ router.get('/card/:cardId/latest', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[Interview] Error fetching latest card session:', error);
-    return res.status(500).json({ error: 'Failed to fetch latest interview session. Retry shortly or check the service configuration.' });
+    return res
+      .status(500)
+      .json({
+        error: 'Failed to fetch latest interview session. Retry shortly or check the service configuration.',
+      });
   }
 });
 

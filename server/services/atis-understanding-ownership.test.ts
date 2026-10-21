@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getTableName } from 'drizzle-orm';
 import { ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader } from '../scheduledJobRuntime';
 import { processAllCardsUnderstanding, processCardUnderstanding, processCardUnderstandingOutcome } from './atis-understanding';
+import { codexLlmFixture } from '../test/codexLlmFixture';
 
 const mocks = vi.hoisted(() => ({ getDb: vi.fn(), invokeLLM: vi.fn() }));
 vi.mock('../db', () => ({ getDb: mocks.getDb }));
@@ -109,34 +110,63 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe('ATIS understanding ownership', () => {
-  it.each(['role', 'sessionEpoch', 'lease'])('refuses actual LLM dispatch after %s revocation during model discovery', async reason => {
+  it('persists actual subscription-backed generated output with both guidance and transactional ownership', async () => {
     const state = fixture();
-    const entered = deferred();
-    const release = deferred();
+    const bridge = await codexLlmFixture({ turns: [{ answer: JSON.stringify(understanding) }] });
+    const actual = await vi.importActual<typeof import('../_core/llm')>('../_core/llm');
+    mocks.invokeLLM.mockImplementation(actual.invokeLLM);
+    try {
+      expect(await processCardUnderstandingOutcome(1, { context: state.context, guidance: { goal: 'Checked subscription goal' } }))
+        .toEqual({ kind: 'generated', understanding });
+      const calls = await bridge.calls();
+      expect(calls).toHaveLength(1);
+      expect(calls[0].input.conversation[1].content).toContain('Checked subscription goal');
+      expect(state.saved).toHaveLength(1);
+      expect(state.events).toContain('assert-tx');
+      expect(state.events.at(-1)).toBe('commit');
+    } finally { await bridge.close(); }
+  });
+
+  it('discards an actual subscription completion after authority changes while the model is running', async () => {
+    const state = fixture(); let revoked = false;
+    const lost = new ScheduledJobLeaseLostError();
+    state.assertOwnership.mockImplementation(async () => { if (revoked) throw lost; });
+    const bridge = await codexLlmFixture({ turns: [{ answer: JSON.stringify(understanding), hold: true }] });
+    const actual = await vi.importActual<typeof import('../_core/llm')>('../_core/llm');
+    mocks.invokeLLM.mockImplementation(actual.invokeLLM);
+    try {
+      const pending = processCardUnderstandingOutcome(1, { context: state.context });
+      const rejected = expect(pending).rejects.toBe(lost);
+      await bridge.waitFile('calls.jsonl'); revoked = true;
+      await bridge.release('allow-turn'); await rejected;
+      expect(state.saved).toEqual([]);
+      expect(state.db.transaction).not.toHaveBeenCalled();
+      expect(await bridge.calls()).toHaveLength(1);
+    } finally { await bridge.close(); }
+  });
+
+  it.each(['role', 'sessionEpoch', 'lease'])('refuses actual LLM dispatch after %s revocation during subscription readiness', async () => {
+    const state = fixture();
     let revoked = false;
     const lost = new ScheduledJobLeaseLostError();
     state.assertOwnership.mockImplementation(async () => { if (revoked) throw lost; });
-    vi.stubEnv('OPENAI_API_KEY', `fixture-dispatch-${reason}`);
-    vi.stubEnv('OPENAI_MODEL', '');
-    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
-      if (init?.method === 'POST') throw new Error('Completion must not be sent');
-      entered.resolve();
-      await release.promise;
-      return new Response(JSON.stringify({ data: [{ id: 'gpt-5-mini' }] }));
-    });
+    const bridge = await codexLlmFixture({ holdLogin: true });
+    const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const actual = await vi.importActual<typeof import('../_core/llm')>('../_core/llm');
     mocks.invokeLLM.mockImplementation(actual.invokeLLM);
-    const pending = processCardUnderstandingOutcome(1, { context: state.context, guidance: { goal: 'Keep this guidance' } });
-    const rejection = expect(pending).rejects.toBe(lost);
-    await entered.promise;
-    revoked = true;
-    release.resolve();
-    await rejection;
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe('https://api.openai.com/v1/models');
-    expect(state.saved).toEqual([]);
-    expect(state.db.transaction).not.toHaveBeenCalled();
+    try {
+      const pending = processCardUnderstandingOutcome(1, { context: state.context, guidance: { goal: 'Keep this guidance' } });
+      const rejection = expect(pending).rejects.toBe(lost);
+      await bridge.waitFile('login-ready');
+      revoked = true;
+      await bridge.release('allow-login');
+      await rejection;
+      expect(await bridge.calls()).toEqual([]);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(state.saved).toEqual([]);
+      expect(state.db.transaction).not.toHaveBeenCalled();
+    } finally { await bridge.close(); }
   });
   it('passes guidance and scheduled context together through the model and fenced writes', async () => {
     const state = fixture();

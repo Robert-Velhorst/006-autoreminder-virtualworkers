@@ -154,7 +154,7 @@ async function waitForGeneration<T>(operation: Promise<T>, context?: ScheduledJo
     else context.signal.addEventListener("abort", onAbort, { once: true });
   });
   try {
-    // The LLM API has no caller signal; abandon its result without allowing writes.
+    // Preserve prompt cancellation even for legacy/test adapters that ignore the signal.
     return await Promise.race([operation, cancelled]);
   } finally {
     context.signal.removeEventListener("abort", onAbort);
@@ -368,6 +368,7 @@ export async function generateAptlssForCard(
       type: "json_schema",
       json_schema: { name: "aptlss_execution_plan", strict: true, schema: generationSchema as unknown as Record<string, unknown> },
     },
+    ...(context ? { signal: context.signal, beforeDispatch: () => assertAptlssJobOwnership(context) } : {}),
   }), context);
   await assertAptlssJobOwnership(context);
   const text = getLLMText(response);

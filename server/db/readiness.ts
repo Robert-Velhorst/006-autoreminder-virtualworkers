@@ -1,7 +1,7 @@
 export const REQUIRED_POSTGRES_MIGRATION = {
-  tag: "0010_atis_analysis_admission",
-  createdAt: 1792567179124n,
-  hash: "d4b149e1b05133b71a26a36f7118b2a70ee053824adc163f027a34085194032c",
+  tag: "0012_scheduled_generation_approval",
+  createdAt: 1792574751125n,
+  hash: "1d241f9e430a59672dc4053f11f4bf5c8f96a5212828eef402530c73630946a6",
 } as const;
 
 export const READINESS_QUERY_TIMEOUT_MS = 2_000;

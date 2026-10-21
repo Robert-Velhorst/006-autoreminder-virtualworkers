@@ -25,9 +25,7 @@ import { invokeLLM } from '../_core/llm';
 import { ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader, type ScheduledJobTransaction } from '../scheduledJobRuntime';
 import type { AtisAnalysisGuidance } from '../../shared/atisAnalysis';
 
-// atis-understanding uses the same LLM provider chain as the rest of the app:
-// GROQ_API_KEY (free) → OPENAI_API_KEY → BUILT_IN_FORGE_API_KEY
-// No Forge-specific hardcoding needed.
+// Use the canonical subscription transport; never add a paid provider fallback here.
 
 interface CardContext {
   card: ATISCard;

@@ -39,10 +39,12 @@ describe("production image verification isolation", () => {
       "node:assert/strict": assert,
       "node:fs": {
         readdirSync: path => path === "/app" ? [] : store,
-        existsSync: path => path.startsWith("dist/tools/") ? !missingTool : installed.includes(path),
+        existsSync: path => path.startsWith("dist/tools/") || path.startsWith("dist/bridge/") ? !missingTool : installed.includes(path),
         readFileSync: path => path === "dist/aptlss-build.json"
           ? JSON.stringify({ bundleHash: "fixture", collectorPackageHash: "fixture", toolBundleHashes: {
             "dist/tools/reanalyze_all.js": "fixture", "dist/tools/reanalyze_active_placeholders.js": "fixture",
+            "dist/bridge/run-codex-bridge.js": "fixture", "dist/bridge/run-manager-codex.js": "fixture",
+            "dist/bridge/run-codex-llm.js": "fixture", "dist/bridge/manager-codex-supervisor.js": "fixture",
           } })
           : path.endsWith(".png") ? icon : Buffer.from("fixture"),
       },

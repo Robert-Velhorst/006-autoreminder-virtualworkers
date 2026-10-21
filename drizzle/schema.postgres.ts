@@ -451,7 +451,7 @@ export const generationJobs = pgTable("generation_jobs", {
   totalCards: integer("totalCards").notNull(),
   completedCards: integer("completedCards").notNull().default(0),
   failedCards: integer("failedCards").notNull().default(0),
-  status: varchar("status", { length: 20 }).notNull(),
+  status: varchar("status", { length: 32 }).notNull(),
   settings: text("settings"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   completedAt: timestamp("completedAt"),
@@ -486,13 +486,25 @@ export const scheduledJobs = pgTable("scheduled_jobs", {
   id: varchar("id", { length: 64 }).primaryKey(),
   cardIds: text("cardIds").notNull(), // JSON string array
   scheduledTime: timestamp("scheduledTime").notNull(),
-  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, running, completed, failed, cancelled
+  status: varchar("status", { length: 32 }).notNull().default("pending"), // Includes completed_with_errors.
   settings: text("settings").notNull(), // JSON string
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   completedAt: timestamp("completedAt"),
   error: text("error"),
   createdBy: varchar("createdBy", { length: 64 }).notNull(),
-});
+  approvedByUserId: integer("approvedByUserId"),
+  approvedSessionEpoch: sessionEpochType("approvedSessionEpoch"),
+  approvedAt: timestamp("approvedAt"),
+  approvalHash: varchar("approvalHash", { length: 64 }),
+}, table => [check("scheduled_jobs_approval_complete", sql`(
+  ${table.approvedByUserId} IS NULL AND ${table.approvedSessionEpoch} IS NULL
+  AND ${table.approvedAt} IS NULL AND ${table.approvalHash} IS NULL
+) OR (
+  ${table.approvedByUserId} IS NOT NULL AND ${table.approvedSessionEpoch} IS NOT NULL
+  AND ${table.approvedAt} IS NOT NULL AND ${table.approvalHash} IS NOT NULL
+  AND ${table.approvedByUserId} > 0 AND ${table.approvedSessionEpoch} >= 0
+  AND ${table.approvalHash} ~ '^[0-9a-fA-F]{64}$'
+)`)]);
 
 export type ScheduledJob = typeof scheduledJobs.$inferSelect;
 export type InsertScheduledJob = typeof scheduledJobs.$inferInsert;

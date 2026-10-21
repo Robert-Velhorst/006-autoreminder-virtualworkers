@@ -30,7 +30,7 @@ This repository is actively developed. A versioned container image and tagged re
 
 - The application uses a persistent Node.js process and PostgreSQL; Redis is optional.
 - Docker Compose is the supported single-host deployment path.
-- Trello, email, Google evidence, and AI-provider integrations require credentials supplied by the operator.
+- Trello, email and Google evidence require operator-supplied credentials. AI work uses the private Codex subscription bridge; personal authentication stays outside the app container and Git.
 - External actions such as Trello changes and outbound messages are policy-gated; configure and verify integrations before enabling them.
 - Production readiness depends on deployment-specific configuration and operational checks. A successful build or container publication is not proof of a live production deployment.
 
@@ -119,6 +119,13 @@ The GitHub Release workflow publishes a versioned image to `ghcr.io/robert-velho
 Production authentication uses registered accounts and role-based access controls. `LOCAL_AUTH_BYPASS` is for loopback development only; the server refuses that mode in production or on a non-loopback host. Do not expose the dashboard publicly until authentication, account recovery, role boundaries, HTTPS, and integration scopes have been reviewed for the target deployment.
 
 ## Integrations and Data
+
+AI text and structured generation use the [private subscription bridge](docs/CODEX_SUBSCRIPTION_BRIDGE.md),
+starting at Luna low with escalation to medium/high when needed. The application
+does not silently switch to a paid API. Queue configuration and a heartbeat are
+not proof of successful real generation or available subscription allowance.
+See the bridge guide for its supported inputs, private host setup, source-free
+bundles, cancellation and exact operational acceptance boundaries.
 
 The application stores operational data in PostgreSQL. Redis is used for shared cache and realtime coordination when configured. Trello and other providers require separately provisioned credentials. Follow least privilege when creating provider accounts and tokens, and rotate any credential that has entered source control or an untrusted log.
 

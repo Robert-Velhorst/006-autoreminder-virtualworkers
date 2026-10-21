@@ -6,11 +6,14 @@ import { DatabaseUnavailableError } from "./databaseAvailability";
 import { getActiveWorkerProfileId } from "./workerOperatorContext";
 import { sessionIdentityProof, type SessionIdentityProof } from "./_core/sessionIdentity";
 
+type SessionIdentityDatabase = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+export type SessionIdentityTransaction = Parameters<Parameters<SessionIdentityDatabase["transaction"]>[0]>[0];
+
 /** Serialize identity verification/minting against lifecycle-trigger invalidation. */
 export async function withSessionIdentity<T>(
   openId: string,
   expected: SessionIdentityProof | "legacy" | undefined,
-  action: (user: User) => Promise<T>,
+  action: (user: User, transaction: SessionIdentityTransaction) => Promise<T>,
 ): Promise<T> {
   const db = await getDb();
   if (!db) throw new DatabaseUnavailableError();
@@ -25,6 +28,6 @@ export async function withSessionIdentity<T>(
     if (user.role === "worker" && await getActiveWorkerProfileId(user.id, tx) === null) {
       throw ForbiddenError("An active worker profile is required");
     }
-    return action(user);
+    return action(user, tx);
   });
 }
