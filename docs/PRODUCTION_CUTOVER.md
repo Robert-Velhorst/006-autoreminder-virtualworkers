@@ -182,11 +182,12 @@ uppercase names.
 
 ## Optional Integrations
 
-- AI provider API keys are optional and are not enabled by default. The
-  self-hosted server does not currently authenticate with Codex subscription
-  credentials; do not assume subscription-backed AI is available in Hetzner.
-  AI-dependent features are not part of the production acceptance gate unless
-  an explicitly supported provider is configured and its behavior is verified.
+- AI uses the [private Codex subscription bridge](CODEX_SUBSCRIPTION_BRIDGE.md).
+  Production rejects paid API routing. Keep the CLI executable, personal login
+  and private work outside the app container; mount only the private queue.
+  Verify real text/structured generation, permissions, allowance failure and
+  recovery on the approved host. Source tests, startup, a configured queue or
+  its heartbeat do not establish live subscription acceptance.
 - `REDIS_URL` is optional and enables shared cache/realtime coordination when
   an external Redis service is provisioned.
 - `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, and

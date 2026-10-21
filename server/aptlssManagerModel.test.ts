@@ -235,16 +235,14 @@ describe("optional manager semantic enrichment", () => {
     expect(result.sourceGaps.join(" ")).toContain("OpenAI API credit is exhausted");
     expect(JSON.stringify(result)).not.toContain("private provider text");
   });
-  it("discovers the canonical available model when neither model override is set", async () => {
+  it("does not discover an API model or borrow the subscription model when explicit legacy overrides are absent", async () => {
     vi.stubEnv("APTLSS_MANAGER_MODEL", "");
     vi.stubEnv("OPENAI_MODEL", "");
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: "gpt-4.1" }] })))
-      .mockResolvedValueOnce(new Response(JSON.stringify(envelope({ claims: [], actions: [], interventions: [] }))));
     const { input, base } = fixture();
     const result = await enrichManagerResult(input, base);
-    expect(result.sourceGaps).toEqual(base.sourceGaps);
-    expect(fetchMock.mock.calls[0][0]).toBe("https://api.openai.com/v1/models");
-    expect(JSON.parse(fetchMock.mock.calls[1][1]?.body as string).model).toBe("gpt-4.1");
+    expect(result.actions).toEqual(base.actions);
+    expect(result.sourceGaps.join(" ")).toMatch(/semantic.*unavailable/i);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
   it("accepts documented reasoning metadata but reads only the completed assistant output", async () => {
     const body = envelope({ claims: [], actions: [], interventions: [] });

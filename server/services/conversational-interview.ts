@@ -1,13 +1,31 @@
 /**
  * Conversational Interview Service
- * 
+ *
  * Conducts a smart, adaptive interview with the user to understand task goals.
  * Uses AI to probe deeply, ask follow-up questions, and extract true intent.
  */
 
 import type { PreAnalysisResult } from './pre-interview-analysis';
-import { validateAnswer, calculateInterviewConfidence, generateFollowUpQuestion, detectLowConfidenceAndGenerateFollowUps, generateSmartFollowUpMessage, type ValidationResult } from './answer-validator';
+import {
+  validateAnswer,
+  calculateInterviewConfidence,
+  generateFollowUpQuestion,
+  detectLowConfidenceAndGenerateFollowUps,
+  generateSmartFollowUpMessage,
+  type ValidationResult,
+} from './answer-validator';
 import { getLLMText, invokeLLM } from '../_core/llm';
+
+export type InterviewInferenceContext = {
+  signal: AbortSignal;
+  beforeDispatch: () => Promise<void>;
+};
+
+async function assertInterviewContext(context?: InterviewInferenceContext) {
+  context?.signal.throwIfAborted();
+  await context?.beforeDispatch();
+  context?.signal.throwIfAborted();
+}
 
 export interface InterviewMessage {
   role: 'assistant' | 'user';
@@ -50,7 +68,7 @@ export interface FinalGoal {
  */
 export async function startInterview(
   cardName: string,
-  preAnalysis: PreAnalysisResult
+  preAnalysis: PreAnalysisResult,
 ): Promise<{ state: InterviewState; firstMessage: string }> {
   const state: InterviewState = {
     messages: [],
@@ -80,8 +98,10 @@ export async function startInterview(
 export async function processResponse(
   state: InterviewState,
   userResponse: string,
-  preAnalysis: PreAnalysisResult
+  preAnalysis: PreAnalysisResult,
+  context?: InterviewInferenceContext,
 ): Promise<{ nextMessage: string; isComplete: boolean; finalGoal?: FinalGoal }> {
+  await assertInterviewContext(context);
   // Add user message to history
   state.messages.push({
     role: 'user',
@@ -92,7 +112,7 @@ export async function processResponse(
   // Validate the user's answer
   const lastQuestion = state.messages[state.messages.length - 2]?.content || '';
   const validation = validateAnswer(userResponse, state.currentTopic as any);
-  
+
   state.validations.push({
     question: lastQuestion,
     answer: userResponse,
@@ -104,7 +124,7 @@ export async function processResponse(
 
   // Check for low confidence and generate smart follow-ups
   const lowConfidenceResult = detectLowConfidenceAndGenerateFollowUps(validation, 40);
-  
+
   if (lowConfidenceResult.shouldAsk && state.lowConfidenceFollowUpsAsked < 2) {
     // Ask smart follow-up questions for low confidence answers
     const smartFollowUpMessage = generateSmartFollowUpMessage(lowConfidenceResult);
@@ -114,7 +134,7 @@ export async function processResponse(
       timestamp: new Date(),
     });
     state.lowConfidenceFollowUpsAsked++;
-    
+
     return {
       nextMessage: smartFollowUpMessage,
       isComplete: false,
@@ -130,7 +150,7 @@ export async function processResponse(
         content: followUpQuestion,
         timestamp: new Date(),
       });
-      
+
       return {
         nextMessage: followUpQuestion,
         isComplete: false,
@@ -139,11 +159,11 @@ export async function processResponse(
   }
 
   // Use AI to analyze response and decide next step
-  const aiDecision = await getAINextStep(state, userResponse, preAnalysis);
+  const aiDecision = await getAINextStep(state, userResponse, preAnalysis, context);
 
   if (aiDecision.isComplete) {
     // Interview is done, generate final goal
-    const finalGoal = await generateFinalGoal(state, preAnalysis);
+    const finalGoal = await generateFinalGoal(state, preAnalysis, context);
     return {
       nextMessage: aiDecision.message,
       isComplete: true,
@@ -190,7 +210,8 @@ function generateOpeningMessage(cardName: string, preAnalysis: PreAnalysisResult
 async function getAINextStep(
   state: InterviewState,
   userResponse: string,
-  preAnalysis: PreAnalysisResult
+  preAnalysis: PreAnalysisResult,
+  context?: InterviewInferenceContext,
 ): Promise<{ message: string; isComplete: boolean }> {
   const systemPrompt = `You are conducting an interview to understand a task goal. Your job is to:
 1. Probe deeply - don't accept vague answers
@@ -205,13 +226,13 @@ INTERVIEW CONTEXT:
 - Card: ${preAnalysis.evidence.keywords.join(', ')}
 - Pre-analysis confidence: ${preAnalysis.confidence}%
 - Current interview confidence: ${state.overallConfidence}%
-- Identified gaps: ${preAnalysis.identifiedGaps.map(g => g.question).join('; ')}
+- Identified gaps: ${preAnalysis.identifiedGaps.map((g) => g.question).join('; ')}
 
 VALIDATION RESULTS:
-${state.validations.map(v => `Q: ${v.question}\nA: ${v.answer}\nConfidence: ${v.validation.confidence}%\nIssues: ${v.validation.issues.map(i => i.message).join(', ')}`).join('\n\n')}
+${state.validations.map((v) => `Q: ${v.question}\nA: ${v.answer}\nConfidence: ${v.validation.confidence}%\nIssues: ${v.validation.issues.map((i) => i.message).join(', ')}`).join('\n\n')}
 
 CONVERSATION SO FAR:
-${state.messages.map(m => `${m.role}: ${m.content}`).join('\n')}
+${state.messages.map((m) => `${m.role}: ${m.content}`).join('\n')}
 
 USER JUST SAID: "${userResponse}"
 
@@ -240,12 +261,15 @@ Otherwise, ask your next question naturally (be conversational, not robotic).`;
 
   try {
     const response = await invokeLLM({
+      signal: context?.signal,
+      beforeDispatch: context?.beforeDispatch,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: `User response: "${userResponse}"\n\nWhat should I ask next?` },
       ],
       maxTokens: 500,
     });
+    await assertInterviewContext(context);
     const aiMessage = getLLMText(response) || 'Could you tell me more about that?';
 
     const isComplete = aiMessage.startsWith('INTERVIEW_COMPLETE');
@@ -253,6 +277,7 @@ Otherwise, ask your next question naturally (be conversational, not robotic).`;
 
     return { message: cleanMessage, isComplete };
   } catch (error) {
+    await assertInterviewContext(context);
     console.error('[Interview] AI error:', error);
     // Fallback to simple follow-up
     return {
@@ -267,7 +292,8 @@ Otherwise, ask your next question naturally (be conversational, not robotic).`;
  */
 async function generateFinalGoal(
   state: InterviewState,
-  preAnalysis: PreAnalysisResult
+  preAnalysis: PreAnalysisResult,
+  context?: InterviewInferenceContext,
 ): Promise<FinalGoal> {
   const systemPrompt = `You are summarizing an interview about a task goal. Extract:
 1. The REAL goal (outcome, not just action)
@@ -278,7 +304,7 @@ async function generateFinalGoal(
 6. People involved and their roles
 
 CONVERSATION:
-${state.messages.map(m => `${m.role}: ${m.content}`).join('\n')}
+${state.messages.map((m) => `${m.role}: ${m.content}`).join('\n')}
 
 PRE-ANALYSIS:
 ${preAnalysis.summary}
@@ -296,6 +322,8 @@ Return JSON:
 
   try {
     const response = await invokeLLM({
+      signal: context?.signal,
+      beforeDispatch: context?.beforeDispatch,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: 'Extract the final goal from this conversation as JSON.' },
@@ -303,6 +331,7 @@ Return JSON:
       maxTokens: 800,
       responseFormat: { type: 'json_object' },
     });
+    await assertInterviewContext(context);
     let content = getLLMText(response) || '{}';
 
     // Remove markdown code blocks if present
@@ -320,6 +349,7 @@ Return JSON:
     const finalGoal = JSON.parse(content) as FinalGoal;
     return finalGoal;
   } catch (error) {
+    await assertInterviewContext(context);
     console.error('[Interview] Error generating final goal:', error);
     // Fallback
     return {

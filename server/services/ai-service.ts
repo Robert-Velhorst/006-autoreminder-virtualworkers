@@ -1,39 +1,38 @@
 /**
  * Compatibility adapter for the Trello chatbot.
  *
- * All model work is routed through the application's single OpenAI client.
- * Provider credentials and model selection are environment-managed and never
- * stored in the dashboard database.
+ * All model work uses the application's fixed Codex subscription policy.
+ * Authentication remains in the private host runner, never the dashboard database.
  */
 
-import { getLLMText, getOpenAIModelStatus, invokeLLM } from "../_core/llm";
+import { getLLMText, getLLMModelStatus, invokeLLM } from "../_core/llm";
 
-export type AIProvider = "openai";
+export type AIProvider = "codex-subscription";
 
 const PM_SYSTEM_PROMPT = `You are a project-management coach embedded in a worker task system.
 
 Help the worker complete the current task efficiently and professionally. Be direct, supportive, concise, and evidence-bound. Use only the supplied context. If the evidence is insufficient, say what is missing and ask one focused question. Never claim that an external action was completed unless the supplied context proves it.`;
 
 export async function getAIConfig() {
-  return getOpenAIModelStatus();
+  return getLLMModelStatus();
 }
 
 export async function getAvailableModels() {
-  const status = await getOpenAIModelStatus();
+  const status = await getLLMModelStatus();
   return status.model ? [{ id: status.model, name: status.model }] : [];
 }
 
-/** Runtime mutation was intentionally removed: configuration is env-managed. */
+/** Runtime mutation is disabled: the subscription provider/model policy is fixed. */
 export function setAIConfig(): never {
-  throw new Error("AI configuration is managed through OPENAI_API_KEY and OPENAI_MODEL");
+  throw new Error("AI uses the fixed Codex subscription policy. Authentication is managed by the private host runner, not the dashboard database.");
 }
 
 export function setAIProvider(): never {
-  throw new Error("OpenAI is the only configured model provider");
+  throw new Error("Codex subscription is the fixed model provider");
 }
 
 export function setAIModel(): never {
-  throw new Error("Model selection is managed through OPENAI_MODEL");
+  throw new Error("Model selection is fixed by the Codex subscription policy");
 }
 
 export async function generateAIResponse(
@@ -49,7 +48,7 @@ export async function generateAIResponse(
     maxTokens: 800,
   });
   const text = getLLMText(result);
-  if (!text) throw new Error("OpenAI returned an empty response");
+  if (!text) throw new Error("The Codex subscription returned an empty response");
   return text;
 }
 
@@ -77,20 +76,24 @@ export async function generateStuckGuidance(stepDescription: string, context: st
 }
 
 export async function testAIConnection() {
-  const status = await getOpenAIModelStatus();
+  const status = await getLLMModelStatus();
   if (!status.configured || !status.model) {
-    return { success: false, provider: "openai" as const, model: null, message: "OPENAI_API_KEY is not configured" };
+    return { success: false, provider: status.provider, model: status.model,
+      message: "The local Codex subscription queue is not configured. No API key is required; no inference was requested." };
   }
+  if (status.available === false) return { success: false, provider: status.provider, model: status.model,
+    message: "The local Codex subscription bridge is unavailable. No inference was requested." };
 
   const result = await invokeLLM({
     messages: [{ role: "user", content: "Reply with exactly: Connection successful" }],
-    maxTokens: 16,
+    // The subscription turn budget includes its required answer/review envelope.
+    maxTokens: 256,
   });
   const response = getLLMText(result);
-  if (!response) throw new Error("OpenAI returned an empty response");
+  if (!response) throw new Error("The Codex subscription returned an empty response");
   return {
     success: true,
-    provider: "openai" as const,
+    provider: status.provider,
     model: result.model || status.model,
     message: response,
   };

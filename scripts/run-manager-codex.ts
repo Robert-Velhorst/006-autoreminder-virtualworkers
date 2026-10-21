@@ -1,5 +1,5 @@
-import { resolve } from "node:path";
 import { startCodexManagerRunner } from "../server/aptlssManagerCodexRunner";
+import { resolveCodexBridgePaths } from "../shared/codex-bridge-paths.mjs";
 
 const executable = process.env.APTLSS_CODEX_EXECUTABLE;
 if (!executable) throw new Error("Set APTLSS_CODEX_EXECUTABLE to the installed official Codex executable.");
@@ -14,7 +14,8 @@ const onDisconnect = () => controller.abort();
 process.on("message", onMessage);
 process.once("disconnect", onDisconnect);
 try {
-  await startCodexManagerRunner(resolve(".local/pilot/codex-queue"), resolve(".local/pilot/codex-private"), executable, controller.signal);
+  const { queue, managerWork } = resolveCodexBridgePaths(process.env);
+  await startCodexManagerRunner(queue, managerWork, executable, controller.signal);
 } finally {
   process.removeListener("message", onMessage);
   process.removeListener("disconnect", onDisconnect);

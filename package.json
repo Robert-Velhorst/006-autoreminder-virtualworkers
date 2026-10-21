@@ -8,12 +8,12 @@
   },
   "scripts": {
     "dev": "cross-env NODE_ENV=development tsx watch server/_core/index.ts",
-    "build": "vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --external:./vite.js --outdir=dist && esbuild server/scripts/reanalyze_all.ts server/scripts/reanalyze_active_placeholders.ts --platform=node --packages=external --bundle --format=esm --outdir=dist/tools && tsx scripts/seal-aptlss-build.ts",
+    "build": "vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --external:./vite.js --outdir=dist && esbuild server/scripts/reanalyze_all.ts server/scripts/reanalyze_active_placeholders.ts --platform=node --packages=external --bundle --format=esm --outdir=dist/tools && node scripts/build-codex-bridge.mjs && tsx scripts/seal-aptlss-build.ts",
     "start": "cross-env NODE_ENV=production node dist/index.js",
     "check": "tsc --noEmit",
     "check:db-transfer": "tsc --noEmit --ignoreConfig --target ES2022 --module ESNext --moduleResolution bundler --esModuleInterop --skipLibCheck --types node scripts/migrate-mysql-to-postgres.ts server/scripts/mysqlPostgresTransferCore.ts",
     "format": "prettier --write .",
-    "test": "vitest run --maxWorkers=4 && node --test e2e/api-rate-window.test.mjs scripts/operator-data-transfer-utils.test.mjs scripts/verify-postgres-production-image.test.mjs scripts/image-vulnerability-policy.test.mjs scripts/scan-production-image.test.mjs scripts/promote-scanned-image.test.mjs scripts/image-release-workflow.test.mjs deployment/hetzner/production-gate.test.mjs deployment/hetzner/deploy-script.test.mjs deployment/hetzner/deploy-script.integration.test.mjs",
+    "test": "vitest run --maxWorkers=4 && node --test scripts/doctor.test.mjs scripts/manager-codex-supervisor.test.mjs e2e/api-rate-window.test.mjs scripts/operator-data-transfer-utils.test.mjs scripts/verify-postgres-production-image.test.mjs scripts/image-vulnerability-policy.test.mjs scripts/scan-production-image.test.mjs scripts/promote-scanned-image.test.mjs scripts/image-release-workflow.test.mjs deployment/hetzner/production-gate.test.mjs deployment/hetzner/deploy-script.test.mjs deployment/hetzner/deploy-script.integration.test.mjs",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
@@ -40,6 +40,7 @@
     "test:legacy-mysql": "node scripts/run-mysql-integration.mjs"
   },
   "dependencies": {
+    "ajv": "8.20.0",
     "@aws-sdk/client-s3": "3.1100.0",
     "@aws-sdk/s3-request-presigner": "3.1100.0",
     "@hookform/resolvers": "^5.2.2",

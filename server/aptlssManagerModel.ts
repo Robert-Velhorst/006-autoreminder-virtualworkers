@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ManagerInput, ManagerResult } from "../shared/aptlssManager";
 import { createHash } from "node:crypto";
-import { getOpenAIModelStatus, resolveOpenAIRequestTimeoutMs } from "./_core/llm";
+import { resolveOpenAIRequestTimeoutMs } from "./_core/llm";
 import { CODEX_MANAGER_MODEL, managerSemanticProvider, requestManagerCodexReview, type CodexManagerAttempt } from "./aptlssManagerCodex";
 import {
   compareManagerWork,
@@ -80,8 +80,7 @@ async function configured() {
   return {
     provider,
     key,
-    model: process.env.APTLSS_MANAGER_MODEL?.trim() || process.env.OPENAI_MODEL?.trim()
-      || (key ? (await getOpenAIModelStatus()).model : null),
+    model: process.env.APTLSS_MANAGER_MODEL?.trim() || process.env.OPENAI_MODEL?.trim() || null,
   };
 }
 

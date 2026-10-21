@@ -31,15 +31,17 @@ async function checkUrl(name, url) {
 
 const env = { ...await readEnv(".env"), ...process.env };
 const managerProvider = env.APTLSS_MANAGER_PROVIDER?.trim() || "codex-subscription";
-const providerValid = managerProvider === "codex-subscription" || managerProvider === "openai-api";
+const providerValid = managerProvider === "codex-subscription";
 add("config:APTLSS_MANAGER_PROVIDER", providerValid ? "ok" : "error",
-  providerValid ? managerProvider : "must be codex-subscription or openai-api");
+  providerValid ? managerProvider : "must be codex-subscription; paid API routing is not permitted in production");
+add("config:subscription-bridge", "warning", env.APTLSS_CODEX_QUEUE_DIR?.trim()
+  ? "Queue configured; private bridge and subscription-account acceptance still require verification"
+  : "Queue not configured; subscription-backed AI work is unavailable");
 const required = [
   ["DATABASE_URL"],
   ["JWT_SECRET"],
   ["TRELLO_API_KEY", "TrelloAPIKey"],
   ["TRELLO_TOKEN", "TrelloAPIToken"],
-  ...(managerProvider === "openai-api" ? [["OPENAI_API_KEY"]] : []),
 ];
 for (const aliases of required) {
   const configured = aliases.some(name => Boolean(env[name]?.trim()));

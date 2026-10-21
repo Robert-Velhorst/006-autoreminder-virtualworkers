@@ -13,8 +13,7 @@ import {
 } from '../services/trello-chatbot';
 import { requireAdmin, requireAuthenticated } from '../middleware/auth';
 import { getWebhookCallbackUrl } from '../services/webhook-auto-register';
-import { getOpenAIModelStatus } from '../_core/llm';
-import { testAIConnection } from '../services/ai-service';
+import { getAIConfig, testAIConnection } from '../services/ai-service';
 import { parseLimitOffset } from '../utils/pagination';
 import { rateLimit } from 'express-rate-limit';
 import { getConfiguredTrelloWebhookCallbackUrl } from './trelloWebhookSignature';
@@ -632,14 +631,14 @@ router.get('/analytics', requireAdmin, async (req: any, res: Response) => {
  */
 router.get('/ai-settings', requireAdmin, async (req: any, res: Response) => {
   try {
-    const status = await getOpenAIModelStatus();
+    const status = await getAIConfig();
     res.json({
       success: true,
       config: status,
     });
   } catch (error: any) {
-    console.error('[TrelloWebhook] Error loading AI settings:', error);
-    res.status(500).json({ error: 'Could not load OpenAI settings' });
+    console.error('[TrelloWebhook] Could not load AI subscription status');
+    res.status(500).json({ error: 'Could not load Codex subscription status' });
   }
 });
 
@@ -649,7 +648,7 @@ router.get('/ai-settings', requireAdmin, async (req: any, res: Response) => {
  */
 router.post('/ai-settings', requireAdmin, async (req: any, res: Response) => {
   return res.status(410).json({
-    error: 'AI credentials are managed through OPENAI_API_KEY and cannot be stored in the dashboard database',
+    error: 'AI uses the fixed Codex subscription policy. Authentication stays in the private host runner; dashboard configuration writes are disabled.',
   });
 });
 
@@ -660,7 +659,7 @@ router.post('/test-ai', requireAdmin, async (_req: any, res: Response) => {
   } catch (error) {
     return res.status(502).json({
       success: false,
-      error: 'Could not test the OpenAI connection',
+      error: 'Could not test the Codex subscription connection',
     });
   }
 });

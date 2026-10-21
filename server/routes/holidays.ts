@@ -23,8 +23,7 @@ export const SUPPORTED_HOLIDAY_COUNTRIES = [
   { countryCode: 'FR', name: 'France' },
   { countryCode: 'NL', name: 'Netherlands' },
   { countryCode: 'PH', name: 'Philippines' },
-  { countryCode: 'PK', name: 'Pakistan' },
-  { countryCode: 'IN', name: 'India' },
+  { countryCode: 'KE', name: 'Kenya' },
 ] as const;
 
 /**
@@ -365,38 +364,19 @@ router.get('/by-timezone/:timezone/:year', async (req: any, res: Response) => {
       'Africa/Nairobi': 'KE',
       'Africa/Casablanca': 'MA',
       'Africa/Accra': 'GH',
-      // Middle East
-      'Asia/Dubai': 'AE', // UAE supported
-      'Asia/Riyadh': 'SA', // Saudi Arabia supported
-      'Asia/Kuwait': 'BD', // Kuwait not supported, using Bangladesh
-      'Asia/Qatar': 'BD', // Qatar not supported, using Bangladesh
-      'Asia/Bahrain': 'BD', // Bahrain not supported, using Bangladesh
-      'Asia/Tehran': 'BD', // Iran not supported, using Bangladesh
-      'Asia/Jerusalem': 'BD', // Israel not supported, using Bangladesh
-      'Asia/Beirut': 'BD', // Lebanon not supported, using Bangladesh
-      // Asia
-      'Asia/Karachi': 'BD', // Pakistan not supported, using Bangladesh as fallback
-      'Asia/Kolkata': 'BD', // India not supported, using Bangladesh as fallback
-      'Asia/Colombo': 'BD', // Sri Lanka not supported, using Bangladesh as fallback
+      // No substitute country calendars for zones without verified v3 coverage.
       'Asia/Dhaka': 'BD',
-      'Asia/Kathmandu': 'BD', // Nepal not supported, using Bangladesh as fallback
-      'Asia/Yangon': 'BD', // Myanmar not supported, using Bangladesh as fallback
-      'Asia/Bangkok': 'BD', // Thailand not supported, using Bangladesh
       'Asia/Jakarta': 'ID', // Indonesia supported
       'Asia/Makassar': 'ID', // Indonesia supported
       'Asia/Jayapura': 'ID', // Indonesia supported
       'Asia/Ho_Chi_Minh': 'VN', // Vietnam supported
-      'Asia/Phnom_Penh': 'BD', // Cambodia not supported, using Bangladesh
-      'Asia/Kuala_Lumpur': 'BD', // Malaysia not supported, using Bangladesh
       'Asia/Singapore': 'SG', // Singapore supported
       'Asia/Manila': 'PH', // Philippines supported
       'Asia/Shanghai': 'CN', // China supported
       'Asia/Hong_Kong': 'HK', // Hong Kong supported
-      'Asia/Taipei': 'BD', // Taiwan not supported, using Bangladesh
       'Asia/Seoul': 'KR', // South Korea supported
       'Asia/Tokyo': 'JP', // Japan supported
-      'Asia/Almaty': 'BD', // Kazakhstan not supported, using Bangladesh
-      'Asia/Tashkent': 'BD', // Uzbekistan not supported, using Bangladesh
+      'Asia/Almaty': 'KZ',
       // Pacific & Oceania
       'Australia/Perth': 'AU',
       'Australia/Darwin': 'AU',
@@ -405,13 +385,11 @@ router.get('/by-timezone/:timezone/:year', async (req: any, res: Response) => {
       'Australia/Sydney': 'AU',
       'Australia/Melbourne': 'AU',
       'Pacific/Auckland': 'NZ',
-      'Pacific/Fiji': 'BD', // Fiji not supported, using Bangladesh
-      'Pacific/Guam': 'BD', // Guam not supported, using Bangladesh
     };
 
     const countryCode = Object.hasOwn(timezoneToCountryMap, timezone) ? timezoneToCountryMap[timezone] : undefined;
     if (!countryCode) {
-      return res.status(400).json({ error: 'Timezone not supported or country mapping not found' });
+      return res.status(400).json({ error: 'Holiday coverage unavailable for this timezone' });
     }
 
     // Validate year
@@ -440,7 +418,7 @@ router.get('/by-timezone/:timezone/:year', async (req: any, res: Response) => {
     
     if (!responseText) {
       console.log('[Holidays] Empty response from API');
-      return res.json({ success: true, count: 0, holidays: [] });
+      return res.status(404).json({ error: 'Holiday coverage unavailable for this timezone and year' });
     }
     
     let holidaysData;
@@ -455,14 +433,7 @@ router.get('/by-timezone/:timezone/:year', async (req: any, res: Response) => {
     // Handle empty response from API
     if (!Array.isArray(holidaysData) || holidaysData.length === 0) {
       console.log('[Holidays] API returned empty or non-array response for country:', countryCode);
-      return res.json({ 
-        success: true, 
-        count: 0, 
-        countryCode: countryCode,
-        timezone: timezone,
-        holidays: [],
-        message: 'No holidays available for this country in the API'
-      });
+      return res.status(404).json({ error: 'Holiday coverage unavailable for this timezone and year' });
     }
     
     // Store holidays in database

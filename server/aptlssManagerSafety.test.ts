@@ -12,7 +12,10 @@ function fixture() {
   mkdirSync(join(root, "dist/public/downloads"), { recursive: true });
   writeFileSync(join(root, "dist/index.js"), "test bundle");
   mkdirSync(join(root, "dist/tools"), { recursive: true });
-  for (const file of MANAGER_RUNTIME_TOOL_BUNDLES) writeFileSync(join(root, file), "test maintenance tool");
+  for (const file of MANAGER_RUNTIME_TOOL_BUNDLES) {
+    mkdirSync(dirname(join(root, file)), { recursive: true });
+    writeFileSync(join(root, file), "test maintenance tool");
+  }
   const collector = Buffer.from([0, 255, 1, 128, 42]);
   writeFileSync(join(root, "dist/public/downloads/worker-browser-collector.zip"), collector);
   const manifest = {
@@ -32,6 +35,9 @@ function prepareSourceTree(root: string) {
   writeFileSync(join(root,"browser-extension/service-worker.js"), "initial worker");
   const files=["scripts/verify-aptlss-safety.ts","scripts/seal-aptlss-build.ts","scripts/package-browser-collector.ps1","scripts/aptlss-pilot-compose.mjs","scripts/aptlss-pilot-validation.mjs","scripts/run-manager-codex.ts","scripts/Start-ManagerCodex.ps1","package.json","pnpm-lock.yaml","pnpm-workspace.yaml","drizzle.config.ts","vitest.config.ts","Dockerfile","docker-compose.yml","deployment/shadow-pilot.yml","deployment/codex-subscription.yml","playwright.aptlss.config.ts","e2e/aptlss-manager.spec.ts","e2e/aptlss-manager-live.spec.ts","e2e/aptlss-manager-review.spec.ts","scripts/start-aptlss-test-server.ts"];
   for (const file of files) { mkdirSync(dirname(join(root,file)),{recursive:true}); writeFileSync(join(root,file),"fixture\r\n"); }
+  for (const file of ["run-codex-bridge.ts", "run-codex-llm.ts", "build-codex-bridge.mjs", "manager-codex-supervisor.mjs"]) {
+    writeFileSync(join(root, "scripts", file), "fixture\r\n");
+  }
   for (const file of ["e2e/api-rate-window.mjs", "e2e/api-rate-window.test.mjs"]) writeFileSync(join(root, file), "fixture\r\n");
   mkdirSync(join(root,"drizzle/contracts"),{recursive:true});
   writeFileSync(join(root,"drizzle/contracts/generate-pilot-snapshot.mjs"),"export const snapshotSource = true;\r\n");

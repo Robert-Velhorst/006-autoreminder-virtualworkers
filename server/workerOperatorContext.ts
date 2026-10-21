@@ -163,22 +163,26 @@ export async function resolveWorkerOperatorContext(user: User, database?: NonNul
     ? (await db.select().from(userWorkingHours).where(eq(userWorkingHours.userId, profile.founderId)).limit(1))[0] ?? null
     : null;
   const effectiveHours = hours ?? founderHours;
-  const timezone = validateWorkerTimeZone(effectiveHours?.timezone || profile?.timezone);
+  // Profile defaults are persisted worker settings too; do not guess whether
+  // they were manually saved by comparing them with schema defaults.
+  const timezone = validateWorkerTimeZone(hours?.timezone ?? profile?.timezone ?? founderHours?.timezone);
   const founder = profile
     ? (await db.select({ name: users.name }).from(users).where(eq(users.id, profile.founderId)).limit(1))[0]
     : null;
 
   const breaks: WorkerBreak[] = [];
-  if (effectiveHours) {
-    if (effectiveHours.enableBreaks) {
-      addBreak(breaks, "Breakfast", effectiveHours.breakfastTime, effectiveHours.breakfastDuration);
-      addBreak(breaks, "Lunch", effectiveHours.lunchTime, effectiveHours.lunchDuration);
-      addBreak(breaks, "Dinner", effectiveHours.dinnerTime, effectiveHours.dinnerDuration);
+  if (hours) {
+    if (hours.enableBreaks) {
+      addBreak(breaks, "Breakfast", hours.breakfastTime, hours.breakfastDuration);
+      addBreak(breaks, "Lunch", hours.lunchTime, hours.lunchDuration);
+      addBreak(breaks, "Dinner", hours.dinnerTime, hours.dinnerDuration);
     }
-  } else if (profile) {
-    addBreak(breaks, "Breakfast", profile.breakfastTime == null ? null : hourTime(profile.breakfastTime), profile.breakfastDuration);
-    addBreak(breaks, "Lunch", profile.lunchTime == null ? null : hourTime(profile.lunchTime), profile.lunchDuration);
-    addBreak(breaks, "Dinner", profile.dinnerTime == null ? null : hourTime(profile.dinnerTime), profile.dinnerDuration);
+  } else if (profile && (!founderHours || founderHours.enableBreaks)) {
+    const profileTime = (value: number | null | undefined, fallback: string | null | undefined) =>
+      value == null ? fallback : hourTime(value);
+    addBreak(breaks, "Breakfast", profileTime(profile.breakfastTime, founderHours?.breakfastTime), profile.breakfastDuration ?? founderHours?.breakfastDuration);
+    addBreak(breaks, "Lunch", profileTime(profile.lunchTime, founderHours?.lunchTime), profile.lunchDuration ?? founderHours?.lunchDuration);
+    addBreak(breaks, "Dinner", profileTime(profile.dinnerTime, founderHours?.dinnerTime), profile.dinnerDuration ?? founderHours?.dinnerDuration);
   }
 
   return {
@@ -189,13 +193,11 @@ export async function resolveWorkerOperatorContext(user: User, database?: NonNul
     displayName: profile?.name?.trim() || fallbackName,
     founderName: founder?.name?.trim() || "Founder",
     timezone,
-    workStartTime: effectiveHours
-      ? hourTime(effectiveHours.workStartHour, effectiveHours.workStartMinute)
-      : hourTime(profile?.workStartHour ?? 9),
-    workEndTime: effectiveHours
-      ? hourTime(effectiveHours.workEndHour, effectiveHours.workEndMinute)
-      : hourTime(profile?.workEndHour ?? 18),
-    workingDays: parseWorkingDays(effectiveHours?.workingDays || profile?.workingDays),
+    workStartTime: hourTime(hours?.workStartHour ?? profile?.workStartHour ?? founderHours?.workStartHour ?? 9,
+      hours ? hours.workStartMinute : profile?.workStartHour != null ? 0 : founderHours?.workStartMinute ?? 0),
+    workEndTime: hourTime(hours?.workEndHour ?? profile?.workEndHour ?? founderHours?.workEndHour ?? 18,
+      hours ? hours.workEndMinute : profile?.workEndHour != null ? 0 : founderHours?.workEndMinute ?? 0),
+    workingDays: parseWorkingDays(hours?.workingDays ?? profile?.workingDays ?? founderHours?.workingDays),
     breaks,
     ...workerHourTargetsFromSettings(effectiveHours),
   };

@@ -64,10 +64,8 @@ export function getProductionConfigurationErrors(env: Environment = process.env)
     errors.push("TRELLO_TOKEN is required");
   }
   const managerProvider = env.APTLSS_MANAGER_PROVIDER?.trim() || "codex-subscription";
-  if (managerProvider !== "codex-subscription" && managerProvider !== "openai-api") {
-    errors.push("APTLSS_MANAGER_PROVIDER must be codex-subscription or openai-api");
-  } else if (managerProvider === "openai-api" && !hasValue(env, "OPENAI_API_KEY")) {
-    errors.push("OPENAI_API_KEY is required");
+  if (managerProvider !== "codex-subscription") {
+    errors.push("APTLSS_MANAGER_PROVIDER must be codex-subscription; paid API routing is not permitted in production");
   }
 
   const publicOrigins = ["PUBLIC_URL", "APP_URL", "VITE_FRONTEND_URL"].map(name => {

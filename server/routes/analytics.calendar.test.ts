@@ -12,8 +12,9 @@ function fixture(timezone: string, fallback: boolean, times: string[], schedule:
   const entry = (id: number, timestamp: string) => ({ id, trackedUserId: 41, trackedProfileId: 7, founderId: 9,
     vaId: null, taskId: 'card', startTime: new Date(timestamp), endTime: new Date(new Date(timestamp).getTime() + 60000),
     isVoided: false, durationSeconds: 600, durationMinutes: 10 });
-  const profile = { id: 7, userId: 41, founderId: 9, status: 'active', name: 'Synthetic worker', timezone: 'UTC',
-    workingDays: '1', workStartHour: 9, workEndHour: 17, breakfastTime: null, lunchTime: null, dinnerTime: null };
+  const profile = { id: 7, userId: 41, founderId: 9, status: 'active', name: 'Synthetic worker', timezone: fallback ? null : 'UTC',
+    workingDays: fallback ? null : '1', workStartHour: fallback ? null : 9, workEndHour: fallback ? null : 17,
+    breakfastTime: null, lunchTime: null, dinnerTime: null };
   const rows = new Map<unknown, any[]>([
     [users, [actor, { id: 9, role: 'admin' }]], [vaProfiles, [profile]],
     [userWorkingHours, [{ userId: fallback ? 9 : 41, timezone, workStartHour: 9, workEndHour: 17,

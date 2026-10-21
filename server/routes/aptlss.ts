@@ -15,6 +15,10 @@ import {
 } from '../services/aptlss-generation';
 import { executeAptlssGenerationBatch } from '../services/aptlss-scheduled-generation';
 import { AssignmentError, MAX_ASSIGNMENT_TASKS, assignmentFailure, readCanonicalAssignments } from '../taskAssignmentMutation';
+import { withSessionIdentity } from '../sessionLifecycle';
+import { sessionIdentityProof } from '../_core/sessionIdentity';
+import { ForbiddenError, HttpError } from '../../shared/_core/errors';
+import { ScheduledJobLeaseLostError, type ScheduledJobContext } from '../scheduledJobRuntime';
 
 export async function readSchedulingAssignmentSnapshot(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, founderId: number, taskIds: string[]) {
   if (!Number.isSafeInteger(founderId) || founderId <= 0) throw new AssignmentError(400, 'Invalid scheduling founder');
@@ -199,9 +203,50 @@ async function fetchUserWorkspaceBoards(apiKey: string, token: string) {
   return boards;
 }
 
-async function fetchCardForAptlss(cardId: string) {
+async function fetchCardForAptlss(cardId: string, context?: ScheduledJobContext) {
   if (!encodeTrelloPathSegment(cardId)) throw new Error("Invalid Trello card ID");
-  return fetchAptlssSourceCard(cardId);
+  return fetchAptlssSourceCard(cardId, context);
+}
+
+export function generationRequestContext(req: Request, res: Response) {
+  const actor = requestUser(req);
+  if (!actor || actor.role !== 'admin') throw ForbiddenError('An active administrator account is required');
+  const expected = sessionIdentityProof(actor), openId = actor.openId;
+  const controller = new AbortController();
+  let failureStatus = 409;
+  const cancel = () => controller.abort();
+  const close = () => { if (!res.writableEnded) cancel(); };
+  req.once('aborted',cancel); res.once('close',close);
+  if (req.aborted || res.destroyed) cancel();
+  const context: ScheduledJobContext = {
+    signal: controller.signal,
+    assertOwnership: async reader => {
+      if (controller.signal.aborted) throw new ScheduledJobLeaseLostError();
+      try {
+        if (reader) {
+          // Reuse the caller's connection. This is a fresh, nonlocking checkpoint:
+          // a card transaction may span provider awaits and must not pin account authority.
+          const [current] = await reader.select().from(users).where(eq(users.openId,openId)).limit(1);
+          if (!current || current.id !== expected.userId || current.sessionEpoch !== expected.sessionEpoch || current.role !== 'admin') {
+            throw ForbiddenError('Administrator authority changed');
+          }
+        } else {
+          // Without an existing reader, the canonical identity transaction remains short-lived.
+          await withSessionIdentity(openId,expected,async current => {
+            if (current.role !== 'admin') throw ForbiddenError('Administrator authority changed');
+          });
+        }
+      } catch (error) {
+        failureStatus = error instanceof HttpError && error.statusCode === 403 ? 403 : 503;
+        cancel();
+        throw new ScheduledJobLeaseLostError();
+      }
+      if (controller.signal.aborted) throw new ScheduledJobLeaseLostError();
+    },
+  };
+  return { context,get failureStatus() { return failureStatus; },dispose: () => {
+    req.removeListener('aborted',cancel); res.removeListener('close',close);
+  } };
 }
 
 async function generateAptlssChecklist(card: any, settings: any) {
@@ -893,6 +938,7 @@ router.post('/trello/boards/:boardId/cache/clear', async (req: Request, res: Res
 
 // Generate APTLSS for a card
 router.post('/aptlss/generate', async (req: Request, res: Response) => {
+  let operation: ReturnType<typeof generationRequestContext> | undefined;
   try {
     const { cardId, cardData, settings } = req.body;
 
@@ -900,7 +946,10 @@ router.post('/aptlss/generate', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Card ID or card data is required' });
     }
 
-    const card = cardId ? await fetchCardForAptlss(cardId) : cardData;
+    operation = generationRequestContext(req,res);
+    await operation.context.assertOwnership();
+    const card = cardId ? await fetchCardForAptlss(cardId,operation.context) : cardData;
+    await operation.context.assertOwnership();
 
     // Content sufficiency check — per docs: do NOT generate for cards with just a title
     const hasDescription = card.desc && card.desc.trim().length > 0;
@@ -920,11 +969,18 @@ router.post('/aptlss/generate', async (req: Request, res: Response) => {
     const result = await generateAptlssForCard(card, {
       ...(settings && typeof settings === 'object' ? settings : {}),
       applyToTrello: Boolean(cardId),
-    });
+    }, operation.context);
+    await operation.context.assertOwnership();
     res.json(result);
   } catch (error: any) {
+    if (res.destroyed || res.headersSent) return;
+    if (error instanceof ScheduledJobLeaseLostError) {
+      return res.status(operation?.failureStatus ?? 409).json({ error: 'Generation authority changed or was cancelled; review before retrying.' });
+    }
     console.error('Error generating APTLSS:', error);
     res.status(500).json({ error: 'Failed to generate APTLSS. Retry shortly or check the service configuration.' });
+  } finally {
+    operation?.dispose();
   }
 });
 

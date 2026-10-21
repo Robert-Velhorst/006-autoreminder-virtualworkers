@@ -54,6 +54,16 @@ succeeded. New durable-analysis source remains on its own review branch until
 its fresh gates pass. No unfinished source was discarded to manufacture an
 only-main state, and no operational deployment is implied.
 
+Confirmed-analysis PR #145 subsequently passed quality `39565591698`, CodeQL
+`39565587914` and its aggregate at `ce2f95cf61e675939363eee76e284e0324d8db5a`.
+Normal merge `820ee121fb137b122727560b9e0deeab71a44bfb` and that reviewed head
+share tree `c6f3ce1635fdefc92a3e03895200590d02850376`. Verified archive tag
+`archive/atis-admission-acceptance-20261021` has object
+`5e2da5f009af43538c3d139861cda80a2fc0659c` and peels to the accepted head.
+The remote branch was deleted with the exact-head lease and its contained local
+branch with guarded deletion. Subsequent subscription, calendar and authority
+work stays separate until its own exact-head acceptance.
+
 ### Earlier Only-Main Checkpoint
 
 PR [#99](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/99)
