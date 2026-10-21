@@ -30,6 +30,7 @@ export default defineConfig({
       "scripts/full-data-rollback-checkpoint.test.mjs",
       "scripts/full-data-rollback-checkpoint.integration.test.mjs",
       "scripts/verify-production-image.test.mjs",
+      "scripts/verify-native-test-fixture.test.mjs",
       "scripts/verify-generated-records.test.mjs",
       "scripts/pilot-backup-restore.test.mjs",
       "scripts/pilot-backup-restore.integration.test.mjs",

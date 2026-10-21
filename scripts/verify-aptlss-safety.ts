@@ -46,6 +46,7 @@ const result = spawnSync(
     "server/dbLifecycle.test.ts",
     "server/workerOperatorContextTransaction.test.ts",
     "--maxWorkers=1",
+    "--reporter=default",
     "--reporter=json",
     `--outputFile=${report}`,
   ],
