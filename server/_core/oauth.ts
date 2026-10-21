@@ -8,7 +8,7 @@ import { sessionIdentityProof } from "./sessionIdentity";
 import {
   createOAuthLoginNonce, getOAuthLoginConfiguration, getOAuthLoginCookieName,
   getOAuthLoginCookieOptions, hashOAuthLoginNonce, isOAuthLoginNonce, OAUTH_LOGIN_STATE_TTL_MS,
-  openOAuthLoginBinding, sealOAuthLoginBinding,
+  openOAuthLoginBinding, encryptOAuthLoginBinding,
 } from "./oauthState";
 import { createOAuthLoginState, consumeOAuthLoginState } from "./oauthStateDb";
 
@@ -30,7 +30,7 @@ export function registerOAuthRoutes(app: Express) {
     const binding = createOAuthLoginNonce();
     let sealedBinding: string;
     try {
-      sealedBinding = sealOAuthLoginBinding(binding, configuration.callbackUri);
+      sealedBinding = encryptOAuthLoginBinding(binding, configuration.callbackUri);
       await createOAuthLoginState({ stateHash: hashOAuthLoginNonce(state), bindingHash: hashOAuthLoginNonce(binding),
         callbackUri: configuration.callbackUri });
     } catch {

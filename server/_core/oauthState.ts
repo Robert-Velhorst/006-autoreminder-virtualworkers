@@ -77,7 +77,7 @@ export function hashOAuthLoginNonce(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-export function sealOAuthLoginBinding(binding: string, callbackUri: string): string {
+export function encryptOAuthLoginBinding(binding: string, callbackUri: string): string {
   if (!isOAuthLoginNonce(binding)) throw new Error("Invalid OAuth nonce");
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", bindingKey(), iv, { authTagLength: 16 });

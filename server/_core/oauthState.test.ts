@@ -4,7 +4,7 @@ const configuration = vi.hoisted(() => ({ appId: "synthetic-app", oAuthServerUrl
   cookieSecret: crypto.randomUUID() + crypto.randomUUID() }));
 vi.mock("./env", () => ({ ENV: configuration }));
 import { createOAuthLoginNonce, getOAuthLoginConfiguration, hashOAuthLoginNonce, isOAuthLoginNonce,
-  sealOAuthLoginBinding, openOAuthLoginBinding } from "./oauthState";
+  encryptOAuthLoginBinding, openOAuthLoginBinding } from "./oauthState";
 const originalCookieSecret = configuration.cookieSecret;
 
 beforeEach(() => {
@@ -73,8 +73,8 @@ describe("OAuth initiation configuration and nonce boundaries", () => {
   it("encrypts the binding with randomized authenticated ciphertext scoped to the callback", () => {
     const binding = createOAuthLoginNonce();
     const callback = getOAuthLoginConfiguration().callbackUri;
-    const first = sealOAuthLoginBinding(binding, callback);
-    const second = sealOAuthLoginBinding(binding, callback);
+    const first = encryptOAuthLoginBinding(binding, callback);
+    const second = encryptOAuthLoginBinding(binding, callback);
     expect(first).not.toBe(second);
     expect(first).not.toContain(binding);
     expect(openOAuthLoginBinding(first, callback)).toBe(binding);
@@ -86,7 +86,7 @@ describe("OAuth initiation configuration and nonce boundaries", () => {
 
   it("rejects unauthenticated, malformed, oversized and tampered browser-binding cookies", () => {
     const callback = getOAuthLoginConfiguration().callbackUri;
-    const sealed = sealOAuthLoginBinding(createOAuthLoginNonce(), callback);
+    const sealed = encryptOAuthLoginBinding(createOAuthLoginNonce(), callback);
     const parts = sealed.split(".");
     const changed = [...parts];
     changed[2] = (changed[2][0] === "A" ? "B" : "A") + changed[2].slice(1);
