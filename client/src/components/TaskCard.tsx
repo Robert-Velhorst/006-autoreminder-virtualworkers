@@ -5,6 +5,8 @@ import { Clock, AlertTriangle, Lock, Globe, FileText, Brain, Target, Sparkles, E
 import { Timer } from "@/components/Timer";
 import { toast } from "sonner";
 import { Task } from "@/types";
+import { AtisAnalysisDialog } from "@/components/AtisAnalysisDialog";
+import { readCardUnderstanding } from "@/lib/atis-analysis";
 import { cn } from "@/lib/utils";
 import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
@@ -86,6 +88,7 @@ export function TaskCard({ task, onToggle, isExpanded, onExpandChange, onStartIn
   const [synced, setSynced] = useState(task.synced || false);
   const [syncingStep, setSyncingStep] = useState<string | null>(null);
   const [reanalyzing, setReanalyzing] = useState(false);
+  const [analysisCardId, setAnalysisCardId] = useState<number | null>(null);
   const [conversationCount, setConversationCount] = useState<number | null>(null);
 
   const [localChecklist, setLocalChecklist] = useState<any[]>(task.checklist || []);
@@ -265,91 +268,37 @@ export function TaskCard({ task, onToggle, isExpanded, onExpandChange, onStartIn
 
   const handleReanalyze = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    
-    // Need either atisCardId or cardId (trello ID) to re-analyze
-    const cardIdentifier = task.atisCardId || task.cardId;
-    if (!cardIdentifier) {
-      toast.error('No card ID available for re-analysis');
-      return;
-    }
-
     setReanalyzing(true);
-    toast.loading('Re-analyzing card...', { id: 'reanalyze' });
-
     try {
-      // Step 1: Re-ingest card data from Trello (if we have trello ID)
-      if (task.cardId) {
-        const ingestResponse = await fetch(`/api/atis/cards/${task.cardId}/reingest`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-        });
-        
-        if (!ingestResponse.ok) {
-          const error = await ingestResponse.json();
-          throw new Error(error.error || 'Failed to re-ingest card data');
+      const id = task.atisCardId || (task.cardId ? await getAtisCardId(task.cardId) : null);
+      if (!id) throw new Error("Card identity is unavailable. Refresh before analysis.");
+      setAnalysisCardId(id);
+    } catch {
+      toast.error("Card identity is unavailable. Refresh before analysis.");
+    } finally { setReanalyzing(false); }
+  };
+
+  const refreshAnalyzedCard = async (id: number, signal: AbortSignal) => {
+    const result = await readCardUnderstanding(id, signal);
+    signal.throwIfAborted();
+    if (result?.aptlssChecklist) {
+      const parsed = typeof result.aptlssChecklist === "string" ? JSON.parse(result.aptlssChecklist) : result.aptlssChecklist;
+      if (Array.isArray(parsed)) {
+        setLocalChecklist(parsed.map((item: any, index: number) => ({
+          id: `${id}-step-${index}`, step: item.name || item.step || item.description || "Step",
+          timeMinutes: item.estimatedMinutes || item.timeMinutes || item.time || 15,
+          aptlssType: item.priority || item.aptlssType || item.type || "T", completed: false,
+        })));
+        setLocalHasUnderstanding(true);
+        const status = await fetch(`/api/atis/checklist/status/${id}`, { credentials: "include", signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) });
+        if (status.ok) {
+          const saved = await status.json();
+          signal.throwIfAborted();
+          const completions: Record<string, boolean> = {};
+          parsed.forEach((_: unknown, index: number) => { completions[`${id}-step-${index}`] = Array.isArray(saved.completedSteps) && saved.completedSteps.some((row: any) => row.stepIndex === index); });
+          setStepCompletions(completions);
         }
       }
-
-      // Step 2: Re-analyze with AI (generate new checklist & timeline)
-      const atisId = task.atisCardId || (await getAtisCardId(task.cardId!));
-      if (atisId) {
-        const analyzeResponse = await fetch(`/api/atis/understanding/reprocess/${atisId}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-        });
-
-        if (!analyzeResponse.ok) {
-          const error = await analyzeResponse.json();
-          throw new Error(error.error || 'Failed to re-analyze card');
-        }
-
-        const result = await analyzeResponse.json();
-        
-        let newChecklist = localChecklist;
-        if (result.understanding?.aptlssChecklist) {
-          try {
-            const parsed = JSON.parse(result.understanding.aptlssChecklist);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              newChecklist = parsed.map((item: any, index: number) => ({
-                id: `${task.atisCardId}-step-${index}`,
-                step: item.name || item.step || item.description || 'Step',
-                timeMinutes: item.estimatedMinutes || item.timeMinutes || item.time || 15,
-                aptlssType: item.priority || item.aptlssType || item.type || 'T',
-                completed: false,
-              }));
-              setLocalChecklist(newChecklist);
-              setLocalHasUnderstanding(true);
-            }
-          } catch (e) {
-            console.error('Failed to parse checklist:', e);
-          }
-        }
-
-        toast.success('Card re-analyzed successfully', {
-          id: 'reanalyze',
-          description: `Updated checklist with ${newChecklist.length} steps`,
-        });
-
-        // Also reload completion status to reflect new checklist
-        const cResponse = await fetch(`/api/atis/checklist/status/${task.atisCardId}`);
-        if (cResponse.ok) {
-          const statusData = await cResponse.json();
-          if (statusData.completedSteps && Array.isArray(statusData.completedSteps)) {
-            const newCompletions: Record<string, boolean> = {};
-            newChecklist.forEach((item, index) => {
-              const isCompleted = statusData.completedSteps.some((c: any) => c.stepIndex === index);
-              newCompletions[item.id] = isCompleted;
-            });
-            setStepCompletions(newCompletions);
-          }
-        }
-      }
-    } catch (error: any) {
-      toast.error(error.message || 'Failed to re-analyze card', { id: 'reanalyze' });
-    } finally {
-      setReanalyzing(false);
     }
   };
 
@@ -505,6 +454,9 @@ export function TaskCard({ task, onToggle, isExpanded, onExpandChange, onStartIn
   const totalMinutes = localChecklist?.reduce((sum, item) => sum + (item.timeMinutes || 0), 0) || Math.round(task.durationHours * 60);
 
   return (
+    <><AtisAnalysisDialog open={analysisCardId !== null} onOpenChange={open => { if (!open) setAnalysisCardId(null); }}
+      selection={{ mode: "single", cardId: analysisCardId ?? undefined, limit: 1 }} title="Review card analysis"
+      onCompleted={async (job, signal) => { if (analysisCardId && job.items.some(item => item.cardId === analysisCardId && ["generated", "fallback"].includes(item.state))) await refreshAnalyzedCard(analysisCardId, signal); }} />
     <Card 
       className={cn(
         "mb-4 transition-all duration-200 border-l-4 overflow-hidden",
@@ -584,8 +536,8 @@ export function TaskCard({ task, onToggle, isExpanded, onExpandChange, onStartIn
                   {/* AI Analysis status badge */}
                   {!localHasUnderstanding && (
                     <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50">
-                      <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                      AI Analyzing...
+                      <AlertTriangle className="h-2.5 w-2.5" />
+                      Plan needs review
                     </Badge>
                   )}
                   
@@ -841,7 +793,7 @@ export function TaskCard({ task, onToggle, isExpanded, onExpandChange, onStartIn
                   {reanalyzing ? (
                     <>
                       <Loader2 className="h-3 w-3 animate-spin" />
-                      Analyzing...
+                      Loading preview...
                     </>
                   ) : (
                     <>
@@ -977,6 +929,6 @@ export function TaskCard({ task, onToggle, isExpanded, onExpandChange, onStartIn
           </CardContent>
         </CollapsibleContent>
       </Collapsible>
-    </Card>
+    </Card></>
   );
 }

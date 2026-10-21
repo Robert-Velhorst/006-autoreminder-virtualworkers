@@ -58,6 +58,8 @@ export type ToolChoice =
   | ToolChoiceExplicit;
 
 export type InvokeParams = {
+  signal?: AbortSignal;
+  beforeDispatch?: () => Promise<void>;
   messages: Message[];
   tools?: Tool[];
   toolChoice?: ToolChoice;
@@ -272,7 +274,8 @@ export function selectPreferredOpenAIModel(modelIds: string[], explicit?: string
     ?? "gpt-4o-mini";
 }
 
-async function resolveOpenAIModel(key: string) {
+async function resolveOpenAIModel(key: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   const explicit = process.env.OPENAI_MODEL?.trim();
   const keyFingerprint = key.slice(-8);
   if (modelCache && modelCache.keyFingerprint === keyFingerprint && modelCache.expiresAt > Date.now()) {
@@ -281,7 +284,7 @@ async function resolveOpenAIModel(key: string) {
   try {
     const response = await fetch("https://api.openai.com/v1/models", {
       headers: { authorization: `Bearer ${key}` },
-      signal: AbortSignal.timeout(10_000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
     });
     if (!response.ok) throw new Error(`model catalog returned ${response.status}`);
     const payload = await response.json() as { data?: Array<{ id?: unknown }> };
@@ -290,6 +293,8 @@ async function resolveOpenAIModel(key: string) {
     modelCache = { keyFingerprint, model, expiresAt: Date.now() + MODEL_CACHE_MS };
     return model;
   } catch (error) {
+    signal?.throwIfAborted();
+    if (error instanceof Error && error.name === 'AbortError') throw error;
     if (explicit) return explicit;
     console.warn("[LLM] OpenAI model discovery failed; using the compatibility fallback", {
       reason: error instanceof Error ? error.message : "unknown",
@@ -328,14 +333,14 @@ export function getLLMText(result: InvokeResult): string {
     .trim();
 }
 
-const getProviders = async (): Promise<ProviderConfig[]> => {
+const getProviders = async (signal?: AbortSignal): Promise<ProviderConfig[]> => {
   const key = process.env.OPENAI_API_KEY?.trim();
   if (!key) throw new Error("OPENAI_API_KEY is required for AI operations");
   return [{
     id: "openai",
     url: "https://api.openai.com/v1/chat/completions",
     key,
-    model: await resolveOpenAIModel(key),
+    model: await resolveOpenAIModel(key, signal),
   }];
 };
 
@@ -385,10 +390,12 @@ const normalizeResponseFormat = ({
 };
 
 export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
-  const providers = await getProviders();
+  params.signal?.throwIfAborted();
+  const providers = await getProviders(params.signal);
   const errors: string[] = [];
 
   for (const provider of providers) {
+    let checkingDispatch = false;
     try {
       const {
         messages,
@@ -442,11 +449,20 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
       
       headers.authorization = `Bearer ${provider.key}`;
 
+      const body = JSON.stringify(payload);
+      const timeoutSignal = AbortSignal.timeout(resolveOpenAIRequestTimeoutMs());
+      const signal = params.signal ? AbortSignal.any([params.signal, timeoutSignal]) : timeoutSignal;
+      // Guard failures are authority failures, never provider failures or retry candidates.
+      checkingDispatch = true;
+      signal.throwIfAborted();
+      await params.beforeDispatch?.();
+      signal.throwIfAborted();
+      checkingDispatch = false;
       const response = await fetch(provider.url, {
         method: "POST",
         headers,
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(resolveOpenAIRequestTimeoutMs()),
+        body,
+        signal,
       });
 
       if (!response.ok) {
@@ -457,6 +473,9 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
       return (await response.json()) as InvokeResult;
       
     } catch (error: any) {
+      if (checkingDispatch) throw error;
+      params.signal?.throwIfAborted();
+      if (error instanceof Error && error.name === 'AbortError') throw error;
       console.warn(`[LLM] Provider '${provider.id}' failed: ${error.message}`);
       errors.push(`[${provider.id}] ${error.message}`);
       // A single canonical provider avoids cross-provider data leakage and

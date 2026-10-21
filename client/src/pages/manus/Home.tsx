@@ -24,6 +24,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { TaskCard } from "@/components/TaskCard";
+import { AtisAnalysisDialog } from "@/components/AtisAnalysisDialog";
+import type { AtisAnalysisSelection } from "@shared/atisAnalysis";
 import { Task } from "@/types";
 import { useAuth } from "@/_core/hooks/useAuth";
 import {
@@ -1235,6 +1237,8 @@ export function TodayHoursChip() {
 // ─── Inner layout (needs useSidebar) ────────────────────────────────────────
 function HomeInner() {
   const { user, logout } = useAuth();
+  const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [analysisSelection, setAnalysisSelection] = useState<AtisAnalysisSelection>({ mode: "pending", limit: 100 });
   const { theme, toggleTheme } = useTheme();
   const [workerProfile, setWorkerProfile] = useState<any>(null);
 
@@ -1534,6 +1538,13 @@ function HomeInner() {
 
           {activeSection === "settings" && (
             <div className="space-y-4">
+              {user?.role === "admin" && <section className="space-y-2 border-b pb-4">
+                <h3 className="text-sm font-semibold">Card analysis</h3>
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" onClick={() => { setAnalysisSelection({ mode: "pending", limit: 100 }); setAnalysisOpen(true); }}><RefreshCw className="size-4" />Preview pending cards</Button>
+                  <Button variant="outline" onClick={() => { setAnalysisSelection({ mode: "low_confidence", minConfidence: 30, limit: 100 }); setAnalysisOpen(true); }}><RefreshCw className="size-4" />Review low-confidence cards</Button>
+                </div>
+              </section>}
               <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-5">
                 <h3 className="text-sm font-semibold text-foreground mb-1 flex items-center gap-2">
                   <Timer className="w-4 h-4 text-violet-500" />
@@ -1617,6 +1628,7 @@ function HomeInner() {
       </a>
 
       {/* Conversation Dialog */}
+      {user?.role === "admin" && <AtisAnalysisDialog open={analysisOpen} onOpenChange={setAnalysisOpen} selection={analysisSelection} resumeOnMount />}
       <ConversationDialog
         open={!!conversationCard}
         onOpenChange={(open) => !open && setConversationCard(null)}

@@ -4,6 +4,10 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 export const MANAGER_IMPLEMENTATION_VERSION = "joyce-shadow-3";
+export const MANAGER_RUNTIME_TOOL_BUNDLES = [
+  "dist/tools/reanalyze_all.js",
+  "dist/tools/reanalyze_active_placeholders.js",
+] as const;
 
 function fileDigest(path: string) {
   const contents = readFileSync(path);
@@ -21,12 +25,17 @@ export function managerSafetyDigest(root = process.cwd()) {
     const collectorPackageHash = createHash("sha256")
       .update(readFileSync(resolve(root, "dist/public/downloads/worker-browser-collector.zip")))
       .digest("hex");
+    const toolsValid = manifest.toolBundleHashes && typeof manifest.toolBundleHashes === "object"
+      && Object.keys(manifest.toolBundleHashes).length === MANAGER_RUNTIME_TOOL_BUNDLES.length
+      && MANAGER_RUNTIME_TOOL_BUNDLES.every(file => existsSync(resolve(root, file))
+        && /^[a-f0-9]{64}$/.test(manifest.toolBundleHashes[file])
+        && createHash("sha256").update(readFileSync(resolve(root, file))).digest("hex") === manifest.toolBundleHashes[file]);
     if (
       manifest.version !== MANAGER_IMPLEMENTATION_VERSION ||
       !/^[a-f0-9]{64}$/.test(manifest.digest) ||
       manifest.bundleHash !== bundleHash ||
       !/^[a-f0-9]{64}$/.test(manifest.collectorPackageHash) ||
-      manifest.collectorPackageHash !== collectorPackageHash
+      manifest.collectorPackageHash !== collectorPackageHash || !toolsValid
     ) throw new Error("APTLSS build identity is missing or does not match the running bundle and browser collector.");
     return manifest.digest as string;
   }

@@ -30,6 +30,9 @@ import { BulkTaskActions } from "@/components/BulkTaskActions";
 import { GoalInterviewDialog } from "@/components/GoalInterviewDialog";
 import { taskCache, CACHE_KEYS } from "@/lib/taskCache";
 import { AtisOperationClient, canStartAtisOperation, INITIAL_ATIS_OPERATION_VIEW, type AtisOperationView } from "@/lib/atis-operation";
+import { AtisAnalysisDialog } from "@/components/AtisAnalysisDialog";
+import { readCardUnderstanding } from "@/lib/atis-analysis";
+import type { AtisAnalysisSelection } from "@shared/atisAnalysis";
 
 // No longer using mock data - fetch from Trello API
 
@@ -54,6 +57,8 @@ export default function Home() {
   const taskSourceAvailable = useRef(false);
   const [atisOperation, setAtisOperation] = useState<AtisOperationView>(INITIAL_ATIS_OPERATION_VIEW);
   const atisClient = useRef<AtisOperationClient | null>(null);
+  const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [analysisSelection, setAnalysisSelection] = useState<AtisAnalysisSelection>({ mode: "pending", limit: 100 });
   const isSyncing = !canStartAtisOperation(atisOperation);
   const [searchQuery, setSearchQuery] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -380,12 +385,15 @@ export default function Home() {
   useEffect(() => {
     if (!isAuthenticated || !user) return;
     const client = new AtisOperationClient({
+      chainUnderstanding: false,
       onState: setAtisOperation,
       onCompleted: async operation => {
         const counts = operation.result;
         if (operation.kind === 'sync') {
           const hasCounts = [counts?.totalBoards, counts?.totalCards].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0);
           toast.success(hasCounts ? `Synced ${counts!.totalBoards} boards and ${counts!.totalCards} cards from Trello` : 'Trello sync completed.');
+          setAnalysisSelection({ mode: "pending", limit: 100 });
+          setAnalysisOpen(true);
         } else {
           const processed = counts?.processed;
           toast.success(typeof processed === 'number' && Number.isFinite(processed) && processed >= 0 ? `AI analyzed ${processed} cards` : 'Card analysis completed.', {
@@ -414,74 +422,22 @@ export default function Home() {
   };
 
   const handleInterviewComplete = async (finalGoal: any) => {
-    if (!taskSourceAvailable.current) return;
-    if (!interviewTask) {
-      return;
-    }
-
-    const targetTask = interviewTask;
-    setTasks((prevTasks) => prevTasks.map((task) => (
-      task.id === targetTask.id
-        ? {
-            ...task,
-            goal: finalGoal?.goal || task.goal,
-            deliverable: finalGoal?.deliverable || task.deliverable,
-            confidenceScore: finalGoal?.confidence || task.confidenceScore,
-          }
-        : task
-    )));
-
-    const reanalysisToastId = `interview-reanalysis-${targetTask.id}`;
-    toast.loading('Applying clarified goal to task analysis...', { id: reanalysisToastId });
-
+    if (!taskSourceAvailable.current || !interviewTask) return;
+    const target = interviewTask;
     try {
-      if (targetTask.cardId) {
-        await fetch(`/api/atis/cards/${targetTask.cardId}/reingest`, {
-          credentials: 'include',
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-        });
+      let cardId = target.atisCardId;
+      if (!cardId && target.cardId) {
+        const response = await fetch(`/api/atis/cards/by-trello/${encodeURIComponent(target.cardId)}`, { credentials: "include", signal: AbortSignal.timeout(30_000) });
+        if (!response.ok) throw new Error();
+        cardId = (await response.json()).id;
       }
-
-      let atisCardId = targetTask.atisCardId;
-      if (!atisCardId && targetTask.cardId) {
-        const lookupResponse = await fetch(`/api/atis/cards/by-trello/${encodeURIComponent(targetTask.cardId)}`, {
-          credentials: 'include',
-        });
-        if (lookupResponse.ok) {
-          const lookupData = await lookupResponse.json();
-          atisCardId = lookupData.id;
-        }
-      }
-
-      if (atisCardId) {
-        const reprocessResponse = await fetch(`/api/atis/understanding/reprocess/${atisCardId}`, {
-          credentials: 'include',
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            interviewGoal: finalGoal?.goal,
-            interviewDeliverable: finalGoal?.deliverable,
-            interviewSuccessCriteria: finalGoal?.successCriteria,
-          }),
-        });
-
-        if (!reprocessResponse.ok) {
-          const errorData = await reprocessResponse.json().catch(() => ({ error: 'Failed to re-analyze task' }));
-          throw new Error(errorData.error || 'Failed to re-analyze task');
-        }
-      }
-
-      await fetchTasks();
-      toast.success('Goal clarified and task analysis refreshed.', { id: reanalysisToastId });
-    } catch (error) {
-      console.error('Failed to apply interview result:', error);
-      toast.error(`Goal saved, but refresh failed: ${error instanceof Error ? error.message : 'Unknown error'}`, {
-        id: reanalysisToastId,
-      });
-    } finally {
+      if (!cardId) throw new Error();
+      setAnalysisSelection({ mode: "single", cardId, limit: 1, guidance: {
+        goal: finalGoal?.goal, deliverable: finalGoal?.deliverable, successCriteria: finalGoal?.successCriteria,
+      } });
+      setAnalysisOpen(true);
       setInterviewTask(null);
-    }
+    } catch { toast.error("Card identity unavailable. Your interview remains open; refresh before requesting analysis."); }
   };
 
   const handleToggleTask = async (id: string) => {
@@ -681,12 +637,12 @@ export default function Home() {
               </Button>
             )}
             {atisOperation.status === 'interrupted' && (
-              <Button variant="outline" size="sm" disabled={atisOperation.busy} onClick={() => void atisClient.current?.acknowledgeAndRestart()}>
+              <Button variant="outline" size="sm" disabled={atisOperation.busy} onClick={() => { if (atisOperation.operation?.kind === 'sync') void atisClient.current?.acknowledgeAndRestart(); else { setAnalysisSelection({ mode: "pending", limit: 100 }); setAnalysisOpen(true); } }}>
                 <RefreshCw className="size-4 mr-2" /> Acknowledge interruption and restart {atisOperation.operation?.kind === 'sync' ? 'sync' : 'analysis'}
               </Button>
             )}
             {atisOperation.status === 'completed' && atisOperation.operation?.kind === 'sync' && !atisOperation.busy && (
-              <Button variant="outline" size="sm" onClick={() => void atisClient.current?.startUnderstanding()}>
+              <Button variant="outline" size="sm" onClick={() => { setAnalysisSelection({ mode: "pending", limit: 100 }); setAnalysisOpen(true); }}>
                 <RefreshCw className="size-4 mr-2" /> Analyze synced cards
               </Button>
             )}
@@ -862,6 +818,12 @@ export default function Home() {
       </main>
 
       {/* Conversation Dialog */}
+      <AtisAnalysisDialog open={analysisOpen} onOpenChange={setAnalysisOpen} selection={analysisSelection} resumeOnMount
+        onCompleted={async (job, signal) => {
+          if (analysisSelection.mode === "single" && analysisSelection.cardId && job.items.some(item => item.cardId === analysisSelection.cardId && ["generated", "fallback"].includes(item.state))) await readCardUnderstanding(analysisSelection.cardId, signal);
+          signal.throwIfAborted();
+          await fetchTasks(true);
+        }} />
       <ConversationDialog
         open={!!conversationCard}
         onOpenChange={(open) => !open && setConversationCard(null)}

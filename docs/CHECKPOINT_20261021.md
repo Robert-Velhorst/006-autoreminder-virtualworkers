@@ -139,3 +139,34 @@ credentials, database exports, backups and local operational data are excluded.
 The local Docker inventory timed out; images and volumes were not proved unused
 and were not deleted. The execution policy rejected temporary scan-directory
 deletion before execution. No bypass or reclaimed-space claim was made.
+
+## Accepted Image Integration And Analysis Follow-Up
+
+PR135 exact head `cba207691700f51b5e88690eeb0cbfa0babac5b5` passed quality
+`39560277949` and CodeQL `39560273868`. The real image scan reported 633
+packages, zero findings and zero exceptions. Configured PostgreSQL image checks,
+the complete manager browser gate and isolated backup/restore passed. This is
+source/image acceptance, not a Hetzner deployment or live provider receipt.
+
+The normal merge is `0e18557d45452f5ef1812955eb55f959ebf822d4`; its tree and
+the reviewed head both equal `56c4fa7fd3fee89d0cc38b1b9e4dbf770c9b58bc`.
+The verified annotated archive is `archive/exact-image-security-20261021`.
+The matching remote branch was removed with an expected-SHA lease and its local
+branch with guarded deletion. Unfinished analysis work was not discarded.
+
+The next source checkpoint adds [confirmed card analysis](CARD_ANALYSIS_ADMISSION.md),
+additive migration 0010, per-card durable outcomes, explicit continuation and
+sealed maintenance tools. Its new source requires independent exact-head CI,
+including native PostgreSQL and browser acceptance. Four outdated old-contract
+assertions failed the first broad local run; that failed run is retained as a
+diagnostic, not relabeled as acceptance by focused reruns.
+
+After those test contracts were updated, the broad local command passed 4,740
+Vitest tests with 437 skips, followed by 291 Node passes and three skips. The
+final UI attribution follow-up additionally passed its 69 focused unit tests
+and the complete 15-case intercepted Chromium suite. Project and transfer type
+checks, full production build/seal and migration metadata regeneration passed;
+regeneration reports 142 tables with no drift. Both compiled maintenance tools
+passed help and missing-owner rejection with no database/provider configured.
+These local receipts do not execute the new native PostgreSQL cases or verify
+a live provider. Their exact-head hosted gate remains required.

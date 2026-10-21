@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getTableName } from 'drizzle-orm';
 import { ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader } from '../scheduledJobRuntime';
-import { processAllCardsUnderstanding, processCardUnderstanding } from './atis-understanding';
+import { processAllCardsUnderstanding, processCardUnderstanding, processCardUnderstandingOutcome } from './atis-understanding';
 
 const mocks = vi.hoisted(() => ({ getDb: vi.fn(), invokeLLM: vi.fn() }));
 vi.mock('../db', () => ({ getDb: mocks.getDb }));
@@ -25,7 +25,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-function fixture(existing = false) {
+function fixture(existing = false, missing = false) {
   const events: string[] = [];
   const saved: Array<Record<string, unknown>> = [];
   let staged: Array<Record<string, unknown>> | undefined;
@@ -49,7 +49,7 @@ function fixture(existing = false) {
         return Promise.resolve().then(() => {
           const name = getTableName(table);
           if (batch) return batchRead++ === 0 ? cards : [];
-          if (name === 'atis_cards') return [cards[readCard++]];
+          if (name === 'atis_cards') return missing ? [] : [cards[readCard++]];
           if (name === 'atis_boards') return [{ name: 'Fixture board' }];
           if (name === 'atis_card_understanding') {
             events.push('read-understanding');
@@ -106,9 +106,100 @@ beforeEach(() => {
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
-afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe('ATIS understanding ownership', () => {
+  it.each(['role', 'sessionEpoch', 'lease'])('refuses actual LLM dispatch after %s revocation during model discovery', async reason => {
+    const state = fixture();
+    const entered = deferred();
+    const release = deferred();
+    let revoked = false;
+    const lost = new ScheduledJobLeaseLostError();
+    state.assertOwnership.mockImplementation(async () => { if (revoked) throw lost; });
+    vi.stubEnv('OPENAI_API_KEY', `fixture-dispatch-${reason}`);
+    vi.stubEnv('OPENAI_MODEL', '');
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === 'POST') throw new Error('Completion must not be sent');
+      entered.resolve();
+      await release.promise;
+      return new Response(JSON.stringify({ data: [{ id: 'gpt-5-mini' }] }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const actual = await vi.importActual<typeof import('../_core/llm')>('../_core/llm');
+    mocks.invokeLLM.mockImplementation(actual.invokeLLM);
+    const pending = processCardUnderstandingOutcome(1, { context: state.context, guidance: { goal: 'Keep this guidance' } });
+    const rejection = expect(pending).rejects.toBe(lost);
+    await entered.promise;
+    revoked = true;
+    release.resolve();
+    await rejection;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.openai.com/v1/models');
+    expect(state.saved).toEqual([]);
+    expect(state.db.transaction).not.toHaveBeenCalled();
+  });
+  it('passes guidance and scheduled context together through the model and fenced writes', async () => {
+    const state = fixture();
+    const guidance = { goal: 'Compare both source reports', deliverable: 'A checked comparison', successCriteria: ['Cite both sources'] };
+    expect(await processCardUnderstandingOutcome(1, { context: state.context, guidance }))
+      .toEqual({ kind: 'generated', understanding });
+    const prompt = mocks.invokeLLM.mock.calls[0][0].messages[1].content;
+    for (const text of [guidance.goal, guidance.deliverable, guidance.successCriteria[0]]) expect(prompt).toContain(text);
+    expect(state.events.slice(state.events.indexOf('begin')))
+      .toEqual(['begin', 'assert-tx', 'read-understanding', 'assert-tx', 'insert', 'assert-tx', 'commit']);
+    expect(state.db.insert).not.toHaveBeenCalled();
+  });
+
+  it('reports generated even when a valid model result has low confidence', async () => {
+    const state = fixture();
+    mocks.invokeLLM.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ ...understanding, confidenceScore: 20 }) } }] });
+    expect(await processCardUnderstandingOutcome(1, { context: state.context }))
+      .toMatchObject({ kind: 'generated', understanding: { confidenceScore: 20 } });
+    expect(state.saved).toHaveLength(1);
+  });
+
+  it('explicitly reports provider fallback only after committing its fenced record', async () => {
+    const state = fixture();
+    mocks.invokeLLM.mockRejectedValue(new Error('Fixture provider failure'));
+    expect(await processCardUnderstandingOutcome(1, { context: state.context, guidance: { goal: 'Checked goal' } }))
+      .toMatchObject({ kind: 'fallback', understanding: { confidenceScore: 20 } });
+    expect(state.saved).toHaveLength(1);
+    expect(state.events.at(-1)).toBe('commit');
+  });
+
+  it('reports missing without a provider call or a persisted success', async () => {
+    const state = fixture(false, true);
+    expect(await processCardUnderstandingOutcome(999, { context: state.context })).toEqual({ kind: 'missing', understanding: null });
+    expect(mocks.invokeLLM).not.toHaveBeenCalled(); expect(state.saved).toEqual([]);
+  });
+  it('does not count a disappeared card as processed through the legacy batch wrapper', async () => {
+    vi.useFakeTimers();
+    const state = fixture(false, true);
+    const progress = vi.fn();
+    const pending = processAllCardsUnderstanding(progress, 2, state.context);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(await pending).toEqual({ processed: 0, failed: 2 });
+    expect(progress.mock.calls.filter(([item]) => item.status === 'failed')).toHaveLength(2);
+    expect(mocks.invokeLLM).not.toHaveBeenCalled(); expect(state.saved).toEqual([]);
+  });
+
+  it('does not permit a missing ownership context on the new outcome API', async () => {
+    await expect(processCardUnderstandingOutcome(1, {} as any)).rejects.toThrow('scheduled ownership context');
+    expect(mocks.getDb).not.toHaveBeenCalled(); expect(mocks.invokeLLM).not.toHaveBeenCalled();
+  });
+
+  it.each([new ScheduledJobLeaseLostError(), new DOMException('Cancelled', 'AbortError')])
+    ('does not save generated or fallback results after model-time ownership loss: %s', async error => {
+      const state = fixture();
+      mocks.invokeLLM.mockImplementation(async () => {
+        state.assertOwnership.mockRejectedValue(error);
+        return { choices: [{ message: { content: JSON.stringify(understanding) } }] };
+      });
+      await expect(processCardUnderstandingOutcome(1, { context: state.context, guidance: { goal: 'A scoped goal' } })).rejects.toBe(error);
+      expect(mocks.invokeLLM).toHaveBeenCalledOnce();
+      expect(state.db.transaction).not.toHaveBeenCalled(); expect(state.saved).toEqual([]);
+    });
+
   it('does not read or call the provider after cancellation', async () => {
     const state = fixture();
     state.controller.abort();

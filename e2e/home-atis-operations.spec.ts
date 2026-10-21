@@ -1,6 +1,7 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import superjson from "superjson";
 import type { AtisOperation } from "../client/src/lib/atis-operation";
+import type { AtisAnalysisJob } from "../shared/atisAnalysis";
 
 test.skip(process.env.APTLSS_UI_ONLY !== "true", "Intercepted Home contracts run only through the UI-only fixture configuration.");
 
@@ -11,13 +12,19 @@ const op = (kind: AtisOperation["kind"], state: AtisOperation["state"] = "runnin
     ? { totalBoards: 2, totalCards: 7, newBoards: 1, newCards: 3 }
     : { processed: 7, failed: 0 } } : {}),
 });
+const analysisId = "11111111-1111-4111-8111-111111111111";
+const analysisJob = (state: "running" | "completed" = "running"): AtisAnalysisJob => ({
+  id: analysisId, state, matched: 7, total: 7, remaining: 0, processed: state === "completed" ? 7 : 0,
+  generated: state === "completed" ? 7 : 0, fallback: 0, missing: 0, failed: 0, uncertain: 0, pending: state === "completed" ? 0 : 7,
+  items: Array.from({ length: 7 }, (_, index) => ({ cardId: index + 1, cardName: `Selected card ${index + 1}`, state: state === "completed" ? "generated" : "pending" })),
+});
 
 async function homeFixture(page: Page, baseURL: string, info: TestInfo) {
   const origin = new URL(baseURL).origin;
   const calls: Call[] = [];
   const unexpected: string[] = [];
   const errors: string[] = [];
-  const model = { active: [] as AtisOperation[], sync: op("sync"), analysis: op("understanding"),
+  const model = { active: [] as AtisOperation[], sync: op("sync"), analysis: analysisJob(),
     analysisConflict: false, statusUnavailable: false };
   page.on("pageerror", error => errors.push(error.message));
   await page.clock.install({ time: new Date("2026-10-21T12:00:00Z") });
@@ -46,14 +53,22 @@ async function homeFixture(page: Page, baseURL: string, info: TestInfo) {
       return route.fulfill({ json: url.searchParams.has("batch") ? results : results[0] });
     }
     if (url.pathname === "/api/atis/operations/active") return route.fulfill({ json: { operations: model.active } });
-    if (/^\/api\/atis\/operations\/(41|42)$/.test(url.pathname)) {
+    if (url.pathname === "/api/atis/operations/41") {
       if (model.statusUnavailable) return route.fulfill({ status: 503, json: { error: "Synthetic status read unavailable" } });
-      return route.fulfill({ json: { operation: url.pathname.endsWith("/41") ? model.sync : model.analysis } });
+      return route.fulfill({ json: { operation: model.sync } });
     }
     if (url.pathname === "/api/atis/sync" && request.method() === "POST") return route.fulfill({ status: 202, json: { operation: model.sync } });
+    if (url.pathname === "/api/atis/understanding/preview" && request.method() === "POST") return route.fulfill({ json: { preview: {
+      id: analysisId, expiresAt: "2026-10-21T12:10:00Z", matched: 7, total: 7, remaining: 0,
+      cards: Array.from({ length: 7 }, (_, index) => ({ id: index + 1, name: `Selected card ${index + 1}` })),
+    } } });
+    if (url.pathname === `/api/atis/understanding/analyses/${analysisId}`) return route.fulfill({
+      status: model.analysisConflict ? 404 : 200,
+      json: model.analysisConflict ? { error: "Analysis not found" } : { analysis: model.analysis },
+    });
     if (url.pathname === "/api/atis/understanding/process" && request.method() === "POST") {
       return route.fulfill({ status: model.analysisConflict ? 409 : 202, json: {
-        operation: model.analysis,
+        ...(model.analysisConflict ? { operation: op("understanding") } : { analysis: model.analysis }),
         ...(model.analysisConflict ? { requestedNotStarted: true, error: "A different request is running. This request was not started." } : {}),
       } });
     }
@@ -73,6 +88,7 @@ async function homeFixture(page: Page, baseURL: string, info: TestInfo) {
     return route.fulfill({ status: 503, json: { error: "Unconfigured browser fixture" } });
   });
   const posts = () => calls.filter(call => call.method === "POST");
+  const confirmations = () => posts().filter(call => (call.body as { phase?: string } | null)?.phase === "confirm");
   const queueReads = () => calls.filter(call => call.path === "/api/atis/timeline-tasks?filter=all");
   const successToasts = page.locator('[data-sonner-toast][data-type="success"]');
   const status = page.getByRole("status", { name: "Sync and analysis status" });
@@ -94,7 +110,7 @@ async function homeFixture(page: Page, baseURL: string, info: TestInfo) {
     await page.screenshot({ path: info.outputPath(`${name}.png`), fullPage: true });
     await info.attach(name, { path: info.outputPath(`${name}.png`), contentType: "image/png" });
   };
-  return { calls, model, posts, queueReads, successToasts, status, tick, flush, ready, open, proof,
+  return { calls, model, posts, confirmations, queueReads, successToasts, status, tick, flush, ready, open, proof,
     verify: async () => {
       expect(errors, "No uncaught browser errors").toEqual([]);
       expect(unexpected, "Every API request is explicitly intercepted").toEqual([]);
@@ -119,28 +135,39 @@ test.describe("Admin Home async ATIS browser contracts (intercepted API, no data
     await fixture.proof("sync-pending-no-success");
     fixture.model.sync = op("sync", "completed");
     await fixture.tick();
-    await expect(fixture.status).toContainText("Card analysis is running on the server");
+    const dialog = page.getByRole("dialog", { name: "Card analysis" });
+    await expect(dialog).toContainText("7 selected of 7 matched. 0 remain outside this batch.");
     await fixture.flush();
     await expect.poll(() => fixture.queueReads().length).toBe(reads + 1);
-    expect(fixture.posts().map(call => call.path)).toEqual(["/api/atis/sync", "/api/atis/understanding/process"]);
+    expect(fixture.posts().map(call => call.path)).toEqual(["/api/atis/sync", "/api/atis/understanding/preview"]);
+    expect(fixture.confirmations()).toHaveLength(0);
     await expect(fixture.successToasts).toContainText(["Synced 2 boards and 7 cards from Trello"]);
-    await expect(page.getByRole("button", { name: "Syncing from Trello" })).toBeDisabled();
-    expect(fixture.posts()[1].body).toEqual({ limit: 50 });
-    fixture.model.analysis = op("understanding", "completed");
+    expect(fixture.posts()[1].body).toEqual({ selection: { mode: "pending", limit: 100 } });
+    await dialog.getByRole("button", { name: "Confirm analysis of 7 cards" }).click();
+    await expect(dialog).toContainText("Analysis in progress");
+    await expect(dialog.getByRole("button", { name: "Confirm analysis of 7 cards" })).toHaveCount(0);
+    expect(fixture.confirmations()).toHaveLength(1);
+    expect(fixture.confirmations()[0].body).toMatchObject({ phase: "confirm", previewId: analysisId, requestKey: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+    expect(fixture.queueReads()).toHaveLength(reads + 1);
+    await expect(fixture.successToasts).toHaveCount(1);
+    fixture.model.analysis = analysisJob("completed");
     await fixture.tick();
-    await expect(fixture.status).toContainText("Card analysis completed");
+    await expect(dialog).toContainText("Batch finished");
+    await expect(dialog).toContainText("7 plans ready");
     await fixture.flush();
     await expect.poll(() => fixture.queueReads().length).toBe(reads + 2);
-    await expect(sync).toBeEnabled();
-    await expect(fixture.successToasts).toHaveCount(2);
+    await expect(fixture.successToasts).toHaveCount(1);
     await expect(fixture.successToasts.filter({ hasText: "Synced 2 boards and 7 cards from Trello" })).toBeVisible();
-    await expect(fixture.successToasts.filter({ hasText: "AI analyzed 7 cards" })).toBeVisible();
-    expect(fixture.posts()).toHaveLength(2);
+    await expect(fixture.successToasts.filter({ hasText: "AI analyzed 7 cards" })).toHaveCount(0);
+    expect(fixture.confirmations()).toHaveLength(1);
+    expect(fixture.posts()).toHaveLength(3);
     await fixture.proof("analysis-completed-refreshed");
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(sync).toBeEnabled();
     await fixture.verify();
   });
 
-  test("reload observes an existing sync without POSTing or automatically chaining new analysis", async ({ page, baseURL }, info) => {
+  test("reload observes an existing sync without restarting it or confirming new analysis", async ({ page, baseURL }, info) => {
     const fixture = await homeFixture(page, baseURL!, info);
     fixture.model.active = [op("sync")];
     await fixture.open();
@@ -153,10 +180,10 @@ test.describe("Admin Home async ATIS browser contracts (intercepted API, no data
     await expect(fixture.successToasts).toHaveCount(0);
     fixture.model.sync = op("sync", "completed");
     await fixture.tick();
-    await expect(fixture.status).toContainText("Trello sync completed");
-    await expect(page.getByRole("button", { name: "Analyze synced cards" })).toBeEnabled();
-    expect(fixture.posts()).toHaveLength(0);
-    await fixture.proof("reload-observes-no-post");
+    await expect(page.getByRole("dialog", { name: "Card analysis" })).toContainText("7 selected of 7 matched");
+    expect(fixture.posts().map(call => call.path)).toEqual(["/api/atis/understanding/preview"]);
+    expect(fixture.confirmations()).toHaveLength(0);
+    await fixture.proof("reload-observes-preview-without-confirmation");
     await fixture.verify();
   });
 
@@ -166,21 +193,27 @@ test.describe("Admin Home async ATIS browser contracts (intercepted API, no data
     fixture.model.sync = op("sync", "completed");
     await fixture.open();
     await page.getByRole("button", { name: "Sync from Trello", exact: true }).click();
-    const alert = page.getByRole("alert", { name: "Sync and analysis status" });
-    await expect(alert).toContainText("Your request was not started");
+    const dialog = page.getByRole("dialog", { name: "Card analysis" });
+    await expect(dialog).toContainText("7 selected of 7 matched");
+    expect(fixture.confirmations()).toHaveLength(0);
+    await dialog.getByRole("button", { name: "Confirm analysis of 7 cards" }).click();
+    await expect(dialog).toContainText("Cannot confirm analysis status");
     await fixture.flush();
-    await expect.poll(() => fixture.posts().length).toBe(2);
+    await expect.poll(() => fixture.posts().length).toBe(3);
     await expect.poll(() => fixture.successToasts.count()).toBe(1); // Only the genuinely completed sync.
     const reads = fixture.queueReads().length;
     await fixture.tick();
-    expect(fixture.posts()).toHaveLength(2);
+    expect(fixture.posts()).toHaveLength(3);
     expect(fixture.queueReads()).toHaveLength(reads);
-    fixture.model.analysis = op("understanding", "completed");
-    await page.getByRole("button", { name: "Check status", exact: true }).click();
-    await expect(fixture.status).toContainText("Your different request was not started");
+    fixture.model.analysis = analysisJob("completed");
+    await dialog.getByRole("button", { name: "Check analysis status", exact: true }).click();
+    await expect(dialog).toContainText("original request could still commit or incur usage");
+    await expect(dialog.getByRole("button", { name: "Review a new preview despite unknown outcome" })).toBeDisabled();
+    await expect(dialog).not.toContainText("Batch finished");
     expect(fixture.queueReads()).toHaveLength(reads);
     await expect(page.getByText("AI analyzed 7 cards", { exact: true })).toHaveCount(0);
-    expect(fixture.posts()).toHaveLength(2);
+    expect(fixture.posts()).toHaveLength(3);
+    expect(fixture.confirmations()).toHaveLength(1);
     await fixture.proof("conflict-not-this-request-success");
     await fixture.verify();
   });
