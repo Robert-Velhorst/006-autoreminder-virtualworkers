@@ -1,5 +1,22 @@
 # Consolidation Ledger
 
+## Active Review: PR #148
+
+PR #148 contains the complete PR #147 history plus scheduled creator approval.
+PR #147 was closed as superseded, not merged or accepted. Its candidate head
+`53feeb8ddebf7dff38c47ec2374c2068a6790870` is preserved by remote annotated tag
+`archive/batch-history-authority-candidate-20261021`, object
+`03f28eea00dcc0c2962410b77e2e614802c706d2`, with the peeled head verified before
+removing its matching branch using an expected-SHA lease.
+
+The remote branch inventory now consists of `main` and the PR #148 branch.
+All six registered local worktrees were inspected: no tracked changes or
+untracked application source were found at that checkpoint. Detached candidate
+heads remain preserved by remote archive tags. Runtime/evidence artifacts are
+not a claim that operational data or credentials were uploaded to GitHub.
+PR #148 still needs its complete exact-head quality result and resolution of
+the two open CodeQL findings before normal consolidation into `main`.
+
 ## Superseded Candidate Archive: October 21, 2026
 
 PR #146 head `dd23e75df25e229a3acaa0d153ecc4ddc34e9061` is fully contained in

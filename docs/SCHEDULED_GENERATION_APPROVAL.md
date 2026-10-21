@@ -100,3 +100,15 @@ to make the harness pass. The final local browser rerun passed all 56 cases
 with no skips; a separate read-only review found no blocker in the proof change.
 Linux acceptance still requires the new exact-head
 hosted result; local Windows traces alone do not establish the Linux cause.
+
+Run `39582024300` subsequently passed all 41 scheduling browser cases at
+`0e64dd6`. Its inline Linux trace showed nine Tab steps (six native date-field
+retentions, checkbox, Close, CTA), directly explaining the old eight-step limit.
+The run failed later in digest recovery, so it is not overall quality acceptance.
+That separate test now drains each attention response body and observes query
+settlement between controlled clock advances and before reloading. Its console
+error checks, 409 input retention, 31-second coverage and one-POST/no-replay
+assertions remain intact. No digest application code or error allowlist changed;
+the exact original network/body interruption is not claimed as reproduced.
+The corrected scenario passed five bounded local repetitions; the complete
+digest browser suite then passed all 13 cases and the temporary server exited.
