@@ -58,6 +58,13 @@ take precedence over recorded minutes; only when both are absent does the
 existing duration helper derive elapsed time from actual start/end. No recorded
 duration is replaced or financial row repriced.
 
+Derived elapsed time rounds to the nearest whole second, matching normal timer
+stops and integer compliance snapshots. This is read-time normalization only:
+the precise original timestamps and absent duration columns remain unchanged.
+CSV exports retain raw fields and append normalized duration, ownership and
+history-completeness fields; do not sum raw minute values when recorded seconds
+take precedence or treat an incomplete export as a confirmed total.
+
 Paid founder cycles, overlapping paid worker weekly logs, and locked day reviews
 reject recovery. SHARE table locks serialize concurrent settlement writes until
 the recovery transaction completes. A settlement committed first is checked;

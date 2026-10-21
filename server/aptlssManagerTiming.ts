@@ -72,7 +72,8 @@ function unionMinutes(intervals: readonly TimeInterval[]) {
   }
 
   if (start !== null && end !== null) totalMilliseconds += end - start;
-  return totalMilliseconds / 60_000;
+  // Keep interval clipping/deduplication, then apply the canonical whole-second policy.
+  return Math.round(totalMilliseconds / 1000) / 60;
 }
 
 export function aggregateManagerTimeSamples(

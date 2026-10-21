@@ -284,7 +284,7 @@ describe.skipIf(!url)('canonical timer full-migration PostgreSQL acceptance', { 
     expect(absent.durationSeconds).toBeNull(); expect(absent.durationMinutes).toBeNull();
     expect(absent.startTime.toISOString()).toBe('2026-10-01T09:00:00.123Z');
     expect(absent.endTime!.toISOString()).toBe('2026-10-01T09:37:00.000Z');
-    expect(recordedSeconds(absent)).toBeCloseTo(2219.877, 3);
+    expect(recordedSeconds(absent)).toBe(2220);
   });
 
   it.each(['paid', 'locked', 'weekly'] as const)('rejects real PostgreSQL %s overlap without changing timer or audit', async kind => {
@@ -369,7 +369,7 @@ describe.skipIf(!url)('canonical timer full-migration PostgreSQL acceptance', { 
       const row = (await western.select().from(schema.timeEntries))[0];
       expect(row.startTime.toISOString()).toBe('2026-10-01T09:00:00.123Z');
       expect(row.endTime!.toISOString()).toBe('2026-10-01T09:37:00.000Z');
-      expect(recordedSeconds(row)).toBeCloseTo(2219.877, 3);
+      expect(recordedSeconds(row)).toBe(2220);
       expect(row.durationSeconds).toBeNull(); expect(row.durationMinutes).toBeNull();
     } finally {
       if (previousTZ === undefined) delete process.env.TZ; else process.env.TZ = previousTZ;

@@ -199,6 +199,7 @@ export async function collectComplianceSnapshot(
   if (!db) throw new Error("Database not available");
   const operatorContext = await resolveWorkerOperatorContextById(worker.userId, db);
   if (operatorContext.profileId !== worker.id || operatorContext.founderId !== worker.founderId) throw new Error('Worker ownership changed before compliance collection');
+  if (!(await timeCompleteness(db, worker.founderId)).complete) throw new Error('Historical time requires ownership review before compliance totals');
   const dateKey = dateKeyInTimeZone(now, operatorContext.timezone);
   console.log(`[ManusScheduler] Collecting compliance for ${worker.name} on ${dateKey}`);
 
@@ -257,6 +258,7 @@ export async function collectComplianceSnapshot(
     email.status === "pending" && !email.suggestedNextAction?.trim() && !email.llmSummary?.trim()
   ).length;
   const emailMissed = Math.max(0, emails.length - emailCompleted);
+  // Provider reads can await while historical ownership changes.
   if (!(await timeCompleteness(db, worker.founderId)).complete) throw new Error('Historical time requires ownership review before compliance totals');
   const trackedSeconds = trackedEntries.reduce((total, entry) => total + recordedSeconds(entry), 0);
   const scheduledTargetSeconds = calculateScheduledTargetSeconds(operatorContext, dateKey);

@@ -1,5 +1,5 @@
 import { timeCompleteness } from '../canonicalTimer';
-import { recordedMinutes } from '../../shared/timerDuration';
+import { recordedMinutes, recordedSeconds } from '../../shared/timerDuration';
 import { Router } from 'express';
 import { and, eq, inArray } from 'drizzle-orm';
 import { getDb } from '../db';
@@ -72,9 +72,14 @@ router.get('/export', async (req, res) => {
       res.setHeader('X-Time-History-Complete', String(completeness.complete));
       res.setHeader('X-Unresolved-Time-Entries', String(completeness.unresolvedEntryCount));
       const rows = [
-        ['id', 'trackedUserId', 'trackedProfileId', 'legacyVaId', 'founderId', 'taskId', 'durationMinutes', 'startTime', 'endTime', 'source'],
+        ['id', 'trackedUserId', 'trackedProfileId', 'legacyVaId', 'founderId', 'taskId', 'durationMinutes', 'startTime', 'endTime', 'source',
+          'durationSeconds', 'isVoided', 'recordedSeconds', 'recordedMinutes',
+          'ownershipVerified', 'historyComplete', 'unresolvedEntryCount'],
         ...times.map(entry => [entry.id, entry.trackedUserId, entry.trackedProfileId, entry.vaId, entry.founderId, entry.taskId, entry.durationMinutes,
-          entry.startTime.toISOString(), entry.endTime?.toISOString(), entry.source]),
+          entry.startTime.toISOString(), entry.endTime?.toISOString(), entry.source, entry.durationSeconds, entry.isVoided,
+          entry.trackedUserId == null ? null : recordedSeconds(entry),
+          entry.trackedUserId == null ? null : recordedMinutes(entry),
+          entry.trackedUserId != null, completeness.complete, completeness.unresolvedEntryCount]),
       ];
       res.type('text/csv').attachment('time-entries.csv');
       return res.send(serializeCsv(rows));

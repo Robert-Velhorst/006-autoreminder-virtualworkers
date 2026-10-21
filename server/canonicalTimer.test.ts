@@ -78,6 +78,12 @@ describe('canonical timer transaction behavior', () => {
     { endTime: new Date(), durationSeconds: 61, durationMinutes: 2, expected: 61 },
     { endTime: new Date(), durationMinutes: 2, expected: 120 },
     { endTime: new Date(), durationSeconds: -5, expected: 0 },
+    { startTime: '2026-10-01T09:00:00.123Z', endTime: '2026-10-01T09:37:00.000Z', expected: 2220 },
+    { startTime: '2026-10-01T09:00:00.000Z', endTime: '2026-10-01T09:00:00.400Z', expected: 0 },
+    { startTime: '2026-10-01T09:00:00.000Z', endTime: '2026-10-01T09:00:00.600Z', expected: 1 },
+    { startTime: 'invalid', endTime: 'invalid', expected: 0 },
+    { startTime: '2026-10-01T10:00:00Z', endTime: '2026-10-01T09:00:00Z', expected: 0 },
+    { startTime: '2026-10-01T09:00:00Z', endTime: '2026-10-01T10:00:00Z', durationSeconds: 61, expected: 61 },
   ])('applies the shared duration policy %#', ({ expected, ...entry }) => {
     expect(recordedSeconds(entry)).toBe(expected);
   });
