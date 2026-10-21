@@ -116,10 +116,12 @@ the URL without an `ssl` override. Node.js then verifies the certificate and
 hostname using its TLS trust configuration. Set `REDIS_URL` only
 when an external Redis service is configured. Do not commit `.env`.
 
-**The production PostgreSQL service and VA Dashboard database do not yet
-exist.** The owner intends to consolidate their GitHub tools on a shared
-open-source PostgreSQL service. Provision the service with private network
-access, TLS, automated backups, and tested recovery. Create a separate VA
+**The approved production PostgreSQL target and VA Dashboard database have not
+been confirmed for this application.** The owner intends to consolidate their
+GitHub tools on a shared open-source PostgreSQL service. Confirm that intended
+service before provisioning another one; lack of configuration in this repo is
+not evidence that no shared service exists elsewhere. Verify private network
+access, TLS, automated backups, and tested recovery. Create or verify a separate VA
 Dashboard database and least-privilege role; other apps must have separate
 databases and credentials. No legacy data source or import plan has been
 identified. Apply this app's migrations to the new database, then test backup,

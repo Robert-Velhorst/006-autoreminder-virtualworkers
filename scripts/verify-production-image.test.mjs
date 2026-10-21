@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import assert from "node:assert/strict";
+import { runInNewContext } from "node:vm";
 import { verifyProductionImage } from "./verify-production-image.mjs";
 
 const ok = { status: 0, stdout: "", stderr: "" };
@@ -25,7 +27,58 @@ function driver(overrides = {}) {
 }
 
 describe("production image verification isolation", () => {
-  it("accepts only all eight checks with no provider network", () => {
+  function executeRuntimeCheck({ installed = [], store = [], missingImport } = {}) {
+    const run = driver();
+    verifyProductionImage("fixture:release", run);
+    const script = run.mock.calls.find(([args]) => args[0] === "run")[0].at(-1);
+    const icon = Buffer.alloc(24);
+    Buffer.from("89504e470d0a1a0a", "hex").copy(icon);
+    icon.writeUInt32BE(144, 16);
+    icon.writeUInt32BE(144, 20);
+    const modules = {
+      "node:assert/strict": assert,
+      "node:fs": {
+        readdirSync: path => path === "/app" ? [] : store,
+        existsSync: path => installed.includes(path),
+        readFileSync: path => path === "dist/aptlss-build.json"
+          ? JSON.stringify({ bundleHash: "fixture", collectorPackageHash: "fixture" })
+          : path.endsWith(".png") ? icon : Buffer.from("fixture"),
+      },
+      "node:crypto": { createHash: () => ({ update: () => ({ digest: () => "fixture" }) }) },
+      "@trpc/server": { initTRPC: { create() {} } },
+      "@trpc/server/adapters/express": { createExpressMiddleware() {} },
+      "@trpc/client": { createTRPCProxyClient() {} },
+      "@trpc/react-query": { createTRPCReact() {} },
+    };
+    const require = name => {
+      if (!(name in modules) || name === missingImport) throw new Error("Missing module: " + name);
+      return modules[name];
+    };
+    require.resolve = name => { throw new Error("Not installed: " + name); };
+    runInNewContext(script, { require, process: { getuid: () => 1001 } });
+  }
+
+  it("executes the actual runtime script for an intact minimal fixture", () => {
+    expect(() => executeRuntimeCheck()).not.toThrow();
+  });
+
+  it.each(["npm", "npx", "yarn", "yarnpkg"])("rejects a runtime containing %s", tool => {
+    expect(() => executeRuntimeCheck({ installed: ["/usr/local/bin/" + tool] })).toThrow(/must not enter/);
+  });
+
+  it("rejects npm package payload even without its command shim", () => {
+    expect(() => executeRuntimeCheck({ installed: ["/usr/local/lib/node_modules/npm"] })).toThrow(/npm must not enter/);
+  });
+
+  it.each(["typescript@7.0.2", "@typescript+typescript-linux-x64@7.0.2"])("rejects unused compiler payload %s", compiler => {
+    expect(() => executeRuntimeCheck({ store: [compiler] })).toThrow(/Compiler packages/);
+  });
+
+  it.each(["@trpc/server", "@trpc/server/adapters/express", "@trpc/client", "@trpc/react-query"])("rejects removal of runtime dependency %s", missingImport => {
+    expect(() => executeRuntimeCheck({ missingImport })).toThrow(/Missing module/);
+  });
+
+  it("accepts runtime checks with no provider network", () => {
     const run = driver();
     expect(verifyProductionImage("fixture:release", run)).toMatchObject({
       passed: true,
@@ -35,6 +88,13 @@ describe("production image verification isolation", () => {
       .filter(([args]) => args[0] === "run")
       .map(([args]) => args);
     expect(containers).toHaveLength(2);
+    const runtimeScript = containers[0].at(-1);
+    expect(runtimeScript).toContain('/usr/local/lib/node_modules/npm');
+    expect(runtimeScript).toContain('["npm", "npx", "yarn", "yarnpkg"]');
+    expect(runtimeScript).toContain('require.resolve("typescript")');
+    expect(runtimeScript).toContain('name.startsWith("@typescript+typescript-")');
+    expect(runtimeScript).toContain('require("@trpc/server/adapters/express")');
+    expect(runtimeScript).toContain('require("@trpc/client")');
     const names = containers.map(args => args[args.indexOf("--name") + 1]);
     expect(new Set(names).size).toBe(2);
     for (const args of containers) {

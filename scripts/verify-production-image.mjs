@@ -84,6 +84,16 @@ export function verifyProductionImage(image, run = docker) {
     assert.equal(icon.readUInt32BE(16), 144);
     assert.equal(icon.readUInt32BE(20), 144);
     assert.throws(() => require.resolve("vitest"));
+    assert.throws(() => require.resolve("typescript"));
+    assert(!fs.readdirSync("node_modules/.pnpm").some(name => name.startsWith("typescript@") || name.startsWith("@typescript+typescript-")), "Compiler packages must not enter the runtime image");
+    assert.equal(typeof require("@trpc/server").initTRPC.create, "function");
+    assert.equal(typeof require("@trpc/server/adapters/express").createExpressMiddleware, "function");
+    assert.equal(typeof require("@trpc/client").createTRPCProxyClient, "function");
+    assert.equal(typeof require("@trpc/react-query").createTRPCReact, "function");
+    assert(!fs.existsSync("/usr/local/lib/node_modules/npm"), "npm must not enter the runtime image");
+    for (const tool of ["npm", "npx", "yarn", "yarnpkg"]) {
+      assert(!fs.existsSync("/usr/local/bin/" + tool), tool + " must not enter the runtime image");
+    }
   `,
   ]);
   if (runtimeCheck.status !== 0)
@@ -112,6 +122,9 @@ export function verifyProductionImage(image, run = docker) {
       "collector-integrity",
       "icon",
       "no-vitest",
+      "no-typescript-compiler",
+      "trpc-runtime-imports",
+      "no-package-manager",
       "fail-closed-startup",
     ],
   };

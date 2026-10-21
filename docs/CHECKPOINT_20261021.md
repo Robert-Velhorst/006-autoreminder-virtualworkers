@@ -108,6 +108,30 @@ Runtime and isolated PostgreSQL image acceptance passed for the same image.
 That older security-branch image is not acceptance of the financial source,
 the complete workflow, real providers or a Hetzner deployment.
 
+## Accepted Financial Source And Image Integration
+
+PR144 was accepted at `c43dee70fadc49522fc4c3fe42285bc37cb5ecb2` and normally
+merged as `b92be39f88d66e4f53fae782900b70705f9ade90`. Both trees equal
+`12ed4cfa58c5f3a35da0f144ff92d5b65c26c279`. Quality `39557268165` and CodeQL
+`39557267429` plus its aggregate passed: 4,952 Vitest tests with 22 skips,
+99 Node contracts, all 29 native financial cases, eight financial browser
+cases, 1,041 manager service tests and 97 manager browser cases. The acceptance
+also includes configured PostgreSQL image checks and isolated backup/restore;
+it does not prove the live data cutover, providers or human shadow trial.
+
+The accepted head is preserved under the verified annotated remote tag
+`archive/financial-authority-acceptance-20261021`. Its remote development branch
+was deleted using its expected full SHA after archive and merge-tree comparison.
+After image-security integration merge `be5eea6` contained it, guarded local
+branch deletion also succeeded; no forced deletion was needed.
+
+PR135 separately passed full quality `39557333508` at `f391013`, including
+a real zero-finding image report without exceptions. The current integration
+retains both financial and image-security Node contracts, the scoped compiler
+peer removals and the final-stage zlib patch. It must pass fresh exact-head
+checks before its own merge; neither predecessor receipt accepts the combined
+source automatically.
+
 ## Cleanup Boundaries
 
 Only source, tests and documentation are published. Private environment files,

@@ -30,7 +30,8 @@ image acceptance, browser checks and isolated backup/restore. The repair adds
 server-owned initiation and a browser-bound single-use database transaction,
 with UTC database-clock expiry checked after acquiring its row lock, and an
 authenticated-encryption browser binding. These tests do not establish real
-provider acceptance.
+provider acceptance. Separate post-merge main quality `39549562272` and
+Push-on-main `39549561798` also passed.
 
 PR #143's founder/task assignment repair was accepted at exact head
 `e57811c9cd40d5facb829c66074bea18e06a1f79`, with quality `39551621023` and
@@ -42,17 +43,43 @@ passed; this does not establish historical operational data acceptance. See
 [Assignment Identity Cutover](ASSIGNMENT_IDENTITY_CUTOVER.md) before operational
 migration; ambiguous historical assignments are never resolved automatically.
 
-Draft PR #144 preserves subsequent financial authority and passive-read work.
-Its local checkpoint and explicitly unverified portions are recorded in
-[Checkpoint](CHECKPOINT_20261021.md). Financial migration 0009 requires its own
-native acceptance and [cutover review](FINANCIAL_LEDGER_CUTOVER.md); a prior
-assignment or OAuth pass cannot accept later financial changes.
+PR [#144](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/144)
+accepted financial authority, fresh financial-read ownership, stale-save
+revision protection, request admission and passive timeline reads at reviewed
+head `c43dee70fadc49522fc4c3fe42285bc37cb5ecb2`. Quality `39557268165` and
+CodeQL workflow `39557267429` and its aggregate check passed. It merged as
+`b92be39f88d66e4f53fae782900b70705f9ade90`, with the identical tree
+`12ed4cfa58c5f3a35da0f144ff92d5b65c26c279`. The reviewed head is retained under
+verified annotated archive tag `archive/financial-authority-acceptance-20261021`.
+The remote financial branch was subsequently deleted with an exact-SHA lease;
+its local ref was removed by guarded deletion after integration merge `be5eea6`
+contained the source. No forced local deletion was used. These gates cover
+source acceptance, not operational financial-data
+reconciliation; follow [Financial Ledger Cutover](FINANCIAL_LEDGER_CUTOVER.md)
+before applying migration 0009 to historical production data.
+
+The actual reviewed-head quality log records 4,952 passing Vitest cases with
+22 skips, 99 Node contracts, 1,041 manager checks, 97 manager Chromium cases
+(15.2 minutes), 29/29 financial native cases and 8/8 financial browser cases.
+These are separate suite results, not an additive count of unique scenarios.
+The older [checkpoint](CHECKPOINT_20261021.md) describes the earlier incomplete
+state and does not supersede this accepted-head evidence.
 
 PR [#135](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/135)
-retains the separate exact-image vulnerability and promotion gate. Its workflow
-cannot start under the current selected-Action policy. Permission for the one
-pinned official artifact upload action remains an owner decision; neither
-removing evidence retention nor broadening permissions is a substitute.
+retains the separate exact-image vulnerability and promotion gate. The one
+pinned official artifact-upload Action was approved as the sole allowlist
+addition, resolving the earlier policy blocker without bypassing it. Earlier
+head `f391013` passed full CI `39557333508`: the exact production-image scan
+covered 633 packages with zero vulnerabilities and no exceptions, and positive
+PostgreSQL acceptance confirmed cleanup for the same image. This is isolated
+source/image proof, not acceptance of a live host or provider.
+
+The current local PR #135 source includes generic credential documentation
+commit `0ab95ce` and completed merge `be5eea6` of accepted main. The resulting
+integration must pass fresh exact-head quality, CodeQL, exact-image security and
+acceptance gates before consolidation. Prior PR #135 or PR #144 results cannot
+be transferred to this changed source. No external-provider acceptance,
+production cutover or human shadow trial was performed by these checks.
 
 The dated results below describe earlier source revisions. The live acceptance
 requirements remain in [Production Cutover](PRODUCTION_CUTOVER.md), and branch

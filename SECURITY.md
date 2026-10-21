@@ -18,6 +18,8 @@ If a credential is committed, assume it is compromised even after removing it fr
 
 Deployments should use HTTPS, least-privilege provider credentials, private database/cache networks, restricted administrative accounts, backups, and the current supported container image. Never publish `.env` files, database dumps, tokens, or runtime state as package assets.
 
+The [Container Image Security contract](docs/IMAGE_SECURITY.md) requires exact-artifact scanning, fail-closed HIGH/CRITICAL decisions including unfixed findings, and approved exact-scoped exceptions lasting no more than 30 days. Its default exception list is empty; documentation is not proof of a passing release gate or a production deployment.
+
 ## Output boundaries
 
 Use the shared CSV serializer for exports and escape untrusted email-template

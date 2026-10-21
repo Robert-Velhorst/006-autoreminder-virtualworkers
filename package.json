@@ -13,7 +13,7 @@
     "check": "tsc --noEmit",
     "check:db-transfer": "tsc --noEmit --ignoreConfig --target ES2022 --module ESNext --moduleResolution bundler --esModuleInterop --skipLibCheck --types node scripts/migrate-mysql-to-postgres.ts server/scripts/mysqlPostgresTransferCore.ts",
     "format": "prettier --write .",
-    "test": "vitest run --maxWorkers=4 && node --test e2e/api-rate-window.test.mjs scripts/operator-data-transfer-utils.test.mjs scripts/verify-postgres-production-image.test.mjs deployment/hetzner/production-gate.test.mjs deployment/hetzner/deploy-script.test.mjs deployment/hetzner/deploy-script.integration.test.mjs",
+    "test": "vitest run --maxWorkers=4 && node --test e2e/api-rate-window.test.mjs scripts/operator-data-transfer-utils.test.mjs scripts/verify-postgres-production-image.test.mjs scripts/image-vulnerability-policy.test.mjs scripts/scan-production-image.test.mjs scripts/promote-scanned-image.test.mjs scripts/image-release-workflow.test.mjs deployment/hetzner/production-gate.test.mjs deployment/hetzner/deploy-script.test.mjs deployment/hetzner/deploy-script.integration.test.mjs",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",

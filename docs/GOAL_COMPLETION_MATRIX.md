@@ -2,22 +2,64 @@
 
 Statuses describe the repository, not provider consent outside the repository.
 
-## Current Boundary, 2026-10-21
+## Current Release Decision, 2026-10-21
 
-The dated MySQL implementation and rehearsal sections below are historical,
-not the current deployment target. The supported target is one persistent
-application container with separately provisioned shared PostgreSQL and optional
-external Redis. Follow [Production Cutover](PRODUCTION_CUTOVER.md) and
-[Technical Audit](TECHNICAL_AUDIT.md) for current requirements and exact accepted
-source revisions. Do not start an additional permanent dashboard or remove
-private data/recovery archives while consolidating source branches.
+**Not cleared for production deployment or active automatic planning.** The
+accepted PR #144 source receipt is `c43dee7`. PR #144 merged as
+`b92be39f88d66e4f53fae782900b70705f9ade90`, with a tree identical to
+`12ed4cfa58c5f3a35da0f144ff92d5b65c26c279`. Quality run `39557268165`,
+CodeQL `39557267429` and the aggregate gate succeeded. The current PR #135
+integration needs fresh exact-head gates; its earlier successful image receipt
+does not certify the new merge. This supersedes older source/publication/branch
+observations below, not their retained historical evidence. A passed source gate
+is not a live deployment receipt or acceptance of every production path.
 
-Canonical timer and OAuth changes have accepted source checkpoints on main.
-Assignment identity work and the separate image-security publication gate still
-require their own acceptance. An accepted source tree is not evidence that the
-real shared database, Hetzner host, external accounts or human shadow trial are
-ready. The objective remains incomplete until those gates and the verified
-normal consolidation to main are finished.
+The supported target is one persistent application container with separately
+provisioned shared PostgreSQL and optional external Redis. The dated MySQL
+implementation and rehearsal sections below are historical, not another runtime
+target. Do not start an additional permanent dashboard or remove private data
+and recovery archives while consolidating source branches.
+
+| Requirement | Verified current evidence | Remaining acceptance |
+| --- | --- | --- |
+| Consolidate local source without losing history | Timer, OAuth, assignment and financial PRs were merged with reviewed-tree comparisons. PR #144's merge `b92be39f88d66e4f53fae782900b70705f9ade90` has tree `12ed4cfa58c5f3a35da0f144ff92d5b65c26c279`, matching accepted source `c43dee7`. Earlier archive/consolidation receipts remain historical evidence. | Finish PR #135 integration and fresh exact-head acceptance before claiming normal consolidation to `main`. Preserve unique source/history and its branch until authorized archival/removal; do not claim only `main` while it exists. |
+| Canonical runtime and additive data model | Persistent Node 26.12.0 application, PostgreSQL 18.6 fixtures, 140 canonical application tables and migrations through `0009_financial_ledger_authority`. Assignment and financial audit additions are additive; historical migrations are not another runtime backend. | Provision and test the actual shared PostgreSQL service, dedicated application database and least-privilege role. Reconcile any transferred data against its source and preserve rollback evidence; synthetic fixtures and transfer tooling do not prove a real import. |
+| Source safety and regressions | Accepted PR #144 quality run `39557268165` passed 4,952 Vitest tests with 22 skips, 99 Node tests, 1,041 manager tests, 97 manager Chromium cases, 29/29 native financial cases and 8/8 financial browser cases. CodeQL `39557267429` and the aggregate gate were green. Counts describe separate gates, not additive coverage of every feature. | Require fresh quality, native, browser, image and security gates for the current integration. Source tests do not verify real provider delivery, target-host recovery or unexamined roadmap criteria; the two ATIS gaps below remain source work. |
+| Durable notification delivery and recovery | PR #134 records exact digest membership, immutable payload/address, dispatch phases, lease fencing and audited recovery. Final provider-boundary checks cover consent, address and worker-access changes during provider preparation. Issue #75 is closed against its regression evidence. | Verify the selected live provider and operator recovery procedure. Provider acceptance is not inbox receipt; uncertain results must not become silent replay permission. |
+| Image vulnerability enforcement | PR #135 checkpoint `f391013` passed real built-image scanning: 633 packages, zero vulnerabilities and no accepted exceptions. Quality run `39557333508` also passed configured PostgreSQL image acceptance and the full CI gate; CodeQL was green. The exact-pinned action approval was applied; other action-policy entries were unchanged. | Rerun all required gates on the new integration head and retain its exact-image receipt. Require protected-main verification and a real release's exact-digest scan, configured PostgreSQL acceptance, attestation and same-digest promotion. Earlier previews are not proof of this gate or a new accepted release; do not bypass artifact/action policy. |
+| Private information and historical credentials | Accepted source has secret-scan evidence. Private configuration, recovery archives and operational data are not source publication artifacts. Provider-specific remediation documentation was removed in favor of generic historical credential-remediation guidance. Historical alerts #1 and #4 remain open; the owner declined deletion. | Do not treat documentation removal or owner-declined deletion as credential remediation or alert closure. Verify authorized rotation/revocation and record the remaining historical exposure boundary without publishing secret values. Private backups are not a data-migration receipt. |
+| Deployable release and infrastructure | The repository contains guarded deployment and exact-artifact release tooling. Existing `v1.0.0-rc.1` remains a historical, non-production preview. Synthetic configured-image acceptance exists, not an accepted target-host deployment. | Verify the actual host/domain, private runtime configuration, shared database/TLS, backups/restore and authorized deployment credentials. Publish/promote only a freshly accepted exact artifact, then perform authorized deployment, rollback and operator checks. Infrastructure and real deployment remain unverified. |
+| Real operator and integration acceptance | Authenticated synthetic browser, source-contract and database tests exist. Their account and provider scopes remain explicit. | Verify real owner/worker access, Google/Trello/browser callbacks and freshness, WebSockets, schedulers and recovery on the target environment. Mocked transports and local previews are not live-account acceptance. |
+| Reliable APTLSS activation | Shadow-mode controls and regression evidence remain available. No calibrated probability of future correctness is claimed. | At least five working days and 100 human-reviewed proposals, Robert's review of urgent conflicts, zero critical errors and at least 98 correct and sufficiently supported proposals; begin active operation with one worker only after acceptance. |
+
+The remaining issue inventory must be checked against current code and tests,
+not treated as either proven defects or automatically completed work. Existing
+capability criteria that have not been inspected remain unproven. Do not close
+broader security or integration issues using a narrow digest or UI test result.
+
+Accepted source now includes account offboarding, output escaping, canonical
+timer ownership, browser-bound legacy OAuth state, founder/full-task assignment
+identity and atomic audited financial ledger changes with optimistic save
+revisions. Do not repeat earlier audits as if those paths were unchanged, or
+equate their bounded acceptance with all source being production-ready.
+
+The latest read-only ATIS audit against `c43dee7` retains two concrete gaps:
+legacy `reprocess-failed`, `reprocess/:cardId` and `reanalyze-all` routes call
+provider analysis outside durable operation admission/lease fencing, while
+their request-rate limit is not a per-card analysis quota; and bulk clients
+request 200/500 cards while the server silently caps selection at 100 without
+explicit continuation. The ordinary understanding process endpoint already
+uses durable operations. Preserve the legacy features and clients while adding
+bounded confirmed selection, durable execution/quota controls and truthful
+batch completion. These gaps and unexamined criteria remain source work;
+infrastructure is not the only remaining acceptance.
+
+Use [Image Security](IMAGE_SECURITY.md),
+[Notification Delivery](NOTIFICATION_DELIVERY.md),
+[Consolidation Ledger](CONSOLIDATION_LEDGER.md), and
+[Production Cutover](PRODUCTION_CUTOVER.md), alongside
+[Technical Audit](TECHNICAL_AUDIT.md), for the current contracts. The
+records below retain their original source, database, artifact and date scopes.
 
 ## Release Decision, 2026-10-02
 
@@ -497,6 +539,15 @@ webhook acceptance.
 - A stable public callback is registered for push webhooks.
 
 ## Container Lifecycle Constraint, 2026-10-01
+
+**Historical runtime description superseded:** the MySQL/Redis/tunnel stack
+below describes the former deployment, not the current target. Use one
+application container with separately provisioned shared PostgreSQL and
+optional external Redis, as specified in [Production Cutover](PRODUCTION_CUTOVER.md).
+Retain existing data and recovery archives until authorized migration/cutover;
+this supersession does not authorize deleting a former database volume.
+The one temporary verification workspace and exact-owned-resource cleanup
+constraints remain in force.
 
 Robert requested one operational VA Dashboard instance instead of accumulated
 test instances. Keep the existing `joyce-work-schedule` application and its

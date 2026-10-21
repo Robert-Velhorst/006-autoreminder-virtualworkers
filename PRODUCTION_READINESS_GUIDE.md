@@ -12,8 +12,10 @@ only.
 ## Readiness status
 
 Production cutover is **not yet verified**. The owner intends to consolidate
-their GitHub tools on a shared open-source PostgreSQL service, but neither that
-service nor the VA Dashboard database has been provisioned. Use a separate
+their GitHub tools on a shared open-source PostgreSQL service. The approved
+target service and VA Dashboard database have not been confirmed for this
+application. Check for the intended shared service before provisioning another
+one. Use a separate
 database and least-privilege role for this app. No legacy data source or import
 plan has been identified; do not run the retained MySQL transfer utility unless
 a real source is identified and an import is approved. The Hetzner deployment
@@ -22,8 +24,9 @@ as live acceptance.
 
 ## Required release gates
 
-1. Provision the shared PostgreSQL service and an isolated VA Dashboard
-   database/least-privilege role. Define network access, TLS, automated backup,
+1. Confirm the approved shared PostgreSQL service and provision only what is
+   missing, including an isolated VA Dashboard database/least-privilege role.
+   Define network access, TLS, automated backup,
    and a restore-tested recovery procedure.
 2. Run `pnpm db:migrate` on the new PostgreSQL database. Only define a transfer
    path if an existing source containing VA Dashboard data is identified and
