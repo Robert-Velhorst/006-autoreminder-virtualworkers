@@ -1,3 +1,4 @@
+import { matchesTimerWhere } from '../test/timerDatabase';
 import type { Request } from 'express';
 import express from 'express';
 import request from 'supertest';
@@ -32,7 +33,7 @@ function inArrayParameters(sql: string, params: unknown[], column: string) {
 function createDatabase(profiles: Row[], entries: Row[], tasks: Row[] = []) {
   const queriedTables: unknown[] = [];
   const db = {
-    select: vi.fn(() => {
+    select: vi.fn((selection?: Row) => {
       let table: unknown;
       let condition: unknown;
       const query: any = {
@@ -50,6 +51,8 @@ function createDatabase(profiles: Row[], entries: Row[], tasks: Row[] = []) {
             if (founderId !== undefined) rows = rows.filter(row => row.founderId === founderId);
             if (vaIds) rows = rows.filter(row => vaIds.includes(row.vaId));
           }
+          if (condition) rows = rows.filter(row => matchesTimerWhere(row, condition));
+          if (selection?.count) rows = [{ count: rows.length }];
           return Promise.resolve(rows).then(resolve, reject);
         },
       };
@@ -83,9 +86,9 @@ function assignedTask(id: number, taskId: string, vaId: number, founderId: numbe
   };
 }
 
-function timeEntry(id: number, vaId: number, founderId: number, source: string) {
+function timeEntry(id: number, vaId: number, founderId: number, source: string, trackedUserId: number | null = null, trackedProfileId: number | null = null) {
   return {
-    id,
+    id, trackedUserId, trackedProfileId, isVoided: false,
     vaId,
     founderId,
     taskId: 'task-' + id,
@@ -155,8 +158,8 @@ describe('reports worker object authorization boundary', () => {
       { id: 9, userId: 88, founderId: 7, status: 'active' },
       { id: 4, userId: 42, founderId: 8, status: 'inactive' },
     ], [
-      timeEntry(51, 42, 7, 'active-worker-legacy-entry'),
-      timeEntry(52, 3, 7, 'active-worker-profile-entry'),
+      timeEntry(51, 42, 7, 'active-worker-legacy-entry', 42, 3),
+      timeEntry(52, 3, 7, 'active-worker-profile-entry', 42, 3),
       timeEntry(53, 88, 7, 'other-worker-legacy-entry'),
       timeEntry(54, 9, 7, 'other-worker-profile-entry'),
       timeEntry(55, 42, 8, 'other-founder-legacy-entry'),

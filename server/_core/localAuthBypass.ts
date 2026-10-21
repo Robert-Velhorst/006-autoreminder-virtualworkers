@@ -39,6 +39,7 @@ function requestIsLoopback(req: Request) {
 }
 
 export async function resolveLocalBypassUser(req: Request): Promise<User | null> {
+  if (process.env.NODE_ENV === "production") return null;
   if (!isLocalAuthBypassEnabled() || !requestIsLoopback(req)) return null;
 
   const db = await getDb();

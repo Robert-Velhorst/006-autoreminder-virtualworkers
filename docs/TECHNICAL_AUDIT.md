@@ -1,5 +1,40 @@
 # Technical Audit
 
+## Latest Source Acceptance Boundary: October 21, 2026
+
+The configured PostgreSQL production-image gate was accepted in PR
+[#140](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/140)
+at source `5f237b01f84f3254108882d797902fc5b68f23a1`, merged as
+`5af68da3216986bef1b26f634f9abb2e264d0a28`. The isolated check exercised verified
+database TLS, canonical migrations, a restricted application role, actual HTTP
+authentication and worker offboarding, and confirmed fixture cleanup. This is
+not acceptance of the real Hetzner host, providers, or operational data.
+
+PR [#141](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/141)
+merged canonical timer identity and worker-interface changes as
+`df5c9f3f8af3c06723fe0d1992a50d6153ed4410`, with an identical tree to reviewed
+head `386aab90401312d48f818d3e8c3ccb6ab2266d76`. That head passed quality
+`39543523895` and CodeQL `39543520471`: 4,460 Vitest cases with 22 skips,
+all 17 native cross-reader cases, configured image acceptance, browser gates
+and isolated backup/restore. Earlier failed candidates remain failed historical
+evidence. The merged-main run and any later source need their own acceptance.
+
+Independent source review still confirms application blockers: issue #95's
+nontransactional assignment upsert lacks founder/task uniqueness, and issue
+#52's legacy OAuth callback lacks browser-bound single-use initiation. Their
+fixes require scoped native/route regression evidence; timer correctness or
+current Google OAuth protections do not establish these separate requirements.
+
+PR [#135](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/135)
+retains the separate exact-image vulnerability and promotion gate. Its workflow
+cannot start under the current selected-Action policy. Permission for the one
+pinned official artifact upload action remains an owner decision; neither
+removing evidence retention nor broadening permissions is a substitute.
+
+The dated results below describe earlier source revisions. The live acceptance
+requirements remain in [Production Cutover](PRODUCTION_CUTOVER.md), and branch
+disposition is tracked in [Consolidation Ledger](CONSOLIDATION_LEDGER.md).
+
 ## Architecture
 
 The application is one persistent Node service with a React client, Express
@@ -34,8 +69,9 @@ canonical identity, evidence, planning and scheduled-job records.
   fabricating unsupported per-task detail.
 - Corrected batch pause targeting so a queue-row control always affects the
   selected running operation rather than an unrelated primary job.
-- Repaired PostgreSQL migration/schema parity; an isolated migrated PostgreSQL
-  18.6 fixture has exactly 137 expected tables, with no missing or extra columns.
+- Repaired PostgreSQL migration/schema parity; PR #140's isolated migrated
+  PostgreSQL 18.6 fixture verified 138 expected tables. Later schema changes
+  require a new full parity check, not reuse of this earlier result.
 - Added one-time owner access recovery without enabling public registration.
 - Made administrator ATIS sync/analysis asynchronous: durable operation IDs,
   bounded status polling, explicit interruption recovery, request deduplication,

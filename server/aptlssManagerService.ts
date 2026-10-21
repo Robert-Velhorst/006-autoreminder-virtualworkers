@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { timeCompleteness } from "./canonicalTimer";
 import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   aptlssManagerRuns, aptlssManagerChecks, aptlssManagerState, aptlssManagerUpdates, aptlssManagerCorrections, aptlssPlans, aptlssSteps,
@@ -83,20 +84,23 @@ export async function loadManagerTimingHistory(db: Db, vaId: number) {
 /** Only explicit source links are joined. Text similarity alone never grants data access. */
 export async function collectManagerInput(db: Db, vaId: number, now: Date): Promise<ManagerInput> {
   assertManagerPilotWorker(vaId);
-  const [assignmentState, plans, states, scores, steps, waiting, times, mails, updates, outcomes, cached] = await Promise.all([
+  const [assignmentState, plans, states, scores, steps, waiting, fetchedTimes, mails, updates, outcomes, cached] = await Promise.all([
     readManagerAssignmentState(db, vaId),
     db.select().from(aptlssPlans).where(eq(aptlssPlans.vaId, vaId)).orderBy(aptlssPlans.cardId).limit(LIMIT + 1),
     db.select().from(cardStates).where(eq(cardStates.vaId, vaId)).orderBy(cardStates.cardId).limit(LIMIT + 1),
     db.select().from(priorityScores).where(eq(priorityScores.vaId, vaId)).orderBy(priorityScores.cardId).limit(LIMIT + 1),
     db.select().from(aptlssSteps).where(eq(aptlssSteps.vaId, vaId)).orderBy(aptlssSteps.cardId, aptlssSteps.stepNumber).limit(5001),
     db.select().from(aptlssWaitingReasons).where(and(eq(aptlssWaitingReasons.vaId, vaId), eq(aptlssWaitingReasons.status, "active"))).orderBy(desc(aptlssWaitingReasons.createdAt), desc(aptlssWaitingReasons.id)).limit(LIMIT + 1),
-    db.select().from(timeEntries).where(and(eq(timeEntries.vaId, vaId), eq(timeEntries.isVoided, false))).orderBy(desc(timeEntries.id)).limit(5001),
+    db.select().from(timeEntries).where(and(eq(timeEntries.trackedUserId, vaId), eq(timeEntries.isVoided, false))).orderBy(desc(timeEntries.id)).limit(5001),
     db.select().from(emailTasks).where(eq(emailTasks.vaId, vaId)).orderBy(desc(emailTasks.receivedAt), desc(emailTasks.id)).limit(501),
     db.select().from(aptlssManagerUpdates).where(eq(aptlssManagerUpdates.vaId, vaId)).orderBy(desc(aptlssManagerUpdates.id)).limit(501),
     db.select().from(decisionOutcomes).where(eq(decisionOutcomes.vaId, vaId)).orderBy(desc(decisionOutcomes.id)).limit(501),
     db.select().from(trelloCachedCards).where(eq(trelloCachedCards.userId, vaId)).orderBy(desc(trelloCachedCards.cachedAt)).limit(1001),
   ]);
   const gaps: string[] = [];
+  const times = assignmentState.profile ? fetchedTimes.filter(entry => entry.founderId === assignmentState.profile!.founderId) : [];
+  const historyStatus = assignmentState.profile ? await timeCompleteness(db, assignmentState.profile.founderId) : { complete: false, unresolvedEntryCount: 0 };
+  if (!historyStatus.complete) gaps.push("Historical timer ownership requires operator review; execution totals and estimates are incomplete.");
   const assignmentCoverage = assessManagerAssignmentCoverage(assignmentState, plans, steps);
   if (!assignmentState.profile) gaps.push("The worker assignment source is unavailable or ambiguous. Restore one active worker profile before trusting full coverage.");
   if (assignmentState.truncated) gaps.push("The active assignment list exceeds this cycle's safe capacity; not all assigned work was checked.");
@@ -232,13 +236,13 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
   const events = entryIds.length ? await db.select().from(timeEntryEvents).where(inArray(timeEntryEvents.timeEntryId, entryIds)).orderBy(desc(timeEntryEvents.id)).limit(10001) : [];
   // Build one event index so history size cannot multiply scan work per timer row.
   const timing = aggregateManagerTimeSamples(times.slice(0, 5000), steps, events);
-  if (events.length > 10000 || times.length > 5000) {
+  if (!historyStatus.complete || events.length > 10000 || fetchedTimes.length > 5000) {
     timing.samples.length = 0;
     gaps.push("Time history was truncated; incomplete execution samples are excluded from personal estimates and accuracy measurement.");
   }
   const graphConflicts = [...new Map(openConflictLinks.map(({conflict:c,cardId}) => [`${c.id}:${cardId}`, { id: `graph:${c.id}`, cardId, evidenceIds: [`evidence:${c.sourceEvidenceId}:${cardId}`, `evidence:${c.assertedEvidenceId}:${cardId}`], status: c.status, severity: "urgent", explanation: c.resolution ?? "Source and worker statements disagree; review the retained evidence." }])).values()];
   if (openConflictLinks.length > 1500) for (const cardId of ids) graphConflicts.push({ id: `conflict-capacity:${cardId}`, cardId, evidenceIds: [], status: "needs_verification", severity: "urgent", explanation: "Open conflict coverage is incomplete. Verify this task's unresolved source conflicts before continuing." });
-  const executionCoverageComplete = cards.length > 0 && assignmentCoverage.complete && plans.length <= LIMIT && states.length <= LIMIT && scores.length <= LIMIT
+  const executionCoverageComplete = historyStatus.complete && cards.length > 0 && assignmentCoverage.complete && plans.length <= LIMIT && states.length <= LIMIT && scores.length <= LIMIT
     && steps.length <= 5000 && waiting.length <= LIMIT && mails.length <= 500 && updates.length <= 500
     && outcomes.length <= 500 && cached.length <= 1000 && linked.length <= EVIDENCE_LIMIT && graph.length <= EVIDENCE_LIMIT
     && messages.length <= EVIDENCE_LIMIT && revisions.length <= 5000 && conflicts.length <= 1500 && openConflictLinks.length <= 1500;
@@ -258,7 +262,8 @@ export async function collectManagerInput(db: Db, vaId: number, now: Date): Prom
     });
     for (const target of selected.withheldTargets) withheld.push({ cardId: card.id, ...target, actionKind });
   }
-  return { now: now.toISOString(), cards, evidence, timeSamples: timing.samples, sourceGaps: gaps, graphConflicts, timeSummary: timing.timeSummary, executionCoverageComplete,
+  return { now: now.toISOString(), cards, evidence, timeSamples: timing.samples, sourceGaps: gaps, graphConflicts,
+    timeSummary: { ...timing.timeSummary, ...historyStatus }, executionCoverageComplete,
     assignmentFingerprint: assignmentState.fingerprint,
     learning: { stateHash: hash(learningHashes), guidance, withheld } };
 }
@@ -575,7 +580,8 @@ export function managerCoverageMatchesSnapshot(snapshot: Pick<ManagerSnapshot, "
 async function executionScope(db: Db, vaId: number, now: Date) {
   const worker = await resolveWorkerOperatorContextById(vaId, db);
   const dateKey = dateKeyInTimeZone(now, worker.timezone);
-  const [timer] = await db.select().from(timeEntries).where(and(eq(timeEntries.vaId, vaId), eq(timeEntries.isVoided, false), isNull(timeEntries.endTime))).orderBy(timeEntries.startTime).limit(1);
+  const [timer] = await db.select().from(timeEntries).where(and(eq(timeEntries.trackedUserId, vaId), eq(timeEntries.isVoided, false), isNull(timeEntries.endTime))).orderBy(timeEntries.startTime).limit(1);
+  if (timer && timer.founderId !== (worker.founderId ?? vaId)) throw new Error('A previous-founder timer must be closed by its historical founder before current execution can continue.');
   const [plan] = await db.select().from(dailyPlans).where(and(eq(dailyPlans.vaId, vaId), eq(dailyPlans.dateKey, dateKey))).limit(1);
   const state = await stateAndSnapshot(db, vaId);
   return { worker, dateKey, timer: timer ?? null, plan, state, fingerprintScope: {

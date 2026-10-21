@@ -27,9 +27,10 @@ import { collectComplianceSnapshot, startManusScheduler, stopManusScheduler } fr
 
 const worker = { id: 7, userId: 41, founderId: 9, name: "Synthetic worker", timezone: "UTC",
   status: "active", trelloMemberId: "synthetic-member" } as typeof vaProfiles.$inferSelect;
+const operatorContext = { userId: worker.userId, profileId: worker.id, founderId: worker.founderId, timezone: 'UTC' };
 
 function timer(id = 1, overrides: Partial<typeof timeEntries.$inferSelect> = {}): typeof timeEntries.$inferSelect {
-  return { id, taskId: `task-${id}`, vaId: worker.userId, founderId: worker.founderId,
+  return { id, taskId: `task-${id}`, vaId: null, trackedUserId: worker.userId, trackedProfileId: worker.id, founderId: worker.founderId,
     cardId: `card-${id}`, cardName: `Card ${id}`, cardUrl: null, boardName: "Board", listName: "DOING",
     startTime: new Date("2026-09-30T23:00:00Z"), endTime: null, durationSeconds: null,
     durationMinutes: null, notes: null, source: "manus", category: "client_work",
@@ -133,6 +134,7 @@ describe("Manus automatic timer stop ownership", () => {
     vi.setSystemTime(new Date("2026-10-01T00:00:00Z"));
     vi.spyOn(console, "log").mockImplementation(() => {});
     controls.notify.mockResolvedValue(true);
+    controls.operator.mockResolvedValue(operatorContext);
     vi.stubEnv("NOTIFICATIONS_ENABLED", "true");
   });
   afterEach(() => {
@@ -211,7 +213,7 @@ describe("Manus automatic timer stop ownership", () => {
   });
 
   it("stops only running, non-voided worker-account timers in this founder scope", async () => {
-    const { state } = database([timer(), timer(2, { vaId: worker.id }), timer(3, { founderId: 88 }),
+    const { state } = database([timer(), timer(2, { trackedUserId: worker.id }), timer(3, { founderId: 88 }),
       timer(4, { isVoided: true }), timer(5, { endTime: new Date("2026-09-30T23:30:00Z") })]);
     const lease = ownership();
     await expect(scheduledWork(lease.context)).resolves.toMatchObject({ recordsProcessed: 1 });
@@ -349,7 +351,7 @@ describe("Manus automatic timer stop ownership", () => {
       return [];
     });
     controls.comments.mockResolvedValue(new Set());
-    controls.operator.mockResolvedValue({});
+    controls.operator.mockResolvedValue(operatorContext);
     controls.target.mockReturnValue(0);
     await expect(collectComplianceSnapshot(worker, "auto", lease.context)).rejects.toBeInstanceOf(ScheduledJobLeaseLostError);
     expect(insert).not.toHaveBeenCalled();
@@ -361,7 +363,7 @@ describe("Manus automatic timer stop ownership", () => {
     vi.stubEnv("TRELLO_TOKEN", "synthetic-token");
     controls.cards.mockResolvedValue([]);
     controls.comments.mockResolvedValue(new Set());
-    controls.operator.mockResolvedValue({});
+    controls.operator.mockResolvedValue(operatorContext);
     controls.target.mockReturnValue(0);
     await expect(collectComplianceSnapshot(worker, "manual")).resolves.toMatchObject({ vaId: worker.userId, source: "manual" });
     expect(insert).toHaveBeenCalledTimes(1);
@@ -374,7 +376,7 @@ describe("Manus automatic timer stop ownership", () => {
     vi.stubEnv("TRELLO_TOKEN", "synthetic-token");
     controls.cards.mockResolvedValue([]);
     controls.comments.mockResolvedValue(new Set());
-    controls.operator.mockResolvedValue({});
+    controls.operator.mockResolvedValue(operatorContext);
     controls.target.mockReturnValue(0);
     await expect(collectComplianceSnapshot(worker, "auto", lease.context)).resolves.toMatchObject({ vaId: worker.userId });
     expect(lease.assertOwnership).toHaveBeenCalledTimes(2);

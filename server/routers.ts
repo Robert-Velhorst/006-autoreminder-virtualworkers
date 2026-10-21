@@ -43,7 +43,13 @@ export const appRouter = router({
       const user = opts.ctx.user;
       // Reject mock/legacy users — they must re-register with local auth
       if (user?.loginMethod === 'mock') return null;
-      return user;
+      if (!user) return null;
+      // Session and credential material must remain server-side, including future fields.
+      return {
+        id: user.id, openId: user.openId, name: user.name, email: user.email,
+        loginMethod: user.loginMethod, role: user.role,
+        createdAt: user.createdAt, updatedAt: user.updatedAt, lastSignedIn: user.lastSignedIn,
+      };
     }),
     logout: publicProcedure.mutation(async ({ ctx }) => {
       try {
@@ -117,7 +123,7 @@ export const appRouter = router({
               .where(eq(vaProfiles.userId, workerUserId))
               .limit(1)
             : [];
-          const cardContext = await aggregateCardContext(input.taskId, workerProfile?.id);
+          const cardContext = await aggregateCardContext(input.taskId, workerUserId);
           const taskDescription = formatContextForAI(cardContext);
           const sessionId = await createAnalysisSession(input.taskId, String(ctx.user.id));
 

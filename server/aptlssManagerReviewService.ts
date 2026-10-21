@@ -1,3 +1,4 @@
+import { assertTimerIdentityReady } from "./canonicalTimer";
 import { createHash, randomUUID } from "node:crypto";
 import {
   and,
@@ -1314,12 +1315,13 @@ export async function restoreManagerPlan(
         throw new Error(
           "The plan has changed since this run. Automatic rollback would overwrite newer work."
         );
+      await assertTimerIdentityReady(tx);
       const [timer] = await tx
         .select({ id: timeEntries.id })
         .from(timeEntries)
         .where(
           and(
-            eq(timeEntries.vaId, vaId),
+            eq(timeEntries.trackedUserId, vaId),
             eq(timeEntries.isVoided, false),
             isNull(timeEntries.endTime)
           )

@@ -3,6 +3,7 @@ import type { Express, Request, Response } from "express";
 import * as db from "../db";
 import { getSessionCookieOptions } from "./cookies";
 import { sdk } from "./sdk";
+import { sessionIdentityProof } from "./sessionIdentity";
 
 function getQueryParam(req: Request, key: string): string | undefined {
   const value = req.query[key];
@@ -36,9 +37,12 @@ export function registerOAuthRoutes(app: Express) {
         lastSignedIn: new Date(),
       });
 
+      const account = await db.getUserByOpenId(userInfo.openId);
+      if (!account) throw new Error("Account unavailable");
       const sessionToken = await sdk.createSessionToken(userInfo.openId, {
         name: userInfo.name || "",
         expiresInMs: ONE_YEAR_MS,
+        expectedIdentity: sessionIdentityProof(account),
       });
 
       const cookieOptions = getSessionCookieOptions(req);

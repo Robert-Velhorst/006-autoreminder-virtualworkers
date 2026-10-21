@@ -20,7 +20,7 @@ const password = "synthetic-long-password";
 const endpoint = "/api/auth/owner-bootstrap";
 const app = express().use(express.json()).use("/api/auth", localAuthRoutes);
 
-function database(returnedRows: Array<{ id: number }> = [{ id: owner.id }]) {
+function database(returnedRows: Array<{ id: number; sessionEpoch?: string }> = [{ id: owner.id, sessionEpoch: "1" }]) {
   const returning = vi.fn().mockResolvedValue(returnedRows);
   const whereUpdate = vi.fn((_condition: SQL) => ({ returning }));
   const set = vi.fn(() => ({ where: whereUpdate }));
@@ -61,9 +61,9 @@ describe("one-time owner bootstrap compare-and-set", () => {
     expect(condition.sql).toContain('"users"."id" = $1');
     expect(condition.sql).toContain('"users"."passwordHash" is null');
     expect(condition.params).toEqual([owner.id]);
-    expect(db.returning).toHaveBeenCalledWith({ id: users.id });
+    expect(db.returning).toHaveBeenCalledWith({ id: users.id, sessionEpoch: users.sessionEpoch });
     expect(mocks.hash).toHaveBeenCalledWith(password, 12);
-    expect(mocks.createSessionToken).toHaveBeenCalledWith(owner.openId, { name: owner.name, expiresInMs: ONE_YEAR_MS });
+    expect(mocks.createSessionToken).toHaveBeenCalledWith(owner.openId, { name: owner.name, expiresInMs: ONE_YEAR_MS, expectedIdentity: { userId: owner.id, sessionEpoch: "1" } });
     expect(db.returning.mock.invocationCallOrder[0]).toBeLessThan(mocks.createSessionToken.mock.invocationCallOrder[0]);
     expect(response.headers["set-cookie"]).toEqual([expect.stringContaining(`${COOKIE_NAME}=synthetic-session`)]);
   });
@@ -95,7 +95,7 @@ describe("one-time owner bootstrap compare-and-set", () => {
       await bothLookedUp;
       return [owner];
     });
-    db.returning.mockResolvedValueOnce([{ id: owner.id }]).mockResolvedValueOnce([]);
+    db.returning.mockResolvedValueOnce([{ id: owner.id, sessionEpoch: "1" }]).mockResolvedValueOnce([]);
     mocks.getDb.mockResolvedValue(db);
     const responses = await Promise.all([
       request(app).post(endpoint).send({ token, password }),

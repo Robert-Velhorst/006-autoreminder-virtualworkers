@@ -7,8 +7,10 @@ import bcrypt from 'bcryptjs';
 import { createHash, timingSafeEqual } from 'crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import { COOKIE_NAME, ONE_YEAR_MS } from '@shared/const';
+import { HttpError } from '@shared/_core/errors';
 import { users, vaProfiles } from '../../drizzle/schema.postgres';
 import { sdk } from '../_core/sdk';
+import { sessionIdentityProof } from '../_core/sessionIdentity';
 import { getSessionCookieOptions } from '../_core/cookies';
 import * as db from '../db';
 import { isLocalRegistrationAllowed } from '../_core/localRegistration';
@@ -116,7 +118,7 @@ router.post('/owner-bootstrap', async (req: Request, res: Response) => {
     const updatedOwners = await database.update(users)
       .set({ passwordHash, loginMethod: 'local', lastSignedIn: new Date() })
       .where(and(eq(users.id, owner.id), isNull(users.passwordHash)))
-      .returning({ id: users.id });
+      .returning({ id: users.id, sessionEpoch: users.sessionEpoch });
     if (updatedOwners.length !== 1) {
       return res.status(409).json({ error: 'Owner setup is no longer available. No session was created.' });
     }
@@ -124,6 +126,7 @@ router.post('/owner-bootstrap', async (req: Request, res: Response) => {
     const sessionToken = await sdk.createSessionToken(owner.openId, {
       name: owner.name || owner.openId,
       expiresInMs: ONE_YEAR_MS,
+      expectedIdentity: sessionIdentityProof(updatedOwners[0]),
     });
     const cookieOptions = getSessionCookieOptions(req);
     res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
@@ -194,13 +197,17 @@ router.post('/register', async (req: Request, res: Response) => {
     // Store password hash
     const dbInstance = await (await import('../db')).getDb();
     if (!dbInstance) return respondDatabaseUnavailable(res);
+    let registeredIdentity;
     if (dbInstance) {
       const { users } = await import('../../drizzle/schema.postgres');
       const { eq } = await import('drizzle-orm');
-      await dbInstance
+      const [createdAccount] = await dbInstance
         .update(users)
         .set({ passwordHash })
-        .where(eq(users.openId, username));
+        .where(eq(users.openId, username))
+        .returning({ id: users.id, sessionEpoch: users.sessionEpoch });
+      if (!createdAccount) throw new Error('Account unavailable');
+      registeredIdentity = sessionIdentityProof(createdAccount);
     }
 
     console.log('[LocalAuth] User created successfully, creating session');
@@ -209,6 +216,7 @@ router.post('/register', async (req: Request, res: Response) => {
     const sessionToken = await sdk.createSessionToken(username, {
       name: name || username,
       expiresInMs: ONE_YEAR_MS,
+      expectedIdentity: registeredIdentity,
     });
 
     const cookieOptions = getSessionCookieOptions(req);
@@ -250,6 +258,7 @@ router.post('/login', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'This account does not have a local password. Use Sign in with Trello.' });
     }
 
+    const expectedIdentity = sessionIdentityProof(user);
     const valid = await bcrypt.compare(password, user.passwordHash);
     if (!valid) {
       return res.status(401).json({ error: 'Invalid username or password' });
@@ -265,6 +274,7 @@ router.post('/login', async (req: Request, res: Response) => {
     const sessionToken = await sdk.createSessionToken(username, {
       name: user.name || username,
       expiresInMs: ONE_YEAR_MS,
+      expectedIdentity,
     });
 
     const cookieOptions = getSessionCookieOptions(req);
@@ -273,6 +283,9 @@ router.post('/login', async (req: Request, res: Response) => {
     return res.json({ success: true, message: 'Logged in successfully' });
   } catch (error) {
     if (isDatabaseUnavailable(error)) return respondDatabaseUnavailable(res);
+    if (error instanceof HttpError && [401, 403].includes(error.statusCode)) {
+      return res.status(403).json({ error: 'Account access changed. Sign in again or contact your manager.' });
+    }
     console.error('[LocalAuth] Login failed');
     return res.status(500).json({ error: 'Login failed' });
   }
@@ -336,6 +349,15 @@ router.post('/trello/login-token', async (req: Request, res: Response) => {
     }
 
     const user = matchingUsers[0];
+    const expectedIdentity = sessionIdentityProof(user);
+    // The initial Trello match may predate a concurrent profile identity change.
+    // Capture the epoch first, then revalidate linkage; minting fences later changes.
+    const currentProfiles = await dbInstance.select().from(vaProfiles)
+      .where(and(eq(vaProfiles.userId, user.id), eq(vaProfiles.trelloMemberId, trelloId)))
+      .orderBy(vaProfiles.id);
+    if (selectWorkerProfile(currentProfiles)?.id !== vaProfile.id) {
+      return res.status(401).json({ error: 'Worker identity changed. Please sign in again.' });
+    }
 
     // Update last signed in
     await db.upsertUser({
@@ -347,6 +369,7 @@ router.post('/trello/login-token', async (req: Request, res: Response) => {
     const sessionToken = await sdk.createSessionToken(String(user.openId), {
       name: user.name || String(user.openId),
       expiresInMs: ONE_YEAR_MS,
+      expectedIdentity,
     });
 
     const cookieOptions = getSessionCookieOptions(req);

@@ -1,3 +1,4 @@
+import { matchesTimerWhere } from '../test/timerDatabase';
 import type { Request } from 'express';
 import express from 'express';
 import request from 'supertest';
@@ -56,18 +57,31 @@ function matchesWhere(row: Row, condition: unknown): boolean {
 }
 
 function database(profiles: Row[], tasks: Row[] = [], times: Row[] = []) {
+  // These fixtures explicitly model reviewed ownership. Colliding fixture
+  // identities remain unresolved; production code performs no such inference.
+  times.forEach(row => {
+    if (Object.prototype.hasOwnProperty.call(row, 'trackedUserId')) return;
+    const owners = profiles.filter(profile => profile.founderId === row.founderId &&
+      (profile.id === row.vaId || profile.userId === row.vaId));
+    const unique = [...new Map(owners.map(profile => [profile.id, profile])).values()];
+    row.trackedUserId = unique.length === 1 ? unique[0].userId : null;
+    row.trackedProfileId = unique.length === 1 ? unique[0].id : null;
+  });
   const db = {
-    select: vi.fn(() => {
+    select: vi.fn((selection?: Row) => {
       let table: unknown;
       let condition: unknown;
       const rows = () => {
         const source = table === vaProfiles ? profiles : table === taskAssignments ? tasks : table === timeEntries ? times : [];
-        return condition ? source.filter(row => matchesWhere(row, condition)) : source;
+        const found = condition ? source.filter(row => matchesTimerWhere(row, condition)) : source;
+        return selection?.count ? [{ count: found.length }] : found;
       };
       const query: any = {
         from: (value: unknown) => { table = value; return query; },
         where: (value: unknown) => { condition = value; return query; },
         orderBy: () => query,
+        limit: () => query,
+        catch: (reject: (error: unknown) => unknown) => Promise.resolve(rows()).catch(reject),
         then: (resolve: (value: Row[]) => unknown, reject: (error: unknown) => unknown) =>
           Promise.resolve(rows()).then(resolve, reject),
       };

@@ -1,4 +1,5 @@
 import type { ManagerAction, ManagerTimeSample } from "../shared/aptlssManager";
+import { recordedSeconds } from '../shared/timerDuration';
 
 type TimingPrediction = {
   cardId: string;
@@ -32,6 +33,7 @@ type TimingEntry = {
   durationSeconds: number | null;
   durationMinutes: number | null;
   notes?: string | null;
+  isVoided?: boolean;
 };
 
 type TimingStep = {
@@ -70,7 +72,8 @@ function unionMinutes(intervals: readonly TimeInterval[]) {
   }
 
   if (start !== null && end !== null) totalMilliseconds += end - start;
-  return totalMilliseconds / 60_000;
+  // Keep interval clipping/deduplication, then apply the canonical whole-second policy.
+  return Math.round(totalMilliseconds / 1000) / 60;
 }
 
 export function aggregateManagerTimeSamples(
@@ -95,9 +98,7 @@ export function aggregateManagerTimeSamples(
   const interruptedIntervals: TimeInterval[] = [];
 
   for (const entry of entries) {
-    const seconds = Number(
-      entry.durationSeconds ?? (entry.durationMinutes ?? 0) * 60,
-    );
+    const seconds = recordedSeconds(entry);
     const startedAt = timestamp(entry.startTime);
     const completedAt = timestamp(entry.endTime);
     if (

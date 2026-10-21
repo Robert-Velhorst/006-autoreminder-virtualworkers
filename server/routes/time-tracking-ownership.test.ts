@@ -19,14 +19,14 @@ function user(role: User['role']): User {
 
 describe('timeTrackingOwnership', () => {
   it('keeps worker time scoped to the signed-in worker and records the owning founder', () => {
-    expect(timeTrackingOwnership(user('worker'), 9)).toEqual({ vaId: 42, founderId: 9 });
+    expect(timeTrackingOwnership(user('worker'), 9)).toEqual({ trackedUserId: 42, vaId: null, founderId: 9 });
   });
 
   it('does not let an admin profile redirect the admin compatibility timer', () => {
-    expect(timeTrackingOwnership(user('admin'), 9)).toEqual({ vaId: 42, founderId: 42 });
+    expect(timeTrackingOwnership(user('admin'), 9)).toEqual({ trackedUserId: 42, vaId: null, founderId: 42 });
   });
 
   it('uses the worker account as a safe fallback when no profile is available', () => {
-    expect(timeTrackingOwnership(user('worker'))).toEqual({ vaId: 42, founderId: 42 });
+    expect(timeTrackingOwnership(user('worker'))).toEqual({ trackedUserId: 42, vaId: null, founderId: 42 });
   });
 });

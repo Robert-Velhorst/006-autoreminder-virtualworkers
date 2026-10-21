@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./db", () => ({ getDb: mocks.getDb }));
 vi.mock("bcryptjs", () => ({ default: { hash: mocks.hash } }));
 
-import { users, vaProfiles, workerInvitations } from "../drizzle/schema.postgres";
+import { users, vaProfiles, workerInvitations, workerLifecycleAudit } from "../drizzle/schema.postgres";
 import {
   acceptWorkerInvitation,
   createWorkerInvitation,
@@ -67,6 +67,7 @@ function createAcceptanceDatabase(fixture: InvitationFixture, token: string) {
           const read = async () => {
             if (lockForUpdate && fixture.lockWaitMs)
               await new Promise(done => setTimeout(done, fixture.lockWaitMs));
+            if (source === users) return [projectSelection(selection, fixture)];
             if (source !== workerInvitations) return [];
             if (
               fixture.invitation.tokenHash !==
@@ -82,6 +83,9 @@ function createAcceptanceDatabase(fixture: InvitationFixture, token: string) {
       };
       return query;
     },
+    insert: (table: unknown) => ({ values: async (values: Record<string, unknown>) => {
+      writes.push({ table, values });
+    } }),
     update: (table: unknown) => ({
       set: (rawValues: Record<string, unknown>) => ({
         where: async () => {
@@ -166,6 +170,7 @@ function activeInvitationFixture(
       name: "Invited Worker",
       role: "worker",
       passwordHash: null,
+      sessionEpoch: "4",
     },
     profile: {
       id: 21,
@@ -247,6 +252,8 @@ describe("worker invitation trust boundary", () => {
       tokenHash: hashWorkerInvitationToken(result.token),
     });
     expect(inserted.get(workerInvitations)?.tokenHash).not.toBe(result.token);
+    expect(inserted.get(workerLifecycleAudit)).toEqual({ actorUserId: 7, founderId: 7,
+      userId: result.userId, workerProfileId: result.vaId, action: "create", previousStatus: null, nextStatus: "inactive" });
   });
 
   it("rejects invalid founder IDs before creating any invitation", async () => {

@@ -1,3 +1,4 @@
+import { addDaysToDateKey, dateKeyInTimeZone, dateWindowInTimeZone, weekDateKeys } from '../../shared/workerTime';
 import { Router } from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { getDb } from '../db';
@@ -9,7 +10,9 @@ import { managerActionNeedsSourceVerification, managerActionSourceRequirements, 
 import { enqueueManagerTask } from '../aptlssManagerQueue';
 import { WORKER_EXECUTION_HOLD_MESSAGE } from '../../shared/aptlssManager';
 import { readManagerAssignmentState } from '../aptlssManagerAssignments';
-import { selectWorkerProfile } from '../workerOperatorContext';
+import { resolveWorkerOperatorContext, selectWorkerProfile } from '../workerOperatorContext';
+import { closeCanonicalTimer, insertCanonicalTimer, withTimerAccountTransaction, lockTimerAccount, requireEntryId, timerFailure, timeCompleteness, assertTimerIdentityReady } from '../canonicalTimer';
+import { recordedMinutes } from '../../shared/timerDuration';
 import { getGoogleEvidenceStatus } from '../googleEvidence';
 import { readCurrentManagerHistory } from '../aptlssManagerHistoryDb';
 
@@ -58,16 +61,15 @@ async function requireActiveWorkerProfileForTimeTracking(req: Request & { user?:
 
 export function timeTrackingOwnership(user: User, workerFounderId?: number | null, workerVaId = user.id) {
   return {
-    vaId: user.role === 'worker' ? workerVaId : user.id,
+    trackedUserId: user.id,
+    vaId: null,
     founderId: user.role === 'worker' ? workerFounderId ?? user.id : user.id,
   };
 }
 
-function nonNegativeDurationMinutes(entry: { durationMinutes?: number | null }) {
-  return Math.max(0, Number(entry.durationMinutes) || 0);
-}
+const nonNegativeDurationMinutes = recordedMinutes;
 
-type WorkerTimeTrackingProfile = { id: number; founderId: number; trelloMemberId: string | null; status: string };
+type WorkerTimeTrackingProfile = { id: number; founderId: number; trelloMemberId: string | null; status: string; timezone: string };
 
 type TimeTrackingScope = {
   vaIds: number[];
@@ -82,23 +84,23 @@ const AMBIGUOUS_TIME_ENTRY_OWNER_ERROR = 'Worker time-entry ownership overlaps a
 function timeEntryScopeWhere(scope: TimeTrackingScope) {
   return and(
     eq(timeEntries.founderId, scope.founderId),
-    inArray(timeEntries.vaId, scope.vaIds),
+    inArray(timeEntries.trackedUserId, scope.vaIds),
   );
 }
 
 function timeEntryCandidateScopeWhere(scope: TimeTrackingScope) {
   return and(
     eq(timeEntries.founderId, scope.founderId),
-    inArray(timeEntries.vaId, scope.candidateVaIds),
+    inArray(timeEntries.trackedUserId, scope.candidateVaIds),
   );
 }
 
-function timeEntryMatchesScope(entry: { vaId: number; founderId: number }, scope: TimeTrackingScope) {
-  return entry.founderId === scope.founderId && scope.vaIds.includes(entry.vaId);
+function timeEntryMatchesScope(entry: { trackedUserId: number | null; founderId: number }, scope: TimeTrackingScope) {
+  return entry.founderId === scope.founderId && entry.trackedUserId !== null && scope.vaIds.includes(entry.trackedUserId);
 }
 
-function timeEntryHasAmbiguousIdentity(entry: { vaId: number; founderId: number }, scope: TimeTrackingScope) {
-  return entry.founderId === scope.founderId && scope.ambiguousVaIds.includes(entry.vaId);
+function timeEntryHasAmbiguousIdentity(entry: { trackedUserId: number | null; founderId: number }, scope: TimeTrackingScope) {
+  return entry.founderId === scope.founderId && entry.trackedUserId === null;
 }
 
 async function resolveTimeTrackingScope(tx: any, user: User, lockWorkerProfile = false): Promise<TimeTrackingScope | null> {
@@ -112,7 +114,7 @@ async function resolveTimeTrackingScope(tx: any, user: User, lockWorkerProfile =
   let profileQuery = tx.select({
     id: vaProfiles.id,
     founderId: vaProfiles.founderId,
-    trelloMemberId: vaProfiles.trelloMemberId,
+    trelloMemberId: vaProfiles.trelloMemberId, timezone: vaProfiles.timezone,
     status: vaProfiles.status,
   }).from(vaProfiles).where(eq(vaProfiles.userId, user.id)).orderBy(vaProfiles.id);
   if (lockWorkerProfile) profileQuery = profileQuery.for('update');
@@ -120,47 +122,29 @@ async function resolveTimeTrackingScope(tx: any, user: User, lockWorkerProfile =
   const profileRows = await profileQuery as WorkerTimeTrackingProfile[];
   const profile = selectWorkerProfile(profileRows);
   if (!profile) return null;
-  const candidateIds = Array.from(new Set([user.id, profile.id]));
-  const profileCollisionRows = await tx.select({ id: vaProfiles.id, userId: vaProfiles.userId })
-    .from(vaProfiles).where(and(
-      eq(vaProfiles.founderId, profile.founderId),
-      inArray(vaProfiles.id, candidateIds),
-    ));
-  const accountCollisionRows = await tx.select({ id: users.id }).from(users)
-    .where(inArray(users.id, candidateIds));
-  const ambiguousVaIds = Array.from(new Set<number>([
-    ...profileCollisionRows
-      .filter((row: { id: number; userId: number }) => row.userId !== user.id)
-      .map((row: { id: number }) => row.id),
-    ...accountCollisionRows
-      .filter((row: { id: number }) => row.id !== user.id)
-      .map((row: { id: number }) => row.id),
-  ]));
-  return {
-    vaIds: candidateIds.filter(id => !ambiguousVaIds.includes(id)),
-    candidateVaIds: candidateIds,
-    ambiguousVaIds,
-    founderId: profile.founderId,
-    profile,
-  };
+  return { vaIds: [user.id], candidateVaIds: [user.id], ambiguousVaIds: [],
+    founderId: profile.founderId, profile };
+
 }
 
-async function withTimeTrackingScope<T>(
+type TimeTrackingObject = Record<string, unknown> & { readonly length?: never };
+
+async function withTimeTrackingScope<T extends TimeTrackingObject>(
   db: any,
   user: User,
   read: (connection: any, scope: TimeTrackingScope) => Promise<T>,
 ): Promise<{ status: 200; value: T } | { status: 403 | 409; error: string }> {
   if (user.role !== 'worker') {
-    return { status: 200, value: await read(db, {
+    return { status: 200, value: { ...await read(db, {
       vaIds: [user.id], candidateVaIds: [user.id], ambiguousVaIds: [], founderId: user.id, profile: null,
-    }) };
+    }), ...await timeCompleteness(db, user.id) } };
   }
 
   return db.transaction(async (tx: any) => {
     const scope = await resolveTimeTrackingScope(tx, user, true);
     if (!scope) return { status: 403 as const, error: 'An active worker profile is required' };
     if (!scope.vaIds.length) return { status: 409 as const, error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR };
-    return { status: 200 as const, value: await read(tx, scope) };
+    return { status: 200 as const, value: { ...await read(tx, scope), ...await timeCompleteness(tx, scope.founderId) } };
   });
 }
 
@@ -230,65 +214,18 @@ async function lockTaskAssignmentOwner(tx: any, workerFounderId: number, workerP
     : { kind: 'changed' as const };
 }
 
-async function transitionActiveTimer(user: User, transition: "stop" | "pause", notes?: string | null) {
+async function transitionActiveTimer(user: User, transition: "stop" | "pause", rawEntryId: unknown, notes?: string | null) {
+  const entryId = requireEntryId(rawEntryId);
   const db = await getDb();
   if (!db) return { status: 503, body: { error: 'Database not available' } };
-
-  return db.transaction(async tx => {
-    const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, user.id)).for('update');
-    if (!account) return { status: 401, body: { error: 'Account no longer exists' } };
-
-    const scope = await resolveTimeTrackingScope(tx, user, true);
-    if (!scope) return { status: 403, body: { error: 'An active worker profile is required' } };
-    if (!scope.vaIds.length) return { status: 409, body: { error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR } };
-
-    const entries = await tx.select().from(timeEntries).where(and(
-      timeEntryCandidateScopeWhere(scope), sql`${timeEntries.endTime} IS NULL`
-    )).orderBy(desc(timeEntries.startTime)).for('update');
-    if (entries.some((candidate: typeof timeEntries.$inferSelect) => timeEntryHasAmbiguousIdentity(candidate, scope))) {
-      return { status: 409, body: { error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR } };
-    }
-    const entry = entries.find((candidate: typeof timeEntries.$inferSelect) => timeEntryMatchesScope(candidate, scope));
-    if (!entry) {
-      const completedEntries = await tx.select().from(timeEntries).where(and(
-        timeEntryScopeWhere(scope), sql`${timeEntries.endTime} IS NOT NULL`,
-      )).orderBy(desc(timeEntries.endTime), desc(timeEntries.id)).limit(1);
-      const completed = completedEntries.find((candidate: typeof timeEntries.$inferSelect) =>
-        timeEntryMatchesScope(candidate, scope) && candidate.endTime !== null && !candidate.isVoided,
-      );
-      const wasPaused = typeof completed?.notes === 'string' && /\(paused\)\s*$/.test(completed.notes);
-      if (completed && (transition === 'stop' || wasPaused)) {
-        return transition === 'pause'
-          ? { status: 200, body: { success: true, entry: completed, paused: true, alreadyPaused: true, taskId: completed.taskId } }
-          : { status: 200, body: { success: true, entry: completed, alreadyStopped: true } };
+  const result = await closeCanonicalTimer(db, user, entryId, transition, { notes,
+    afterClose: async (tx, entry) => {
+      if (user.role === 'worker' && isManagerPilotWorker(user.id)) {
+        await enqueueManagerTask(tx, { vaId: user.id, trigger: "timer_changed", eventKey: `timer-closed:${entry.id}` });
       }
-      return { status: 400, body: { error: 'No active timer found' } };
-    }
-
-    const endTime = new Date();
-    const startTime = new Date(entry.startTime);
-    const durationMinutes = Math.max(0, Math.round((endTime.getTime() - startTime.getTime()) / 60000));
-    const finalNotes = transition === 'pause'
-      ? entry.notes ? `${entry.notes} (paused)` : '(paused)'
-      : notes || entry.notes;
-
-    await tx.update(timeEntries).set({ endTime, durationMinutes, notes: finalNotes })
-      .where(and(eq(timeEntries.id, entry.id), timeEntryScopeWhere(scope), sql`${timeEntries.endTime} IS NULL`));
-    if (user.role === 'worker' && isManagerPilotWorker(user.id)) {
-      await enqueueManagerTask(tx, {
-        vaId: user.id,
-        trigger: "timer_changed",
-        eventKey: `timer-${transition}:${entry.id}:${endTime.toISOString()}`,
-      });
-    }
-    const [updatedEntry] = await tx.select().from(timeEntries).where(and(
-      eq(timeEntries.id, entry.id), timeEntryScopeWhere(scope),
-    )).limit(1);
-
-    return transition === 'pause'
-      ? { status: 200, body: { success: true, entry: updatedEntry, paused: true, taskId: entry.taskId } }
-      : { status: 200, body: { success: true, entry: updatedEntry } };
+    },
   });
+  return { status: 200, body: result };
 }
 
 // Get active timer for a task (if any)
@@ -307,21 +244,30 @@ router.get('/time-tracking/active', async (req: any, res: Response) => {
     const result = await withTimeTrackingScope(db, user, async (connection, scope) => {
       const activeTimers = await connection.select()
         .from(timeEntries)
-        .where(and(timeEntryCandidateScopeWhere(scope), sql`${timeEntries.endTime} IS NULL`))
+        .where(and(eq(timeEntries.trackedUserId, user.id), eq(timeEntries.isVoided, false), sql`${timeEntries.endTime} IS NULL`))
         .orderBy(desc(timeEntries.startTime));
+      if (activeTimers.some((entry: typeof timeEntries.$inferSelect) => entry.founderId !== scope.founderId)) {
+        return { previousFounderTimer: true as const };
+      }
       if (activeTimers.some((entry: typeof timeEntries.$inferSelect) => timeEntryHasAmbiguousIdentity(entry, scope))) {
         return { ownershipAmbiguous: true as const };
       }
       const activeTimer = activeTimers.find((entry: typeof timeEntries.$inferSelect) => timeEntryMatchesScope(entry, scope));
+      if (!activeTimer) await assertTimerIdentityReady(connection);
       return activeTimer ? { active: true, entry: activeTimer } : { active: false, entry: null };
     });
     if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+    if ('previousFounderTimer' in result.value && result.value.previousFounderTimer) {
+      return res.status(409).json({ error: 'An active timer belongs to a previous founder. Ask that founder to close the exact entry before starting another timer.' });
+    }
     if ('ownershipAmbiguous' in result.value && result.value.ownershipAmbiguous) {
       return res.status(409).json({ error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR });
     }
     res.json(result.value);
   } catch (error) {
-    console.error('Error fetching active timer:', error);
+    const failure = timerFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error fetching active timer');
     res.status(500).json({ error: 'Failed to fetch active timer' });
   }
 });
@@ -345,9 +291,7 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
       return res.status(503).json({ error: 'Database not available' });
     }
 
-    const outcome = await db.transaction(async tx => {
-      const [account] = await tx.select({ id: users.id }).from(users).where(eq(users.id, user.id)).for('update');
-      if (!account) return { status: 401, body: { error: 'Account no longer exists' } };
+    const outcome = await withTimerAccountTransaction(db, user, async tx => {
       const scope = await resolveTimeTrackingScope(tx, user, true);
       if (!scope) return { status: 403, body: { error: 'An active worker profile is required' } };
       if (!scope.vaIds.length) return { status: 409, body: { error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR } };
@@ -469,10 +413,10 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
         return { status: 409, body: { error: AMBIGUOUS_TIME_ENTRY_OWNER_ERROR } };
       }
       const active = activeEntries.find((entry: typeof timeEntries.$inferSelect) => timeEntryMatchesScope(entry, scope));
-      if (active) return { status: 400, body: { error: 'Timer already active', activeTaskId: active.taskId } };
+      if (active) return { status: 409, body: { error: 'Timer already active', activeTaskId: active.taskId } };
       const workerVaId = scope.vaIds.includes(user.id) ? user.id : scope.vaIds[0];
       const ownership = timeTrackingOwnership(user, profile?.founderId, workerVaId);
-      const [entry] = await tx.insert(timeEntries).values({ taskId, ...ownership, startTime: new Date(), notes }).returning();
+      const entry = await insertCanonicalTimer(tx, { taskId, ...ownership, trackedProfileId: profile?.id ?? null, startTime: new Date(), notes });
       if (!entry) throw new Error("Time entry insert returned no row");
       if (user.role === 'worker' && isManagerPilotWorker(user.id)) {
         await enqueueManagerTask(tx, {
@@ -485,7 +429,9 @@ router.post('/time-tracking/start', async (req: any, res: Response) => {
     });
     res.status(outcome.status).json(outcome.body);
   } catch (error) {
-    console.error('Error starting timer:', error);
+    const failure = timerFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error starting timer');
     res.status(500).json({ error: 'Failed to start timer' });
   }
 });
@@ -499,10 +445,12 @@ router.post('/time-tracking/stop', async (req: any, res: Response) => {
     }
 
     const notes = typeof req.body?.notes === 'string' ? req.body.notes : null;
-    const outcome = await transitionActiveTimer(user, 'stop', notes);
+    const outcome = await transitionActiveTimer(user, 'stop', req.body?.entryId, notes);
     res.status(outcome.status).json(outcome.body);
   } catch (error) {
-    console.error('Error stopping timer:', error);
+    const failure = timerFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error stopping timer');
     res.status(500).json({ error: 'Failed to stop timer' });
   }
 });
@@ -515,10 +463,12 @@ router.post('/time-tracking/pause', async (req: any, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const outcome = await transitionActiveTimer(user, 'pause');
+    const outcome = await transitionActiveTimer(user, 'pause', req.body?.entryId);
     res.status(outcome.status).json(outcome.body);
   } catch (error) {
-    console.error('Error pausing timer:', error);
+    const failure = timerFailure(error);
+    if (failure) return res.status(failure.status).json({ error: failure.error });
+    console.error('Error pausing timer');
     res.status(500).json({ error: 'Failed to pause timer' });
   }
 });
@@ -558,7 +508,7 @@ router.get('/time-tracking/task/:taskId', async (req: any, res: Response) => {
     if (result.status !== 200) return res.status(result.status).json({ error: result.error });
     res.json(result.value);
   } catch (error) {
-    console.error('Error fetching task time entries:', error);
+    console.error('Error fetching task time entries:');
     res.status(500).json({ error: 'Failed to fetch time entries' });
   }
 });
@@ -579,11 +529,11 @@ router.get('/time-tracking/summary', async (req: any, res: Response) => {
     }
 
     const result = await withTimeTrackingScope(db, user, async (connection, scope) => {
+      const { timezone: zone } = await resolveWorkerOperatorContext(user, connection);
       const conditions = [timeEntryScopeWhere(scope)];
       if (startDate && endDate) {
-        const start = new Date(startDate as string);
-        const end = new Date(endDate as string);
-        end.setHours(23, 59, 59, 999);
+        const start = dateWindowInTimeZone(String(startDate), zone).start;
+        const end = new Date(dateWindowInTimeZone(String(endDate), zone).endExclusive.getTime() - 1);
         conditions.push(gte(timeEntries.startTime, start), lte(timeEntries.startTime, end));
       }
       const rows = await connection.select().from(timeEntries)
@@ -596,7 +546,7 @@ router.get('/time-tracking/summary', async (req: any, res: Response) => {
       const byDate: Record<string, number> = {};
       const byTask: Record<string, number> = {};
       entries.forEach((entry: typeof timeEntries.$inferSelect) => {
-        const date = new Date(entry.startTime).toISOString().split('T')[0];
+        const date = dateKeyInTimeZone(new Date(entry.startTime), zone);
         byDate[date] = (byDate[date] || 0) + nonNegativeDurationMinutes(entry);
         byTask[entry.taskId] = (byTask[entry.taskId] || 0) + nonNegativeDurationMinutes(entry);
       });
@@ -613,7 +563,7 @@ router.get('/time-tracking/summary', async (req: any, res: Response) => {
     if (result.status !== 200) return res.status(result.status).json({ error: result.error });
     res.json(result.value);
   } catch (error) {
-    console.error('Error fetching time summary:', error);
+    console.error('Error fetching time summary:');
     res.status(500).json({ error: 'Failed to fetch time summary' });
   }
 });
@@ -632,15 +582,11 @@ router.get('/time-tracking/weekly-progress', async (req: any, res: Response) => 
     }
 
     const result = await withTimeTrackingScope(db, user, async (connection, scope) => {
-      const now = new Date();
-      const dayOfWeek = now.getDay();
-      const startOfWeek = new Date(now);
-      startOfWeek.setDate(now.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1));
-      startOfWeek.setHours(0, 0, 0, 0);
-
-      const endOfWeek = new Date(startOfWeek);
-      endOfWeek.setDate(startOfWeek.getDate() + 6);
-      endOfWeek.setHours(23, 59, 59, 999);
+      const context = await resolveWorkerOperatorContext(user, connection);
+      const zone = context.timezone;
+      const bounds = weekDateKeys(dateKeyInTimeZone(new Date(), zone));
+      const startOfWeek = dateWindowInTimeZone(bounds.startDateKey, zone).start;
+      const endOfWeek = new Date(dateWindowInTimeZone(bounds.endDateKey, zone).endExclusive.getTime() - 1);
 
       const weekRows = await connection.select()
         .from(timeEntries)
@@ -657,35 +603,16 @@ router.get('/time-tracking/weekly-progress', async (req: any, res: Response) => 
       );
       const actualHours = Math.round(actualMinutes / 60 * 10) / 10;
 
-      const { userWorkingHours } = await import('../../drizzle/schema.postgres');
-      const settings = await connection.select()
-        .from(userWorkingHours)
-        .where(eq(userWorkingHours.userOpenId, user.openId))
-        .limit(1);
-
-      let weeklyHoursMin = 55;
-      let weeklyHoursMax = 60;
-      let dailyHoursMin = 9.5;
-      let dailyHoursMax = 11.5;
-
-      if (settings.length > 0) {
-        weeklyHoursMin = settings[0].weeklyHoursMin || 55;
-        weeklyHoursMax = settings[0].weeklyHoursMax || 60;
-        dailyHoursMin = parseFloat(String(settings[0].dailyHoursMin)) || 9.5;
-        dailyHoursMax = parseFloat(String(settings[0].dailyHoursMax)) || 11.5;
-      }
+      const { weeklyHoursMin, weeklyHoursMax, dailyHoursMin, dailyHoursMax } = context;
 
     // Calculate daily breakdown
       const dailyBreakdown: Record<string, number> = {};
       for (let i = 0; i < 7; i++) {
-        const date = new Date(startOfWeek);
-        date.setDate(startOfWeek.getDate() + i);
-        const dateStr = date.toISOString().split('T')[0];
-        dailyBreakdown[dateStr] = 0;
+        dailyBreakdown[addDaysToDateKey(bounds.startDateKey, i)] = 0;
       }
 
       weekEntries.forEach((entry: typeof timeEntries.$inferSelect) => {
-        const date = new Date(entry.startTime).toISOString().split('T')[0];
+        const date = dateKeyInTimeZone(new Date(entry.startTime), zone);
         if (dailyBreakdown[date] !== undefined) {
           dailyBreakdown[date] += nonNegativeDurationMinutes(entry);
         }
@@ -702,8 +629,8 @@ router.get('/time-tracking/weekly-progress', async (req: any, res: Response) => 
       const progressPercent = Math.min(100, Math.round((actualHours / targetMidpoint) * 100));
 
       return {
-        weekStart: startOfWeek.toISOString().split('T')[0],
-        weekEnd: endOfWeek.toISOString().split('T')[0],
+        weekStart: dateKeyInTimeZone(startOfWeek, zone),
+        weekEnd: dateKeyInTimeZone(endOfWeek, zone),
         actualHours,
         actualMinutes,
         weeklyHoursMin,
@@ -720,7 +647,7 @@ router.get('/time-tracking/weekly-progress', async (req: any, res: Response) => 
     if (result.status !== 200) return res.status(result.status).json({ error: result.error });
     res.json(result.value);
   } catch (error) {
-    console.error('Error fetching weekly progress:', error);
+    console.error('Error fetching weekly progress:');
     res.status(500).json({ error: 'Failed to fetch weekly progress' });
   }
 });

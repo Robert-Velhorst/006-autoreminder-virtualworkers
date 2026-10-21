@@ -37,6 +37,28 @@ describe("historical timing projections", () => {
 });
 
 describe("manager timing sample aggregation", () => {
+  it('uses canonical whole seconds after clipping precise legacy timestamps', () => {
+    const entry = { id: 1, aptlssStepId: 11, cardId: 'card-a', category: 'client_work',
+      startTime: '2026-10-01T09:00:00.123Z', endTime: '2026-10-01T09:01:31.000Z',
+      durationSeconds: null, durationMinutes: null };
+    const before = { ...entry };
+    const result = aggregateManagerTimeSamples([entry],
+      [{ id: 11, cardId: 'card-a', category: 'research', status: 'complete' }],
+      [{ timeEntryId: 1, eventType: 'pause' }]);
+    expect(result.samples[0].minutes).toBe(91 / 60);
+    expect(result.timeSummary.interruptedMinutes).toBe(91 / 60);
+    expect(entry).toEqual(before);
+  });
+
+  it('rounds only the final deduplicated interval union rather than every overlap', () => {
+    const entry = { id: 1, aptlssStepId: 11, cardId: 'card-a', category: 'client_work',
+      startTime: '2026-10-01T09:00:00.123Z', endTime: '2026-10-01T09:00:01.000Z',
+      durationSeconds: 1, durationMinutes: null };
+    const result = aggregateManagerTimeSamples([entry, { ...entry, id: 2 }],
+      [{ id: 11, cardId: 'card-a', category: 'research', status: 'complete' }], []);
+    expect(result.samples[0].minutes).toBe(1 / 60);
+  });
+
   it("combines sessions per completed worker step and indexes interruptions once", () => {
     const result = aggregateManagerTimeSamples(
       [

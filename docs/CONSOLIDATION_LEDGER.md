@@ -2,6 +2,27 @@
 
 ## Current Consolidation Checkpoint: October 21, 2026
 
+The latest merged main source is
+`df5c9f3f8af3c06723fe0d1992a50d6153ed4410` from PR #141. Its tree exactly
+matches reviewed head `386aab90401312d48f818d3e8c3ccb6ab2266d76`, preserved
+under verified annotated tag `archive/canonical-timer-acceptance-20261021`.
+Quality run `39543523895` and CodeQL `39543520471` passed at that head,
+including 4,460 Vitest cases, all 17 native cross-reader cases, browser gates,
+configured PostgreSQL image acceptance and isolated backup/restore. The merged
+timer branch was removed with an exact-SHA lease after archive verification.
+Post-merge main run `39544579909` requires its own result; parent acceptance
+does not prove a later main run passed.
+
+One temporary review branch remains: PR #135 for exact-image security. Its
+source progress is online and is not discarded to manufacture an only-main
+result. It awaits the narrowly scoped Action-policy decision and integration
+acceptance against the current main. Consolidate it into main only after
+its exact-head checks and review pass, preserve the reviewed head in a verified
+archive tag, and delete only the matching branch ref. Private configuration,
+secrets and recovery archives remain outside Git.
+
+### Earlier Only-Main Checkpoint
+
 PR [#99](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/99)
 merged as `77d4bf762893a735d9c2aa170b8e9bfe538c5b5f`, with a tree identical to
 the green reviewed head `01222c24b3cdf358781a95fa058d2c8b78e3e243`. That head
@@ -130,10 +151,11 @@ production build, and migration-drift detection. The two failing deployment chec
 are obsolete project configurations that still point to removed `Frontend` and
 `Backend` directories; they are not application test failures.
 
-Those projects must not be repointed to the repository root. The consolidated
-server requires a persistent container runtime for Express, tRPC, scheduled
-work, Redis, and WebSockets. Retire obsolete hosting Git integrations only
-after the public container replacement passes the production cutover gate.
+The retired request-only hosting projects must not be repointed to the
+repository root or recreated. The consolidated server requires a persistent
+container runtime for Express, tRPC, scheduled work and WebSockets, with optional
+external Redis. Their earlier removal did not establish replacement-host
+acceptance; the Hetzner cutover gate remains mandatory.
 
 ## October 1, 2026: reliability changes without capability removal
 

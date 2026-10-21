@@ -120,6 +120,14 @@ or reports published with the repository.
    output remains at the requested runner path if scanning produced it;
    early failures can leave no raw report. A passing proof is written only
    after successful evaluation, and an old proof is removed before a new scan.
+5. CI retains its runtime-default/dependency checks and runs the build-integrity
+   and fail-closed startup helper against the same `va-dashboard:ci` image.
+   It then runs the [configured PostgreSQL image acceptance harness](POSTGRES_IMAGE_ACCEPTANCE.md)
+   against that image, without rebuilding. The workflow requires a passing
+   receipt, confirmed cleanup, and a receipt image ID equal to the scan proof's
+   image ID. It attempts to retain `postgres-image-ci.json` with the scan
+   evidence for seven days. A history of passing source tests is not a substitute
+   for this configured-image check.
 
 A local Docker config ID and a registry manifest digest are different
 identifiers. The proof's `sourceRef` is an image reference, not a source-code
@@ -134,11 +142,24 @@ The CI scan does not substitute for scanning the separately built release.
 2. It scans `repository@sha256:...` from the build output. The wrapper accepts
    a single runtime manifest, or an index containing exactly one linux/amd64
    runtime and related attestation descriptors; unchecked platforms fail.
-3. After the scan and runtime check pass, the workflow runs the provenance
-   attestation step for that digest, then invokes promotion. The promotion
+3. After the scan and runtime integrity/fail-closed startup check, the workflow
+   runs `verify-postgres-production-image.mjs` with the exact same
+   `repository@BUILD_DIGEST`. The scanner has already pulled that digest; the
+   harness resolves it to a config ID and starts the application by that ID.
+   Its isolated fixture checks verified PostgreSQL TLS, canonical migrations,
+   a least-privilege application role, readiness, password login, safe identity,
+   active profile access, offboarding and stale-session rejection. The workflow
+   requires `passed: true`, `cleanupConfirmed: true`, and an image ID matching
+   the scan proof; it also checks the proof's source reference and build digest.
+   It attempts to retain `postgres-image-release.json` with the scan evidence.
+   Native fixture URL validation remains before the source migration/test suite;
+   the configured-image harness owns a separate disposable database and does
+   not reuse those service URLs or production data.
+4. Only after both image checks and receipt validation pass does the workflow
+   run the provenance attestation step for that digest, then invoke promotion. The promotion
    helper does not independently verify the external attestation; workflow
    ordering supplies that prerequisite.
-4. [`promote-scanned-image.mjs`](../scripts/promote-scanned-image.mjs) rechecks
+5. [`promote-scanned-image.mjs`](../scripts/promote-scanned-image.mjs) rechecks
    the proof, raw report, database metadata and policy hashes, evaluator
    decision, manifest/config identity, and platform. It reads only the canonical
    `image-security-release.json` evidence files under the repository's fixed,
@@ -147,7 +168,7 @@ The CI scan does not substitute for scanning the separately built release.
    arbitrary command-line file paths are rejected. Proof age is limited to one hour and future-dated
    proofs are rejected. It promotes without rebuilding, with `latest` only
    for a stable, non-prerelease release.
-5. Promotion resolves the final tags and checks their equality with the scanned
+6. Promotion resolves the final tags and checks their equality with the scanned
    digest. A mismatch fails, but tags may already have changed: this is not a
    transactional rollback guarantee and the artifact is not accepted on error.
 
@@ -162,7 +183,8 @@ It is not an accepted release. Scan or attestation failure prevents the workflow
 from reaching final release/`latest` promotion. A later promotion error can
 leave changed tags, but still does not establish acceptance or authorize
 deployment as a workaround. This flow gates release
-acceptance, not initial candidate publication. A published GitHub release page
+acceptance, not initial candidate publication. Configured-image acceptance or
+cleanup failure also prevents attestation/promotion. A published GitHub release page
 alone is not evidence that its container passed this flow.
 
 ## Evidence And Remaining Acceptance
@@ -176,6 +198,14 @@ report. Both workflows attempt to retain the proof, raw report and copied DB
 metadata for seven days, including when policy evaluation fails. Actual upload
 success still requires inspection of that run's artifacts; an early scanner
 failure may produce no files. Protect reports/logs and exclude credentials.
+
+The separate configured-PostgreSQL receipt records the image ID, migration/hash,
+schema count, named synthetic checks, `cleanupConfirmed: true`, and
+`providerAcceptance: false`. The workflow checks its image ID against the scan
+proof before continuing. An early or failed harness invocation can leave no
+complete receipt; logs and a partial/empty file are not acceptance. The receipt
+does not establish public HTTPS, browser-cookie behavior, provider access, or
+deployment. Neither fixture uses operational data.
 
 Remaining acceptance checks include demonstrating that an unfixed
 HIGH/CRITICAL finding blocks, scanner/database failure blocks,

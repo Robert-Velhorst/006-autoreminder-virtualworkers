@@ -1,6 +1,7 @@
+import { timerTestDatabase } from '../test/timerDatabase';
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TrpcContext } from "../_core/context";
-import { cardSnoozes, timeEntries, users, weeklyPayLog } from "../../drizzle/schema.postgres";
+import { cardSnoozes, timeEntries, users, vaProfiles, weeklyPayLog } from "../../drizzle/schema.postgres";
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),
@@ -54,68 +55,16 @@ function makeDb(options: {
   initialRows?: Partial<MockRows>;
   beforeUpdate?: (table: unknown, rows: MockRows) => void;
 } = {}) {
-  const rows: MockRows = {
-    users: [{ id: 10 }, { id: 20 }],
-    cardSnoozes: [],
-    timeEntries: [],
-    weeklyPayLog: [],
-    ...options.initialRows,
-  };
-  let nextSnoozeId = Math.max(0, ...rows.cardSnoozes.map(row => Number(row.id) || 0)) + 1;
-  let beforeUpdate = options.beforeUpdate;
-
-  const tableRows = (table: unknown) => table === users ? rows.users
-    : table === cardSnoozes ? rows.cardSnoozes
-      : table === timeEntries ? rows.timeEntries
-        : table === weeklyPayLog ? rows.weeklyPayLog
-          : [];
-
-  const tx: any = {
-    select: vi.fn(() => {
-      let table: unknown;
-      let condition: unknown;
-      let rowLimit = Number.POSITIVE_INFINITY;
-      const query: any = {
-        from(value: unknown) { table = value; return query; },
-        where(value: unknown) { condition = value; return query; },
-        orderBy() { return query; },
-        limit(value: number) { rowLimit = value; return query; },
-        for() { return Promise.resolve(tableRows(table).filter(row => matchesWhere(row, condition)).slice(0, rowLimit)); },
-        then(resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) {
-          return Promise.resolve(tableRows(table).filter(row => matchesWhere(row, condition)).slice(0, rowLimit))
-            .then(resolve, reject);
-        },
-      };
-      return query;
-    }),
-    update: vi.fn((table: unknown) => ({
-      set(values: Record<string, unknown>) {
-        return {
-          where: async (condition: unknown) => {
-            beforeUpdate?.(table, rows);
-            beforeUpdate = undefined;
-            const matching = tableRows(table).filter(row => matchesWhere(row, condition));
-            const changed = matching.filter(row => Object.entries(values).some(([key, value]) => {
-              const previous = row[key];
-              if (previous instanceof Date && value instanceof Date) return previous.getTime() !== value.getTime();
-              return previous !== value;
-            }));
-            matching.forEach(row => Object.assign(row, values));
-            return [{ affectedRows: changed.length }];
-          },
-        };
-      },
-    })),
-    insert: vi.fn((table: unknown) => ({
-      values: async (values: Record<string, unknown>) => {
-        if (table === cardSnoozes) rows.cardSnoozes.push({ id: nextSnoozeId++, ...values });
-        return [{ insertId: nextSnoozeId - 1 }];
-      },
-    })),
-    transaction: vi.fn(async (run: (database: any) => Promise<unknown>) => run(tx)),
-  };
-
-  return { db: tx, rows };
+  const rows: MockRows = { users: [{ id: 10, role: 'worker' }, { id: 20, role: 'worker' }],
+    cardSnoozes: [], timeEntries: [], weeklyPayLog: [], ...options.initialRows };
+  rows.timeEntries.forEach(row => Object.assign(row, { trackedUserId: 10, trackedProfileId: 110,
+    founderId: 1, isVoided: false }));
+  let pending = options.beforeUpdate;
+  const store = new Map<unknown, any[]>([[users, rows.users], [cardSnoozes, rows.cardSnoozes],
+    [timeEntries, rows.timeEntries], [weeklyPayLog, rows.weeklyPayLog],
+    [vaProfiles, [{ id: 110, userId: 10, founderId: 1, status: 'active' }, { id: 120, userId: 20, founderId: 1, status: 'active' }]]]);
+  const fixture = timerTestDatabase(store, { beforeUpdate: table => { pending?.(table, rows); pending = undefined; } });
+  return { db: fixture.db, rows };
 }
 
 function context(id: number, role: "worker" | "admin" | "user" = "worker") {
@@ -171,24 +120,24 @@ describe("legacy Manus worker-scope boundaries", () => {
   it("does not update a time entry if its ownership changes after the scoped read", async () => {
     const entry = {
       id: 51,
-      vaId: 10,
+      vaId: null,
       startTime: new Date("2026-09-26T10:00:00Z"),
-      endTime: null,
+      endTime: new Date("2026-09-26T10:15:00Z"),
       durationSeconds: null,
       durationMinutes: null,
     };
     const { db, rows } = makeDb({
       initialRows: { timeEntries: [entry] },
       beforeUpdate: (table, currentRows) => {
-        if (table === timeEntries) currentRows.timeEntries[0].vaId = 20;
+        if (table === timeEntries) currentRows.timeEntries[0].trackedUserId = 20;
       },
     });
     mocks.getDb.mockResolvedValue(db);
 
     await expect(timerRouter.createCaller(context(10)).updateEntry({ id: 51, durationSeconds: 900 }))
-      .rejects.toMatchObject({ code: "NOT_FOUND" });
+      .rejects.toMatchObject({ code: "CONFLICT" });
 
-    expect(rows.timeEntries[0]).toMatchObject({ vaId: 20, endTime: null, durationSeconds: null });
+    expect(rows.timeEntries[0]).toMatchObject({ trackedUserId: 20, durationSeconds: null });
   });
 
   it("allows a worker to update their own time entry", async () => {
@@ -196,7 +145,7 @@ describe("legacy Manus worker-scope boundaries", () => {
       id: 52,
       vaId: 10,
       startTime: new Date("2026-09-26T10:00:00Z"),
-      endTime: null,
+      endTime: new Date("2026-09-26T10:10:00Z"),
       durationSeconds: null,
       durationMinutes: null,
     };

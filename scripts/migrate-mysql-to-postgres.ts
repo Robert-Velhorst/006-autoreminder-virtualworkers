@@ -161,12 +161,13 @@ async function getTargetColumns(
     udtName: string;
     generated: string;
     identity: string;
+    nullable: string;
     columnDefault: string | null;
   }>(
     client,
     `SELECT table_name AS "tableName", column_name AS "columnName", data_type AS "dataType",
             udt_name AS "udtName", is_generated AS "generated", is_identity AS "identity", column_default AS "columnDefault",
-            ordinal_position AS "ordinalPosition"
+            ordinal_position AS "ordinalPosition", is_nullable AS nullable
      FROM information_schema.columns
      WHERE table_schema = current_schema()
      ORDER BY table_name, ordinal_position`
@@ -181,6 +182,7 @@ async function getTargetColumns(
       udtName: row.udtName,
       generated: row.generated === "ALWAYS",
       identity: row.identity === "YES",
+      nullable: row.nullable === 'YES',
       columnDefault: row.columnDefault,
     });
     columns.set(row.tableName, tableColumns);
@@ -676,6 +678,7 @@ async function main() {
           "PostgreSQL schema is empty; apply Drizzle migrations before copying data"
         );
       await target.query("BEGIN");
+      await target.query("SELECT set_config('aptlss.legacy_timer_import', txid_current()::text, true)");
       targetTransaction = true;
       await target.query("SET LOCAL lock_timeout = '5s'");
       const lockList = targetTables

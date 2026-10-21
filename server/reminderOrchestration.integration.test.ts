@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import {
   afterAll,
   afterEach,
@@ -10,7 +11,8 @@ import {
 } from "vitest";
 import { and, eq, inArray, lte } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
-import { Pool, type PoolClient } from "pg";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { Pool, escapeIdentifier, type PoolClient } from "pg";
 import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresTestDatabase.mjs";
 import * as schema from "../drizzle/schema.postgres";
 import { upsertSourceCommitment } from "./sourceCommitments";
@@ -49,24 +51,45 @@ describe.skipIf(!databaseUrl)(
   { timeout: 30_000 },
   () => {
     let pool: Pool | undefined;
+    let admin: Pool | undefined;
+    let created = false;
+    const privateName = `reminder_races_${randomUUID().replaceAll("-", "")}`;
+    const assertOwnedName = () => {
+      if (!/^reminder_races_[a-f0-9]{32}$/.test(privateName)) {
+        throw new Error("Invalid private reminder fixture identity");
+      }
+    };
     let lock: PoolClient | undefined;
     let db: NodePgDatabase<typeof schema>;
     let reminders: ReminderService;
 
     beforeAll(async () => {
-      const target = new URL(requireIsolatedPostgresTestDatabase(databaseUrl, process.env.NODE_ENV === "production"));
+      const base = new URL(requireIsolatedPostgresTestDatabase(databaseUrl, process.env.NODE_ENV === "production"));
+      assertOwnedName();
+      admin = new Pool({ connectionString: base.href, max: 1, connectionTimeoutMillis: 10_000 });
+      // The global worker scans every due row, so fixture prefixes cannot isolate it.
+      created = true;
+      try {
+        await admin.query(`CREATE DATABASE ${escapeIdentifier(privateName)}`);
+      } catch (error) {
+        if ((error as { code?: string }).code === "42P04") created = false;
+        throw error;
+      }
+      const target = new URL(base.href);
+      target.pathname = `/${privateName}`;
       pool = new Pool({
-        connectionString: databaseUrl!,
+        connectionString: target.href,
         max: 8,
         connectionTimeoutMillis: 10_000,
       });
       db = drizzle(pool, { schema });
+      await migrate(db, { migrationsFolder: path.resolve("drizzle-postgres-v1") });
       controls.db = db;
 
       const { rows: identity } = await pool.query(
         "SELECT current_database() AS name, current_setting('server_version') AS version"
       );
-      expect(identity[0]?.name).toBe(target.pathname.slice(1));
+      expect(identity[0]?.name).toBe(privateName);
       expect(identity[0]?.version).toMatch(/^18\./);
       const { rows: tables } = await pool.query(`SELECT table_name FROM information_schema.tables
         WHERE table_schema = 'public' AND table_name IN
@@ -74,7 +97,7 @@ describe.skipIf(!databaseUrl)(
       expect(tables).toHaveLength(5);
 
       lock = await pool.connect();
-      const { rows: lockRows } = await lock.query(
+      await lock.query(
         "SELECT pg_advisory_lock(hashtext('reminder-orchestration-integration'))"
       );
 
@@ -84,7 +107,7 @@ describe.skipIf(!databaseUrl)(
         reason: "Email providers are disabled in this integration test.",
       });
       reminders = await import("./reminderOrchestration");
-    });
+    }, 125_000);
 
     afterEach(async () => {
       if (!db || !owned.userIds.length) return;
@@ -150,13 +173,25 @@ describe.skipIf(!databaseUrl)(
 
     afterAll(async () => {
       controls.db = undefined;
-      if (lock) {
-        await lock
-          .query("SELECT pg_advisory_unlock(hashtext('reminder-orchestration-integration'))")
-          .catch(() => undefined);
-        lock.release();
+      try {
+        if (lock) {
+          try {
+            await lock.query("SELECT pg_advisory_unlock(hashtext('reminder-orchestration-integration'))");
+          } finally { lock.release(); }
+        }
+      } finally {
+        try { if (pool) await pool.end(); }
+        finally {
+          if (admin) {
+            try {
+              if (created) {
+                assertOwnedName();
+                await admin.query(`DROP DATABASE IF EXISTS ${escapeIdentifier(privateName)}`);
+              }
+            } finally { await admin.end(); }
+          }
+        }
       }
-      if (pool) await pool.end();
     });
 
     async function createFixture(

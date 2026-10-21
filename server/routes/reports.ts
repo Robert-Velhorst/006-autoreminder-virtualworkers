@@ -1,3 +1,5 @@
+import { timeCompleteness } from '../canonicalTimer';
+import { recordedMinutes, recordedSeconds } from '../../shared/timerDuration';
 import { Router } from 'express';
 import { and, eq, inArray } from 'drizzle-orm';
 import { getDb } from '../db';
@@ -5,33 +7,21 @@ import { taskAssignments, timeEntries, vaProfiles } from '../../drizzle/schema.p
 import { requireActiveWorkerProfile, requireAuthenticated, requestUser } from '../middleware/auth';
 import { attributeTimeEntriesToProfiles, loadAccountTimeEntries } from '../timeEntryOwnership';
 import { selectWorkerProfile } from '../workerOperatorContext';
+import { serializeCsv } from '../utils/csv';
 
 const router = Router();
 router.use(requireAuthenticated);
 router.use(requireActiveWorkerProfile);
 
-function csvCell(value: unknown) {
-  const text = value == null ? '' : String(value);
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
-
 async function loadWorkerProfileTimeEntries(
   db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
   activeProfile: { id: number; founderId: number },
 ) {
-  const founderProfiles = await db.select({
-    id: vaProfiles.id,
-    userId: vaProfiles.userId,
-    founderId: vaProfiles.founderId,
-  }).from(vaProfiles).where(eq(vaProfiles.founderId, activeProfile.founderId));
-  const identities = Array.from(new Set(founderProfiles.flatMap(profile => [profile.id, profile.userId])));
-  if (identities.length === 0) return [];
+  const [profile] = await db.select().from(vaProfiles).where(eq(vaProfiles.id, activeProfile.id));
+  if (!profile) return [];
+  return db.select().from(timeEntries).where(and(eq(timeEntries.trackedUserId, profile.userId),
+    eq(timeEntries.founderId, activeProfile.founderId)));
 
-  const entries = await db.select().from(timeEntries).where(and(
-    eq(timeEntries.founderId, activeProfile.founderId),
-    inArray(timeEntries.vaId, identities),
-  ));
-  return attributeTimeEntriesToProfiles(founderProfiles, entries).entriesByProfileId.get(activeProfile.id) ?? [];
 }
 
 router.get('/export', async (req, res) => {
@@ -78,13 +68,21 @@ router.get('/export', async (req, res) => {
       const times = user.role === 'worker'
         ? activeProfile ? await loadWorkerProfileTimeEntries(db, activeProfile) : []
         : await loadAccountTimeEntries(db, user);
+      const completeness = await timeCompleteness(db, user.role === 'admin' ? undefined : activeProfile?.founderId ?? user.id);
+      res.setHeader('X-Time-History-Complete', String(completeness.complete));
+      res.setHeader('X-Unresolved-Time-Entries', String(completeness.unresolvedEntryCount));
       const rows = [
-        ['id', 'vaId', 'founderId', 'taskId', 'durationMinutes', 'startTime', 'endTime', 'source'],
-        ...times.map(entry => [entry.id, entry.vaId, entry.founderId, entry.taskId, entry.durationMinutes,
-          entry.startTime.toISOString(), entry.endTime?.toISOString(), entry.source]),
+        ['id', 'trackedUserId', 'trackedProfileId', 'legacyVaId', 'founderId', 'taskId', 'durationMinutes', 'startTime', 'endTime', 'source',
+          'durationSeconds', 'isVoided', 'recordedSeconds', 'recordedMinutes',
+          'ownershipVerified', 'historyComplete', 'unresolvedEntryCount'],
+        ...times.map(entry => [entry.id, entry.trackedUserId, entry.trackedProfileId, entry.vaId, entry.founderId, entry.taskId, entry.durationMinutes,
+          entry.startTime.toISOString(), entry.endTime?.toISOString(), entry.source, entry.durationSeconds, entry.isVoided,
+          entry.trackedUserId == null ? null : recordedSeconds(entry),
+          entry.trackedUserId == null ? null : recordedMinutes(entry),
+          entry.trackedUserId != null, completeness.complete, completeness.unresolvedEntryCount]),
       ];
       res.type('text/csv').attachment('time-entries.csv');
-      return res.send(rows.map(row => row.map(csvCell).join(',')).join('\r\n'));
+      return res.send(serializeCsv(rows));
     }
 
     const tasks = user.role === 'admin'
@@ -101,7 +99,7 @@ router.get('/export', async (req, res) => {
         task.assignedAt.toISOString(), task.updatedAt.toISOString()]),
     ];
     res.type('text/csv').attachment('task-summary.csv');
-    return res.send(rows.map(row => row.map(csvCell).join(',')).join('\r\n'));
+    return res.send(serializeCsv(rows));
   } catch (error) {
     console.error('[Reports] Failed to generate report', error);
     res.status(500).json({ error: 'Failed to generate report' });

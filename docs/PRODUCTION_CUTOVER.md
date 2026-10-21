@@ -33,6 +33,22 @@ secret, or a signing secret configured without the callback.
 
 ## Release and Deployment Gate
 
+Both CI and release verification require explicit native PostgreSQL fixtures;
+`scripts/verify-native-test-fixture.mjs` rejects missing, mismatched, or unsafe
+test URLs rather than allowing database suites to silently skip. A separate
+[configured PostgreSQL image gate](POSTGRES_IMAGE_ACCEPTANCE.md) checks the
+compiled production runtime with verified database TLS and synthetic accounts.
+That isolated gate does not prove Hetzner, real provider access, live data
+recovery, or worker acceptance. Do not substitute historical MySQL rehearsal
+reports for current PostgreSQL container evidence.
+
+Before deploying a canonical timer identity migration over historical data,
+follow [Timer Identity Cutover](TIMER_IDENTITY_CUTOVER.md) while application
+writes are stopped. Unknown active legacy entries block readiness deliberately.
+Resolve ownership and any required actual stop times through the audited
+operator path, without guessing aliases, deleting history, or changing settled
+financial records. A schema migration alone is not data acceptance.
+
 Production deployment is started manually from protected `main`. The selected
 release must be a published stable `vMAJOR.MINOR.PATCH` tag whose commit is
 contained in `main`. The workflow verifies the GHCR image's provenance against

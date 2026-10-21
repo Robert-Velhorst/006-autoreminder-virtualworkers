@@ -35,12 +35,11 @@ function makeDb(options: {
     select: vi.fn(() => {
       let table: unknown;
       const rows = () => {
-        if (table === users) return [{ id: 42 }, ...(options.otherAccountIds ?? []).map(id => ({ id }))];
+        if (table === users) return [{ id: 42, role: "worker" }, ...(options.otherAccountIds ?? []).map(id => ({ id }))];
         if (table === vaProfiles) {
           const profileRead = profileReads++;
           if (profileRead === 0) return [profile];
-          if (profileRead === 1) return [options.profileAfterMiddleware ?? profile];
-          return options.profileCollisions ?? [profile];
+          return [options.profileAfterMiddleware ?? profile];
         }
         if (table === taskAssignments) {
           const read = taskAssignmentReads++;
@@ -50,7 +49,7 @@ function makeDb(options: {
         if (table === atisCards) return options.cardMember
           ? [{ listName: "To Do", memberIds: JSON.stringify([profile.trelloMemberId]), isArchived: false }]
           : [];
-        if (table === timeEntries) return timeEntryReads++ === 0 ? [] : [entry];
+        if (table === timeEntries) return [];
         return [];
       };
       const query: any = {
@@ -167,7 +166,7 @@ describe("worker timer-start authorization", () => {
     expect(inserted).not.toHaveBeenCalled();
   });
 
-  it("uses the unambiguous profile ID when the account ID overlaps another worker profile", async () => {
+  it("uses the canonical account ID even when that number overlaps another profile", async () => {
     const { db, inserted } = makeDb({
       assignment: { id: 11, taskId: "assigned-card", vaId: 7, founderId: 8, status: "assigned" },
       profileCollisions: [{ id: 42, userId: 77, founderId: 8, status: "active" }],
@@ -179,7 +178,7 @@ describe("worker timer-start authorization", () => {
       .send({ taskId: "assigned-card" })
       .expect(200);
 
-    expect(inserted).toHaveBeenCalledWith(expect.objectContaining({ vaId: 7, founderId: 8, taskId: "assigned-card" }));
+    expect(inserted).toHaveBeenCalledWith(expect.objectContaining({ trackedUserId: 42, trackedProfileId: 7, vaId: null, founderId: 8, taskId: "assigned-card" }));
   });
 
   it("rejects a timer when reassignment wins while the start waits for the assignment row", async () => {

@@ -37,7 +37,6 @@ import performanceOptimizationRoutes from "../routes/performance-optimization.js
 import advancedSchedulingRoutes from "../routes/advanced-scheduling.js";
 import atisPhasesRoutes from "../routes/atis-phases.js";
 import batchOperationsRoutes from "../routes/batch-operations.js";
-import healthRoutes from "../routes/health.js";
 import { registerHaiConnectorRoutes } from "../haiConnectorRoutes.js";
 import { websocketService } from "../services/websocket.js";
 import { getRequestBodyLimit, securityHeaders } from "../middleware/security.js";
@@ -59,7 +58,7 @@ import { assertLocalAuthBypassConfiguration, isLocalAuthBypassEnabled } from "./
 import { assertProductionConfiguration } from "./productionConfig.js";
 import { getBackgroundWorkConfiguration } from "./backgroundWork.js";
 import { getTrustedProxyHops } from "./trustedProxy.js";
-import { getPendingRequestQueueCap } from "./requestQueueCapacity.js";
+import { configureRequestAdmission } from "./requestAdmission.js";
 import googleEvidenceRoutes from "../googleEvidenceRoutes.js";
 import { startReminderWorker, stopReminderWorker } from "../reminderOrchestration.js";
 import { initializeWebhookAutoRegister, stopWebhookAutoRegister } from "../services/webhook-auto-register.js";
@@ -97,100 +96,6 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
   throw new Error(`No available port found starting from ${startPort}`);
 }
 
-// ---------------------------------------------------------------------------
-// Concurrency limiter — replaces the old hard-503 approach.
-//
-// Instead of immediately rejecting requests over MAX_CONNECTIONS, we queue
-// them and process them as slots free up.  Requests that wait longer than
-// QUEUE_TIMEOUT_MS are rejected with 503 so the queue never grows unbounded.
-// ---------------------------------------------------------------------------
-function positiveInteger(
-  value: string | undefined,
-  fallback: number,
-  maximum: number
-) {
-  const parsed = Number.parseInt(value ?? "", 10);
-  return Number.isFinite(parsed) && parsed > 0
-    ? Math.min(parsed, maximum)
-    : fallback;
-}
-
-const MAX_CONCURRENT = positiveInteger(process.env.MAX_CONCURRENT_REQUESTS, 100, 10_000);
-const QUEUE_TIMEOUT_MS = positiveInteger(process.env.REQUEST_QUEUE_TIMEOUT_MS, 30_000, 300_000);
-const MAX_PENDING_REQUESTS = getPendingRequestQueueCap();
-
-let activeRequests = 0;
-const waitQueue: Array<() => void> = [];
-
-function acquireSlot(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (activeRequests < MAX_CONCURRENT) {
-      activeRequests++;
-      resolve();
-      return;
-    }
-
-    if (waitQueue.length >= MAX_PENDING_REQUESTS) {
-      reject(new Error('Request queue capacity reached'));
-      return;
-    }
-
-    // Queue the request with a timeout guard
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      const idx = waitQueue.indexOf(tryAcquire);
-      if (idx !== -1) waitQueue.splice(idx, 1);
-      reject(new Error("Request queue timeout"));
-    }, QUEUE_TIMEOUT_MS);
-
-    const tryAcquire = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      activeRequests++;
-      resolve();
-    };
-
-    waitQueue.push(tryAcquire);
-  });
-}
-
-function releaseSlot(): void {
-  activeRequests = Math.max(0, activeRequests - 1);
-  const next = waitQueue.shift();
-  if (next) next();
-}
-
-function concurrencyLimiter(
-  req: express.Request,
-  res: express.Response,
-  next: express.NextFunction
-): void {
-  acquireSlot()
-    .then(() => {
-      let released = false;
-      const releaseOnce = () => {
-        if (released) return;
-        released = true;
-        releaseSlot();
-      };
-      res.once("finish", releaseOnce);
-      res.once("close", releaseOnce);
-      next();
-    })
-    .catch(() => {
-      console.warn(
-        `[Server] Request queue full (${waitQueue.length} waiting, ${activeRequests} active)`
-      );
-      res.status(503).json({
-        error: "Server busy — please retry in a moment",
-        retryAfter: Math.ceil(QUEUE_TIMEOUT_MS / 1000),
-      });
-    });
-}
-
 async function startServer() {
   assertProductionConfiguration();
   assertLocalAuthBypassConfiguration();
@@ -208,8 +113,8 @@ async function startServer() {
 
   app.use(securityHeaders);
 
-  // Concurrency limiter — queues excess requests instead of hard-rejecting them
-  app.use(concurrencyLimiter);
+  // Probes bypass ordinary admission and body parsing; application requests do not.
+  configureRequestAdmission(app);
 
   const requestBodyLimit = getRequestBodyLimit();
   app.use(express.json({
@@ -221,12 +126,6 @@ async function startServer() {
     },
   }));
   app.use(express.urlencoded({ limit: requestBodyLimit, extended: true }));
-
-  // Health probes must remain public and must not consume the UI/API rate budget.
-  app.use("/api/health", healthRoutes);
-  // Conventional platform readiness alias. Mounting the health router here
-  // makes GET /readyz perform the same database and Redis checks as /api/health.
-  app.use("/readyz", healthRoutes);
 
   // Bound authentication work before credentials are resolved.
   app.use("/api", apiIpRateLimiter);

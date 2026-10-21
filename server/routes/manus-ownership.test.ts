@@ -147,7 +147,7 @@ function makeTimerDb(
 ) {
   const inserted: Record<string, unknown>[] = [];
   const rowsFor = (table: unknown, condition?: unknown) => {
-    if (table === users) return [{ id: 10 }];
+    if (table === users) return [{ id: 10, role: "worker" }];
     if (table === vaProfiles) return [{ id: 77, founderId: 3, status: "active" }];
     if (table === taskAssignments) return condition
       ? assignments.filter(assignment => matchesWhere(assignment, condition))
@@ -339,7 +339,7 @@ describe("legacy Manus route ownership and timer authorization", () => {
 
     await expect(startWorkerTimer()).resolves.toMatchObject({ cardId: "stale-card" });
 
-    expect(inserted).toEqual([expect.objectContaining({ taskId: "stale-card", vaId: 10, founderId: 3 })]);
+    expect(inserted).toEqual([expect.objectContaining({ taskId: "stale-card", trackedUserId: 10, vaId: null, founderId: 3 })]);
   });
 
   it.each(["snapshot hash", "missing check", "missing run", "disabled policy", "changed assignments"])(
