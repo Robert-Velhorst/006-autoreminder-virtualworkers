@@ -11,7 +11,7 @@ vi.mock("../scheduledJobRuntime", async importOriginal => {
   return { ScheduledJobLeaseLostError: actual.ScheduledJobLeaseLostError, runScheduledJob: controls.run };
 });
 vi.mock("./email", () => ({ sendMorningBriefing: controls.morning, sendEODReport: controls.eod }));
-vi.mock("./recipientEmailConsent", () => ({ hasRecipientEmailConsent: controls.consent }));
+vi.mock("./recipientEmailConsent", () => ({ getConsentingRecipientEmail: controls.consent }));
 import { processScheduledBriefings } from "./briefing-scheduler";
 
 describe("scheduled briefing ownership at the email boundary", () => {
@@ -19,7 +19,7 @@ describe("scheduled briefing ownership at the email boundary", () => {
     vi.resetAllMocks();
     controls.settings.mockResolvedValue({ morningBriefingEnabled: true, eodReportEnabled: true });
     controls.ownership.mockResolvedValue(undefined);
-    controls.consent.mockResolvedValue(true);
+    controls.consent.mockImplementation(async id => id === 2 ? "worker-preference@example.invalid" : "founder-preference@example.invalid");
     controls.morning.mockResolvedValue(true); controls.eod.mockResolvedValue(true);
     controls.contexts.length = 0;
     controls.run.mockImplementation(async (_input, work) => {
@@ -36,13 +36,13 @@ describe("scheduled briefing ownership at the email boundary", () => {
   });
   afterEach(() => vi.restoreAllMocks());
   it.each([2, 3])("honors recipient %s opt-out independently", async userId => {
-    controls.consent.mockImplementation(async id => id !== userId);
+    controls.consent.mockImplementation(async id => id === userId ? null : "consenting@example.invalid");
     await processScheduledBriefings();
     expect(controls.morning).toHaveBeenCalledTimes(userId === 2 ? 0 : 1);
     expect(controls.eod).toHaveBeenCalledTimes(userId === 3 ? 0 : 1);
   });
   it("does not create jobs when neither recipient has persisted consent", async () => {
-    controls.consent.mockResolvedValue(false);
+    controls.consent.mockResolvedValue(null);
     await processScheduledBriefings();
     expect(controls.run).not.toHaveBeenCalled();
     expect(controls.morning).not.toHaveBeenCalled();
@@ -54,7 +54,7 @@ describe("scheduled briefing ownership at the email boundary", () => {
     controls.consent.mockImplementation(async id => {
       const count = (reads.get(id) ?? 0) + 1;
       reads.set(id, count);
-      return id !== userId || count === 1;
+      return id === userId && count > 1 ? null : "consenting@example.invalid";
     });
     await processScheduledBriefings();
     expect(userId === 2 ? controls.morning : controls.eod).not.toHaveBeenCalled();
@@ -67,6 +67,10 @@ describe("scheduled briefing ownership at the email boundary", () => {
     expect(controls.ownership.mock.invocationCallOrder[1]).toBeLessThan(controls.eod.mock.invocationCallOrder[0]);
     expect(controls.morning.mock.calls[0][2]).toBe(controls.contexts[0]);
     expect(controls.eod.mock.calls[0][2]).toBe(controls.contexts[1]);
+    expect(controls.morning.mock.calls[0][0]).toBe("worker-preference@example.invalid");
+    expect(controls.eod.mock.calls[0][0]).toBe("founder-preference@example.invalid");
+    expect(controls.consent).toHaveBeenCalledWith(2, "daily_digest");
+    expect(controls.consent).toHaveBeenCalledWith(3, "daily_digest");
   });
   it("does not send a morning email after ownership loss", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);

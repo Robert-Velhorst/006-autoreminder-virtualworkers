@@ -995,8 +995,9 @@ describe("scheduled reminder delivery boundary", () => {
 
     const query = new PgDialect().sqlToQuery(fixture.statsExpression() as SQL);
     const expectedBounds = zonedCalendarDayBounds(new Date(), "Europe/Amsterdam");
-    expect(query.params).toContainEqual(expectedBounds.start);
-    expect(query.params).toContainEqual(expectedBounds.end);
+    expect(query.params).toContainEqual(expectedBounds.start.toISOString());
+    expect(query.params).toContainEqual(expectedBounds.end.toISOString());
+    expect(query.params.some(value => value instanceof Date)).toBe(false);
     expect(query.sql).toContain("sentAt");
   });
 

@@ -9,6 +9,7 @@ import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { trpc } from "@/lib/trpc";
+import { DigestRecovery } from "@/components/DigestRecovery";
 
 function formatDuration(milliseconds: number | null | undefined) {
   if (milliseconds === null || milliseconds === undefined) return "Learning from the first run";
@@ -34,6 +35,10 @@ function latestBadge(status: string | undefined) {
 }
 
 export function MaintenanceCenter() {
+  return <><MaintenanceControls /><DigestRecovery /></>;
+}
+
+function MaintenanceControls() {
   const [clock, setClock] = useState(Date.now());
   const [draftIntervals, setDraftIntervals] = useState<Record<string, string>>({});
   const utils = trpc.useUtils();

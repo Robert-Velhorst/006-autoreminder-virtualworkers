@@ -6,7 +6,7 @@ import { dateKeyInTimeZone, dateWindowInTimeZone } from '../../shared/workerTime
 import { runScheduledJob, ScheduledJobLeaseLostError } from '../scheduledJobRuntime';
 import { getBriefingSettings, shouldRunBriefingAt, type BriefingSettings } from '../briefingSettings';
 import { createNonOverlappingRunner } from './non-overlapping-runner';
-import { hasRecipientEmailConsent } from './recipientEmailConsent';
+import { getConsentingRecipientEmail } from './recipientEmailConsent';
 
 let schedulerInterval: NodeJS.Timeout | null = null;
 
@@ -77,13 +77,14 @@ export async function processScheduledBriefings() {
         settings = await getBriefingSettings(worker.founderId);
         founderSettings.set(worker.founderId, settings);
       }
-      const shouldSendMorning = settings.morningBriefingEnabled
+      const morningAddress = settings.morningBriefingEnabled
         && shouldRunBriefingAt(settings.morningBriefingTime, currentHour, currentMinute)
-        && Boolean(worker.email)
-        && await hasRecipientEmailConsent(worker.userId);
-      const shouldSendEod = settings.eodReportEnabled
+        ? await getConsentingRecipientEmail(worker.userId, 'daily_digest') : null;
+      const eodAddress = settings.eodReportEnabled
         && shouldRunBriefingAt(settings.eodReportTime, currentHour, currentMinute)
-        && await hasRecipientEmailConsent(worker.founderId);
+        ? await getConsentingRecipientEmail(worker.founderId, 'daily_digest') : null;
+      const shouldSendMorning = morningAddress !== null;
+      const shouldSendEod = eodAddress !== null;
       if (!shouldSendMorning && !shouldSendEod) continue;
 
       // Only load detailed worker state when a delivery is due.
@@ -121,9 +122,9 @@ export async function processScheduledBriefings() {
       if (shouldSendMorning) {
         await runScheduledJob({ jobKey: `briefing:${worker.userId}:${dateKey}` }, async context => {
           await context.assertOwnership();
-          if (!await hasRecipientEmailConsent(worker.userId)) throw new Error("Morning briefing recipient has not enabled email");
+          if (await getConsentingRecipientEmail(worker.userId, 'daily_digest') !== morningAddress) throw new Error("Morning briefing recipient consent or address changed");
           console.log(`[Scheduler] Triggering Morning Briefing for ${worker.name} (${workerTimezone})`);
-          const delivered = await sendMorningBriefing(worker.email!, {
+          const delivered = await sendMorningBriefing(morningAddress!, {
             workerName: worker.name,
             date: reportDate,
             tasks,
@@ -135,7 +136,7 @@ export async function processScheduledBriefings() {
         });
       }
 
-      if (shouldSendEod && founder[0].email) {
+      if (shouldSendEod) {
         await runScheduledJob({ jobKey: `eod-report:${worker.userId}:${dateKey}` }, async context => {
           console.log(`[Scheduler] Triggering EOD Report for ${worker.name} (${workerTimezone})`);
           const window = dateWindowInTimeZone(dateKey, workerTimezone);
@@ -159,8 +160,8 @@ export async function processScheduledBriefings() {
             ? 0
             : Math.round((completedTasks.length / assignments.length) * 100);
           await context.assertOwnership();
-          if (!await hasRecipientEmailConsent(worker.founderId)) throw new Error("EOD report recipient has not enabled email");
-          const delivered = await sendEODReport(founder[0].email!, {
+          if (await getConsentingRecipientEmail(worker.founderId, 'daily_digest') !== eodAddress) throw new Error("EOD report recipient consent or address changed");
+          const delivered = await sendEODReport(eodAddress!, {
             workerName: worker.name,
             date: reportDate,
             completedTasks,

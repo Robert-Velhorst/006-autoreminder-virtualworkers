@@ -1,5 +1,6 @@
 import { TRPCError } from "@trpc/server";
 import { ENV } from "./env";
+import { areNotificationsEnabled } from "../services/notificationPolicy";
 
 export type NotificationPayload = {
   title: string;
@@ -67,6 +68,7 @@ const validatePayload = (input: NotificationPayload): NotificationPayload => {
 export async function notifyOwner(
   payload: NotificationPayload
 ): Promise<boolean> {
+  if (!areNotificationsEnabled()) return false;
   const { title, content } = validatePayload(payload);
 
   if (!ENV.forgeApiUrl) {

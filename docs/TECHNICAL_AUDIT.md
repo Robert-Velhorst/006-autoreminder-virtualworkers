@@ -35,7 +35,7 @@ canonical identity, evidence, planning and scheduled-job records.
 - Corrected batch pause targeting so a queue-row control always affects the
   selected running operation rather than an unrelated primary job.
 - Repaired PostgreSQL migration/schema parity; an isolated migrated PostgreSQL
-  18.6 fixture has exactly 136 expected tables, with no missing or extra columns.
+  18.6 fixture has exactly 137 expected tables, with no missing or extra columns.
 - Added one-time owner access recovery without enabling public registration.
 - Made administrator ATIS sync/analysis asynchronous: durable operation IDs,
   bounded status polling, explicit interruption recovery, request deduplication,

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray, lte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt, lte, ne, or, sql } from "drizzle-orm";
 import {
   commitments,
   emailTasks,
@@ -655,15 +655,18 @@ async function deliveryStats(
 ) {
   const { start, end } = zonedCalendarDayBounds(now, timezone);
   const recipientScope = eq(reminderSchedules.recipientUserId, recipientUserId);
+  // Use the column's UTC encoder, not pg's host-local raw Date serialization.
+  const sentDuringDay = and(gte(reminderSchedules.sentAt, start), lt(reminderSchedules.sentAt, end));
+  const approvedDuringDay = and(gte(reminderSchedules.approvedAt, start), lt(reminderSchedules.approvedAt, end));
   const [stats] = await database.select({
     sentToday: sql<number>`SUM(CASE
-      WHEN (${reminderSchedules.state} = 'sent' AND ${reminderSchedules.sentAt} >= ${start} AND ${reminderSchedules.sentAt} < ${end})
-        OR (${inArray(reminderSchedules.state, ["sending", "needs_review"])} AND ${reminderSchedules.approvedAt} >= ${start} AND ${reminderSchedules.approvedAt} < ${end})
+      WHEN (${reminderSchedules.state} = 'sent' AND ${sentDuringDay})
+        OR (${inArray(reminderSchedules.state, ["sending", "needs_review"])} AND ${approvedDuringDay})
       THEN 1 ELSE 0 END)`,
     lastSentAt: sql<Date | null>`MAX(CASE
       WHEN ${reminderSchedules.state} = 'sent' THEN ${reminderSchedules.sentAt}
       WHEN ${inArray(reminderSchedules.state, ["sending", "needs_review"])} THEN ${reminderSchedules.approvedAt}
-      ELSE NULL END)`,
+      ELSE NULL END)`.mapWith(reminderSchedules.sentAt),
   }).from(reminderSchedules).where(excludeScheduleId === undefined
     ? recipientScope
     : and(recipientScope, ne(reminderSchedules.id, excludeScheduleId)));

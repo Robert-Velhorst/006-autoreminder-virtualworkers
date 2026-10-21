@@ -241,7 +241,8 @@ describe("active PostgreSQL feature migration metadata", () => {
     for (const [name, table] of Object.entries(historical.tables) as [string, { columns: Record<string, unknown> }][]) {
       const runtime = generated.tables[`public.${name}`];
       expect(runtime, name).toBeDefined();
-      expect(Object.keys(runtime.columns).sort(), name).toEqual(Object.keys(table.columns).sort());
+      // Forward migrations may add columns but must retain the historical fields.
+      expect(Object.keys(runtime.columns), name).toEqual(expect.arrayContaining(Object.keys(table.columns)));
     }
   }, 30000);
 });

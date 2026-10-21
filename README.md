@@ -89,7 +89,11 @@ separately and configure `REDIS_URL` only when a Redis service is available.
 Keep production credentials out of local development files and never commit
 environment files.
 
-The canonical migration lineage continues through `0027_glorious_epoch`. Consolidated migrations are additive and include task assignments/schedules, evidence foundations, schema parity repairs, and worker-scoped operator data. See [the consolidation ledger](docs/CONSOLIDATION_LEDGER.md) for migration ownership and compatibility decisions.
+The current runtime migration contract is `drizzle/schema.postgres.ts` with
+`drizzle-postgres-v1`. The developer lineage through `0027_glorious_epoch` is
+retained as history, not an alternative runtime backend. Consolidated migrations
+are additive; see [the consolidation ledger](docs/CONSOLIDATION_LEDGER.md) for
+ownership and compatibility decisions.
 
 Useful checks:
 
@@ -129,6 +133,7 @@ Please do not report vulnerabilities in public issues. See [SECURITY.md](SECURIT
 - [Production cutover and operations](docs/PRODUCTION_CUTOVER.md)
 - [Consolidation ledger and data ownership](docs/CONSOLIDATION_LEDGER.md)
 - [Branch consolidation history](docs/BRANCH_CONSOLIDATION.md)
+- [Notification delivery and operator recovery](docs/NOTIFICATION_DELIVERY.md)
 - [Environment variable template](.env.example)
 
 ## License
@@ -137,4 +142,8 @@ MIT. See [LICENSE](LICENSE).
 
 ## APTLSS shadow-pilot source integration
 
-The manager, evidence and reminder features are being reconciled with the canonical PostgreSQL runtime. See [PR99 integration](docs/PR99_INTEGRATION.md) for source changes and acceptance boundaries. Historical MySQL deployment and pilot verification documents do not establish current PostgreSQL or provider acceptance.
+The manager, evidence and reminder source features are integrated with the
+canonical PostgreSQL runtime. See [PR99 integration](docs/PR99_INTEGRATION.md) for
+source history and acceptance boundaries. Historical deployment and pilot
+verification documents do not establish current live-provider, worker-trial or
+Hetzner acceptance.

@@ -44,6 +44,7 @@ import { getRequestBodyLimit, securityHeaders } from "../middleware/security.js"
 import { requireTrustedSessionOrigin } from "../middleware/sessionOriginProtection.js";
 import { initializeRedis, closeRedis } from "../services/redis.js";
 import { startBriefingScheduler, stopBriefingScheduler } from "../services/briefing-scheduler.js";
+import { startDigestScheduler, stopDigestScheduler } from "../services/digest-scheduler.js";
 import { startManusScheduler, stopManusScheduler } from "../services/manus-scheduler.js";
 import {
   apiRateLimiter,
@@ -350,6 +351,7 @@ async function startServer() {
     // Schedulers are independent from cache warming. External email briefings
     // remain disabled unless explicitly enabled by configuration.
     startBriefingScheduler();
+    startDigestScheduler();
     startManusScheduler();
     startReminderWorker();
     startMaintenanceCenter();
@@ -398,6 +400,7 @@ async function startServer() {
       }
 
       stopBriefingScheduler();
+      stopDigestScheduler();
       stopManusScheduler();
       stopReminderWorker();
       stopFounderDecisionAlertWorker();
