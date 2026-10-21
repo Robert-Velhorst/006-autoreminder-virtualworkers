@@ -513,7 +513,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
       cardId: worker.cardId, category: "research", minutes: 12, interrupted: false,
     });
     expect(input.timeSamples.some(sample => sample.stepId === openStep.id || sample.cardId === otherWorker.cardId)).toBe(false);
-    expect(input.timeSummary).toEqual({ waitingMinutes: 7, interruptedMinutes: 15 });
+    expect(input.timeSummary).toEqual({ waitingMinutes: 7, interruptedMinutes: 15, complete: true, unresolvedEntryCount: 0 });
   });
 
   it("preserves conflicting Gmail snapshots, surfaces a sticky warning, and rolls back failed queue receipts", async () => {
@@ -3201,7 +3201,7 @@ describe.skipIf(!controls.url)("APTLSS manager real PostgreSQL reliability", { t
     const caller = timerRouter.createCaller({ user: ownUser, req: {}, res: {} } as TrpcContext);
     await expect(caller.start({ cardId: worker.cardId, cardName: "Review local requirements",
       cardUrl: `https://trello.com/c/${worker.cardId}`, boardName: "Integration fixture", listName: "TO DO" }))
-      .rejects.toMatchObject({ code: "FORBIDDEN", message: expect.stringMatching(/exactly one active worker profile is required/i) });
+      .rejects.toMatchObject({ code: "PRECONDITION_FAILED", message: expect.stringMatching(/worker profile is ambiguous/i) });
     expect(await db.select().from(schema.timeEntries).where(eq(schema.timeEntries.trackedUserId, worker.id))).toHaveLength(0);
   });
 

@@ -32,6 +32,28 @@ beforeEach(() => { vi.clearAllMocks(); vi.useFakeTimers({ toFake: ['Date'] }); }
 afterEach(() => vi.useRealTimers());
 
 describe('analytics canonical calendar', () => {
+  it.each(['user', 'admin'])('retains inactive history without inventing overtime for a %s viewer', async role => {
+    vi.setSystemTime(new Date('2026-10-19T00:30:00Z'));
+    const actor = { id: 9, role, openId: 'synthetic-founder' } as User;
+    const rows = new Map<unknown, any[]>([
+      [users, [actor, { id: 41, role: 'worker' }]],
+      [vaProfiles, [{ id: 7, userId: 41, founderId: 9, status: 'inactive', name: 'Retired profile', timezone: 'UTC' }]],
+      [userWorkingHours, []], [taskAssignments, []],
+      [timeEntries, [{ id: 1, trackedUserId: 41, trackedProfileId: 7, founderId: 9, vaId: null,
+        taskId: 'retained-history', startTime: new Date('2026-10-18T12:00:00Z'),
+        endTime: new Date('2026-10-18T13:00:00Z'), durationSeconds: 3600, durationMinutes: 60, isVoided: false }]],
+    ]);
+    mocks.getDb.mockResolvedValue(timerTestDatabase(rows).db);
+    const app = express(); app.use((req, _res, next) => { (req as any).user = actor; next(); }); app.use(analytics);
+    const response = await request(app).get('/team-capacity').expect(200);
+    expect(response.body).toMatchObject({ complete: true, capacityComplete: false,
+      expectedMinutes: 0, trackedMinutes: 60, utilization: null, overtimeMinutes: null,
+      workers: [{ workerId: 7, scheduleVerified: false, expectedMinutes: 0, trackedMinutes: 60,
+        utilization: null, overtimeMinutes: null }] });
+    expect(rows.get(timeEntries)).toHaveLength(1);
+    expect(rows.get(vaProfiles)![0].status).toBe('inactive');
+  });
+
   it.each([false, true])('uses the saved four-hour schedule instead of the legacy eight-hour profile, founder fallback=%s', async fallback => {
     vi.setSystemTime(new Date('2026-10-19T00:30:00Z'));
     const app = fixture('America/Los_Angeles', fallback, ['2026-10-18T23:00:00Z', '2026-10-18T23:10:00Z'], { workEndHour: 13 });

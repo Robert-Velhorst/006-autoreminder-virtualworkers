@@ -130,21 +130,23 @@ router.get('/team-capacity', async (req, res) => {
       // Profiles are already caller-scoped; resolve each account's effective
       // schedule rather than reusing the viewer's or a retired profile's hours.
       const schedule = await resolveWorkerOperatorContext({ ...user, id: profile.userId, name: profile.name }, db);
-      const expectedMinutes = schedule.profileId === profile.id && schedule.founderId === profile.founderId
-        ? scheduledMinutes(schedule, startDateKey, 7) : 0;
+      const scheduleVerified = schedule.profileId === profile.id && schedule.founderId === profile.founderId;
+      const expectedMinutes = scheduleVerified ? scheduledMinutes(schedule, startDateKey, 7) : 0;
       const actualMinutes = (attribution.entriesByProfileId.get(profile.id) ?? [])
         .filter(entry => entry.startTime >= periodStart && entry.startTime <= periodEnd)
         .reduce((sum, entry) => sum + trackedMinutes(entry), 0);
       return {
         workerId: profile.id,
         workerName: profile.name,
+        scheduleVerified,
         expectedMinutes,
         trackedMinutes: Math.round(actualMinutes),
         utilization: expectedMinutes > 0 ? Math.round((actualMinutes / expectedMinutes) * 1000) / 10 : null,
-        overtimeMinutes: Math.max(0, Math.round(actualMinutes - expectedMinutes)),
+        overtimeMinutes: scheduleVerified ? Math.max(0, Math.round(actualMinutes - expectedMinutes)) : null,
       };
     }));
     const expectedMinutes = workers.reduce((sum, worker) => sum + worker.expectedMinutes, 0);
+    const capacityComplete = completeness.complete && workers.every(worker => worker.scheduleVerified);
     const actualMinutes = attributedTimes
       .filter(entry => entry.startTime >= periodStart && entry.startTime <= periodEnd)
       .reduce((sum, entry) => sum + trackedMinutes(entry), 0);
@@ -155,12 +157,13 @@ router.get('/team-capacity', async (req, res) => {
     res.json({
       ...completeness,
       success: true,
+      capacityComplete,
       period: { start: periodStart.toISOString(), end: periodEnd.toISOString(), days: 7,
         timezone, startDate: startDateKey, endDate: endDateKey },
-      utilization: expectedMinutes > 0 ? Math.round((actualMinutes / expectedMinutes) * 1000) / 10 : null,
+      utilization: capacityComplete && expectedMinutes > 0 ? Math.round((actualMinutes / expectedMinutes) * 1000) / 10 : null,
       expectedMinutes,
       trackedMinutes: actualMinutes,
-      overtimeMinutes: Math.max(0, actualMinutes - expectedMinutes),
+      overtimeMinutes: capacityComplete ? Math.max(0, actualMinutes - expectedMinutes) : null,
       ...(user.role === 'worker' ? {} : {
         unattributedTimeEntries: {
           count: attribution.unattributed.filter(entry => entry.startTime >= periodStart && entry.startTime <= periodEnd).length,
