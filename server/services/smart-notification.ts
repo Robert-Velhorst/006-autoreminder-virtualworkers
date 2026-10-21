@@ -131,7 +131,16 @@ export async function sendSmartNotification(notification: TaskNotification): Pro
   if (!areNotificationsEnabled()) return channelResult('disabled', 'Notifications are globally disabled');
   try {
     const outcome = await sendEmailWithOutcome({ to: address, subject: notification.title,
-      html: `<h2>${escapeHtml(notification.title)}</h2><p>${escapeHtml(notification.content)}</p>${dueDate ? `<p>Due: ${escapeHtml(dueDate.toISOString())}</p>` : ''}` });
+      html: `<h2>${escapeHtml(notification.title)}</h2><p>${escapeHtml(notification.content)}</p>${dueDate ? `<p>Due: ${escapeHtml(dueDate.toISOString())}</p>` : ''}` }, undefined, async () => {
+        try {
+          if (!areNotificationsEnabled()) return false;
+          const latest = await getRecipient(notification.userOpenId, notification.userId);
+          return Boolean(areNotificationsEnabled() && latest && latest.preferences.notificationMode === 'priority_only'
+            && hasPersistedEmailConsent(latest.preferences)
+            && (latest.preferences.emailAddress || latest.user.email) === address
+            && isUrgent(notification, dueDate, latest.preferences.urgentThresholdHours));
+        } catch { return false; }
+      });
     return channelResult(outcome.status, outcome.status === 'sent' ? 'Email delivery confirmed' : outcome.status === 'uncertain'
       ? 'Email delivery is unconfirmed; do not retry automatically' : 'Email was not sent');
   } catch { return channelResult('uncertain', 'Email delivery is unconfirmed; do not retry automatically'); }

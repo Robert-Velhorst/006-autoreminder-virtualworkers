@@ -9,6 +9,7 @@ import {
   listGmailMessages, sendGoogleMail, syncWorkerGoogleEvidence,
 } from "./googleEvidence";
 import { ScheduledJobLeaseLostError, type ScheduledJobContext } from "./scheduledJobRuntime";
+import { EmailDispatchNotStartedError } from "./services/email-dispatch-guard";
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(), enqueue: vi.fn(), commitment: vi.fn(), worker: vi.fn(),
@@ -150,6 +151,7 @@ function provider(hook: (url: URL, init?: RequestInit) => void = () => {}) {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.stubEnv("NOTIFICATIONS_ENABLED", "true");
   vi.stubEnv("JWT_SECRET", "test-google-evidence-ownership-secret-long-enough");
   vi.stubEnv("GOOGLE_CLIENT_ID", "test-client-id");
   vi.stubEnv("GOOGLE_CLIENT_SECRET", "test-client-secret");
@@ -239,6 +241,52 @@ describe("Google scheduled ownership", () => {
     }));
     expect(await sendGoogleMail(message)).toEqual({ id: "synthetic-message-id" });
     expect(sends).toBe(1);
+  });
+  it.each(['false', 'read-error'])("rechecks eligibility after paused Google token readiness: %s", async refusal => {
+    mailFixture();
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const send = vi.fn();
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async input => {
+      if (new URL(String(input)).hostname === 'oauth2.googleapis.com') {
+        entered(); await held; return response({ access_token: 'token' });
+      }
+      send(); return response({ id: 'must-not-send' });
+    }));
+    let eligible = true;
+    const guard = vi.fn(async () => { if (refusal === 'read-error') throw new Error('Storage unavailable'); return eligible; });
+    const pending = sendGoogleMail(message, undefined, guard);
+    const rejected = expect(pending).rejects.toBeInstanceOf(EmailDispatchNotStartedError);
+    await waiting;
+    expect(guard).not.toHaveBeenCalled(); eligible = false; release();
+    await rejected;
+    expect(guard).toHaveBeenCalledOnce(); expect(send).not.toHaveBeenCalled();
+  });
+  it('rechecks eligibility after asynchronous MIME composition and honors the dynamic master flag', async () => {
+    mailFixture(); const fetchMock = provider();
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const compose = vi.fn(async () => { await held; return { message: Buffer.from('fixture') }; });
+    vi.spyOn(nodemailer, 'createTransport').mockReturnValue({ sendMail: compose } as never);
+    const guard = vi.fn(async () => true);
+    const pending = sendGoogleMail(message, undefined, guard);
+    const rejected = expect(pending).rejects.toBeInstanceOf(EmailDispatchNotStartedError);
+    await vi.waitFor(() => expect(compose).toHaveBeenCalledOnce());
+    vi.stubEnv('NOTIFICATIONS_ENABLED', 'false'); release(); await rejected;
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/messages/send'))).toBe(false);
+  });
+  it('does not reuse a pre-dispatch refusal classification or recheck eligibility after Google fetch begins', async () => {
+    mailFixture(); let sends = 0;
+    const guard = vi.fn(async () => true);
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async input => {
+      if (new URL(String(input)).hostname === 'oauth2.googleapis.com') return response({ access_token: 'token' });
+      sends++; guard.mockResolvedValue(false); throw new EmailDispatchNotStartedError();
+    }));
+    const error = await sendGoogleMail(message, undefined, guard).catch(error => error);
+    expect(error).not.toBeInstanceOf(EmailDispatchNotStartedError);
+    expect(error.message).toContain('unconfirmed'); expect(sends).toBe(1); expect(guard).toHaveBeenCalledOnce();
   });
 
   it("rejects an already aborted run before reading credentials or contacting Google", async () => {

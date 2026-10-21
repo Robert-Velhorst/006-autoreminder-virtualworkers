@@ -7,6 +7,8 @@ import { runScheduledJob, ScheduledJobLeaseLostError } from '../scheduledJobRunt
 import { getBriefingSettings, shouldRunBriefingAt, type BriefingSettings } from '../briefingSettings';
 import { createNonOverlappingRunner } from './non-overlapping-runner';
 import { getConsentingRecipientEmail } from './recipientEmailConsent';
+import { resolveWorkerOperatorContextById } from '../workerOperatorContext';
+import { areNotificationsEnabled } from './notificationPolicy';
 
 let schedulerInterval: NodeJS.Timeout | null = null;
 
@@ -118,6 +120,15 @@ export async function processScheduledBriefings() {
         day: "numeric",
       }).format(new Date());
       const dateKey = dateKeyInTimeZone(new Date(), workerTimezone);
+      const beforeDispatch = (recipientId: number, expectedAddress: string) => async () => {
+        try {
+          if (!areNotificationsEnabled()) return false;
+          const currentWorker = await resolveWorkerOperatorContextById(worker.userId);
+          if (currentWorker.profileId !== worker.id || currentWorker.founderId !== worker.founderId) return false;
+          const currentAddress = await getConsentingRecipientEmail(recipientId, 'daily_digest');
+          return areNotificationsEnabled() && currentAddress === expectedAddress;
+        } catch { return false; }
+      };
 
       if (shouldSendMorning) {
         await runScheduledJob({ jobKey: `briefing:${worker.userId}:${dateKey}` }, async context => {
@@ -130,7 +141,7 @@ export async function processScheduledBriefings() {
             tasks,
             totalHours: tasks.reduce((sum, task) => sum + task.durationHours, 0),
             highPriorityCount: 0,
-          }, context);
+          }, context, beforeDispatch(worker.userId, morningAddress!));
           if (!delivered) throw new Error("Morning briefing provider did not confirm delivery");
           return { recordsProcessed: tasks.length, detail: `Delivered to worker for ${dateKey}` };
         });
@@ -169,7 +180,7 @@ export async function processScheduledBriefings() {
             blockedTasks,
             totalHoursWorked,
             completionRate,
-          }, context);
+          }, context, beforeDispatch(worker.founderId, eodAddress!));
           if (!delivered) throw new Error("EOD report provider did not confirm delivery");
           return { recordsProcessed: entries.length + assignments.length, detail: `Delivered to owner for ${dateKey}` };
         });

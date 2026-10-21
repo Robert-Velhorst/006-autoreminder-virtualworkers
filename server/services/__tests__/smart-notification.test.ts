@@ -39,6 +39,49 @@ beforeEach(() => { vi.resetAllMocks(); controls.profile.mockResolvedValue(9); vi
 afterEach(() => vi.unstubAllEnvs());
 
 describe('smart notifications use durable recipient state', () => {
+  it.each(['revoked', 'address', 'identity missing', 'offboarded', 'mode', 'unavailable', 'global'])(
+    'blocks %s changes during awaited provider readiness at the final dispatch guard', async change => {
+      const latest = recipient();
+      if (change === 'offboarded') latest.user.role = 'worker';
+      const rows = [[latest], [latest], [latest]];
+      database(rows);
+      let release!: () => void;
+      const ready = new Promise<void>(resolve => { release = resolve; });
+      const dispatch = vi.fn();
+      controls.email.mockImplementation(async (_options, _context, beforeDispatch) => {
+        await ready;
+        if (!await beforeDispatch()) return { status: 'not_sent' };
+        dispatch(); return { status: 'sent' };
+      });
+      const pending = sendSmartNotification(notice);
+      await vi.waitFor(() => expect(controls.email).toHaveBeenCalledOnce());
+      if (change === 'revoked') latest.preferences.emailEnabled = 0;
+      if (change === 'address') latest.preferences.emailAddress = 'different@example.invalid';
+      if (change === 'identity missing') rows[2] = [];
+      if (change === 'offboarded') controls.profile.mockResolvedValue(null);
+      if (change === 'mode') latest.preferences.notificationMode = 'disabled';
+      if (change === 'unavailable') controls.db.mockRejectedValue(new Error('Synthetic read unavailable'));
+      if (change === 'global') vi.stubEnv('NOTIFICATIONS_ENABLED', 'false');
+      release();
+      expect(await pending).toMatchObject({ sent: false, deliveryState: 'not_sent', channels: { email: 'not_sent' } });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(controls.email.mock.calls[0][1]).toBeUndefined();
+      expect(typeof controls.email.mock.calls[0][2]).toBe('function');
+    },
+  );
+
+  it('allows unchanged identity, consent and exact address after awaited readiness', async () => {
+    database([[recipient()]]);
+    const dispatch = vi.fn();
+    controls.email.mockImplementation(async (_options, _context, beforeDispatch) => {
+      await Promise.resolve();
+      if (!await beforeDispatch()) return { status: 'not_sent' };
+      dispatch(); return { status: 'sent' };
+    });
+    expect(await sendSmartNotification(notice)).toMatchObject({ sent: true, deliveryState: 'sent' });
+    expect(dispatch).toHaveBeenCalledOnce();
+  });
+
   it('globally disables delivery and enqueue before accessing dependencies', async () => {
     vi.stubEnv('NOTIFICATIONS_ENABLED', 'false');
     expect(await sendSmartNotification(notice)).toMatchObject({ sent: false, mode: 'disabled' });

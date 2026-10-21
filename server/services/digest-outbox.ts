@@ -238,19 +238,21 @@ export async function deliverDigestForUser(
       return true;
     });
     if (!dispatch) { outcome = result('skipped', job, 'Recipient consent or address changed; batch retained'); return; }
+    const beforeDispatch = () => db.transaction(async tx => {
+      await context.assertOwnership(tx);
+      const recipient = await identity(tx, userOpenId);
+      const allowed = Boolean(recipient?.user.id === prepared.recipient.user.id
+        && recipient.workerEligible && consenting(recipient.preferences)
+        && (recipient.preferences!.emailAddress || recipient.user.email) === job.recipientEmail);
+      await context.assertOwnership(tx);
+      return allowed;
+    });
     let delivery: Awaited<ReturnType<typeof sendEmailWithOutcome>>;
     try {
       await context.assertOwnership();
-      const eligible = await db.transaction(async tx => {
-        await context.assertOwnership(tx);
-        const recipient = await identity(tx, userOpenId);
-        const allowed = recipient?.workerEligible && consenting(recipient.preferences)
-          && (recipient.preferences!.emailAddress || recipient.user.email) === job.recipientEmail;
-        await context.assertOwnership(tx);
-        return allowed;
-      });
+      const eligible = await beforeDispatch();
       delivery = eligible
-        ? await sendEmailWithOutcome({ to: job.recipientEmail!, subject: job.subject!, html: job.html! }, context)
+        ? await sendEmailWithOutcome({ to: job.recipientEmail!, subject: job.subject!, html: job.html! }, context, beforeDispatch)
         : { status: 'not_sent', reason: 'Recipient consent, address, or active worker eligibility changed; no email was sent' };
     } catch (error) {
       if (error instanceof ScheduledJobLeaseLostError || context.signal.aborted) throw error;

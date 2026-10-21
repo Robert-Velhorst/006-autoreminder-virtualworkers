@@ -401,6 +401,73 @@ describe.skipIf(!url)('digest outbox full-migration native PostgreSQL', { timeou
     }
   });
 
+  it.each(['offboarded', 'consent_revoked', 'address_changed', 'non_operator', 'ambiguous'] as const)(
+    'rechecks persisted eligibility at the provider callback after paused setup: %s', async change => {
+      await db.update(schema.users).set({ role: 'worker' }).where(eq(schema.users.id, recipient.id));
+      const [profile] = await db.insert(schema.vaProfiles).values({ userId: recipient.id, founderId: stranger.id, name: 'Worker' }).returning();
+      await queue();
+      let started!: () => void; const entered = new Promise<void>(resolve => { started = resolve; });
+      let release!: () => void; const wait = new Promise<void>(resolve => { release = resolve; }); gates.push(release);
+      const irreversibleSend = vi.fn();
+      controls.send.mockImplementation(async (_message, _context, beforeDispatch: () => Promise<boolean>) => {
+        started(); await wait;
+        if (!await beforeDispatch()) return { status: 'not_sent', reason: 'Final recipient authorization denied before provider invocation' };
+        irreversibleSend(); return { status: 'sent' };
+      });
+      const pending = deliverDigestForUser(recipient.openId, { now });
+      await entered;
+      const [frozen] = await db.select().from(schema.digestJobs).where(eq(schema.digestJobs.userOpenId, recipient.openId));
+      if (change === 'offboarded') await db.update(schema.vaProfiles).set({ status: 'inactive' }).where(eq(schema.vaProfiles.id, profile.id));
+      else if (change === 'consent_revoked') await db.update(schema.userNotificationPreferences).set({ emailEnabled: 0 }).where(eq(schema.userNotificationPreferences.userId, recipient.id));
+      else if (change === 'address_changed') await db.update(schema.userNotificationPreferences).set({ emailAddress: 'changed@example.invalid' }).where(eq(schema.userNotificationPreferences.userId, recipient.id));
+      else if (change === 'non_operator') await db.update(schema.users).set({ role: 'user' }).where(eq(schema.users.id, recipient.id));
+      else await db.insert(schema.vaProfiles).values({ userId: recipient.id, founderId: stranger.id, name: 'Second active profile' });
+      release();
+      expect(await pending).toMatchObject({ state: 'not_sent', jobId: frozen.id, count: 1 });
+      expect(irreversibleSend).not.toHaveBeenCalled();
+      expect((await job(frozen.id))).toMatchObject({ deliveryPhase: 'not_sent', payloadHash: frozen.payloadHash,
+        recipientEmail: frozen.recipientEmail, completedAt: null });
+      expect(await readQueuedDigestNotifications(recipient.openId)).toHaveLength(1);
+    });
+
+  it('propagates ownership lost during provider setup without converting it into a definitely-unsent retry', async () => {
+    await queue();
+    let started!: () => void; const entered = new Promise<void>(resolve => { started = resolve; });
+    let release!: () => void; const wait = new Promise<void>(resolve => { release = resolve; }); gates.push(release);
+    const irreversibleSend = vi.fn();
+    controls.send.mockImplementation(async (_message, _context, beforeDispatch: () => Promise<boolean>) => {
+      started(); await wait;
+      if (!await beforeDispatch()) return { status: 'not_sent', reason: 'Authorization denied' };
+      irreversibleSend(); return { status: 'sent' };
+    });
+    const pending = deliverDigestForUser(recipient.openId, { now }).then(value => ({ value }), error => ({ error }));
+    await entered;
+    const key = `digest:${createHash('sha256').update(recipient.openId).digest('hex')}`;
+    await pool.query('update scheduled_job_leases set "leaseExpiresAt" = clock_timestamp() - interval \'1 second\' where "jobKey" = $1', [key]);
+    release();
+    expect(await pending).toHaveProperty('error', expect.any(ScheduledJobLeaseLostError));
+    const [held] = await db.select().from(schema.digestJobs).where(eq(schema.digestJobs.userOpenId, recipient.openId));
+    expect(held.deliveryPhase).toBe('dispatching'); expect(held.nextAttemptAt).toBeNull();
+    expect((await deliverDigestForUser(recipient.openId, { now })).state).toBe('uncertain');
+    expect(irreversibleSend).not.toHaveBeenCalled();
+    expect(controls.send).toHaveBeenCalledOnce();
+  });
+
+  it('does not rerun the recipient guard after provider acceptance and falsely classify accepted mail as unsent', async () => {
+    await queue();
+    const irreversibleSend = vi.fn();
+    controls.send.mockImplementation(async (_message, _context, beforeDispatch: () => Promise<boolean>) => {
+      if (!await beforeDispatch()) return { status: 'not_sent', reason: 'Authorization denied' };
+      irreversibleSend();
+      await db.update(schema.userNotificationPreferences).set({ emailEnabled: 0 }).where(eq(schema.userNotificationPreferences.userId, recipient.id));
+      return { status: 'sent' };
+    });
+    const delivered = await deliverDigestForUser(recipient.openId, { now });
+    expect(delivered.state).toBe('sent'); expect(irreversibleSend).toHaveBeenCalledOnce();
+    expect((await job(delivered.jobId!)).deliveryPhase).toBe('sent');
+    expect(await readQueuedDigestNotifications(recipient.openId)).toEqual([]);
+  });
+
   it.each(['pending', 'processing', 'failed'] as const)('holds legacy %s jobs with unknown membership rather than replaying queued rows', async status => {
     await queue();
     const [legacy] = await db.insert(schema.digestJobs).values({ userOpenId: recipient.openId, status, scheduledFor: now }).returning();

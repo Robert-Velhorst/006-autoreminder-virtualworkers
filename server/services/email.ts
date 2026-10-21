@@ -3,6 +3,7 @@ import { convert } from 'html-to-text';
 import { areNotificationsEnabled } from './notificationPolicy';
 import nodemailer, { type Transporter } from 'nodemailer';
 import { ScheduledJobLeaseLostError, type ScheduledJobContext } from '../scheduledJobRuntime';
+import { assertEmailDispatchAllowed, EmailDispatchNotStartedError } from './email-dispatch-guard';
 import {
   getGoogleMailDeliveryStatus,
   sendGoogleMail,
@@ -165,6 +166,7 @@ async function assertEmailOwnership(context?: ScheduledJobContext): Promise<void
 export async function sendEmailWithOutcome(
   options: EmailOptions,
   context?: ScheduledJobContext,
+  beforeDispatch?: () => Promise<boolean>,
 ): Promise<EmailDeliveryOutcome> {
   let status: EmailProviderStatus;
   try {
@@ -182,6 +184,7 @@ export async function sendEmailWithOutcome(
     return { status: 'not_sent', reason: `${status.reason ?? 'Email provider is not ready'}; no email was sent.` };
   }
 
+  let dispatchStarted = false;
   try {
     const text = options.text || convert(options.html, {
       wordwrap: false,
@@ -195,7 +198,9 @@ export async function sendEmailWithOutcome(
     if (status.provider === 'gmail_api') {
       const message = { to: options.to, subject: options.subject, html: options.html, text };
       await assertEmailOwnership(context);
-      if (context) await sendGoogleMail(message, context);
+      // Gmail performs the final guard after its own token refresh and MIME composition.
+      if (beforeDispatch) await sendGoogleMail(message, context, beforeDispatch);
+      else if (context) await sendGoogleMail(message, context);
       else await sendGoogleMail(message);
     } else if (status.provider === 'sendgrid') {
       const message = {
@@ -206,6 +211,9 @@ export async function sendEmailWithOutcome(
         text,
       };
       await assertEmailOwnership(context);
+      await assertEmailDispatchAllowed(beforeDispatch, context);
+      if (context?.signal.aborted) throw new ScheduledJobLeaseLostError();
+      dispatchStarted = true;
       await sgMail.send(message);
     } else {
       const transporter = getGmailTransporter();
@@ -217,12 +225,18 @@ export async function sendEmailWithOutcome(
         text,
       };
       await assertEmailOwnership(context);
+      await assertEmailDispatchAllowed(beforeDispatch, context);
+      if (context?.signal.aborted) throw new ScheduledJobLeaseLostError();
+      dispatchStarted = true;
       await transporter.sendMail(message);
     }
     console.log(`[Email] ${status.provider} delivery succeeded: ${options.subject}`);
     return { status: 'sent' };
   } catch (error) {
     if (error instanceof ScheduledJobLeaseLostError) throw error;
+    if (!dispatchStarted && error instanceof EmailDispatchNotStartedError) {
+      return { status: 'not_sent', reason: error.message };
+    }
     console.error(`[Email] ${status.provider} delivery failed:`, error);
     return {
       status: 'uncertain',
@@ -231,8 +245,10 @@ export async function sendEmailWithOutcome(
   }
 }
 
-export async function sendEmail(options: EmailOptions, context?: ScheduledJobContext): Promise<boolean> {
-  return (await sendEmailWithOutcome(options, context)).status === 'sent';
+export async function sendEmail(options: EmailOptions, context?: ScheduledJobContext, beforeDispatch?: () => Promise<boolean>): Promise<boolean> {
+  const outcome = beforeDispatch ? await sendEmailWithOutcome(options, context, beforeDispatch)
+    : context ? await sendEmailWithOutcome(options, context) : await sendEmailWithOutcome(options);
+  return outcome.status === 'sent';
 }
 
 export async function sendWorkerInvitationEmail({
@@ -478,26 +494,32 @@ export async function sendMorningBriefing(
   email: string,
   data: WorkerBriefingData,
   context?: ScheduledJobContext,
+  beforeDispatch?: () => Promise<boolean>,
 ): Promise<boolean> {
   const html = generateMorningBriefingHtml(data);
-  return sendEmail({
+  const message = {
     to: email,
     subject: `☀️ Your Daily Briefing - ${data.date}`,
     html,
-  }, context);
+  };
+  if (beforeDispatch) return sendEmail(message, context, beforeDispatch);
+  return context ? sendEmail(message, context) : sendEmail(message);
 }
 
 export async function sendEODReport(
   email: string,
   data: EODReportData,
   context?: ScheduledJobContext,
+  beforeDispatch?: () => Promise<boolean>,
 ): Promise<boolean> {
   const html = generateEODReportHtml(data);
-  return sendEmail({
+  const message = {
     to: email,
     subject: `🌙 End of Day Report - ${data.date}`,
     html,
-  }, context);
+  };
+  if (beforeDispatch) return sendEmail(message, context, beforeDispatch);
+  return context ? sendEmail(message, context) : sendEmail(message);
 }
 
 export async function validateEmailProvider(): Promise<boolean> {

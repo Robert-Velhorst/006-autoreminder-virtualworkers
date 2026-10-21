@@ -34,6 +34,13 @@ I/O. Only the recorded members are marked sent after provider acceptance;
 notifications queued during that call cannot join the email retrospectively.
 The provider call is never made while holding the preparation transaction open.
 
+Automated email rechecks recipient eligibility, persisted consent and the frozen
+address after provider preparation, immediately before dispatch. Gmail performs
+this check after token refresh and message composition. A failed pre-dispatch
+check retains the batch as definitely not sent; a failure after dispatch begins
+remains unconfirmed and must not authorize an automatic replay. This is a fresh
+authorization boundary, not a distributed transaction with the email provider.
+
 Delivery phases have deliberately different meanings:
 
 | Phase | Meaning |
