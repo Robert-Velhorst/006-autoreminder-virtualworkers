@@ -26,7 +26,7 @@ CREATE TABLE "assignment_events" (
 	"nextStatus" varchar(20) NOT NULL,
 	"beforeJson" jsonb,
 	"afterJson" jsonb NOT NULL,
-	"createdAt" timestamp DEFAULT now() NOT NULL,
+	"createdAt" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "assignment_events_kind_check" CHECK ("assignment_events"."kind" IN ('created', 'reassigned', 'status_changed', 'notes_changed'))
 );
 --> statement-breakpoint

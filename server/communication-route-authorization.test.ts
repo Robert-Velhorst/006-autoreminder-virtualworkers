@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { taskAssignments, userWorkingHours, users, vaProfiles } from "../drizzle/schema.postgres";
+import { matchesTimerWhere } from './test/timerDatabase';
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),
@@ -33,26 +34,25 @@ import communicationRoutes from "./routes/communication";
 
 const pgDialect = new PgDialect();
 
-function assignmentRowsMatching(rows: Array<Record<string, unknown>>, condition: unknown) {
-  if (!condition) return rows;
-  const { sql, params } = pgDialect.sqlToQuery(condition as SQL);
-  const comparisons = [...sql.matchAll(/"task_assignments"\."([^"]+)" = \$(\d+)/g)];
-  return rows.filter(row => comparisons.every((comparison, index) => row[comparison[1]] === params[Number(comparison[2]) - 1]));
-}
-
 function mockDb(profiles: unknown[], assignments: Array<Record<string, unknown>> = []) {
+  const profileRows = profiles as Array<Record<string, any>>;
+  const assignmentRows = assignments.map(row => ({ founderId: 8, status: 'assigned', ...row }));
+  const allProfiles = [...profileRows, ...assignmentRows.filter(row => !profileRows.some(profile => profile.id === row.vaId))
+    .map(row => ({ id: row.vaId, userId: 100 + Number(row.vaId), founderId: row.founderId, status: 'active' }))];
+  const accounts = [...allProfiles.map(profile => ({ id: profile.userId, role: 'worker', name: 'Worker' })),
+    ...[...new Set(allProfiles.map(profile => profile.founderId))].map(id => ({ id, role: 'admin', name: 'Founder' }))];
   const assignmentConditions: unknown[] = [];
   const transactionUpdate = vi.fn().mockReturnValue({ rowCount: 1 });
   const conversationInsert = vi.fn();
   const conversationUpdate = vi.fn();
   const rowsFor = (table: unknown, condition: unknown) => {
-    if (table === vaProfiles) return profiles;
-    if (table === taskAssignments) return assignmentRowsMatching(assignments, condition);
-    if (table === users) return [{ name: "Founder" }];
+    if (table === vaProfiles) return allProfiles.filter(row => matchesTimerWhere(row, condition));
+    if (table === taskAssignments) return assignmentRows.filter(row => matchesTimerWhere(row, condition));
+    if (table === users) return accounts.filter(row => matchesTimerWhere(row, condition));
     if (table === userWorkingHours) return [];
     return [];
   };
-  const select = (transactional: boolean) => vi.fn(() => {
+  const select = () => vi.fn(() => {
     let table: unknown;
     let condition: unknown;
     const query: any = {
@@ -62,7 +62,7 @@ function mockDb(profiles: unknown[], assignments: Array<Record<string, unknown>>
         if (table === taskAssignments) assignmentConditions.push(value);
         return query;
       }),
-      limit: vi.fn(() => transactional ? query : Promise.resolve(rowsFor(table, condition))),
+      limit: vi.fn(() => query),
       orderBy: vi.fn(() => query),
       for: vi.fn(async () => rowsFor(table, condition)),
       then: (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) =>
@@ -71,7 +71,8 @@ function mockDb(profiles: unknown[], assignments: Array<Record<string, unknown>>
     return query;
   });
   const db = {
-    select: select(false),
+    execute: vi.fn(async () => ({ rows: [] })),
+    select: select(),
     insert: vi.fn(() => ({
       values: vi.fn((value: unknown) => {
         conversationInsert(value);
@@ -86,7 +87,8 @@ function mockDb(profiles: unknown[], assignments: Array<Record<string, unknown>>
       return query;
     }),
     transaction: vi.fn(async (callback: (transaction: any) => Promise<unknown>) => callback({
-      select: select(true),
+      execute: vi.fn(async () => ({ rows: [] })),
+      select: select(),
       insert: vi.fn(() => ({
         values: vi.fn((value: unknown) => {
           conversationInsert(value);
@@ -129,7 +131,7 @@ describe("communication ask-founder authorization", () => {
     await request(app)
       .post("/communication/ask-founder")
       .send({ taskId: "card-not-assigned", question: "Can you clarify this?" })
-      .expect(404, { error: "Task is not assigned to this worker" });
+      .expect(404, { error: "Assigned task not found" });
 
     expect(mocks.fetchAuthorizedTrelloCard).not.toHaveBeenCalled();
   });
@@ -226,6 +228,7 @@ describe("communication ask-founder authorization", () => {
     expect(mocks.postTrelloComment).toHaveBeenCalledWith(
       "assigned-card",
       '**[Worker Question]**\nWorker asked:\n"Can you clarify this?"',
+      expect.any(Function),
     );
     expect(conversationInsert).toHaveBeenCalledWith(expect.objectContaining({
       cardTrelloId: "assigned-card",
@@ -263,12 +266,13 @@ describe("communication decision-log authorization", () => {
 
     await request(app)
       .get(`/communication/decision-log/${taskId}?workerId=9`)
-      .expect(404, { error: "Task not found" });
+      .expect(403, { error: "Task is not assigned to this worker" });
 
-    expect(assignmentConditions).toHaveLength(1);
+    expect(assignmentConditions.length).toBeGreaterThan(0);
     const { sql, params } = pgDialect.sqlToQuery(assignmentConditions[0] as SQL);
-    expect(sql).toMatch(/"task_assignments"\."vaId" = \$\d+/);
-    expect(params).toEqual([taskId, 7]);
+    expect(sql).toMatch(/"task_assignments"\."founderId" = \$\d+/);
+    expect(sql).not.toContain('"vaId"');
+    expect(params).toEqual([8, taskId]);
   });
 
   it("does not append a decision to another worker's assignment when their workerId is supplied", async () => {
@@ -289,12 +293,13 @@ describe("communication decision-log authorization", () => {
     await request(app)
       .post("/communication/decision-log")
       .send({ taskId, workerId: 9, decision: "Unauthorized change" })
-      .expect(404, { error: "Task not found" });
+      .expect(403, { error: "Task is not assigned to this worker" });
 
-    expect(assignmentConditions).toHaveLength(1);
+    expect(assignmentConditions.length).toBeGreaterThan(0);
     const { sql, params } = pgDialect.sqlToQuery(assignmentConditions[0] as SQL);
-    expect(sql).toMatch(/"task_assignments"\."vaId" = \$\d+/);
-    expect(params).toEqual([taskId, 7]);
+    expect(sql).toMatch(/"task_assignments"\."founderId" = \$\d+/);
+    expect(sql).not.toContain('"vaId"');
+    expect(params).toEqual([8, taskId]);
     expect(transactionUpdate).not.toHaveBeenCalled();
   });
 });

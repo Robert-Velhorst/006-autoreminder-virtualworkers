@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { taskAssignments } from '../drizzle/schema.postgres';
 import { timerTestDatabase } from './test/timerDatabase';
@@ -61,6 +61,46 @@ describe('canonical assignment identity', () => {
   it('fails closed when locking capability is unavailable', async () => {
     const { db } = fixture();
     await expect(readCanonicalAssignment({ select: db.select }, 10, 'a', { lock: true })).rejects.toMatchObject({ status: 503 });
+  });
+
+  it('does not read or row-lock when acquiring an absent-identity fence fails', async () => {
+    const { db } = fixture([]);
+    db.execute.mockRejectedValue(new Error('transaction lock unavailable'));
+    await expect(readCanonicalAssignment(db, 10, 'absent-child', { lock: true })).rejects.toThrow('transaction lock unavailable');
+    expect(db.select).not.toHaveBeenCalled();
+  });
+
+  it('binds advisory identities as parameters and separates founders, parents and child IDs', async () => {
+    const { db } = fixture([]);
+    const identities: string[] = [];
+    db.execute.mockImplementation(async (query: any) => {
+      const compiled = new PgDialect().sqlToQuery(query);
+      expect(compiled.sql).not.toContain('card');
+      identities.push(compiled.params[0] as string);
+    });
+    await readCanonicalAssignments(db, 10, ['card:list:item', 'card'], { lock: true });
+    await readCanonicalAssignment(db, 11, 'card:list:item', { lock: true });
+    expect(identities.map(value => JSON.parse(value))).toEqual([
+      ['task_assignment', 10, 'card'], ['task_assignment', 10, 'card:list:item'], ['task_assignment', 11, 'card:list:item'],
+    ]);
+    expect(new Set(identities).size).toBe(3);
+  });
+
+  it('caps SELECT at deduplicated task count plus one and skips all I/O for an empty batch', async () => {
+    const { db } = fixture();
+    const select = db.select;
+    const limit = vi.fn();
+    db.select = (...args: unknown[]) => {
+      const query = select(...args);
+      const original = query.limit;
+      query.limit = (value: number) => { limit(value); return original(value); };
+      return query;
+    };
+    await readCanonicalAssignments(db, 10, [first.taskId, first.taskId, 'other']);
+    expect(limit).toHaveBeenCalledExactlyOnceWith(3);
+    select.mockClear();
+    expect(await readCanonicalAssignments(db, 10, [], { lock: true })).toEqual([]);
+    expect(select).not.toHaveBeenCalled(); expect(db.execute).not.toHaveBeenCalled();
   });
 
   it('sanitizes database conflicts and does not disclose unknown SQL errors', () => {

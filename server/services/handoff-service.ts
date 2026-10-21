@@ -1,9 +1,9 @@
 import { getDb } from '../db';
-import { dailyBriefings, taskAssignments, vaProfiles } from '../../drizzle/schema.postgres';
+import { dailyBriefings, taskAssignments, users, vaProfiles, type User } from '../../drizzle/schema.postgres';
 import { eq, and } from 'drizzle-orm';
 import { AssignmentError, assertCanonicalAssignmentRows, type AssignmentActor } from '../taskAssignmentMutation';
 import { withLockedAssignment } from '../taskAssignmentService';
-import { withTimerAccountTransaction } from '../canonicalTimer';
+import { selectWorkerProfile } from '../workerOperatorContext';
 
 async function database() {
   const db = await getDb();
@@ -32,11 +32,28 @@ export async function generateShiftSummary(workerId: number, actor: AssignmentAc
   const db = await database();
   const [observed] = await db.select().from(vaProfiles).where(eq(vaProfiles.id, workerId)).limit(1);
   if (!observed) throw new AssignmentError(404, 'Worker profile not found');
-  return withTimerAccountTransaction(db, actor, async (tx, context) => {
-    const worker = context.profile;
-    if (!worker || worker.id !== workerId) throw new AssignmentError(409, 'Worker ownership changed');
+  return db.transaction(async tx => {
+    const accounts = new Map<number, User>();
+    for (const id of [...new Set([actor.id, observed.userId, observed.founderId])].sort((a, b) => a - b)) {
+      const [account] = await tx.select().from(users).where(eq(users.id, id)).for('no key update');
+      if (account) accounts.set(id, account);
+    }
+    const freshActor = accounts.get(actor.id);
+    if (!freshActor || freshActor.role !== actor.role || !['admin', 'worker'].includes(freshActor.role)) {
+      throw new AssignmentError(403, 'Account permissions changed');
+    }
+    if (freshActor.role === 'worker' && freshActor.id !== observed.userId) throw new AssignmentError(403, 'Worker access denied');
+    if (freshActor.role === 'admin' && freshActor.id !== observed.founderId) throw new AssignmentError(404, 'Worker profile not found');
+    if (accounts.get(observed.founderId)?.role !== 'admin' || accounts.get(observed.userId)?.role !== 'worker') {
+      throw new AssignmentError(403, 'Worker or founder access changed');
+    }
+    const profiles = await tx.select().from(vaProfiles).where(eq(vaProfiles.userId, observed.userId))
+      .orderBy(vaProfiles.id).for('update');
+    const worker = selectWorkerProfile(profiles);
+    if (!worker || worker.id !== workerId || worker.founderId !== observed.founderId) throw new AssignmentError(409, 'Worker ownership changed');
+    const founderId = worker.founderId;
     const founderRows = await tx.select().from(taskAssignments)
-      .where(eq(taskAssignments.founderId, context.founderId)).orderBy(taskAssignments.taskId, taskAssignments.id);
+      .where(eq(taskAssignments.founderId, founderId)).orderBy(taskAssignments.taskId, taskAssignments.id);
     assertCanonicalAssignmentRows(founderRows);
     const assignments = founderRows.filter(row => row.vaId === workerId);
     const dateParts = new Intl.DateTimeFormat('en-CA', {
@@ -55,12 +72,12 @@ export async function generateShiftSummary(workerId: number, actor: AssignmentAc
       })),
     });
     const [existing] = await tx.select({ id: dailyBriefings.id }).from(dailyBriefings).where(and(
-      eq(dailyBriefings.vaId, workerId), eq(dailyBriefings.founderId, context.founderId),
+      eq(dailyBriefings.vaId, workerId), eq(dailyBriefings.founderId, founderId),
       eq(dailyBriefings.briefingDate, briefingDate), eq(dailyBriefings.briefingType, 'end_of_day'),
     )).limit(1);
     if (existing) await tx.update(dailyBriefings).set({ content }).where(eq(dailyBriefings.id, existing.id));
-    else await tx.insert(dailyBriefings).values({ vaId: workerId, founderId: context.founderId,
+    else await tx.insert(dailyBriefings).values({ vaId: workerId, founderId,
       briefingDate, briefingType: 'end_of_day', content });
     return true;
-  }, observed.userId, observed.founderId);
+  });
 }

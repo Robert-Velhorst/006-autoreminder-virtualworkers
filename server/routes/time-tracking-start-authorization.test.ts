@@ -25,8 +25,6 @@ function makeDb(options: {
   profileCollisions?: Array<{ id: number; userId: number; founderId: number; status: string }>;
   otherAccountIds?: number[];
 } = {}) {
-  let timeEntryReads = 0;
-  let taskAssignmentReads = 0;
   let profileReads = 0;
   const inserted = vi.fn();
   const entry = { id: 100, taskId: "assigned-card", vaId: 42, founderId: 8, startTime: new Date(), endTime: null };

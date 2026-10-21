@@ -1,9 +1,8 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SQL } from "drizzle-orm";
-import { PgDialect } from "drizzle-orm/pg-core";
-import { chatbotConversations, taskAssignments, vaProfiles } from "../../drizzle/schema.postgres";
+import { chatbotConversations, taskAssignments, users, vaProfiles } from "../../drizzle/schema.postgres";
+import { matchesTimerWhere } from '../test/timerDatabase';
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),
@@ -11,7 +10,9 @@ const mocks = vi.hoisted(() => ({
   isTrelloCommentAutomationEnabled: vi.fn(),
   postTrelloComment: vi.fn(),
   storeConversation: vi.fn(),
+  authenticate: vi.fn(),
 }));
+vi.mock('../_core/sdk', () => ({ sdk: { authenticateRequest: mocks.authenticate } }));
 
 vi.mock("../db", () => ({ getDb: mocks.getDb }));
 vi.mock("../trelloCardAccess", () => ({
@@ -31,13 +32,8 @@ vi.mock("../services/chatbot-history", () => ({ storeConversation: mocks.storeCo
 
 import communicationRoutes from "./communication";
 
-const pgDialect = new PgDialect();
-
 function matches(row: Record<string, unknown>, condition: unknown) {
-  if (!condition) return true;
-  const { sql, params } = pgDialect.sqlToQuery(condition as SQL);
-  const comparisons = [...sql.matchAll(/"(?:\w+)"\."([^"]+)" = \$(\d+)/g)];
-  return comparisons.every(match => row[match[1]] === params[Number(match[2]) - 1]);
+  return matchesTimerWhere(row, condition);
 }
 
 function createDb(
@@ -46,8 +42,9 @@ function createDb(
   failOutcomePersistence: "throw" | "zero" | false = false,
 ) {
   const profile = { id: 7, userId: 42, founderId: 8, name: "Worker", status: "active", timezone: "UTC" };
-  const assignment = { id: 11, taskId: assignmentTaskId, vaId: 7 };
+  const assignment = { id: 11, taskId: assignmentTaskId, vaId: 7, founderId: 8, status: 'assigned' };
   const conversations: Array<Record<string, any>> = [];
+  const accounts = [{ id: 42, role: 'worker', openId: 'worker-42', sessionEpoch: '1' }, { id: 8, role: 'admin', openId: 'founder-8', sessionEpoch: '1' }];
   let nextConversationId = 1;
   let transactionTail = Promise.resolve();
 
@@ -57,6 +54,8 @@ function createDb(
     const rows = () => {
       if (table === vaProfiles) return matches(profile, condition) ? [profile] : [];
       if (table === taskAssignments) return matches(assignment, condition) ? [assignment] : [];
+      if (table === users) return accounts
+        .filter(row => matchesTimerWhere(row, condition));
       if (table === chatbotConversations) return conversations.filter(row => matches(row, condition));
       return [];
     };
@@ -89,6 +88,7 @@ function createDb(
   };
 
   const tx = {
+    execute: vi.fn(async () => ({ rows: [] })),
     select,
     insert: vi.fn(() => ({
       values: vi.fn((row: Record<string, any>) => ({
@@ -102,6 +102,7 @@ function createDb(
     })),
   };
   const db = {
+    execute: tx.execute,
     select,
     update,
     transaction: vi.fn(async (callback: (transaction: typeof tx) => Promise<unknown>) => {
@@ -116,6 +117,7 @@ function createDb(
       }
     }),
     conversations,
+    profile, assignment, accounts,
   };
   return db;
 }
@@ -138,7 +140,42 @@ describe("APTLSS external communication boundary", () => {
     mocks.fetchAuthorizedTrelloCard.mockResolvedValue({ id: "case-1", idMembers: ["worker-member"] });
     mocks.postTrelloComment.mockResolvedValue(true);
     mocks.storeConversation.mockResolvedValue(1);
+    mocks.authenticate.mockResolvedValue({ id: 42, openId: 'worker-42', role: 'worker', sessionEpoch: '1' });
   });
+
+  it.each(['offboarded', 'reassigned', 'session', 'revoked', 'identity', 'reservation', 'unavailable', 'unchanged'])
+    ('revalidates %s after deferred sender readiness without replaying the reservation', async change => {
+      const db = createDb();
+      mocks.getDb.mockResolvedValue(db);
+      let release!: () => void;
+      const readiness = new Promise<void>(resolve => { release = resolve; });
+      const dispatch = vi.fn();
+      mocks.postTrelloComment.mockImplementation(async (_card, _text, beforeDispatch) => {
+        await readiness;
+        if (!await beforeDispatch()) return false;
+        dispatch(); return true;
+      });
+      const app = createApp({ id: 42, openId: 'worker-42', role: 'worker', sessionEpoch: '1' } as any);
+      const payload = { taskId: 'case-1', question: 'Please confirm.' };
+      const pending = request(app).post('/communication/ask-founder').send(payload).then(response => response);
+      await vi.waitFor(() => expect(mocks.postTrelloComment).toHaveBeenCalledOnce());
+      if (change === 'offboarded') db.profile.status = 'inactive';
+      if (change === 'reassigned') db.assignment.vaId = 99;
+      if (change === 'session') db.accounts[0].sessionEpoch = '2';
+      if (change === 'revoked') mocks.authenticate.mockRejectedValue(new Error('Revoked session'));
+      if (change === 'identity') db.accounts[0].openId = 'recreated-worker';
+      if (change === 'reservation') db.conversations[0].responseStatus = 'success';
+      if (change === 'unavailable') db.transaction.mockRejectedValue(new Error('Unavailable'));
+      release();
+      const response = await pending;
+      expect(response.status).toBe(change === 'unchanged' ? 200 : 409);
+      expect(dispatch).toHaveBeenCalledTimes(change === 'unchanged' ? 1 : 0);
+      if (change !== 'unchanged') expect(response.body.deliveryStatus).toBe('not_sent');
+      if (change === 'offboarded' || change === 'session' || change === 'identity') {
+        expect(db.conversations[0].responseStatus).toBe('pending');
+      }
+      expect(db.conversations).toHaveLength(1);
+    });
 
   it("does not post the same explicitly submitted worker question twice when the caller retries", async () => {
     const db = createDb();
@@ -257,7 +294,7 @@ describe("APTLSS external communication boundary", () => {
     await request(app)
       .post("/communication/ask-founder")
       .send({ taskId: "case-1", workerId: 99, question: "Please confirm the deadline." })
-      .expect(404, { error: "Task is not assigned to this worker" });
+      .expect(404, { error: "Assigned task not found" });
 
     expect(mocks.fetchAuthorizedTrelloCard).not.toHaveBeenCalled();
     expect(mocks.postTrelloComment).not.toHaveBeenCalled();

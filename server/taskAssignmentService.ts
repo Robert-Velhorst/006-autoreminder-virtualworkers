@@ -117,12 +117,16 @@ async function upsert(tx: AssignmentTransaction, scope: Awaited<ReturnType<typeo
   if (before && before.vaId === input.workerProfileId && (input.notes === undefined || input.notes === before.notes)) {
     return { assignment: before, outcome: 'unchanged' };
   }
+  const now = new Date();
   const changes = { vaId: input.workerProfileId,
     ...(input.notes === undefined ? {} : { notes: input.notes }),
-    ...(!before || before.vaId !== input.workerProfileId ? { assignedAt: new Date(), assignedBy: scope.actor.id } : {}),
-    updatedAt: new Date() };
+    ...(!before || before.vaId !== input.workerProfileId ? { assignedAt: now, assignedBy: scope.actor.id } : {}),
+    updatedAt: now };
+  // Existing assignment columns are UTC-naive. Encode new timestamps as UTC via
+  // Drizzle's Date mapper instead of session-timezone-dependent DEFAULT now().
   const [after] = await tx.insert(taskAssignments).values({ taskId: input.taskId, founderId: scope.founderId,
-    vaId: input.workerProfileId, assignedBy: scope.actor.id, ...(input.notes === undefined ? {} : { notes: input.notes }) })
+    vaId: input.workerProfileId, assignedBy: scope.actor.id, assignedAt: now, createdAt: now, updatedAt: now,
+    ...(input.notes === undefined ? {} : { notes: input.notes }) })
     .onConflictDoUpdate({ target: [taskAssignments.founderId, taskAssignments.taskId], set: changes,
       setWhere: before ? eq(taskAssignments.id, before.id) : sql`false` }).returning();
   if (!after || (before && after.id !== before.id)) throw new AssignmentError(409, 'Assignment identity changed');

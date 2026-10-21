@@ -59,3 +59,20 @@ Future work starts from `main`. It may advance only to a commit that:
 - retains both delivery and rollback references.
 
 No history rewrite or force push is used.
+
+## OAuth Acceptance, 2026-10-21
+
+PR142 merged normally as `5965eca61a1f8967b1f940af3e947af4bcad6772` after
+exact-head quality `39548283901` and CodeQL aggregate `119051493063` passed at
+`fc850afb4d24bb4b9be5d7fe2402d68d961abbd8`. The merge tree equals the reviewed
+tree. Quality reported 4,549 passing Vitest cases, 22 skips and 96 passing Node
+contracts, plus configured PostgreSQL image, browser and backup/restore gates.
+The corresponding remote and local OAuth branches were removed only after the
+annotated archive tag was verified to preserve that exact head:
+`archive/browser-bound-oauth-acceptance-20261021`.
+
+This is source acceptance, not a live provider round trip or production cutover.
+PR135's image-security gate and PR143's assignment work remain separate review
+branches until their own exact-head acceptance. Do not delete unaccepted source
+merely to produce a one-branch listing. Credentials, databases, private operator
+records and recovery archives remain outside the public repository.

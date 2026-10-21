@@ -2,6 +2,23 @@
 
 Statuses describe the repository, not provider consent outside the repository.
 
+## Current Boundary, 2026-10-21
+
+The dated MySQL implementation and rehearsal sections below are historical,
+not the current deployment target. The supported target is one persistent
+application container with separately provisioned shared PostgreSQL and optional
+external Redis. Follow [Production Cutover](PRODUCTION_CUTOVER.md) and
+[Technical Audit](TECHNICAL_AUDIT.md) for current requirements and exact accepted
+source revisions. Do not start an additional permanent dashboard or remove
+private data/recovery archives while consolidating source branches.
+
+Canonical timer and OAuth changes have accepted source checkpoints on main.
+Assignment identity work and the separate image-security publication gate still
+require their own acceptance. An accepted source tree is not evidence that the
+real shared database, Hetzner host, external accounts or human shadow trial are
+ready. The objective remains incomplete until those gates and the verified
+normal consolidation to main are finished.
+
 ## Release Decision, 2026-10-02
 
 **Not cleared for production cutover or active automatic planning.** The older

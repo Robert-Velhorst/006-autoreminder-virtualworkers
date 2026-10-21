@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { vaProfiles, users, timeEntries } from "../../drizzle/schema.postgres";
+import { vaProfiles, users, timeEntries, taskAssignments } from "../../drizzle/schema.postgres";
+import { timerTestDatabase } from "../test/timerDatabase";
 import { ScheduledJobLeaseLostError } from "../scheduledJobRuntime";
 
 const controls = vi.hoisted(() => ({ getDb: vi.fn(), settings: vi.fn(), ownership: vi.fn(),
-  run: vi.fn(), morning: vi.fn(), eod: vi.fn(), consent: vi.fn(), worker: vi.fn(), contexts: [] as unknown[] }));
+  run: vi.fn(), morning: vi.fn(), eod: vi.fn(), consent: vi.fn(), worker: vi.fn(), due: vi.fn(), contexts: [] as unknown[] }));
 vi.mock("../db", () => ({ getDb: controls.getDb }));
-vi.mock("../briefingSettings", () => ({ getBriefingSettings: controls.settings, shouldRunBriefingAt: () => true }));
+vi.mock("../briefingSettings", () => ({ getBriefingSettings: controls.settings, shouldRunBriefingAt: controls.due }));
 vi.mock("../scheduledJobRuntime", async importOriginal => {
   const actual = await importOriginal<typeof import("../scheduledJobRuntime")>();
   return { ScheduledJobLeaseLostError: actual.ScheduledJobLeaseLostError, runScheduledJob: controls.run };
@@ -15,9 +16,23 @@ vi.mock("./recipientEmailConsent", () => ({ getConsentingRecipientEmail: control
 vi.mock("../workerOperatorContext", () => ({ resolveWorkerOperatorContextById: controls.worker }));
 import { processScheduledBriefings } from "./briefing-scheduler";
 
+function assignmentFixture(assignments: Array<Record<string, unknown>>) {
+  const store = timerTestDatabase(new Map<unknown, any[]>([
+    [vaProfiles, [{ id: 1, userId: 2, founderId: 3, timezone: "UTC", status: "active", name: "Synthetic worker" }]],
+    [users, [{ id: 3, role: "admin" }]], [taskAssignments, assignments], [timeEntries, []],
+  ]));
+  controls.getDb.mockResolvedValue(store.db);
+  return store;
+}
+function scheduledAssignment(id: number, changes: Record<string, unknown> = {}) {
+  return { id, taskId: `card:checklist:item-${id}`, founderId: 3, vaId: 1, status: "assigned",
+    notes: `Title ${id}`, startTime: null, endTime: null, ...changes };
+}
+
 describe("scheduled briefing ownership at the email boundary", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    controls.due.mockReturnValue(true);
     vi.stubEnv("NOTIFICATIONS_ENABLED", "true");
     controls.worker.mockResolvedValue({ userId: 2, profileId: 1, founderId: 3 });
     controls.settings.mockResolvedValue({ morningBriefingEnabled: true, eodReportEnabled: true });
@@ -37,7 +52,99 @@ describe("scheduled briefing ownership at the email boundary", () => {
       return Object.assign(Promise.resolve(rows), { limit: async () => rows });
     } }) }) });
   });
-  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.useRealTimers(); });
+
+  it("keeps both workers due when the first awaited delivery crosses the scheduled minute", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-22T08:00:50Z'));
+    const actual = await vi.importActual<typeof import('../briefingSettings')>('../briefingSettings');
+    controls.due.mockImplementation(actual.shouldRunBriefingAt);
+    controls.settings.mockResolvedValue({ morningBriefingEnabled: true, morningBriefingTime: '08:00', eodReportEnabled: false, eodReportTime: '18:00' });
+    const store = assignmentFixture([]);
+    store.rows.get(vaProfiles)!.push({ id: 4, userId: 5, founderId: 3, timezone: 'UTC', status: 'active', name: 'Second worker' });
+    controls.morning.mockImplementation(async () => {
+      await Promise.resolve();
+      vi.setSystemTime(new Date('2026-10-22T08:01:10Z'));
+      return true;
+    });
+    await processScheduledBriefings();
+    expect(controls.morning).toHaveBeenCalledTimes(2);
+    expect(controls.run.mock.calls.map(call => call[0].jobKey)).toEqual(['briefing:2:2026-10-22', 'briefing:5:2026-10-22']);
+    expect(controls.ownership).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['2026-10-22T07:59:59Z', '08:00', 0],
+    ['2026-10-22T08:14:59Z', '08:00', 1],
+    ['2026-10-22T08:15:00Z', '08:00', 0],
+    ['2026-10-23T00:03:00Z', '23:55', 0],
+  ] as const)('bounds same-day catch-up at %s for %s', async (now, time, calls) => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(now));
+    const actual = await vi.importActual<typeof import('../briefingSettings')>('../briefingSettings');
+    controls.due.mockImplementation(actual.shouldRunBriefingAt);
+    controls.settings.mockResolvedValue({ morningBriefingEnabled: true, morningBriefingTime: time, eodReportEnabled: false, eodReportTime: '18:00' });
+    assignmentFixture([]);
+    await processScheduledBriefings();
+    expect(controls.morning).toHaveBeenCalledTimes(calls);
+    expect(controls.run).toHaveBeenCalledTimes(calls);
+  });
+
+  it.each([{ vaId: 9, status: "completed" }, { vaId: 1, status: "blocked" }])(
+    "rejects full-key ambiguity before either provider or job: %j", async duplicate => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      assignmentFixture([scheduledAssignment(1), scheduledAssignment(2, { taskId: "card:checklist:item-1", ...duplicate })]);
+      await processScheduledBriefings();
+      expect(controls.run).not.toHaveBeenCalled();
+      expect(controls.morning).not.toHaveBeenCalled(); expect(controls.eod).not.toHaveBeenCalled();
+    });
+
+  it("does not truncate canonical batches and keeps checklist items and founders independent", async () => {
+    for (const sender of [controls.morning, controls.eod]) {
+      sender.mockImplementation(async (_to, _data, _context, beforeDispatch) => beforeDispatch());
+    }
+    assignmentFixture([...Array.from({ length: 102 }, (_, i) => scheduledAssignment(i + 1,
+      { status: i === 0 ? "completed" : i === 101 ? "blocked" : "assigned" })),
+      scheduledAssignment(999, { founderId: 8, taskId: "card:checklist:item-1", notes: "Other founder" })]);
+    await processScheduledBriefings();
+    const morning = controls.morning.mock.calls[0][1];
+    const eod = controls.eod.mock.calls[0][1];
+    expect(morning.tasks).toHaveLength(102);
+    expect(morning.tasks.map((task: any) => task.title)).toContain("Title 102");
+    expect(morning.tasks.map((task: any) => task.title)).not.toContain("Other founder");
+    expect(eod.completedTasks.map((task: any) => task.title)).toEqual(["Title 1"]);
+    expect(eod.blockedTasks.map((task: any) => task.title)).toEqual(["Title 102"]);
+    expect(eod.incompleteTasks).toHaveLength(100);
+    expect(await controls.morning.mock.results[0].value).toBe(true);
+    expect(await controls.eod.mock.results[0].value).toBe(true);
+  });
+
+  it("checks the final partial canonical batch again before dispatch", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    controls.settings.mockResolvedValue({ morningBriefingEnabled: true, eodReportEnabled: false });
+    const store = assignmentFixture(Array.from({ length: 102 }, (_, i) => scheduledAssignment(i + 1)));
+    controls.morning.mockImplementation(async (_to, _data, _context, beforeDispatch) => {
+      store.rows.get(taskAssignments)!.push(scheduledAssignment(999, { taskId: "card:checklist:item-99", vaId: 9 }));
+      return beforeDispatch();
+    });
+    await processScheduledBriefings();
+    expect(await controls.morning.mock.results[0].value).toBe(false);
+  });
+
+  it.each(["morning", "eod"] as const)("blocks %s dispatch when a duplicate appears during provider readiness", async kind => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    controls.settings.mockResolvedValue({ morningBriefingEnabled: kind === "morning", eodReportEnabled: kind === "eod" });
+    const store = assignmentFixture([scheduledAssignment(1)]);
+    const dispatch = vi.fn();
+    (kind === "morning" ? controls.morning : controls.eod).mockImplementation(async (_to, _data, _context, beforeDispatch) => {
+      await Promise.resolve();
+      store.rows.get(taskAssignments)!.push(scheduledAssignment(2, { taskId: "card:checklist:item-1", vaId: 9, status: "completed" }));
+      const allowed = await beforeDispatch();
+      if (allowed) dispatch();
+      return allowed;
+    });
+    await processScheduledBriefings();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
 
   it.each(["morning", "eod"] as const)("rechecks %s recipient consent and exact address after awaited provider readiness", async kind => {
     for (const change of ["revoked", "address", "offboarded", "reassigned", "identity missing", "unavailable", "global"] as const) {

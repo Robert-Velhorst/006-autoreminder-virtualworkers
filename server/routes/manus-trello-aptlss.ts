@@ -94,8 +94,8 @@ import {
   aptlssWaitingReasons,
   cardStates,
   decisionOutcomes,
-  taskAssignments,
   vaProfiles,
+  users,
 } from "../../drizzle/schema.postgres";
 import { resolveWorkerOperatorContext } from "../workerOperatorContext";
 import { fetchAuthorizedTrelloCard, TrelloAccessError } from "../trelloCardAccess";
@@ -104,21 +104,52 @@ import { syncWorkerTrelloReplyEvidence } from "../services/trello-reply-evidence
 import { assertWorkerReviewedComment } from "../aptlssExternalActionPolicy";
 import { assertManagerPlanMutationAllowed, isManagerPilotWorker } from "../aptlssManagerPilot";
 import { normalizeManagerDependencies } from "../aptlssManagerDependencies";
+import { readCanonicalAssignments, assignmentFailure } from "../taskAssignmentMutation";
 
 async function setWorkerChecklistState(userId: number, trelloCheckItemId: string, state: "complete" | "incomplete") {
   const db = await getDb();
   if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Database unavailable" });
 
   return db.transaction(async tx => {
+    // Observe only to discover lock identities; authorization is rechecked after locks.
+    const observedProfiles = await tx.select().from(vaProfiles).where(eq(vaProfiles.userId, userId));
+    const observedActive = observedProfiles.filter(profile => profile.status === "active");
+    if (observedActive.length !== 1) {
+      throw new TRPCError({ code: "PRECONDITION_FAILED", message: "A single active worker profile is required to update this checklist." });
+    }
+    const observedSteps = await tx.select().from(aptlssSteps)
+      .where(and(eq(aptlssSteps.vaId, userId), eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId)))
+      .limit(2);
+    const observedCurrent = observedSteps.filter(step => step.status !== "obsolete");
+    if (observedCurrent.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Checklist step not found" });
+    if (observedCurrent.length !== 1) throw new TRPCError({ code: "CONFLICT", message: "This checklist item is ambiguous. Ask the Founder to refresh the work plan." });
+    const observed = observedCurrent[0];
+    const founderId = observedActive[0].founderId;
+    const accounts = new Map<number, typeof users.$inferSelect>();
+    for (const id of [...new Set([founderId, userId])].sort((a, b) => a - b)) {
+      const [account] = await tx.select().from(users).where(eq(users.id, id)).for("no key update");
+      if (account) accounts.set(id, account);
+    }
+    if (accounts.get(userId)?.role !== "worker" || accounts.get(founderId)?.role !== "admin") {
+      throw new TRPCError({ code: "FORBIDDEN", message: "Checklist account access changed; reload before trying again." });
+    }
     const profiles = await tx.select({ id: vaProfiles.id, founderId: vaProfiles.founderId, status: vaProfiles.status })
       .from(vaProfiles)
       .where(eq(vaProfiles.userId, userId))
+      .orderBy(vaProfiles.id)
       .for("update");
     const activeProfiles = profiles.filter(profile => profile.status === "active");
     if (activeProfiles.length !== 1) {
       throw new TRPCError({ code: "PRECONDITION_FAILED", message: "A single active worker profile is required to update this checklist." });
     }
     const profile = activeProfiles[0];
+    if (profile.id !== observedActive[0].id || profile.founderId !== founderId) {
+      throw new TRPCError({ code: "CONFLICT", message: "Worker ownership changed; reload before trying again." });
+    }
+    const observedAssignment = observed.trelloChecklistId && observed.trelloCheckItemId
+      ? `${observed.cardId}:${observed.trelloChecklistId}:${observed.trelloCheckItemId}` : null;
+    const assignmentRows = await readCanonicalAssignments(tx, founderId,
+      observedAssignment ? [observed.cardId, observedAssignment] : [observed.cardId], { lock: true });
 
     const candidates = await tx.select().from(aptlssSteps)
       .where(and(eq(aptlssSteps.vaId, userId), eq(aptlssSteps.trelloCheckItemId, trelloCheckItemId)))
@@ -128,27 +159,16 @@ async function setWorkerChecklistState(userId: number, trelloCheckItemId: string
     if (steps.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Checklist step not found" });
     if (steps.length !== 1) throw new TRPCError({ code: "CONFLICT", message: "This checklist item is ambiguous. Ask the Founder to refresh the work plan." });
     const step = steps[0];
+    if (step.id !== observed.id || step.cardId !== observed.cardId
+      || step.trelloChecklistId !== observed.trelloChecklistId || step.trelloCheckItemId !== observed.trelloCheckItemId) {
+      throw new TRPCError({ code: "CONFLICT", message: "Checklist identity changed; reload before trying again." });
+    }
 
     const exactAssignment = step.trelloChecklistId && step.trelloCheckItemId
       ? `${step.cardId}:${step.trelloChecklistId}:${step.trelloCheckItemId}`
       : null;
-    const cardAssignments = await tx.select({ vaId: taskAssignments.vaId, status: taskAssignments.status })
-      .from(taskAssignments)
-      .where(and(eq(taskAssignments.taskId, step.cardId), eq(taskAssignments.founderId, profile.founderId)))
-      .for("update");
-    if (cardAssignments.length > 1) {
-      throw new TRPCError({ code: "CONFLICT", message: "The card has multiple assignments. Ask the Founder to resolve them before changing this checklist." });
-    }
-
-    const stepAssignments = exactAssignment
-      ? await tx.select({ vaId: taskAssignments.vaId, status: taskAssignments.status })
-        .from(taskAssignments)
-        .where(and(eq(taskAssignments.taskId, exactAssignment), eq(taskAssignments.founderId, profile.founderId)))
-        .for("update")
-      : [];
-    if (stepAssignments.length > 1) {
-      throw new TRPCError({ code: "CONFLICT", message: "The checklist step has multiple assignments. Ask the Founder to resolve them before changing it." });
-    }
+    const cardAssignments = assignmentRows.filter(row => row.taskId === step.cardId);
+    const stepAssignments = assignmentRows.filter(row => row.taskId === exactAssignment);
 
     const assignment = stepAssignments[0] ?? cardAssignments.find(candidate => candidate.vaId === profile.id);
     if (!assignment || assignment.vaId !== profile.id) {
@@ -710,7 +730,14 @@ export const aptlssRouter = router({
         });
       }
       if (ctx.user.role === "worker") {
-        await setWorkerChecklistState(vaId, input.trelloCheckItemId, input.state);
+        try { await setWorkerChecklistState(vaId, input.trelloCheckItemId, input.state); }
+        catch (error) {
+          const failure = assignmentFailure(error);
+          if (failure) throw new TRPCError({ code: failure.status === 409 ? "CONFLICT"
+            : failure.status === 400 ? "BAD_REQUEST" : failure.status === 403 ? "FORBIDDEN"
+              : failure.status === 404 ? "NOT_FOUND" : "PRECONDITION_FAILED", message: failure.error });
+          throw error;
+        }
       } else {
         const updated = await setStepCompletionForWorker(
           vaId,

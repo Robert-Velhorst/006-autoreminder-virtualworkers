@@ -1,7 +1,7 @@
 export const REQUIRED_POSTGRES_MIGRATION = {
   tag: "0008_assignment_identity",
   createdAt: 1792559997541n,
-  hash: "f07470536d642b3e802e6b5410cd7f0d13a133f3ab92318305474296c650a1cc",
+  hash: "5a7f67d77a91384a486ea618fa4df7a847da0b5f2a565c89598216d34c28a2be",
 } as const;
 
 export const READINESS_QUERY_TIMEOUT_MS = 2_000;

@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { assignmentEvents, taskAssignments, users, vaProfiles } from '../drizzle/schema.postgres';
 import { timerTestDatabase, type TestRow } from './test/timerDatabase';
 import { assignTask, reassignTask, changeAssignmentStatus, changeAssignmentStatuses, withLockedAssignment } from './taskAssignmentService';
@@ -15,7 +15,7 @@ function assignment(overrides: TestRow = {}) {
     decisionLog: '[{"decision":"keep"}]', externalLinks: '["https://example.invalid"]', lastWorkedAt: date, ...overrides };
 }
 
-function fixture(initial: TestRow[] = [], hooks: { beforeLock?: (table: unknown) => void; failAudit?: boolean; beforeUpsert?: () => void } = {}) {
+function fixture(initial: TestRow[] = [], hooks: { beforeLock?: (table: unknown, params: unknown[]) => void; failAudit?: boolean; beforeUpsert?: () => void } = {}) {
   const rows = new Map<unknown, TestRow[]>([
     [users, [{ ...admin }, { ...worker }, { id: 30, role: 'worker' }, { id: 40, role: 'admin' }]],
     [vaProfiles, [{ id: 200, userId: 20, founderId: 10, status: 'active' },
@@ -24,10 +24,24 @@ function fixture(initial: TestRow[] = [], hooks: { beforeLock?: (table: unknown)
     [taskAssignments, initial.map(value => structuredClone(value))], [assignmentEvents, []],
   ]);
   const locks: unknown[] = [];
+  const lockDetails: { table: unknown; params: unknown[] }[] = [];
+  const lockModes: string[] = [];
   const store = timerTestDatabase(rows, {
-    beforeLock: async table => { locks.push(table); hooks.beforeLock?.(table); },
+    beforeLock: async (table, condition) => {
+      locks.push(table);
+      const params = new PgDialect().sqlToQuery(condition).params;
+      lockDetails.push({ table, params });
+      hooks.beforeLock?.(table, params);
+    },
     afterInsert: table => { if (table === assignmentEvents && hooks.failAudit) throw new Error('audit unavailable'); },
   });
+  const select = store.db.select;
+  store.db.select = (...args: unknown[]) => {
+    const query = select(...args);
+    const lock = query.for;
+    query.for = (mode: string) => { lockModes.push(mode); return lock(mode); };
+    return query;
+  };
   store.db.execute.mockImplementation(async () => { locks.push('identity'); });
   const insert = store.db.insert;
   // Model PostgreSQL's unique-target upsert and conditional RETURNING, not lock concurrency.
@@ -35,6 +49,7 @@ function fixture(initial: TestRow[] = [], hooks: { beforeLock?: (table: unknown)
     let conflict: any;
     return { onConflictDoUpdate: (options: any) => { conflict = options; return {
       returning: async () => {
+        expect(options.target).toEqual([taskAssignments.founderId, taskAssignments.taskId]);
         hooks.beforeUpsert?.();
         const current = rows.get(taskAssignments)!.find(row => row.founderId === value.founderId && row.taskId === value.taskId);
         if (current) {
@@ -47,8 +62,10 @@ function fixture(initial: TestRow[] = [], hooks: { beforeLock?: (table: unknown)
       },
     }; } };
   } };
-  return { ...store, locks, list: (table: unknown) => rows.get(table)! };
+  return { ...store, locks, lockDetails, lockModes, list: (table: unknown) => rows.get(table)! };
 }
+
+afterEach(() => { vi.useRealTimers(); });
 
 describe('transactional task assignment service', () => {
   it('creates one canonical row and dedicated audit with historical inactive profiles retained', async () => {
@@ -202,5 +219,102 @@ describe('transactional task assignment service', () => {
     f = fixture([], { beforeUpsert: () => { f.list(taskAssignments).push(assignment({ vaId: 300 })); } });
     await expect(assignTask(f.db, admin, { taskId: 'card:list:item', workerProfileId: 200 })).rejects.toMatchObject({ status: 409 });
     expect(f.list(assignmentEvents)).toEqual([]); expect(f.updates).toEqual([]);
+  });
+
+  it('locks accounts ascending with non-key locks before profiles/identity/assignment rows', async () => {
+    const f = fixture([assignment()]);
+    await withLockedAssignment(f.db, admin, 'card:list:item', async () => undefined, { workerProfileIds: [300, 200, 300] });
+    expect(f.lockDetails.filter(lock => lock.table === users).map(lock => lock.params[0])).toEqual([10, 20, 30]);
+    expect(f.lockModes).toEqual(['no key update', 'no key update', 'no key update', 'update', 'update']);
+    expect(f.locks).toEqual([users, users, users, vaProfiles, 'identity', taskAssignments]);
+    expect(f.lockDetails.find(lock => lock.table === vaProfiles)?.params).toEqual([20, 30]);
+  });
+
+  it('also orders accounts ascending when worker ID precedes the founder ID', async () => {
+    const f = fixture([assignment({ founderId: 40 })]);
+    f.list(vaProfiles)[0].founderId = 40;
+    await changeAssignmentStatus(f.db, worker, { taskId: 'card:list:item', status: 'completed' });
+    expect(f.lockDetails.filter(lock => lock.table === users).map(lock => lock.params[0])).toEqual([20, 40]);
+    expect(f.lockModes.slice(0, 2)).toEqual(['no key update', 'no key update']);
+  });
+
+  it.each(['admin', 'user'] as const)('rejects a stale worker role changed to %s while waiting for account locks', async role => {
+    let f: ReturnType<typeof fixture>;
+    f = fixture([assignment()], { beforeLock: (table, params) => {
+      if (table === users && params[0] === worker.id) f.list(users).find(row => row.id === worker.id)!.role = role;
+    } });
+    await expect(changeAssignmentStatus(f.db, worker, { taskId: 'card:list:item', status: 'completed' }))
+      .rejects.toMatchObject({ status: 403, code: 'ASSIGNMENT_ACTOR_CHANGED' });
+    expect(f.updates).toEqual([]); expect(f.list(assignmentEvents)).toEqual([]);
+  });
+
+  it.each(['reassigned', 'relinked', 'ambiguous'] as const)('rejects a target profile %s after discovery', async change => {
+    let f: ReturnType<typeof fixture>;
+    f = fixture([], { beforeLock: table => {
+      if (table !== vaProfiles) return;
+      if (change === 'reassigned') f.list(vaProfiles)[0].founderId = 40;
+      if (change === 'relinked') f.list(vaProfiles)[0].userId = 30;
+      if (change === 'ambiguous') f.list(vaProfiles).push({ id: 202, userId: 20, founderId: 10, status: 'active' });
+    } });
+    await expect(assignTask(f.db, admin, { taskId: 'card', workerProfileId: 200 })).rejects.toMatchObject({ status: 409 });
+    expect(f.list(taskAssignments)).toEqual([]); expect(f.list(assignmentEvents)).toEqual([]);
+  });
+
+  it('rejects a role change of an additional handoff worker before invoking the callback', async () => {
+    let f: ReturnType<typeof fixture>;
+    f = fixture([assignment()], { beforeLock: (table, params) => {
+      if (table === users && params[0] === 30) f.list(users).find(row => row.id === 30)!.role = 'admin';
+    } });
+    const callback = vi.fn();
+    await expect(withLockedAssignment(f.db, admin, 'card:list:item', callback, { workerProfileIds: [300] }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(callback).not.toHaveBeenCalled(); expect(f.updates).toEqual([]);
+  });
+
+  it('does not invoke a generic mutation for a missing assignment', async () => {
+    const f = fixture(); const callback = vi.fn();
+    await expect(withLockedAssignment(f.db, admin, 'missing', callback)).rejects.toMatchObject({ status: 404 });
+    expect(callback).not.toHaveBeenCalled();
+    expect(f.locks).toContain('identity');
+  });
+
+  it('keeps a same-status retry fully idempotent, including audit and timestamps', async () => {
+    const original = assignment({ assignedBy: 40, status: 'completed' }); const f = fixture([original]);
+    expect(await changeAssignmentStatus(f.db, worker, { taskId: original.taskId, status: 'completed' }))
+      .toEqual({ assignment: original, outcome: 'unchanged' });
+    expect(f.list(taskAssignments)).toEqual([original]);
+    expect(f.list(assignmentEvents)).toEqual([]); expect(f.updates).toEqual([]);
+  });
+
+  it('preserves omitted notes across reassignment then clears only an explicit null', async () => {
+    const f = fixture([assignment({ status: 'completed' })]);
+    const reassigned = await assignTask(f.db, admin, { taskId: 'card:list:item', workerProfileId: 300 });
+    expect(reassigned.assignment).toMatchObject({ id: 100, notes: 'Preserved notes', status: 'completed', createdAt: date });
+    const cleared = await assignTask(f.db, admin, { taskId: 'card:list:item', workerProfileId: 300, notes: null });
+    expect(cleared.assignment.notes).toBeNull();
+    expect(cleared.assignment.assignedAt).toEqual(reassigned.assignment.assignedAt);
+    const retried = await assignTask(f.db, admin, { taskId: 'card:list:item', workerProfileId: 300, notes: null });
+    expect(retried.outcome).toBe('unchanged');
+    expect(f.list(assignmentEvents).map(row => row.kind)).toEqual(['reassigned', 'notes_changed']);
+  });
+
+  it('uses one UTC instant for new assignment timestamps and timezone-aware audit storage', async () => {
+    const now = new Date('2026-10-25T01:30:00.123Z');
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const f = fixture();
+    const result = await assignTask(f.db, admin, { taskId: 'card', workerProfileId: 200 });
+    expect(result.assignment).toMatchObject({ assignedAt: now, createdAt: now, updatedAt: now });
+    expect(taskAssignments.createdAt.mapToDriverValue(now)).toBe('2026-10-25T01:30:00.123Z');
+    expect(assignmentEvents.createdAt.getSQLType()).toBe('timestamp with time zone');
+    const serialized = JSON.parse(JSON.stringify(f.list(assignmentEvents)[0].afterJson));
+    expect(serialized.createdAt).toBe('2026-10-25T01:30:00.123Z');
+  });
+
+  it('does not overwrite or audit when a previously observed assignment ID is replaced', async () => {
+    let f: ReturnType<typeof fixture>;
+    f = fixture([assignment()], { beforeUpsert: () => { f.list(taskAssignments)[0].id = 101; } });
+    await expect(reassignTask(f.db, admin, { assignmentId: 100, workerProfileId: 300 })).rejects.toMatchObject({ status: 409 });
+    expect(f.updates).toEqual([]); expect(f.list(assignmentEvents)).toEqual([]);
+    expect(f.list(taskAssignments)[0]).toMatchObject({ id: 100, vaId: 200 });
   });
 });

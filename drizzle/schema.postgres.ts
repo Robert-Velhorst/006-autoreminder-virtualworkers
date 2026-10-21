@@ -701,7 +701,7 @@ export const assignmentEvents = pgTable("assignment_events", {
   nextStatus: varchar("nextStatus", { length: 20 }).notNull(),
   beforeJson: jsonb("beforeJson").$type<Record<string, unknown> | null>(),
   afterJson: jsonb("afterJson").$type<Record<string, unknown>>().notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  createdAt: timestamp("createdAt", { withTimezone: true }).defaultNow().notNull(),
 }, table => [
   index("assignment_events_assignment_created_idx").on(table.assignmentId, table.createdAt),
   index("assignment_events_founder_task_idx").on(table.founderId, table.taskId),

@@ -1,7 +1,6 @@
 import { drizzle } from 'drizzle-orm/node-postgres';
-import { sql } from 'drizzle-orm';
 import type { Pool, PoolClient } from 'pg';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as schema from '../drizzle/schema.postgres';
 import { createAssignmentDatabase, type AssignmentDatabase } from './test/assignmentDatabase';
 import { readCanonicalAssignment, readCanonicalAssignments } from './taskAssignmentMutation';
@@ -51,25 +50,32 @@ describe.skipIf(!baseUrl)('canonical task assignment native service acceptance',
     while (performance.now() < deadline) {
       const waiting = (await fixture.pool.query<{ pid: number; blockers: number[]; wait_event: string }>(`SELECT pid,pg_blocking_pids(pid) AS blockers,wait_event
         FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND cardinality(pg_blocking_pids(pid))>0`)).rows;
-      if (waiting.length === count && waiting.some(row => row.blockers.includes(blocker))) return waiting;
+      const reachesGate = (pid: number, seen = new Set<number>()): boolean => {
+        if (pid === blocker) return true;
+        if (seen.has(pid)) return false;
+        const nextSeen = new Set(seen).add(pid);
+        return waiting.find(row => row.pid === pid)?.blockers.some(next => reachesGate(next, nextSeen)) ?? false;
+      };
+      // A second tuple waiter can block behind the first waiter, not directly
+      // behind the controller. Require both actual waiters to reach our gate.
+      if (waiting.length === count && waiting.every(row => reachesGate(row.pid))) return waiting;
       await new Promise(resolve => setTimeout(resolve,10));
     }
     throw new Error('Expected owned assignment lock waiters were not observed');
   }
 
-  it('serializes two first assignments on the absent full-key advisory lock before account locks, retaining one stable row and last-writer audit', async () => {
+  it('serializes two first assignments through observed account-first waits, retaining one stable row and last-writer audit', async () => {
     const gate = await fixture.pool.connect(); const operations: Promise<any>[] = [];
     try {
       await gate.query('BEGIN'); const gatePid = await pid(gate);
-      const locked = await readCanonicalAssignment(drizzle(gate,{ schema }),1001,'card:list:item',{ lock: true });
-      expect(locked).toBeNull();
+      await gate.query('SELECT id FROM users WHERE id=1001 FOR NO KEY UPDATE');
       const first = settled(assign(12)); operations.push(first);
-      const firstWaiter = await blockedBy(fixture.pool,gatePid); expect(firstWaiter.wait_event).toBe('advisory');
+      const firstWaiter = await blockedBy(fixture.pool,gatePid);
+      expect(firstWaiter.wait_event).not.toBe('advisory');
       const second = settled(assign(13)); operations.push(second);
       const waiting = await waiters(gatePid,2);
-      expect(waiting.every(row => row.wait_event === 'advisory')).toBe(true);
-      // The identity lock must come before user row locks in every writer.
-      await gate.query('SELECT id FROM users WHERE id=1001 FOR NO KEY UPDATE NOWAIT');
+      expect(waiting.map(row => row.pid)).toContain(firstWaiter.pid);
+      expect(new Set(waiting.map(row => row.pid)).size).toBe(2);
       expect(await rawAssignments(fixture.pool)).toEqual([]); expect(await rawEvents(fixture.pool)).toEqual([]);
       await gate.query('COMMIT');
       const [a,b] = await Promise.all([first,second]); if (a.error) throw a.error; if (b.error) throw b.error;
@@ -90,11 +96,12 @@ describe.skipIf(!baseUrl)('canonical task assignment native service acceptance',
     const gate = await fixture.pool.connect(); const operations: Promise<any>[] = [];
     try {
       await gate.query('BEGIN'); const gatePid = await pid(gate);
-      await readCanonicalAssignment(drizzle(gate,{ schema }),1001,'card:list:item',{ lock: true });
+      await gate.query('SELECT id FROM users WHERE id=1001 FOR NO KEY UPDATE');
       const first = settled(reassignTask(fixture.db,founder,{ assignmentId: id,workerProfileId: 13 })); operations.push(first);
-      await blockedBy(fixture.pool,gatePid);
+      const firstWaiter = await blockedBy(fixture.pool,gatePid);
       const second = settled(reassignTask(fixture.db,founder,{ assignmentId: id,workerProfileId: 12 })); operations.push(second);
-      await waiters(gatePid,2); await gate.query('COMMIT');
+      expect((await waiters(gatePid,2)).map(row => row.pid)).toContain(firstWaiter.pid);
+      await gate.query('COMMIT');
       for (const result of await Promise.all([first,second])) { if (result.error) throw result.error; expect(result.value.assignment.id).toBe(id); }
       expect(await rawAssignments(fixture.pool)).toMatchObject([{ id,vaId: 12 }]);
       expect((await rawEvents(fixture.pool)).map(event => [event.kind,event.previousWorkerProfileId,event.nextWorkerProfileId])).toEqual([
@@ -112,9 +119,12 @@ describe.skipIf(!baseUrl)('canonical task assignment native service acceptance',
       expect(rows.map(row => [row.taskId,row.vaId])).toEqual([['card',12]]);
       pending = settled(assign(13,'card:list:item'));
       expect((await blockedBy(fixture.pool,gatePid)).wait_event).toBe('advisory');
-      // A distinct full key remains independent, even under the same founder.
-      const unrelated = await assign(13,'card:list:unrelated'); expect(unrelated.outcome).toBe('created');
-      expect((await fixture.pool.query('SELECT id FROM task_assignments WHERE "taskId"=$1',['card:list:item'])).rows).toEqual([]);
+      // Test advisory key independence without issuing another same-founder
+      // service mutation: the pending writer legitimately holds that account.
+      expect(await fixture.db.transaction(tx => readCanonicalAssignment(tx,1001,'card:list:unrelated',{ lock: true }))).toBeNull();
+      const foreign = await assignTask(fixture.db,{ id: 1004,role: 'admin' },{ taskId: 'card:list:item',workerProfileId: 14 });
+      expect(foreign.outcome).toBe('created');
+      expect((await fixture.pool.query('SELECT id FROM task_assignments WHERE "founderId"=1001 AND "taskId"=$1',['card:list:item'])).rows).toEqual([]);
       await gate.query('COMMIT'); const result = await pending; if (result.error) throw result.error;
       const after = await readCanonicalAssignments(fixture.db,1001,['card','card:list:item']);
       expect(after.map(row => [row.taskId,row.vaId])).toEqual([['card',12],['card:list:item',13]]);
@@ -165,6 +175,62 @@ describe.skipIf(!baseUrl)('canonical task assignment native service acceptance',
     expect((await reassignTask(fixture.db,founder,{ assignmentId: created.assignment.id,workerProfileId: 12 })).outcome).toBe('unchanged');
     expect((await changeAssignmentStatus(fixture.db,founder,{ taskId: 'card:list:item',status: 'assigned' })).outcome).toBe('unchanged');
     expect(await rawAssignments(fixture.pool)).toEqual(before); expect(await rawEvents(fixture.pool)).toEqual(audit);
+  });
+
+  it.each(['America/New_York','Asia/Kolkata'])('preserves exact UTC timestamps, audit JSON, idempotence and history on session timezone %s', async timezone => {
+    const client = await fixture.pool.connect();
+    const initial = new Date('2026-11-01T06:30:00.123Z'); // The repeated New York DST hour.
+    const reassignedAt = new Date('2026-11-01T06:31:00.456Z');
+    const statusAt = new Date('2026-11-01T06:32:00.789Z');
+    try {
+      await client.query("SELECT set_config('TimeZone',$1,false)",[timezone]);
+      expect((await client.query('SHOW TimeZone')).rows[0].TimeZone).toBe(timezone);
+      const localDb = drizzle(client,{ schema });
+      const beforeClock = (await fixture.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+      vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(initial);
+      const created = await assignTask(localDb,founder,{ taskId: 'utc:full:task',workerProfileId: 12 });
+      const id = created.assignment.id;
+      for (const key of ['assignedAt','createdAt','updatedAt'] as const) expect(created.assignment[key].toISOString()).toBe(initial.toISOString());
+      const rawUtc = (await fixture.pool.query(`SELECT
+        to_char("assignedAt",'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS assigned,
+        to_char("createdAt",'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created,
+        to_char("updatedAt",'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated FROM task_assignments WHERE id=$1`,[id])).rows[0];
+      expect(rawUtc).toEqual({ assigned: initial.toISOString(),created: initial.toISOString(),updated: initial.toISOString() });
+      const [createdEvent] = await localDb.select().from(schema.assignmentEvents);
+      expect(createdEvent.afterJson).toMatchObject({ id,assignedAt: initial.toISOString(),createdAt: initial.toISOString(),updatedAt: initial.toISOString() });
+      const rawEvent = (await fixture.pool.query('SELECT "createdAt" FROM assignment_events WHERE id=$1',[createdEvent.id])).rows[0];
+      // Audit time is the actual DB transaction instant, not the frozen app clock.
+      expect(createdEvent.createdAt.toISOString()).toBe(rawEvent.createdAt.toISOString());
+      expect(createdEvent.createdAt.getTime()).toBeGreaterThanOrEqual(beforeClock.getTime());
+      const afterClock = (await fixture.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+      expect(createdEvent.createdAt.getTime()).toBeLessThanOrEqual(afterClock.getTime());
+
+      await fixture.pool.query(`INSERT INTO task_schedule_history (id,"taskId","founderId","assignmentId","changedBy",
+        "previousStartTime","newStartTime",reason) VALUES ('utc-history','utc:full:task',1001,$1,'assignment-founder',
+        '2026-11-01 05:30:00.654321','2026-11-01 06:30:00.123456','Retained precise UTC history')`,[id]);
+      const history = (await fixture.pool.query('SELECT to_jsonb(h) AS row FROM task_schedule_history h')).rows;
+      vi.setSystemTime(reassignedAt);
+      const reassigned = await reassignTask(localDb,founder,{ assignmentId: id,workerProfileId: 13 });
+      expect(reassigned.assignment).toMatchObject({ id,createdAt: initial,assignedAt: reassignedAt,updatedAt: reassignedAt });
+      vi.setSystemTime(statusAt);
+      const changed = await changeAssignmentStatus(localDb,founder,{ taskId: 'utc:full:task',status: 'in_progress' });
+      expect(changed.assignment).toMatchObject({ id,createdAt: initial,assignedAt: reassignedAt,updatedAt: statusAt });
+      const events = await rawEvents(fixture.pool);
+      expect(events.map(event => event.kind)).toEqual(['created','reassigned','status_changed']);
+      expect(events[1].beforeJson).toMatchObject({ assignedAt: initial.toISOString(),createdAt: initial.toISOString(),updatedAt: initial.toISOString() });
+      expect(events[1].afterJson).toMatchObject({ assignedAt: reassignedAt.toISOString(),createdAt: initial.toISOString(),updatedAt: reassignedAt.toISOString() });
+      expect(events[2].afterJson).toMatchObject({ assignedAt: reassignedAt.toISOString(),createdAt: initial.toISOString(),updatedAt: statusAt.toISOString() });
+      const beforeReplay = await rawAssignments(fixture.pool);
+      vi.setSystemTime(new Date('2026-11-01T07:30:00.999Z'));
+      expect((await assignTask(localDb,founder,{ taskId: 'utc:full:task',workerProfileId: 13 })).outcome).toBe('unchanged');
+      expect((await reassignTask(localDb,founder,{ assignmentId: id,workerProfileId: 13 })).outcome).toBe('unchanged');
+      expect((await changeAssignmentStatus(localDb,founder,{ taskId: 'utc:full:task',status: 'in_progress' })).outcome).toBe('unchanged');
+      expect(await rawAssignments(fixture.pool)).toEqual(beforeReplay); expect(await rawEvents(fixture.pool)).toEqual(events);
+      expect((await fixture.pool.query('SELECT to_jsonb(h) AS row FROM task_schedule_history h')).rows).toEqual(history);
+    } finally {
+      vi.useRealTimers();
+      try { await client.query('RESET TimeZone'); } finally { client.release(true); }
+    }
   });
 
   it('changes exact full-key batch statuses without touching a parent, sibling, other worker or founder', async () => {

@@ -20,12 +20,21 @@ and isolated backup/restore. Post-merge main quality `39544579909` and
 CodeQL/push `39544579781` also passed. Earlier failed candidates remain failed
 historical evidence; later source changes need their own exact-head checks.
 
-The separate [external OAuth login state](OAUTH_LOGIN_STATE.md) repair adds
+PR [#142](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/142)
+merged the [external OAuth login state](OAUTH_LOGIN_STATE.md) repair as
+`5965eca61a1f8967b1f940af3e947af4bcad6772`, with the same tree as reviewed
+`fc850afb4d24bb4b9be5d7fe2402d68d961abbd8`. Quality `39548283901` and CodeQL
+aggregate `119051493063` passed. Quality reported 4,549 passing Vitest cases,
+22 skips, 96 Node contracts, native OAuth acceptance, configured PostgreSQL
+image acceptance, browser checks and isolated backup/restore. The repair adds
 server-owned initiation and a browser-bound single-use database transaction,
-with UTC database-clock expiry checked after acquiring its row lock. Mounted
-route and SDK tests do not establish real provider acceptance; native races,
-expiry and rollback must pass on the exact candidate. Founder/task assignment
-uniqueness remains a confirmed separate production gap (#95).
+with UTC database-clock expiry checked after acquiring its row lock, and an
+authenticated-encryption browser binding. These tests do not establish real
+provider acceptance. Founder/task assignment repair remains independently
+under review in PR143; its new migration and code must pass their own
+exact-head native and full regression gates before merge. See
+[Assignment Identity Cutover](ASSIGNMENT_IDENTITY_CUTOVER.md) before operational
+migration; ambiguous historical assignments are never resolved automatically.
 
 PR [#135](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/pull/135)
 retains the separate exact-image vulnerability and promotion gate. Its workflow

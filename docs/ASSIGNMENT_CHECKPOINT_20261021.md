@@ -3,6 +3,22 @@
 Saved on 2026-10-21 at the owner's request to publish current progress and
 clean local generated artifacts. This is not an accepted release or migration.
 
+## Follow-up Local Verification
+
+The subsequent repair addresses the initial fixture failures, transactional
+recipient checks, scheduling/cache eligibility, checklist authorization,
+cross-worker conflict handling and briefing due windows. Its final local suite
+passed 4,395 tests with 393 environment-dependent skips across 375 files.
+TypeScript, transfer typecheck, frontend/backend build and seal, whitespace and
+staged secret scanning passed. Node contracts passed 93 with three platform
+skips. These results overlap the focused runs; do not sum them.
+
+Nineteen service/migration and nine mounted HTTP assignment cases were collected
+but not executed locally. Exact-head hosted PostgreSQL, image, browser and
+security acceptance remain required. The earlier failed checkpoint is retained
+below as dated evidence, not the current local test result. Neither this repair
+nor green CI authorizes operational duplicate resolution or live cutover.
+
 ## Preserved implementation
 
 - PostgreSQL assignment identity migration and dedicated assignment event table.
@@ -10,7 +26,10 @@ clean local generated artifacts. This is not an accepted release or migration.
 - Canonical assignment guards in scheduling, manager, timer and handoff paths.
 - Focused service, route and native database test fixtures.
 
-## Verification and remaining work
+## Initial Checkpoint Verification
+
+The following observations describe checkpoint `b4f64a0`, not acceptance of
+subsequent source changes. The follow-up repair is tracked in the same PR143.
 
 - The complete current checkpoint passes TypeScript (`tsc --noEmit --incremental false`).
 - Service agent reported 40 focused tests passing and one database-dependent skip.

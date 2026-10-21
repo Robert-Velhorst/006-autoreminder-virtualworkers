@@ -51,7 +51,7 @@ export async function readManagerAssignmentState(db: Db, userId: number) {
   const fingerprint = createHash("sha256").update(JSON.stringify({ identity, assignmentIdentity, cardinalityIdentity, ambiguous })).digest("hex");
   return {
     profile,
-    assignments: assignments.slice(0, ASSIGNMENT_LIMIT),
+    assignments: assignmentIdentity,
     truncated: assignments.length > ASSIGNMENT_LIMIT,
     complete: !!profile && !ambiguous && assignments.length <= ASSIGNMENT_LIMIT,
     ambiguous,

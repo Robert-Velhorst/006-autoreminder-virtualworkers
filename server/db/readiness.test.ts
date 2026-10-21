@@ -109,6 +109,15 @@ describe("PostgreSQL readiness probe", () => {
     expect(migration).not.toMatch(/\b(?:UPDATE|DELETE|TRUNCATE)\s+"?(?:task_assignments|task_schedule_history)\b/i);
   });
 
+  it('stores assignment audit instants with timezone in both migration and snapshot', async () => {
+    const migration = await readFile(new URL('../../drizzle-postgres-v1/0008_assignment_identity.sql', import.meta.url), 'utf8');
+    const snapshot = JSON.parse(await readFile(new URL('../../drizzle-postgres-v1/meta/0008_snapshot.json', import.meta.url), 'utf8'));
+    expect(migration).toContain('"createdAt" timestamp with time zone DEFAULT now() NOT NULL');
+    expect(snapshot.tables['public.assignment_events'].columns.createdAt).toMatchObject({
+      type: 'timestamp with time zone', default: 'now()', notNull: true,
+    });
+  });
+
   it.skipIf(!process.env.DATABASE_URL)(
     "recognizes the migrated CI PostgreSQL database",
     async () => {

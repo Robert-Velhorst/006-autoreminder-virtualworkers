@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { chatbotConversations, taskAssignments, vaProfiles } from "../../drizzle/schema.postgres";
+import { chatbotConversations, taskAssignments } from "../../drizzle/schema.postgres";
 import { getDb } from "../db";
 import { requireAuthenticated, requestUser, resolveWorkerProfileId } from "../middleware/auth";
 import {
@@ -12,6 +12,7 @@ import {
 import { fetchAuthorizedTrelloCard, TrelloAccessError } from "../trelloCardAccess";
 import { AssignmentError, assignmentFailure } from "../taskAssignmentMutation";
 import { withLockedAssignment } from "../taskAssignmentService";
+import { sdk } from "../_core/sdk";
 
 const router = Router();
 router.use(requireAuthenticated);
@@ -114,12 +115,47 @@ router.post("/ask-founder", async (req, res) => {
     }
 
     let posted = false;
+    let authorizationDenied = false;
+    const beforeDispatch = async () => {
+      try {
+        if (!isTrelloCommentAutomationEnabled()) throw new Error('Outbound comments disabled');
+        const authenticated = await sdk.authenticateRequest(req);
+        if (authenticated.id !== user.id || authenticated.openId !== user.openId
+          || authenticated.sessionEpoch !== user.sessionEpoch || authenticated.role !== 'worker') {
+          throw new AssignmentError(403, 'Session identity changed');
+        }
+        await withLockedAssignment(db, user, taskId, async (tx, _assignment, context) => {
+          if (context.actor.openId !== user.openId || context.actor.sessionEpoch !== user.sessionEpoch
+            || context.profile.id !== workerId || context.profile.userId !== user.id
+            || context.founderId !== worker.founderId) {
+            throw new AssignmentError(409, 'Worker identity or ownership changed');
+          }
+          const [pending] = await tx.select().from(chatbotConversations)
+            .where(and(eq(chatbotConversations.id, reservation.conversationId),
+              eq(chatbotConversations.commandArgs, requestArgs),
+              eq(chatbotConversations.command, 'ask_founder'),
+              eq(chatbotConversations.cardTrelloId, cardId)))
+            .limit(1).for('update');
+          if (pending?.responseStatus !== 'pending' || pending.responseText !== normalizedQuestion) {
+            throw new AssignmentError(409, 'Question reservation changed');
+          }
+        });
+        return true;
+      } catch {
+        authorizationDenied = true;
+        return false;
+      }
+    };
     try {
-      posted = await postTrelloComment(cardId, commentText);
+      posted = await postTrelloComment(cardId, commentText, beforeDispatch);
     } catch (error) {
-      console.error("[Communication] Trello question delivery could not be confirmed:", error);
+      console.error("[Communication] Trello question delivery could not be confirmed");
     }
     if (!posted) {
+      if (authorizationDenied) return res.status(409).json({
+        success: false, deliveryStatus: 'not_sent',
+        error: 'Question authorization changed or could not be verified before dispatch. Reload before taking further action.',
+      });
       return res.status(502).json({
         success: false,
         deliveryStatus: "unknown",
@@ -138,7 +174,7 @@ router.post("/ask-founder", async (req, res) => {
         .where(eq(chatbotConversations.id, reservation.conversationId));
       if (affectedRows(result) !== 1) throw new Error("Delivery result was not recorded");
     } catch (error) {
-      console.error("[Communication] Trello accepted the worker question but its delivery result could not be saved:", error);
+      console.error("[Communication] Trello accepted the worker question but its delivery result could not be saved");
       return res.status(502).json({
         success: false,
         deliveryStatus: "unknown",
@@ -150,7 +186,7 @@ router.post("/ask-founder", async (req, res) => {
   } catch (error) {
     const failure = assignmentFailure(error);
     if (failure) return res.status(failure.status).json({ error: failure.error });
-    console.error("[Communication] Error processing ask-founder:", error);
+    console.error("[Communication] Error processing ask-founder");
     if (error instanceof TrelloAccessError) {
       return res.status(error.status).json({ error: error.message });
     }
@@ -185,9 +221,10 @@ router.post("/decision-log", async (req, res) => {
         timestamp: new Date().toISOString(),
       });
 
-      await tx.update(taskAssignments)
+      const result = await tx.update(taskAssignments)
         .set({ decisionLog: JSON.stringify(currentLogs) })
         .where(eq(taskAssignments.id, task.id));
+      if (result.rowCount !== 1) throw new AssignmentError(409, "Assignment changed; reload before trying again");
       return currentLogs;
     });
     if (!logs) return res.status(404).json({ error: "Task not found" });

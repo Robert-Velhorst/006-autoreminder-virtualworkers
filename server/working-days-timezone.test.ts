@@ -2,7 +2,8 @@ import express from 'express';
 import { createServer, type Server } from 'node:http';
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { clients, holidays, taskAssignments, userWorkingHours, vaProfiles } from '../drizzle/schema.postgres';
+import { clients, holidays, taskAssignments, taskDependencies, userWorkingHours, vaProfiles, users } from '../drizzle/schema.postgres';
+import { matchesTimerWhere } from './test/timerDatabase';
 import { dateKeyInTimeZone, dateWindowInTimeZone, dayOfWeekForDateKey, dayOfWeekInTimeZone, zonedDateTimeToUtc } from '../shared/workerTime';
 import { calculateScheduledTargetSeconds } from './complianceMetrics';
 
@@ -12,6 +13,7 @@ vi.mock('./utils/retry', () => ({ fetchWithRetry: mocks.provider }));
 vi.mock('./services/trello-cache', () => ({
   getCachedTasks: vi.fn(), setCachedTasks: vi.fn(), invalidateCache: vi.fn(),
 }));
+import { getCachedTasks, setCachedTasks } from './services/trello-cache';
 vi.mock('./services/request-queue', () => ({
   requestQueue: { execute: async (_key: string, operation: () => Promise<unknown>) => operation() },
 }));
@@ -84,20 +86,28 @@ describe('Working Days and Timezone Features (isolated production routes)', () =
         country: 'NL', weeklyHoursMin: 30, weeklyHoursMax: 40,
         dailyHoursMin: '6', dailyHoursMax: '8',
       }]],
-      [clients, []], [holidays, []], [taskAssignments, []], [vaProfiles, []],
+      [clients, []], [holidays, []], [taskAssignments, []], [vaProfiles, []], [taskDependencies, []],
+      [users, [fixtureUser]],
     ]);
     const readRows = (table: unknown) => {
       const result = rows.get(table);
       if (!result) throw new Error('Unconfigured fixture table');
       return result;
     };
-    const db = {
+    const db: any = {
+      transaction: (operation: (tx: any) => Promise<unknown>) => operation(db),
+      execute: async () => ({ rows: [] }),
       select: () => ({ from: (table: unknown) => {
+        let condition: unknown;
+        let limit = Infinity;
+        const result = () => readRows(table).filter(row => matchesTimerWhere(row, condition)).slice(0, limit);
         const query = {
-          where: (_condition: unknown) => query,
-          limit: (count: number) => Promise.resolve(readRows(table).slice(0, count)),
+          where: (value: unknown) => { condition = value; return query; },
+          orderBy: () => query,
+          for: () => query,
+          limit: (count: number) => { limit = count; return query; },
           then: (resolve: (value: Row[]) => unknown, reject: (reason: unknown) => unknown) =>
-            Promise.resolve(readRows(table)).then(resolve, reject),
+            Promise.resolve(result()).then(resolve, reject),
         };
         return query;
       } }),
@@ -107,6 +117,8 @@ describe('Working Days and Timezone Features (isolated production routes)', () =
       } }) }),
     };
     mocks.getDb.mockReset().mockResolvedValue(db);
+    vi.mocked(getCachedTasks).mockReset();
+    vi.mocked(setCachedTasks).mockClear();
     mocks.provider.mockReset().mockImplementation(async (input: string) => {
       const url = new URL(input);
       expect(url.origin).toBe('https://api.trello.com');
@@ -238,6 +250,34 @@ describe('Working Days and Timezone Features (isolated production routes)', () =
   it('returns 503 when settings cannot access the database instead of passing with empty data', async () => {
     mocks.getDb.mockResolvedValue(null);
     await request(server).get('/api/working-hours/settings').expect(503, { error: 'Database not available' });
+  });
+
+  it('returns 503 before provider calls when task assignment verification has no database', async () => {
+    mocks.getDb.mockResolvedValue(null);
+    await request(server).get('/api/trello/tasks').expect(503, { error: 'Worker assignments could not be verified; retry before scheduling' });
+    expect(mocks.provider).not.toHaveBeenCalled();
+    expect(setCachedTasks).not.toHaveBeenCalled();
+  });
+
+  it.each(['inactive', 'role', 'ambiguous', 'foreign', 'duplicate'])('does not schedule or cache an unverified %s assignment', async invalid => {
+    rows.set(users, [fixtureUser, { id: 8201, role: invalid === 'role' ? 'admin' : 'worker' }]);
+    rows.set(vaProfiles, [{ id: 9101, userId: 8201, founderId: invalid === 'foreign' ? 99 : fixtureUser.id,
+      status: invalid === 'inactive' ? 'inactive' : 'active' }]);
+    rows.set(taskAssignments, [{ id: 1, taskId: 'fixture-card_pending', founderId: fixtureUser.id, vaId: 9101, status: 'assigned' }]);
+    if (invalid === 'ambiguous') rows.get(vaProfiles)!.push({ id: 9102, userId: 8201, founderId: fixtureUser.id, status: 'active' });
+    if (invalid === 'duplicate') rows.get(taskAssignments)!.push({ ...rows.get(taskAssignments)![0], id: 2, status: 'completed' });
+    await request(server).get('/api/trello/tasks').expect(409);
+    expect(setCachedTasks).not.toHaveBeenCalled();
+  });
+
+  it('does not serve a cached schedule after its worker was offboarded', async () => {
+    vi.mocked(getCachedTasks).mockResolvedValue({ tasks: [{ id: 'fixture-card_pending', workerId: 9101 }], overflow: [] });
+    rows.set(users, [fixtureUser, { id: 8201, role: 'worker' }]);
+    rows.set(vaProfiles, [{ id: 9101, userId: 8201, founderId: fixtureUser.id, status: 'inactive' }]);
+    rows.set(taskAssignments, [{ id: 1, taskId: 'fixture-card_pending', founderId: fixtureUser.id, vaId: 9101, status: 'assigned' }]);
+    await request(server).get('/api/trello/tasks').expect(409);
+    expect(mocks.provider).not.toHaveBeenCalled();
+    expect(setCachedTasks).not.toHaveBeenCalled();
   });
 
   it('returns 404 for a missing worker rather than silently using global settings', async () => {

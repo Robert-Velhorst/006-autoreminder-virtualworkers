@@ -11,8 +11,21 @@ import { createNonOverlappingRunner } from './non-overlapping-runner';
 import { getConsentingRecipientEmail } from './recipientEmailConsent';
 import { resolveWorkerOperatorContextById } from '../workerOperatorContext';
 import { areNotificationsEnabled } from './notificationPolicy';
+import { AssignmentError, assertCanonicalAssignmentRows, MAX_ASSIGNMENT_TASKS, readCanonicalAssignments } from '../taskAssignmentMutation';
 
 let schedulerInterval: NodeJS.Timeout | null = null;
+
+// Catch up within this local day only; the durable daily job key still owns
+// duplicate suppression and the lease still owns dispatch authorization.
+const BRIEFING_DUE_WINDOW_MINUTES = 15;
+function isBriefingDue(time: string, hour: number, minute: number) {
+  const currentMinute = hour * 60 + minute;
+  for (let late = 0; late < BRIEFING_DUE_WINDOW_MINUTES && late <= currentMinute; late++) {
+    const candidate = currentMinute - late;
+    if (shouldRunBriefingAt(time, Math.floor(candidate / 60), candidate % 60)) return true;
+  }
+  return false;
+}
 
 export function startBriefingScheduler() {
   if (process.env.BRIEFING_SCHEDULER_ENABLED !== 'true') {
@@ -50,6 +63,7 @@ export function stopBriefingScheduler() {
 }
 
 export async function processScheduledBriefings() {
+  const sweepTime = new Date();
   const db = await getDb();
   if (!db) return;
 
@@ -72,7 +86,7 @@ export async function processScheduledBriefings() {
         hourCycle: 'h23', // 0-23
       });
 
-      const parts = formatter.formatToParts(new Date());
+      const parts = formatter.formatToParts(sweepTime);
       const currentHour = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
       const currentMinute = parseInt(parts.find(p => p.type === 'minute')?.value || '0', 10);
 
@@ -82,10 +96,10 @@ export async function processScheduledBriefings() {
         founderSettings.set(worker.founderId, settings);
       }
       const morningAddress = settings.morningBriefingEnabled
-        && shouldRunBriefingAt(settings.morningBriefingTime, currentHour, currentMinute)
+        && isBriefingDue(settings.morningBriefingTime, currentHour, currentMinute)
         ? await getConsentingRecipientEmail(worker.userId, 'daily_digest') : null;
       const eodAddress = settings.eodReportEnabled
-        && shouldRunBriefingAt(settings.eodReportTime, currentHour, currentMinute)
+        && isBriefingDue(settings.eodReportTime, currentHour, currentMinute)
         ? await getConsentingRecipientEmail(worker.founderId, 'daily_digest') : null;
       const shouldSendMorning = morningAddress !== null;
       const shouldSendEod = eodAddress !== null;
@@ -95,10 +109,20 @@ export async function processScheduledBriefings() {
       const founder = await db.select().from(users).where(eq(users.id, worker.founderId)).limit(1);
       if (!founder || founder.length === 0) continue;
 
-      const assignments = await db.select().from(taskAssignments).where(and(
-        eq(taskAssignments.vaId, worker.id),
-        eq(taskAssignments.founderId, worker.founderId),
-      ));
+      // Validate full founder/task identities before trusting worker/status filters.
+      const founderAssignments = await db.select().from(taskAssignments)
+        .where(eq(taskAssignments.founderId, worker.founderId));
+      assertCanonicalAssignmentRows(founderAssignments);
+      const keys = [...new Set(founderAssignments.map(row => row.taskId))].sort();
+      const canonicalAssignments: typeof founderAssignments = [];
+      for (let offset = 0; offset < keys.length; offset += MAX_ASSIGNMENT_TASKS) {
+        canonicalAssignments.push(...await readCanonicalAssignments(db, worker.founderId,
+          keys.slice(offset, offset + MAX_ASSIGNMENT_TASKS)));
+      }
+      if (canonicalAssignments.length !== founderAssignments.length) {
+        throw new AssignmentError(409, 'Assignments changed; reload before trying again');
+      }
+      const assignments = canonicalAssignments.filter(row => row.vaId === worker.id);
       const tasks = assignments.map(assignment => {
         const startTime = assignment.startTime?.toISOString();
         const endTime = assignment.endTime?.toISOString();
@@ -120,13 +144,21 @@ export async function processScheduledBriefings() {
         year: "numeric",
         month: "long",
         day: "numeric",
-      }).format(new Date());
-      const dateKey = dateKeyInTimeZone(new Date(), workerTimezone);
+      }).format(sweepTime);
+      const dateKey = dateKeyInTimeZone(sweepTime, workerTimezone);
       const beforeDispatch = (recipientId: number, expectedAddress: string) => async () => {
         try {
           if (!areNotificationsEnabled()) return false;
           const currentWorker = await resolveWorkerOperatorContextById(worker.userId);
           if (currentWorker.profileId !== worker.id || currentWorker.founderId !== worker.founderId) return false;
+          // Provider readiness may have awaited I/O since the payload was built.
+          const payloadKeys = assignments.map(row => row.taskId);
+          for (let offset = 0; offset < payloadKeys.length; offset += MAX_ASSIGNMENT_TASKS) {
+            const batch = payloadKeys.slice(offset, offset + MAX_ASSIGNMENT_TASKS);
+            const current = await readCanonicalAssignments(db, worker.founderId, batch);
+            if (current.length !== batch.length
+              || current.some(row => row.vaId !== worker.id)) return false;
+          }
           const currentAddress = await getConsentingRecipientEmail(recipientId, 'daily_digest');
           return areNotificationsEnabled() && currentAddress === expectedAddress;
         } catch { return false; }
@@ -163,10 +195,8 @@ export async function processScheduledBriefings() {
             (sum, entry) => sum + recordedSeconds(entry) / 3600,
             0,
           );
-          const tasksFor = (statuses: Array<typeof assignments[number]["status"]>) => assignments
-            .filter(assignment => statuses.includes(assignment.status))
-            .map(assignment => tasks.find(task => task.cardName === assignment.taskId.split(":")[0]))
-            .filter((task): task is NonNullable<typeof task> => Boolean(task));
+          const tasksFor = (statuses: Array<typeof assignments[number]["status"]>) => tasks
+            .filter((_task, index) => statuses.includes(assignments[index].status));
           const completedTasks = tasksFor(["completed"]);
           const incompleteTasks = tasksFor(["assigned", "in_progress"]);
           const blockedTasks = tasksFor(["blocked"]);

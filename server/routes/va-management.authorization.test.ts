@@ -1,7 +1,7 @@
 import type { Request } from "express";
 import express from "express";
 import request from "supertest";
-import { aptlssManagerChecks, aptlssManagerRuns, aptlssManagerState, taskAssignments, timeEntries, trelloCachedCards, users, vaProfiles, workerInvitations, workerLifecycleAudit } from "../../drizzle/schema.postgres";
+import { assignmentEvents, communicationLog, aptlssManagerChecks, aptlssManagerRuns, aptlssManagerState, taskAssignments, timeEntries, trelloCachedCards, users, vaProfiles, workerInvitations, workerLifecycleAudit } from "../../drizzle/schema.postgres";
 import type { User } from "../../drizzle/schema.postgres";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { managerHistoryHash } from "../aptlssManagerHistory";
@@ -60,10 +60,20 @@ function matchesWhere(row: Row, condition: unknown) {
 }
 
 function database(rowsByTable: Map<unknown, Row[]>, failInsert?: unknown) {
+  if (!rowsByTable.has(users)) {
+    const accounts = new Map<number, Row>();
+    accounts.set(1, { id: 1, role: 'admin' });
+    for (const profile of rowsByTable.get(vaProfiles) ?? []) {
+      accounts.set(Number(profile.founderId), { id: profile.founderId, role: 'admin' });
+      if (!accounts.has(Number(profile.userId))) accounts.set(Number(profile.userId), { id: profile.userId, role: 'worker' });
+    }
+    rowsByTable.set(users, [...accounts.values()]);
+  }
   const updates: Array<{ table: unknown; values: Row }> = [];
   const inserts: Array<{ table: unknown; values: Row }> = [];
   const locks: unknown[] = [];
   const db: any = {
+    execute: vi.fn(async () => ({ rows: [] })),
     transaction: async (callback: (tx: any) => Promise<unknown>) => {
       const snapshot = new Map([...rowsByTable].map(([table, rows]) => [table, structuredClone(rows)]));
       const updateCount = updates.length;
@@ -114,16 +124,28 @@ function database(rowsByTable: Map<unknown, Row[]>, failInsert?: unknown) {
     }),
     insert: vi.fn((table: unknown) => ({
       values: (values: Row) => {
+        let conflict: { set: Row; setWhere: unknown } | undefined;
         const execute = () => {
           if (table === failInsert) throw new Error('Injected insert failure');
+          const existing = table === taskAssignments && conflict
+            ? rowsByTable.get(table)?.find(row => row.founderId === values.founderId && row.taskId === values.taskId) : undefined;
+          if (existing) {
+            if (!matchesWhere(existing, conflict!.setWhere)) return [];
+            updates.push({ table, values: conflict!.set });
+            Object.assign(existing, conflict!.set);
+            return [structuredClone(existing)];
+          }
           inserts.push({ table, values });
           const rows = rowsByTable.get(table) ?? [];
           const row = { id: Math.max(0, ...rows.map(row => Number(row.id))) + 1,
             ...(table === vaProfiles ? { status: 'active' } : {}), ...values };
+          if (table === taskAssignments) Object.assign(row, { status: 'assigned', notes: null, ...values });
           rowsByTable.set(table, [...rows, row]);
           return [row];
         };
-        return { returning: async () => execute(), then: (resolve: any, reject: any) => Promise.resolve().then(execute).then(resolve, reject) };
+        const query = { onConflictDoUpdate: (options: { set: Row; setWhere: unknown }) => { conflict = options; return query; },
+          returning: async () => execute(), then: (resolve: any, reject: any) => Promise.resolve().then(execute).then(resolve, reject) };
+        return query;
       },
     })),
   };
@@ -475,7 +497,7 @@ describe("VA management authorization and profile scope", () => {
       .send({ completed: true });
 
     expect(response.status).toBe(404);
-    expect(updates).toEqual([{ table: taskAssignments, values: { status: "completed" } }]);
+    expect(updates).toEqual([]);
     expect(mocks.invalidateCache).not.toHaveBeenCalled();
     expect(mocks.emitToUser).not.toHaveBeenCalled();
     },
@@ -556,7 +578,7 @@ describe("VA management authorization and profile scope", () => {
     expect(inserts).toEqual([]);
   });
 
-  it("does not treat a completed former assignment as current when ownership changed", async () => {
+  it("rejects a duplicate identity even when the former assignment is completed", async () => {
     const { db, inserts } = database(new Map([
       [vaProfiles, [
         { id: 8, userId: 42, founderId: admin.id, status: "active", name: "Previous worker" },
@@ -574,12 +596,11 @@ describe("VA management authorization and profile scope", () => {
       .send({
         taskId: "shared-task",
         fromVaId: 9,
-        whereLeftOff: "Current worker handoff",
+        whereLeftOff: "Current worker handoff against duplicate rows",
       });
 
-    expect(response.status).toBe(200);
-    expect(inserts).toHaveLength(1);
-    expect(inserts[0].values).toMatchObject({ taskId: "shared-task", fromVaId: 9, founderId: admin.id });
+    expect(response.status).toBe(409);
+    expect(inserts).toEqual([]);
   });
 
   it("rejects handoff creation when only completed assignments remain", async () => {
@@ -654,5 +675,161 @@ describe("VA management authorization and profile scope", () => {
     expect(response.body.error).toBe(invalid === "missing history" ? WORKER_EXECUTION_HOLD_MESSAGE
       : "A source required by the next step is out of date or not verified. Check that source before starting work.");
     expect(inserts).toHaveLength(0);
+  });
+
+  function assignmentFixture(failInsert?: unknown) {
+    const rows = new Map<unknown, Row[]>([
+      [users, [admin, worker, { id: 43, role: 'worker' }]],
+      [vaProfiles, [
+        { id: 8, userId: worker.id, founderId: admin.id, status: 'active', trelloMemberId: null },
+        { id: 9, userId: 43, founderId: admin.id, status: 'active', trelloMemberId: null },
+      ]],
+      [taskAssignments, [{ id: 31, taskId: 'card:step-1', founderId: admin.id, vaId: 8,
+        status: 'in_progress', notes: 'retain notes', createdAt: new Date('2026-01-01T00:00:00Z') }]],
+    ]);
+    const result = database(rows, failInsert);
+    mocks.getDb.mockResolvedValue(result.db);
+    return { ...result, rows };
+  }
+
+  it('reassigns the same full task identity and preserves history fields with one audit event', async () => {
+    const { rows } = assignmentFixture();
+    const before = structuredClone(rows.get(taskAssignments)![0]);
+    const response = await request(appFor(admin)).post('/api/va/assignments/31/assign').send({ vaId: 9 });
+    expect(response.status).toBe(200);
+    expect(rows.get(taskAssignments)).toEqual([expect.objectContaining({ ...before, vaId: 9 })]);
+    expect(rows.get(assignmentEvents)).toEqual([expect.objectContaining({ assignmentId: 31,
+      kind: 'reassigned', previousWorkerProfileId: 8, nextWorkerProfileId: 9 })]);
+    expect((await request(appFor(admin)).post('/api/va/assignments/31/assign').send({ vaId: 9 })).status).toBe(200);
+    expect(rows.get(assignmentEvents)).toHaveLength(1);
+  });
+
+  it('rolls back reassignment and emits no effects when assignment audit cannot be saved', async () => {
+    const { rows, updates } = assignmentFixture(assignmentEvents);
+    const before = structuredClone(rows.get(taskAssignments));
+    expect((await request(appFor(admin)).post('/api/va/assignments/31/assign').send({ vaId: 9 })).status).toBe(500);
+    expect(rows.get(taskAssignments)).toEqual(before);
+    expect(updates).toEqual([]);
+    expect(mocks.invalidateCache).not.toHaveBeenCalled();
+  });
+
+  it.each(['complete', 'review'])('rejects worker %s against duplicate operational identities without writes', async action => {
+    const { rows, updates, inserts } = assignmentFixture();
+    rows.get(taskAssignments)!.push({ ...rows.get(taskAssignments)![0], id: 32, vaId: 9, status: 'completed' });
+    expect((await request(appFor(worker)).post(`/api/va/worker/tasks/card%3Astep-1/${action}`).send({ completed: true })).status).toBe(409);
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+    expect(mocks.emitToUser).not.toHaveBeenCalled();
+  });
+
+  it('does not double-decode an opaque task identity during worker completion', async () => {
+    const { rows } = assignmentFixture();
+    rows.get(taskAssignments)![0].taskId = 'card:literal%3Astep';
+    expect((await request(appFor(worker)).post('/api/va/worker/tasks/card%3Aliteral%253Astep/complete').send({ completed: true })).status).toBe(200);
+    expect(rows.get(taskAssignments)![0]).toMatchObject({ taskId: 'card:literal%3Astep', status: 'completed' });
+    expect(rows.get(assignmentEvents)).toHaveLength(1);
+  });
+
+  it('rejects a truthy non-boolean completion flag without changing the task', async () => {
+    const { updates, inserts } = assignmentFixture();
+    expect((await request(appFor(worker)).post('/api/va/worker/tasks/card%3Astep-1/complete').send({ completed: 'false' })).status).toBe(400);
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+
+  it('rejects duplicate identities across workers before returning the worker task list', async () => {
+    const { rows } = assignmentFixture();
+    rows.get(taskAssignments)!.push({ ...rows.get(taskAssignments)![0], id: 32, vaId: 9, status: 'completed' });
+    expect((await request(appFor(worker)).get('/api/va/worker/tasks')).status).toBe(409);
+    expect((await request(appFor(admin)).get('/api/va/assignments/va/8')).status).toBe(409);
+  });
+
+  it('rejects handoff to an inactive recipient before inserting a note', async () => {
+    const { rows, inserts } = assignmentFixture();
+    rows.get(vaProfiles)![1].status = 'inactive';
+    expect((await request(appFor(admin)).post('/api/va/handoff').send({ taskId: 'card:step-1', fromVaId: 8, toVaId: 9, whereLeftOff: 'Draft handoff' })).status).toBe(409);
+    expect(inserts).toEqual([]);
+  });
+
+  it('does not expose another founder communication for the same external task key', async () => {
+    const { rows } = assignmentFixture();
+    rows.set(communicationLog, [
+      { id: 1, taskId: 'card:step-1', fromUserId: worker.id, toUserId: admin.id, message: 'Own workspace' },
+      { id: 2, taskId: 'card:step-1', fromUserId: 101, toUserId: 102, message: 'Foreign workspace' },
+    ]);
+    const response = await request(appFor(admin)).get('/api/va/communication/card%3Astep-1');
+    expect(response.status).toBe(200);
+    expect(response.body.map((message: { id: number }) => message.id)).toEqual([1]);
+  });
+
+  it.each([true, false])('rejects an inactive historical recipient with task=%s', async withTask => {
+    const { rows, inserts } = assignmentFixture();
+    rows.get(vaProfiles)![1].status = 'inactive';
+    expect((await request(appFor(admin)).post('/api/va/communication').send({
+      ...(withTask ? { taskId: 'card:step-1' } : {}), toUserId: 43,
+      messageType: 'update', message: 'Synthetic update',
+    })).status).toBe(404);
+    expect(inserts).toEqual([]);
+  });
+
+  it.each([true, false])('rejects a recipient ownership change before the locked insert with task=%s', async withTask => {
+    const { db, rows, inserts } = assignmentFixture();
+    const transaction = db.transaction;
+    db.transaction = async (callback: (tx: any) => Promise<unknown>) => {
+      rows.get(vaProfiles)![1].founderId = 99;
+      return transaction(callback);
+    };
+    const response = await request(appFor(admin)).post('/api/va/communication').send({
+      ...(withTask ? { taskId: 'card:step-1' } : {}), toUserId: 43,
+      messageType: 'update', message: 'Synthetic update',
+    });
+    expect(response.status).toBe(409);
+    expect(inserts).toEqual([]);
+    expect(rows.get(vaProfiles)![1].founderId).toBe(99);
+  });
+
+  it.each([true, false])('rejects a promoted recipient account before insertion with task=%s', async withTask => {
+    const { rows, inserts } = assignmentFixture();
+    rows.get(users)![2].role = 'admin';
+    const response = await request(appFor(admin)).post('/api/va/communication').send({
+      ...(withTask ? { taskId: 'card:step-1' } : {}), toUserId: 43,
+      messageType: 'update', message: 'Synthetic update',
+    });
+    expect(response.status).toBe(withTask ? 409 : 403);
+    expect(inserts).toEqual([]);
+  });
+
+  it('pins the original recipient account when a profile is relinked before the task transaction', async () => {
+    const { db, rows, inserts } = assignmentFixture();
+    rows.get(users)!.push({ id: 44, role: 'worker' });
+    const transaction = db.transaction;
+    db.transaction = async (callback: (tx: any) => Promise<unknown>) => {
+      rows.get(vaProfiles)![1].userId = 44;
+      return transaction(callback);
+    };
+    expect((await request(appFor(admin)).post('/api/va/communication').send({ taskId: 'card:step-1', toUserId: 43,
+      messageType: 'update', message: 'Synthetic update' })).status).toBe(409);
+    expect(inserts).toEqual([]);
+    expect(rows.get(vaProfiles)![1].userId).toBe(44);
+  });
+
+  it.each([true, false])('records a valid current workspace recipient with task=%s', async withTask => {
+    const { rows } = assignmentFixture();
+    expect((await request(appFor(admin)).post('/api/va/communication').send({
+      ...(withTask ? { taskId: 'card:step-1' } : {}), toUserId: 43,
+      messageType: 'update', message: 'Synthetic update',
+    })).status).toBe(200);
+    expect(rows.get(communicationLog)).toEqual([expect.objectContaining({ fromUserId: admin.id, toUserId: 43, message: 'Synthetic update' })]);
+  });
+
+  it('fences child and parent task keys before a fallback founder timer start', async () => {
+    const { db } = founderTimerFixture();
+    mocks.getDb.mockResolvedValue(db);
+    const response = await request(appFor(admin)).post('/api/va/time-entries/start').send({ taskId: 'current-card:child', vaId: 8 });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(db.execute).toHaveBeenCalledTimes(2);
+    const identities = db.execute.mock.calls.map(([query]: [unknown]) => JSON.stringify(query));
+    expect(identities.join('\n')).toContain('current-card:child');
+    expect(identities.join('\n')).toContain('current-card');
   });
 });
