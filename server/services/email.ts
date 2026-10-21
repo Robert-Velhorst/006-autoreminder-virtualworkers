@@ -156,6 +156,14 @@ function escapeEmailHtml(value: string) {
   }[character] ?? character));
 }
 
+function escapeEmailUrl(value: string) {
+  const url = new URL(value);
+  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) {
+    throw new Error('Email links require an HTTP(S) URL without credentials');
+  }
+  return escapeEmailHtml(url.href);
+}
+
 async function assertEmailOwnership(context?: ScheduledJobContext): Promise<void> {
   if (!context) return;
   if (context.signal.aborted) throw new ScheduledJobLeaseLostError();
@@ -263,7 +271,7 @@ export async function sendWorkerInvitationEmail({
   expiresAt: Date;
 }) {
   const safeName = escapeEmailHtml(workerName);
-  const safeUrl = escapeEmailHtml(inviteUrl);
+  const safeUrl = escapeEmailUrl(inviteUrl);
   const expiry = expiresAt.toISOString();
   return sendEmail({
     to: email,
@@ -297,23 +305,24 @@ interface WorkerBriefingData {
 }
 
 export function generateMorningBriefingHtml(data: WorkerBriefingData): string {
+  const dashboardUrl = escapeEmailUrl(`${process.env.APP_URL || 'https://vadashboard.app'}/worker`);
   const taskRows = data.tasks.map(task => `
     <tr>
       <td style="padding: 12px; border-bottom: 1px solid #eee;">
-        <strong>${task.title}</strong>
-        <br><span style="color: #666; font-size: 12px;">${task.cardName}</span>
+        <strong>${escapeEmailHtml(String(task.title))}</strong>
+        <br><span style="color: #666; font-size: 12px;">${escapeEmailHtml(String(task.cardName))}</span>
       </td>
       <td style="padding: 12px; border-bottom: 1px solid #eee; text-align: center;">
-        ${task.startTime || 'TBD'} - ${task.endTime || 'TBD'}
+        ${escapeEmailHtml(String(task.startTime || 'TBD'))} - ${escapeEmailHtml(String(task.endTime || 'TBD'))}
       </td>
       <td style="padding: 12px; border-bottom: 1px solid #eee; text-align: center;">
-        ${task.durationHours}h
+        ${escapeEmailHtml(String(task.durationHours))}h
       </td>
       <td style="padding: 12px; border-bottom: 1px solid #eee; text-align: center;">
         <span style="padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;
           background: ${task.priority === 'critical' ? '#fee2e2' : task.priority === 'urgent' ? '#ffedd5' : task.priority === 'high' ? '#fef9c3' : '#f3f4f6'};
           color: ${task.priority === 'critical' ? '#dc2626' : task.priority === 'urgent' ? '#ea580c' : task.priority === 'high' ? '#ca8a04' : '#6b7280'};">
-          ${task.priority.toUpperCase()}
+          ${escapeEmailHtml(String(task.priority).toUpperCase())}
         </span>
       </td>
     </tr>
@@ -328,8 +337,8 @@ export function generateMorningBriefingHtml(data: WorkerBriefingData): string {
     </head>
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
       <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
-        <h1 style="color: white; margin: 0; font-size: 24px;">☀️ Good Morning, ${data.workerName}!</h1>
-        <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0;">${data.date}</p>
+        <h1 style="color: white; margin: 0; font-size: 24px;">☀️ Good Morning, ${escapeEmailHtml(String(data.workerName))}!</h1>
+        <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0;">${escapeEmailHtml(String(data.date))}</p>
       </div>
       
       <div style="background: #f8f9fa; padding: 20px; border-radius: 0 0 12px 12px;">
@@ -339,11 +348,11 @@ export function generateMorningBriefingHtml(data: WorkerBriefingData): string {
             <div style="color: #666; font-size: 12px;">Tasks Today</div>
           </div>
           <div style="flex: 1; background: white; padding: 15px; border-radius: 8px; text-align: center;">
-            <div style="font-size: 28px; font-weight: bold; color: #667eea;">${data.totalHours}h</div>
+            <div style="font-size: 28px; font-weight: bold; color: #667eea;">${escapeEmailHtml(String(data.totalHours))}h</div>
             <div style="color: #666; font-size: 12px;">Total Hours</div>
           </div>
           <div style="flex: 1; background: white; padding: 15px; border-radius: 8px; text-align: center;">
-            <div style="font-size: 28px; font-weight: bold; color: ${data.highPriorityCount > 0 ? '#dc2626' : '#667eea'};">${data.highPriorityCount}</div>
+            <div style="font-size: 28px; font-weight: bold; color: ${data.highPriorityCount > 0 ? '#dc2626' : '#667eea'};">${escapeEmailHtml(String(data.highPriorityCount))}</div>
             <div style="color: #666; font-size: 12px;">High Priority</div>
           </div>
         </div>
@@ -371,7 +380,7 @@ export function generateMorningBriefingHtml(data: WorkerBriefingData): string {
         </div>
 
         <div style="margin-top: 20px; text-align: center;">
-          <a href="${process.env.APP_URL || 'https://vadashboard.app'}/worker" 
+          <a href="${dashboardUrl}"
              style="display: inline-block; background: #667eea; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">
             Open Dashboard →
           </a>
@@ -397,21 +406,23 @@ interface EODReportData {
 }
 
 export function generateEODReportHtml(data: EODReportData): string {
+  const completionRate = typeof data.completionRate === 'number' && Number.isFinite(data.completionRate)
+    ? Math.min(100, Math.max(0, data.completionRate)) : 0;
   const completedRows = data.completedTasks.map(task => `
     <li style="padding: 8px 0; border-bottom: 1px solid #eee;">
-      ✅ <strong>${task.title}</strong> <span style="color: #666;">(${task.durationHours}h)</span>
+      ✅ <strong>${escapeEmailHtml(String(task.title))}</strong> <span style="color: #666;">(${escapeEmailHtml(String(task.durationHours))}h)</span>
     </li>
   `).join('');
 
   const incompleteRows = data.incompleteTasks.map(task => `
     <li style="padding: 8px 0; border-bottom: 1px solid #eee;">
-      ⏳ <strong>${task.title}</strong> <span style="color: #666;">(${task.durationHours}h)</span>
+      ⏳ <strong>${escapeEmailHtml(String(task.title))}</strong> <span style="color: #666;">(${escapeEmailHtml(String(task.durationHours))}h)</span>
     </li>
   `).join('');
 
   const blockedRows = data.blockedTasks.map(task => `
     <li style="padding: 8px 0; border-bottom: 1px solid #eee;">
-      🚫 <strong>${task.title}</strong> <span style="color: #666;">(${task.durationHours}h)</span>
+      🚫 <strong>${escapeEmailHtml(String(task.title))}</strong> <span style="color: #666;">(${escapeEmailHtml(String(task.durationHours))}h)</span>
     </li>
   `).join('');
 
@@ -425,7 +436,7 @@ export function generateEODReportHtml(data: EODReportData): string {
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
       <div style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
         <h1 style="color: white; margin: 0; font-size: 24px;">🌙 End of Day Report</h1>
-        <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0;">${data.workerName} • ${data.date}</p>
+        <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0;">${escapeEmailHtml(String(data.workerName))} • ${escapeEmailHtml(String(data.date))}</p>
       </div>
       
       <div style="background: #f8f9fa; padding: 20px; border-radius: 0 0 12px 12px;">
@@ -447,10 +458,10 @@ export function generateEODReportHtml(data: EODReportData): string {
         <div style="background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
           <div style="display: flex; justify-content: space-between; align-items: center;">
             <span style="font-weight: 600;">Completion Rate</span>
-            <span style="font-size: 24px; font-weight: bold; color: ${data.completionRate >= 80 ? '#22c55e' : data.completionRate >= 50 ? '#f59e0b' : '#ef4444'};">${data.completionRate}%</span>
+            <span style="font-size: 24px; font-weight: bold; color: ${completionRate >= 80 ? '#22c55e' : completionRate >= 50 ? '#f59e0b' : '#ef4444'};">${completionRate}%</span>
           </div>
           <div style="background: #e5e7eb; height: 8px; border-radius: 4px; margin-top: 10px; overflow: hidden;">
-            <div style="background: ${data.completionRate >= 80 ? '#22c55e' : data.completionRate >= 50 ? '#f59e0b' : '#ef4444'}; height: 100%; width: ${data.completionRate}%; border-radius: 4px;"></div>
+            <div style="background: ${completionRate >= 80 ? '#22c55e' : completionRate >= 50 ? '#f59e0b' : '#ef4444'}; height: 100%; width: ${completionRate}%; border-radius: 4px;"></div>
           </div>
         </div>
 
@@ -477,7 +488,7 @@ export function generateEODReportHtml(data: EODReportData): string {
 
         <div style="margin-top: 20px; padding: 15px; background: #fef3c7; border-radius: 8px;">
           <p style="margin: 0; color: #92400e; font-size: 14px;">
-            ⏱️ <strong>Total Hours Logged:</strong> ${data.totalHoursWorked}h
+            ⏱️ <strong>Total Hours Logged:</strong> ${escapeEmailHtml(String(data.totalHoursWorked))}h
           </p>
         </div>
       </div>
