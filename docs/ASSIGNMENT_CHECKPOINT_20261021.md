@@ -19,6 +19,16 @@ security acceptance remain required. The earlier failed checkpoint is retained
 below as dated evidence, not the current local test result. Neither this repair
 nor green CI authorizes operational duplicate resolution or live cutover.
 
+Hosted quality `39551153089` at `1035477` passed the configured PostgreSQL image
+stage and all 19 service/migration plus nine mounted HTTP assignment cases.
+Its overall regression stage failed: the digest-outbox fixture setup and one
+session-lifecycle assertion still expected 138 tables, while additive migration
+0008 correctly produced 139. That run reported 4,726 passing tests, one failed
+test and 61 skips (including cases skipped after the failed fixture setup).
+The two exact schema-count expectations are corrected to 139; no assertion is
+removed. A new exact-head CI run is required. The failed run is not relabeled
+accepted, and earlier native passes are not transferred to changed source.
+
 ## Preserved implementation
 
 - PostgreSQL assignment identity migration and dedicated assignment event table.
