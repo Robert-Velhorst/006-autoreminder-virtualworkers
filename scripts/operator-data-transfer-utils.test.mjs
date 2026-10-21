@@ -18,11 +18,13 @@ const column = (column_name, data_type = "integer", extra = {}) => ({
   column_name, data_type, is_nullable: "NO", column_default: null, is_identity: "NO", ...extra,
 });
 const columns = {
-  time_entries: [column("id", "integer", { is_identity: "YES" }), column("vaId"), column("founderId"), column("notes", "text")],
+  time_entries: [column("id", "integer", { is_identity: "YES" }), column("vaId", "integer", { is_nullable: "YES" }),
+    column('trackedUserId', 'integer', { is_nullable: 'YES' }), column('trackedProfileId', 'integer', { is_nullable: 'YES' }),
+    column("founderId"), column("notes", "text")],
   card_states: [column("id", "integer", { is_identity: "YES" }), column("vaId"), column("cardId", "text"), column("state", "jsonb")],
   app_settings: [column("id", "integer", { is_identity: "YES" }), column("vaId", "integer", { is_nullable: "YES" }), column("key", "character varying"), column("value", "text")],
 };
-const entry = { id: 8, vaId: 2, founderId: 1, notes: "synthetic source" };
+const entry = { id: 8, vaId: 2, trackedUserId: null, trackedProfileId: null, founderId: 1, notes: "synthetic source" };
 const card = { id: 9, vaId: 2, cardId: "card-fixture", state: { b: 2, a: 1 } };
 function payload(tables = { time_entries: [entry], card_states: [] }) {
   return {
@@ -44,6 +46,7 @@ function database(options = {}) {
   let snapshot;
   let locked = false;
   let readOnly = false;
+  let importMode = false;
   const result = rows => ({ rows: structuredClone(rows), rowCount: rows.length });
   return { state, queries, async query(text, values = []) {
     const sql = text.trim().replace(/\s+/g, " ");
@@ -51,19 +54,37 @@ function database(options = {}) {
     if (sql.startsWith("BEGIN")) {
       snapshot = structuredClone(state);
       readOnly = sql.includes("READ ONLY");
+      locked = false;
+      importMode = false;
       return result([]);
     }
     if (sql === "ROLLBACK") {
       if (snapshot) Object.assign(state, snapshot);
       snapshot = undefined;
+      locked = false;
+      importMode = false;
       return result([]);
     }
     if (sql === "COMMIT") {
       assert.equal(readOnly, false);
       snapshot = undefined;
+      locked = false;
+      importMode = false;
       return result([]);
     }
     if (sql.startsWith("SET LOCAL")) return result([]);
+    if (sql === "SELECT has_table_privilege(current_user, 'time_entries', 'TRIGGER') AS allowed") {
+      assert.ok(snapshot);
+      assert.equal(readOnly, false);
+      return result([{ allowed: options.legacyImportPrivilege ?? true }]);
+    }
+    if (sql === "SELECT set_config('aptlss.legacy_timer_import', txid_current()::text, true)") {
+      assert.ok(snapshot);
+      assert.equal(readOnly, false);
+      assert.notEqual(options.legacyImportPrivilege, false);
+      importMode = true;
+      return result([]);
+    }
     if (sql.startsWith("LOCK TABLE")) {
       assert.equal(readOnly, false);
       assert.match(sql, /ACCESS EXCLUSIVE MODE$/);
@@ -88,6 +109,7 @@ function database(options = {}) {
       const [, table, list] = /^INSERT INTO "(\w+)" \(([^)]+)\)/.exec(sql);
       const names = [...list.matchAll(/"(\w+)"/g)].map(match => match[1]);
       const row = Object.fromEntries(names.map((name, index) => [name, values[index]]));
+      if (table === 'time_entries' && (row.trackedUserId == null || row.vaId != null)) assert.equal(importMode, true);
       assert.equal(state.tables[table].some(existing => existing.id === row.id), false);
       const stored = options.coerce ? options.coerce(row) : row;
       state.tables[table].push(stored);
@@ -208,7 +230,8 @@ describe("operator transfer CLI and source validation", () => {
     assert.throws(() => verifyExport(p), /digest/);
   });
   it("rejects missing and different source owners rather than filling or retaining IDs", () => {
-    for (const row of [{ ...entry, vaId: 3 }, { ...entry, vaId: 4 }, { ...entry, founderId: 2 }, { ...entry, vaId: null }, { ...entry, founderId: undefined }]) {
+    for (const row of [{ ...entry, trackedUserId: 3 }, { ...entry, trackedUserId: 4 }, { ...entry, founderId: 2 },
+      { ...entry, trackedProfileId: 3 }, { ...entry, trackedUserId: 2, trackedProfileId: 2 }, { ...entry, founderId: undefined }]) {
       assert.throws(() => prepareTransferRow(row, columns.time_entries, identity, "time_entries"));
     }
     assert.deepEqual(prepareTransferRow(entry, columns.time_entries, identity, "time_entries"), entry);
@@ -253,8 +276,8 @@ describe("canonical global settings and explicit credential restoration", () => 
     assert.deepEqual(sourceIdentity(target), { ...identity, workerPrincipal: sourceIdentity(target).workerPrincipal,
       founderPrincipal: sourceIdentity(target).founderPrincipal, trelloPrincipal: sourceIdentity(target).trelloPrincipal });
     assert.deepEqual(prepareTransferRow(global, columns.app_settings, identity, "app_settings"), global);
-    assert.throws(() => prepareTransferRow({ ...entry, vaId: null }, columns.time_entries.map(item => ({ ...item, is_nullable: "YES" })), identity, "time_entries"));
-    assert.throws(() => prepareTransferRow({ ...entry, vaId: 3 }, columns.time_entries, identity, "time_entries"));
+    assert.throws(() => prepareTransferRow({ ...entry, trackedUserId: 3 }, columns.time_entries, identity, "time_entries"), /owner mismatch/);
+    assert.throws(() => prepareTransferRow({ ...entry, trackedUserId: 2, trackedProfileId: 2 }, columns.time_entries, identity, "time_entries"), /profile mismatch/);
     assert.throws(() => prepareTransferRow({ ...global, vaId: 2 }, columns.app_settings, identity, "unreviewed_table"), /Unreviewed/);
     assert.throws(() => prepareTransferRow({ ...global, vaId: undefined }, columns.app_settings, identity, "app_settings"));
     assert.throws(() => prepareTransferRow({ ...global, value: null }, columns.app_settings, identity, "app_settings"), /Null required/);
@@ -270,7 +293,7 @@ describe("canonical global settings and explicit credential restoration", () => 
     assert.equal(report.applied, true);
     assert.equal(report.dataCheckPassed, true);
     assert.equal(report.completion, "private-credential-restoration-required");
-    assert.deepEqual(report.tables.app_settings, { source: 2, credentialOmissions: 1, inserted: 1, identical: 0, wouldInsert: 0 });
+    assert.deepEqual(report.tables.app_settings, { source: 2, credentialOmissions: 1, inserted: 1, identical: 0, wouldInsert: 0, requiresIdentityReview: 0 });
     assert.deepEqual(db.state.tables.app_settings, [{ ...secret, value: "synthetic-target-secret" }, global]);
     assert.equal(JSON.stringify(value).includes(secret.value), false);
     const reconciled = await transferOperatorRecords(db, value, settingsDefinitions, { identity, reconcile: true, acknowledgeCredentialOmissions: true });
@@ -298,6 +321,54 @@ describe("canonical global settings and explicit credential restoration", () => 
 });
 
 describe("operator import/reconciliation transactions", () => {
+  it('preserves legacy provenance without inferring an owner and explicitly reports unfinished identity review', async () => {
+    const legacy = { ...entry, vaId: 99 };
+    delete legacy.trackedUserId;
+    delete legacy.trackedProfileId;
+    const db = database();
+    const before = structuredClone(legacy);
+    const report = await transferOperatorRecords(db, payload({ time_entries: [legacy], card_states: [] }), definitions, { identity, execute: true });
+    assert.deepEqual(legacy, before);
+    assert.deepEqual(db.state.tables.time_entries, [{ ...legacy, trackedUserId: null, trackedProfileId: null }]);
+    assert.equal(report.dataCheckPassed, true);
+    assert.equal(report.timerIdentityComplete, false);
+    assert.equal(report.completion, 'timer-identity-review-required');
+    assert.equal(report.tables.time_entries.requiresIdentityReview, 1);
+    const sql = db.queries.map(query => query.sql);
+    assert.ok(sql.findIndex(query => query.includes('has_table_privilege')) < sql.findIndex(query => query.includes('set_config')));
+    const reconciled = await transferOperatorRecords(db, payload({ time_entries: [legacy], card_states: [] }), definitions, { identity, reconcile: true });
+    assert.equal(reconciled.timerIdentityComplete, false);
+    assert.equal(reconciled.tables.time_entries.identical, 1);
+  });
+  it('rejects unprivileged legacy staging before enabling import mode, locks, or inserts and rolls back', async () => {
+    const db = database({ legacyImportPrivilege: false });
+    const before = structuredClone(db.state);
+    await assert.rejects(transferOperatorRecords(db, payload(), definitions, { identity, execute: true }), /Privileged operator/);
+    assert.deepEqual(db.state, before);
+    assert.equal(db.queries.at(-1).sql, 'ROLLBACK');
+    assert.ok(db.queries.every(({ sql }) => !/set_config|LOCK TABLE|INSERT INTO|ALTER SEQUENCE|COMMIT/.test(sql)));
+  });
+  it('imports verified canonical rows without privileged legacy mode or changing their identities', async () => {
+    const canonical = { ...entry, vaId: null, trackedUserId: 2, trackedProfileId: 3 };
+    const db = database({ legacyImportPrivilege: false });
+    const report = await transferOperatorRecords(db, payload({ time_entries: [canonical], card_states: [] }), definitions, { identity, execute: true });
+    assert.equal(report.timerIdentityComplete, true);
+    assert.equal(report.completion, 'complete');
+    assert.deepEqual(db.state.tables.time_entries, [canonical]);
+    assert.ok(db.queries.every(({ sql }) => !/set_config|has_table_privilege/.test(sql)));
+  });
+  it('rejects absent or incompatible canonical migration columns, retaining all transaction state', async () => {
+    const withoutCanonical = columns.time_entries.filter(column => !column.column_name.startsWith('tracked'));
+    for (const targetColumns of [withoutCanonical,
+      columns.time_entries.map(column => column.column_name === 'trackedUserId' ? { ...column, data_type: 'text' } : column),
+      columns.time_entries.map(column => column.column_name === 'trackedProfileId' ? { ...column, is_nullable: 'NO' } : column)]) {
+      const db = database({ columns: { time_entries: targetColumns } });
+      const before = structuredClone(db.state);
+      await assert.rejects(transferOperatorRecords(db, payload(), definitions, { identity, execute: true }), /Canonical timer migration/);
+      assert.deepEqual(db.state, before);
+      assert.equal(db.queries.at(-1).sql, 'ROLLBACK');
+    }
+  });
   it("reviews in a read-only snapshot without inserts, DDL or sequence consumption", async () => {
     const db = database();
     const p = payload();
@@ -357,7 +428,7 @@ describe("operator import/reconciliation transactions", () => {
     }
   });
   it("rolls back earlier inserts when any later source ownership, key or schema is invalid", async () => {
-    for (const second of [{ ...entry, id: 10, vaId: 99 }, { ...entry }, { vaId: 2, founderId: 1, notes: "missing id" }]) {
+    for (const second of [{ ...entry, id: 10, trackedUserId: 99 }, { ...entry }, { vaId: 2, founderId: 1, notes: "missing id" }]) {
       const db = database();
       await assert.rejects(transferOperatorRecords(db, payload({ time_entries: [entry, second], card_states: [] }), definitions, { identity, execute: true }));
       assert.deepEqual(db.state.tables.time_entries, []);

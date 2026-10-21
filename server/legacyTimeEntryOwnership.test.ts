@@ -16,17 +16,18 @@ describe("legacy founder time-entry ownership", () => {
     const start = source.slice(source.indexOf("router.post('/time-entries/start'"), source.indexOf("router.put('/time-entries/:id/stop'"));
 
     expect(start).toContain("isManagerPilotWorker(worker[0].userId)");
-    expect(start).toContain("await readCurrentManagerHistory(db, worker[0].userId)");
-    expect(start).toContain("if (!snapshot) return res.status(409)");
+    expect(start).toContain("await readCurrentManagerHistory(tx as any, worker[0].userId)");
+    expect(start).toContain("if (!snapshot) throw new TimerConflict(409");
     expect(start).toContain("managerActionSourceRequirements(JSON.stringify(snapshot), cardId)");
     expect(start).toContain("managerActionNeedsSourceVerification(sourceRequirements");
-    expect(start.indexOf("managerActionNeedsSourceVerification")).toBeLessThan(start.indexOf("db.insert(timeEntries)"));
+    expect(start.indexOf("managerActionNeedsSourceVerification")).toBeLessThan(start.indexOf("insertCanonicalTimer(tx"));
   });
 
   it("does not let a founder stop another founder's time entry by numeric ID", () => {
     const stop = source.slice(source.indexOf("router.put('/time-entries/:id/stop'"), source.indexOf("router.get('/time-entries/:taskId'"));
 
-    expect(stop).toContain("and(eq(timeEntries.id, entryId), eq(timeEntries.founderId, user.id))");
+    expect(stop).toContain("closeCanonicalTimer(db, user, entryId");
+    expect(stop).toContain("founderManaged: true");
   });
 
   it("uses a founder-owned worker profile before assigning work or creating a handoff", () => {

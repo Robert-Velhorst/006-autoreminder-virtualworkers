@@ -135,7 +135,7 @@ describe.skipIf(!fixtureUrl)('VA lifecycle native PostgreSQL transactions', () =
 
   it('soft-offboards without deleting time history', async () => {
     const { profile, account } = await createWorker();
-    await pool.query(`INSERT INTO time_entries ("taskId","vaId","founderId","startTime","durationMinutes") VALUES ('synthetic-task',$1,$2,now(),45)`, [profile.id, actorId]);
+    await pool.query(`INSERT INTO time_entries ("taskId","trackedUserId","trackedProfileId","founderId","startTime","endTime","durationMinutes") VALUES ('synthetic-task',$1,$2,$3,now()-interval '45 minutes',now(),45)`, [account.id, profile.id, actorId]);
     expect((await request(app).delete(`/api/va/vas/${profile.id}`)).status).toBe(200);
     expect((await pool.query('SELECT status FROM va_profiles WHERE id=$1', [profile.id])).rows[0].status).toBe('inactive');
     expect((await pool.query('SELECT "durationMinutes" FROM time_entries')).rows).toEqual([{ durationMinutes: 45 }]);
@@ -167,8 +167,8 @@ describe.skipIf(!fixtureUrl)('VA lifecycle native PostgreSQL transactions', () =
       });
       const accountBefore = (await pool.query('SELECT * FROM users WHERE id=$1', [invitation.userId])).rows[0];
       expect(accountBefore.passwordHash).toBeNull();
-      await pool.query(`INSERT INTO time_entries ("taskId","vaId","founderId","startTime","durationMinutes")
-        VALUES ('synthetic-race-history',$1,$2,now(),45)`, [invitation.vaId, actorId]);
+      await pool.query(`INSERT INTO time_entries ("taskId","trackedUserId","trackedProfileId","founderId","startTime","endTime","durationMinutes")
+        VALUES ('synthetic-race-history',$1,$2,$3,now()-interval '45 minutes',now(),45)`, [invitation.userId, invitation.vaId, actorId]);
       const historyBefore = (await pool.query('SELECT * FROM time_entries ORDER BY id')).rows;
 
       const suffix = randomUUID().replaceAll('-', '');

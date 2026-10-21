@@ -819,8 +819,10 @@ export const reviewQueue = pgTable("review_queue", {
 // Time tracking entries
 export const timeEntries = pgTable('time_entries', {
   id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  trackedUserId: integer('trackedUserId').references(() => users.id, { onDelete: 'restrict' }),
+  trackedProfileId: integer('trackedProfileId').references(() => vaProfiles.id, { onDelete: 'restrict' }),
   taskId: varchar('taskId', { length: 128 }).notNull(),
-  vaId: integer('vaId').notNull(),
+  vaId: integer('vaId'), // Immutable legacy provenance; new timers leave this null.
   founderId: integer('founderId').notNull(),
   cardId: varchar('cardId', { length: 64 }),
   cardName: varchar('cardName', { length: 512 }),
@@ -843,6 +845,9 @@ export const timeEntries = pgTable('time_entries', {
   createdAt: timestamp('createdAt').defaultNow().notNull(),
   updatedAt: timestamp('updatedAt').defaultNow().$onUpdateFn(() => new Date()).notNull(),
 }, (table) => [
+  uniqueIndex('time_entries_one_active_account_idx').on(table.trackedUserId)
+    .where(sql`${table.endTime} IS NULL AND ${table.isVoided} = false`),
+  index('time_entries_account_period_idx').on(table.trackedUserId, table.startTime),
   index('time_entries_period_idx').on(table.startTime, table.endTime),
   index('va_time_entries_period_idx').on(table.vaId, table.startTime, table.endTime),
   index('time_entries_plan_block_idx').on(table.planDateKey, table.planBlockId),

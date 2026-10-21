@@ -4,7 +4,7 @@ import { InfoTooltip } from "@/components/manus/InfoTooltip";
 import ActionAlerts from "@/components/manus/ActionAlerts";
 import RobertDecisionQueue from "@/components/manus/RobertDecisionQueue";
 import { ConversationDialog } from "@/components/ConversationDialog";
-import TimeTracker from "@/components/manus/TimeTracker";
+import TimeTracker, { isTimerDateContext } from "@/components/manus/TimeTracker";
 import WebhookHealthPanel from "@/components/manus/WebhookHealthPanel";
 import TriagePage, { useTriageCounts } from "./TriagePage";
 import TasksTab from "./TasksTab";
@@ -1228,16 +1228,21 @@ const MAX_WIDTH = 320;
 const ACTIVE_SECTION_KEY = "worker-active-section";
 
 // ─── Today's logged hours chip for the sidebar ─────────────────────────────
-function TodayHoursChip() {
-  const todayDate = useMemo(() => {
-    const eatNow = new Date(Date.now() + 3 * 60 * 60 * 1000);
-    return eatNow.toISOString().slice(0, 10);
-  }, []);
-  const { data: dailySummary = [] } = trpc.timer.getDailySummary.useQuery(
-    { date: todayDate },
-    { staleTime: 30 * 60_000 }
+export function TodayHoursChip() {
+  const dateContextQuery = trpc.timer.getDateContext.useQuery(undefined, {
+    staleTime: 60_000, refetchInterval: 60_000, retry: false,
+  });
+  const contextReady = dateContextQuery.isSuccess && !dateContextQuery.error && isTimerDateContext(dateContextQuery.data);
+  const dailyQuery = trpc.timer.getDailySummary.useQuery(
+    { date: contextReady ? dateContextQuery.data!.date : "" },
+    { staleTime: 30 * 60_000, retry: false, enabled: contextReady }
   );
-  const totalSecs = dailySummary.reduce((s, e) => s + e.totalSeconds, 0);
+  if (!contextReady) return <span role="status" className="text-xs text-muted-foreground">History unavailable</span>;
+  if (dailyQuery.error || !dailyQuery.isSuccess) return <span role="status" className="text-xs text-muted-foreground">
+    {dailyQuery.error?.data?.code === "PRECONDITION_FAILED" ? "History needs owner review"
+      : dailyQuery.error ? "History unavailable" : "Loading history..."}
+  </span>;
+  const totalSecs = dailyQuery.data.reduce((s, e) => s + e.totalSeconds, 0);
   if (totalSecs === 0) return <span className="text-xs text-muted-foreground">0h today</span>;
   const h = Math.floor(totalSecs / 3600);
   const m = Math.floor((totalSecs % 3600) / 60);
@@ -1282,7 +1287,7 @@ function HomeInner() {
     return () => window.removeEventListener('openConversations', handleOpenConversations as EventListener);
   }, []);
 
-  const { data: weeklyHours, isLoading: hoursLoading } = trpc.trello.weeklyHours.useQuery();
+  const { data: weeklyHours, isLoading: hoursLoading, error: hoursError } = trpc.trello.weeklyHours.useQuery();
   const { data: recentUpdates, isLoading: updatesLoading } = trpc.trello.recentUpdates.useQuery();
   const { data: streakData } = trpc.streak.get.useQuery({}, { staleTime: 5 * 60_000 });
 
@@ -1360,7 +1365,7 @@ function HomeInner() {
                 {!isCollapsed && (
                   <div className="flex-1 flex items-center justify-between min-w-0 gap-1">
                     <span className={`text-xs font-medium truncate ${hoursLoading ? 'text-muted-foreground' : progressColor.text}`}>
-                      {hoursLoading ? 'Loading…' : weeklyHours ? `${weeklyHours.totalHours}h / ${weeklyHours.targetMin}-${weeklyHours.targetMax}h` : 'Weekly hours unavailable'}
+                      {hoursError ? 'Weekly hours unavailable' : hoursLoading ? 'Loading…' : weeklyHours ? `${weeklyHours.totalHours}h / ${weeklyHours.targetMin}-${weeklyHours.targetMax}h` : 'Weekly hours unavailable'}
                     </span>
                     <TodayHoursChip />
                   </div>

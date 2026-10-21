@@ -1,3 +1,4 @@
+import { timerTestDatabase } from '../test/timerDatabase';
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -103,96 +104,25 @@ function retainedHistory(current: Record<string, unknown> = managerSnapshot()) {
 function makeDb(fixture: Fixture = {}) {
   const user = fixture.user ?? worker;
   const profiles = fixture.profiles ?? [profile];
-  const profileCollisions = fixture.profileCollisions ?? profiles;
-  const entries = fixture.entries ?? fixture.activeEntries ?? [];
+  const entries = (fixture.entries ?? fixture.activeEntries ?? []).map(entry => Object.assign(entry, {
+    trackedUserId: worker.id, trackedProfileId: profile.id, isVoided: entry.isVoided ?? false,
+  }));
+  const history = fixture.history ?? retainedHistory(fixture.snapshot ?? managerSnapshot());
+  const rows = new Map<unknown, Record<string, any>[]>([
+    [users, [{ ...user, role: user.role }]], [vaProfiles, profiles],
+    [timeEntries, entries],
+    [taskAssignments, [fixture.ownAssignment, fixture.exactOtherAssignment, fixture.parentAssignment].filter(Boolean) as any[]],
+    [aptlssPlans, fixture.hasPlan ? [{ vaId: worker.id, cardId, listName: "DOING" }] : []],
+    [atisCards, fixture.cardMember ? [{ trelloId: cardId, listName: "DOING", memberIds: JSON.stringify([profile.trelloMemberId]), isArchived: false }] : []],
+    [cardStates, []],
+    [aptlssManagerState, [history.state]],
+    [aptlssManagerChecks, [history.check]],
+    [aptlssManagerRuns, fixture.missingHistory ? [] : [{ ...history.run }]],
+    [trelloCachedCards, []],
+  ]);
   const insertedValues: Record<string, unknown>[] = [];
-  const updates: Array<{ id: number; values: Record<string, unknown> }> = [];
-  let nextEntryId = 100;
-
-  function createTransaction() {
-    const reads = new Map<unknown, number>();
-    const tx: any = {
-      select: vi.fn(() => {
-        let table: unknown;
-        let rows: unknown[] = [];
-        const query: any = {
-          from: vi.fn((value: unknown) => {
-            table = value;
-            const count = (reads.get(value) ?? 0) + 1;
-            reads.set(value, count);
-            if (table === users) rows = [{ id: user.id }];
-            else if (table === vaProfiles) rows = count >= 2 ? profileCollisions : profiles;
-            else if (table === taskAssignments) {
-              if (count === 1) rows = fixture.ownAssignment ? [fixture.ownAssignment] : [];
-              else if (count === 2) rows = fixture.ownAssignment
-                ? [fixture.ownAssignment]
-                : fixture.exactOtherAssignment ? [fixture.exactOtherAssignment] : [];
-              else if (fixture.exactOtherAssignment) rows = [fixture.exactOtherAssignment];
-              else rows = fixture.parentAssignment ? [fixture.parentAssignment] : [];
-            } else if (table === aptlssPlans) rows = fixture.hasPlan ? [{ listName: "DOING" }] : [];
-            else if (table === atisCards) rows = fixture.cardMember
-              ? [{ listName: "DOING", memberIds: JSON.stringify([profile.trelloMemberId]), isArchived: false }]
-              : [];
-            else if (table === cardStates) rows = [{ state: "DOING" }];
-            else if (table === aptlssManagerState) rows = fixture.history ? [fixture.history.state] : [];
-            else if (table === aptlssManagerChecks) rows = fixture.history ? [fixture.history.check] : [];
-            else if (table === aptlssManagerRuns) rows = fixture.missingHistory ? [] : fixture.history ? [fixture.history.run] : [{
-              id: 1, vaId: worker.id,
-              snapshotJson: JSON.stringify(fixture.snapshot ?? managerSnapshot()),
-            }];
-            else if (table === trelloCachedCards) rows = [];
-            else if (table === timeEntries) rows = count === 1
-              ? entries.filter(entry => entry.endTime === null)
-              : entries;
-            else rows = [];
-            return query;
-          }),
-          where: vi.fn(() => query),
-          orderBy: vi.fn(() => query),
-          limit: vi.fn(() => query),
-          for: vi.fn(() => query),
-          then: (resolve: (value: unknown[]) => unknown, reject: (error: unknown) => unknown) =>
-            Promise.resolve(rows).then(resolve, reject),
-        };
-        return query;
-      }),
-      insert: vi.fn(() => ({
-        values: vi.fn((values: Record<string, unknown>) => ({ returning: vi.fn(async () => {
-          insertedValues.push(values);
-          const inserted: Entry = {
-            id: nextEntryId++,
-            taskId: String(values.taskId),
-            vaId: Number(values.vaId),
-            founderId: Number(values.founderId),
-            startTime: values.startTime as Date,
-            endTime: null,
-            durationMinutes: null,
-            notes: typeof values.notes === "string" ? values.notes : null,
-          };
-          entries.push(inserted);
-          return [{ ...values, ...inserted }];
-        }) })),
-      })),
-      update: vi.fn(() => ({
-        set: vi.fn((values: Record<string, unknown>) => ({
-          where: vi.fn(async () => {
-            const active = entries.find(entry => entry.endTime === null);
-            if (active) {
-              Object.assign(active, values);
-              updates.push({ id: active.id, values });
-            }
-            return [];
-          }),
-        })),
-      })),
-    };
-    return tx;
-  }
-
-  const db = {
-    transaction: vi.fn(async <T>(callback: (tx: any) => Promise<T>) => callback(createTransaction())),
-  };
-  return { db, entries, insertedValues, updates };
+  const fixtureDb = timerTestDatabase(rows, { afterInsert: (table, value) => { if (table === timeEntries) insertedValues.push(value); } });
+  return { db: fixtureDb.db, entries, insertedValues, updates: fixtureDb.updates };
 }
 
 function createApp(db: ReturnType<typeof makeDb>["db"], user: Fixture["user"] | null = worker) {
@@ -286,7 +216,7 @@ describe("legacy timer worker-scope boundary", () => {
     const response = await request(createApp(db)).post("/time-tracking/start").send({ taskId: cardId });
 
     expect(response.status).toBe(200);
-    expect(insertedValues).toEqual([expect.objectContaining({ taskId: cardId, vaId: worker.id, founderId: profile.founderId })]);
+    expect(insertedValues).toEqual([expect.objectContaining({ taskId: cardId, trackedUserId: worker.id, vaId: null, founderId: profile.founderId })]);
     expect(mocks.enqueueManagerTask).toHaveBeenCalledTimes(1);
   });
 
@@ -373,14 +303,14 @@ describe("legacy timer worker-scope boundary", () => {
     const { db, updates } = makeDb({ activeEntries: [active] });
     const app = createApp(db);
 
-    const firstResponse = await request(app).post(`/time-tracking/${transition}`).send();
+    const firstResponse = await request(app).post(`/time-tracking/${transition}`).send({ entryId: active.id });
     expect(firstResponse.status).toBe(200);
     expect(updates).toHaveLength(1);
     const endTime = active.endTime;
     const durationMinutes = active.durationMinutes;
     const notes = active.notes;
 
-    const response = await request(app).post(`/time-tracking/${transition}`).send();
+    const response = await request(app).post(`/time-tracking/${transition}`).send({ entryId: active.id });
 
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
@@ -411,7 +341,7 @@ describe("legacy timer worker-scope boundary", () => {
 
     const response = await request(createApp(db)).post("/time-tracking/start").send({ taskId: cardId });
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(409);
     expect(response.body.activeTaskId).toBe("existing-task");
     expect(insertedValues).toHaveLength(0);
   });
@@ -430,10 +360,10 @@ describe("legacy timer worker-scope boundary", () => {
     const nonWorker = { id: 99, openId: `${role}-99`, role };
     const { db, updates } = makeDb({ user: nonWorker, profiles: [], entries: [foreignActive] });
 
-    const response = await request(createApp(db, nonWorker)).post("/time-tracking/stop").send();
+    const response = await request(createApp(db, nonWorker)).post("/time-tracking/stop").send({ entryId: 55 });
 
-    expect(response.status).toBe(400);
-    expect(response.body).toEqual({ error: "No active timer found" });
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: "Time entry not found" });
     expect(updates).toHaveLength(0);
     expect(foreignActive.endTime).toBeNull();
   });

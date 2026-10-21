@@ -1,3 +1,5 @@
+import { recordedSeconds } from '../../shared/timerDuration';
+import { timeCompleteness } from '../canonicalTimer';
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { adminProcedure, operatorAccountProcedure, router } from "../_core/trpc";
@@ -254,6 +256,7 @@ async function resolveTrelloWorker(ctx: { user: Parameters<typeof resolveWorkerO
   return {
     memberId: ctx.user.role === "admin" ? "me" : worker.trelloMemberId ?? undefined,
     timezone: worker.timezone,
+    founderId: worker.founderId ?? ctx.user.id,
     weeklyHoursMin: worker.weeklyHoursMin,
     weeklyHoursMax: worker.weeklyHoursMax,
   };
@@ -325,6 +328,7 @@ export const trelloRouter = router({
     const db = await getDb();
     if (!db) return {
       ...base,
+      complete: false, unresolvedEntryCount: 0,
       targetMin: worker.weeklyHoursMin,
       targetMax: worker.weeklyHoursMax,
       totalHours: 0,
@@ -332,22 +336,21 @@ export const trelloRouter = router({
       weekEnd: weekEndExclusive.toISOString(),
     };
 
-    const tracked = await db.select({
-      total: sql<number>`sum(durationSeconds)`
-    }).from(timeEntries).where(
+    const tracked = await db.select().from(timeEntries).where(
       and(
-        eq(timeEntries.vaId, vaId),
+        eq(timeEntries.trackedUserId, vaId), eq(timeEntries.founderId, worker.founderId), eq(timeEntries.isVoided, false),
         gte(timeEntries.startTime, weekStart),
         lte(timeEntries.startTime, new Date(weekEndExclusive.getTime() - 1))
       )
     );
-    const trackedSeconds = Number(tracked[0]?.total ?? 0);
+    const trackedSeconds = tracked.reduce((total, entry) => total + recordedSeconds(entry), 0);
     const trackedHours = Math.round((trackedSeconds / 3600) * 10) / 10;
     return {
       ...base,
       targetMin: worker.weeklyHoursMin,
       targetMax: worker.weeklyHoursMax,
       totalHours: trackedHours,
+      ...await timeCompleteness(db, worker.founderId),
       weekStart: weekStart.toISOString(),
       weekEnd: weekEndExclusive.toISOString(),
     };

@@ -1,3 +1,5 @@
+import { recordedSeconds } from '../../shared/timerDuration';
+import { timeCompleteness } from '../canonicalTimer';
 import { getDb } from '../db';
 import { taskAssignments, timeEntries, vaProfiles, users } from '../../drizzle/schema.postgres';
 import { and, eq, gte, isNotNull } from 'drizzle-orm';
@@ -152,12 +154,13 @@ export async function processScheduledBriefings() {
           console.log(`[Scheduler] Triggering EOD Report for ${worker.name} (${workerTimezone})`);
           const window = dateWindowInTimeZone(dateKey, workerTimezone);
           const entries = await db.select().from(timeEntries).where(and(
-            eq(timeEntries.vaId, worker.userId),
+            eq(timeEntries.trackedUserId, worker.userId), eq(timeEntries.isVoided, false), eq(timeEntries.founderId, worker.founderId),
             gte(timeEntries.startTime, window.start),
             isNotNull(timeEntries.endTime),
           ));
+          if (!(await timeCompleteness(db, worker.founderId)).complete) throw new Error('Historical time requires ownership review; no complete EOD total can be sent');
           const totalHoursWorked = entries.reduce(
-            (sum, entry) => sum + (entry.durationSeconds ?? 0) / 3600,
+            (sum, entry) => sum + recordedSeconds(entry) / 3600,
             0,
           );
           const tasksFor = (statuses: Array<typeof assignments[number]["status"]>) => assignments

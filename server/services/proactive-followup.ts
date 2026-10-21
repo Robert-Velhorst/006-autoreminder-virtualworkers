@@ -1,3 +1,4 @@
+import { timeCompleteness } from '../canonicalTimer';
 /**
  * Proactive Follow-up System
  * 
@@ -228,7 +229,7 @@ export async function processPendingFollowUps(): Promise<number> {
         cardId,
         followUp.vaName,
         isOverdue,
-        followUp.vaId
+        undefined // Profile IDs are not canonical account IDs; omit private timer context.
       );
     } else {
       // Use simple template follow-up
@@ -277,16 +278,17 @@ export async function scheduleEndOfDayFollowUps(): Promise<void> {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       
+      if (!(await timeCompleteness(db, worker.founderId)).complete) continue;
       const activeCards = await db
-        .select()
+        .selectDistinct({ taskId: timeEntries.taskId })
         .from(timeEntries)
         .where(
           and(
-            eq(timeEntries.vaId, worker.userId),
+            eq(timeEntries.trackedUserId, worker.userId), eq(timeEntries.founderId, worker.founderId), eq(timeEntries.isVoided, false),
             gte(timeEntries.startTime, today)
           )
         )
-        .groupBy(timeEntries.taskId);
+        ;
       
       for (const entry of activeCards) {
         // Schedule follow-up for shift end

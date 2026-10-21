@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -46,22 +46,20 @@ function formatHHMMSS(totalSeconds: number): string {
   return [h, m, s].map(v => v.toString().padStart(2, "0")).join(":");
 }
 
-function getEATDateString(): string {
-  const eatNow = new Date(Date.now() + 3 * 60 * 60 * 1000);
-  return eatNow.toISOString().slice(0, 10);
-}
-
-function getWeekBounds(): { startDate: string; endDate: string } {
-  const eatNow = new Date(Date.now() + 3 * 60 * 60 * 1000);
-  const dayOfWeek = eatNow.getUTCDay(); // 0 = Sun
-  const monday = new Date(eatNow);
-  monday.setUTCDate(eatNow.getUTCDate() - ((dayOfWeek + 6) % 7));
-  const sunday = new Date(monday);
-  sunday.setUTCDate(monday.getUTCDate() + 6);
-  return {
-    startDate: monday.toISOString().slice(0, 10),
-    endDate: sunday.toISOString().slice(0, 10),
-  };
+export function isTimerDateContext(value: unknown): value is { timezone: string; date: string; startDate: string; endDate: string } {
+  if (!value || typeof value !== "object") return false;
+  const context = value as Record<string, unknown>;
+  if (typeof context.timezone !== "string" || !context.timezone) return false;
+  for (const key of ["date", "startDate", "endDate"]) {
+    const date = context[key];
+    if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+    const parsed = new Date(`${date}T00:00:00Z`);
+    if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) return false;
+  }
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: context.timezone });
+  } catch { return false; }
+  return String(context.startDate) <= String(context.date) && String(context.date) <= String(context.endDate);
 }
 
 /** Parse "HH:MM:SS" or "H:MM" or just minutes into total seconds. */
@@ -97,10 +95,12 @@ interface EditDialogProps {
 }
 
 function EditDialog({ cardId, cardName, date, open, onClose, onSaved }: EditDialogProps) {
-  const { data: entries = [], refetch } = trpc.timer.getEntriesForCard.useQuery(
+  const entriesQuery = trpc.timer.getEntriesForCard.useQuery(
     { cardId, date },
-    { enabled: open }
+    { enabled: open, retry: false }
   );
+  const { refetch } = entriesQuery;
+  const entries = entriesQuery.error ? [] : entriesQuery.data ?? [];
 
   const updateMutation = trpc.timer.updateEntry.useMutation({
     onSuccess: () => {
@@ -157,7 +157,11 @@ function EditDialog({ cardId, cardName, date, open, onClose, onSaved }: EditDial
         </DialogHeader>
 
         <div className="space-y-3 py-1">
-          {entries.length === 0 && (
+          {(entriesQuery.isLoading || entriesQuery.error) && <p role="status" className="text-sm text-muted-foreground">
+            {entriesQuery.error?.data?.code === "PRECONDITION_FAILED" ? "History needs owner review"
+              : entriesQuery.error ? "History unavailable" : "Loading history..."}
+          </p>}
+          {!entriesQuery.isLoading && !entriesQuery.error && entries.length === 0 && (
             <p className="text-sm text-muted-foreground text-center py-4">No completed sessions found for today.</p>
           )}
 
@@ -323,9 +327,9 @@ function WeeklyBarChart({ breakdown, todayDate, dailyGoalSeconds }: WeeklyBarCha
 export default function TimeTracker() {
   const [isExpanded, setIsExpanded] = useState(true);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [todayDate] = useState(() => getEATDateString());
-  const [weekBounds] = useState(() => getWeekBounds());
   const [bannerDismissed, setBannerDismissed] = useState(false);
+  const stopInFlight = useRef(false);
+  const [stopError, setStopError] = useState<string | null>(null);
 
   // Edit dialog state
   const [editCard, setEditCard] = useState<{ cardId: string; cardName: string } | null>(null);
@@ -335,23 +339,46 @@ export default function TimeTracker() {
   // ── queries ──────────────────────────────────────────────────────────────────
   // Timer mutations invalidate these local query keys directly. This avoids a
   // subscription to an SSE endpoint that the server does not provide.
-  const { data: activeTimer } = trpc.timer.getActive.useQuery(undefined, {
-    staleTime: 30 * 60_000,
+  const activeQuery = trpc.timer.getActive.useQuery(undefined, {
+    staleTime: 15_000,
+    retry: false,
   });
+  const activeTimer = activeQuery.data;
+  const activeIdValid = Number.isSafeInteger(activeTimer?.id) && Number(activeTimer?.id) > 0;
 
-  const { data: dailySummary = [] } = trpc.timer.getDailySummary.useQuery(
+  const dateContextQuery = trpc.timer.getDateContext.useQuery(undefined, {
+    staleTime: 60_000, refetchInterval: 60_000, retry: false,
+  });
+  const contextReady = dateContextQuery.isSuccess && !dateContextQuery.error && isTimerDateContext(dateContextQuery.data);
+  const todayDate = contextReady ? dateContextQuery.data!.date : "";
+  const weekBounds = { startDate: contextReady ? dateContextQuery.data!.startDate : "",
+    endDate: contextReady ? dateContextQuery.data!.endDate : "" };
+
+  const dailyQuery = trpc.timer.getDailySummary.useQuery(
     { date: todayDate },
-    { staleTime: 30 * 60_000 }
+    { staleTime: 30 * 60_000, retry: false, enabled: contextReady }
   );
 
   // Weekly totals change after a timer mutation or an edited session.
-  const { data: weeklyTotal } = trpc.timer.getWeeklyTotal.useQuery(weekBounds, {
+  const weeklyQuery = trpc.timer.getWeeklyTotal.useQuery(weekBounds, {
     staleTime: 30 * 60_000,
+    retry: false,
+    enabled: contextReady,
   });
 
-  const { data: weeklyBreakdown = [] } = trpc.timer.getWeeklyBreakdown.useQuery(weekBounds, {
+  const breakdownQuery = trpc.timer.getWeeklyBreakdown.useQuery(weekBounds, {
     staleTime: 30 * 60_000,
+    retry: false,
+    enabled: contextReady,
   });
+  const historyQueries = [dailyQuery, weeklyQuery, breakdownQuery];
+  const historyReady = contextReady && historyQueries.every(query => query.isSuccess && !query.error);
+  const historyMessage = !contextReady ? "History unavailable" : historyQueries.some(query => query.error?.data?.code === "PRECONDITION_FAILED")
+    ? "History needs owner review" : historyQueries.some(query => query.error)
+      ? "History unavailable" : "Loading history...";
+  const dailySummary = dailyQuery.data ?? [];
+  const weeklyTotal = weeklyQuery.data;
+  const weeklyBreakdown = breakdownQuery.data ?? [];
 
   const { data: weeklyTarget } = trpc.trello.weeklyHours.useQuery(undefined, {
     staleTime: 30 * 60_000,
@@ -361,13 +388,18 @@ export default function TimeTracker() {
     staleTime: 30 * 60_000,
   });
 
-  const refreshTimerData = useCallback(() => Promise.all([
-    utils.timer.getActive.invalidate(),
-    utils.timer.getDailySummary.invalidate(),
-    utils.timer.getWeeklyTotal.invalidate(),
-    utils.timer.getWeeklyBreakdown.invalidate(),
-    utils.trello.weeklyHours.invalidate(),
-  ]), [utils]);
+  const refreshTimerData = useCallback(() => {
+    const activeRefresh = utils.timer.getActive.invalidate();
+    // History availability must not hold the active-timer mutation lock.
+    void Promise.all([
+      utils.timer.getDateContext.invalidate(),
+      utils.timer.getDailySummary.invalidate(),
+      utils.timer.getWeeklyTotal.invalidate(),
+      utils.timer.getWeeklyBreakdown.invalidate(),
+      utils.trello.weeklyHours.invalidate(),
+    ]).catch(() => {});
+    return activeRefresh;
+  }, [utils]);
 
   const dailyGoalSeconds = (goalData?.hours ?? 9) * 3600;
 
@@ -386,18 +418,41 @@ export default function TimeTracker() {
 
   // ── mutations ─────────────────────────────────────────────────────────────────
   const stopMutation = trpc.timer.stop.useMutation({
-    onSuccess: () => {
+    retry: false,
+    onSuccess: async (result, submitted) => {
+      if (!result || result.id !== submitted.entryId) {
+        setStopError("The timer stop was not confirmed. Reload its status before trying again.");
+        await refreshTimerData();
+        return;
+      }
+      utils.timer.getActive.setData(undefined, current => current?.id === submitted.entryId ? null : current);
       toast.success("Timer stopped");
       setBannerDismissed(false); // reset banner state
-      void refreshTimerData();
+      setStopError(null);
+      await refreshTimerData();
     },
-    onError: (e) => toast.error(`Failed to stop: ${e.message}`),
+    onError: async (error) => {
+      setStopError(error.data?.code === "CONFLICT"
+        ? "Timer status changed. Review the current timer before trying again."
+        : "The timer stop was not confirmed. Reload its status before trying again.");
+      if (error.data?.code === "CONFLICT") await refreshTimerData();
+    },
+    onSettled: () => { stopInFlight.current = false; },
   });
 
   const handleStop = useCallback(() => {
-    if (!activeTimer) return;
-    stopMutation.mutate({ cardId: activeTimer.cardId });
-  }, [activeTimer, stopMutation]);
+    if (stopInFlight.current || stopMutation.isPending || activeQuery.isLoading || activeQuery.error || stopError) return;
+    if (!activeTimer || !Number.isSafeInteger(activeTimer.id) || activeTimer.id <= 0) {
+      setStopError("This timer could not be identified. Reload its status before trying again.");
+      return;
+    }
+    stopInFlight.current = true;
+    stopMutation.mutate({ entryId: activeTimer.id, cardId: activeTimer.cardId });
+  }, [activeTimer, stopMutation, activeQuery.isLoading, activeQuery.error, stopError]);
+  const stopDisabled = stopMutation.isPending || activeQuery.isLoading || Boolean(activeQuery.error) || !activeIdValid || Boolean(stopError);
+  const timerStatusMessage = activeQuery.error
+    ? "Timer status could not be loaded. Reload it before changing timers."
+    : stopError || (activeTimer && !activeIdValid ? "This timer could not be identified. Reload its status before trying again." : null);
 
   const handleEditSaved = useCallback(() => {
     void refreshTimerData();
@@ -416,6 +471,14 @@ export default function TimeTracker() {
 
   return (
     <>
+      {timerStatusMessage && <div role="status" className="mb-3 flex items-center gap-2 text-sm text-muted-foreground">
+        <span>{timerStatusMessage}</span>
+        <Button variant="ghost" size="icon" title="Reload timer status" aria-label="Reload timer status"
+          disabled={stopMutation.isPending || activeQuery.isFetching}
+          onClick={() => { void activeQuery.refetch().then(result => { if (!result.error) setStopError(null); }); }}>
+          <RefreshCw className="h-4 w-4" />
+        </Button>
+      </div>}
       {/* ── Timer Still Running Banner ─────────────────────────────────────────── */}
       {showResumeBanner && (
         <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-lg border border-green-500/40 bg-green-500/10 mb-3">
@@ -437,7 +500,7 @@ export default function TimeTracker() {
               variant="outline"
               className="border-red-500/50 text-red-600 dark:text-red-400 hover:bg-red-500/10 h-7 text-xs"
               onClick={handleStop}
-              disabled={stopMutation.isPending}
+              disabled={stopDisabled}
             >
               <StopCircle className="w-3.5 h-3.5 mr-1" />
               Stop
@@ -468,7 +531,7 @@ export default function TimeTracker() {
             </div>
             <div className="flex items-center gap-2">
               {/* Summary pills when collapsed */}
-              {!isExpanded && (
+              {!isExpanded && historyReady && (
                 <>
                   <Badge variant="outline" className="text-xs px-2 py-0.5 text-violet-600 dark:text-violet-400 border-violet-500/30">
                     <Clock className="w-3 h-3 mr-1" />
@@ -490,6 +553,12 @@ export default function TimeTracker() {
               </Button>
             </div>
           </div>
+          {!historyReady && <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+            <span>{historyMessage}</span>
+            <Button variant="ghost" size="icon" title="Reload time history" aria-label="Reload time history"
+              disabled={dateContextQuery.isFetching || historyQueries.some(query => query.isFetching)}
+              onClick={() => void refreshTimerData()}><RefreshCw className="h-4 w-4" /></Button>
+          </div>}
         </CardHeader>
 
         {isExpanded && (
@@ -523,7 +592,7 @@ export default function TimeTracker() {
                     variant="outline"
                     className="border-red-500/50 text-red-600 dark:text-red-400 hover:bg-red-500/10"
                     onClick={handleStop}
-                    disabled={stopMutation.isPending}
+                    disabled={stopDisabled}
                   >
                     <StopCircle className="w-4 h-4 mr-1" />
                     Stop
@@ -534,13 +603,15 @@ export default function TimeTracker() {
               <div className="flex items-center gap-3 p-3 bg-muted/40 rounded-lg border border-dashed border-border">
                 <Timer className="w-4 h-4 text-muted-foreground" />
                 <p className="text-sm text-muted-foreground">
-                  No timer running. Start one from a Trello card using the Power-Up button.
+                  {activeQuery.isLoading ? "Loading timer status..." : activeQuery.error
+                    ? "Timer status is unavailable."
+                    : "No timer running. Stop any running timer before starting another task."}
                 </p>
               </div>
             )}
 
             {/* ── Summary Row ───────────────────────────────────────────────────── */}
-            {(() => {
+            {historyReady && (() => {
               const isOvertime = todayTotalSeconds > dailyGoalSeconds;
               const otSeconds = isOvertime ? todayTotalSeconds - dailyGoalSeconds : 0;
               const pct = Math.min(todayTotalSeconds / dailyGoalSeconds, 1);
@@ -625,7 +696,7 @@ export default function TimeTracker() {
             })()}
 
             {/* ── Weekly Bar Chart ──────────────────────────────────────────────── */}
-            {weeklyBreakdown.length > 0 && (
+            {historyReady && weeklyBreakdown.length > 0 && (
               <>
                 <Separator />
                 <WeeklyBarChart breakdown={weeklyBreakdown} todayDate={todayDate} dailyGoalSeconds={dailyGoalSeconds} />
@@ -633,7 +704,7 @@ export default function TimeTracker() {
             )}
 
             {/* ── Today's Log ───────────────────────────────────────────────────── */}
-            {dailySummary.length > 0 && (
+            {historyReady && dailySummary.length > 0 && (
               <>
                 <Separator />
                 <div>
@@ -704,7 +775,7 @@ export default function TimeTracker() {
               </>
             )}
 
-            {dailySummary.length === 0 && !activeTimer && (
+            {historyReady && dailySummary.length === 0 && !activeTimer && (
               <p className="text-xs text-muted-foreground text-center py-2">
                 No time tracked today yet.
               </p>
@@ -714,7 +785,7 @@ export default function TimeTracker() {
       </Card>
 
       {/* ── Edit Dialog ─────────────────────────────────────────────────────────── */}
-      {editCard && (
+      {editCard && contextReady && (
         <EditDialog
           cardId={editCard.cardId}
           cardName={editCard.cardName}

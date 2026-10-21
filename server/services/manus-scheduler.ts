@@ -1,3 +1,5 @@
+import { recordedSeconds } from '../../shared/timerDuration';
+import { timeCompleteness } from '../canonicalTimer';
 import { getDb } from "../db";
 import {
   dailyComplianceSnapshots,
@@ -19,7 +21,7 @@ import {
 } from "./trello-manus";
 import { areNotificationsEnabled } from "./notificationPolicy";
 import { parseDateKey } from "../utils/date-only";
-import { dateKeyInTimeZone, dateWindowInTimeZone } from "../../shared/workerTime";
+import { dateKeyInTimeZone, dateWindowInTimeZone, timeKeyInTimeZone } from "../../shared/workerTime";
 import { calculateScheduledTargetSeconds } from "../complianceMetrics";
 import { resolveWorkerOperatorContextById } from "../workerOperatorContext";
 import { runScheduledJob, ScheduledJobLeaseLostError, type ScheduledJobContext, type ScheduledJobOwnershipReader } from "../scheduledJobRuntime";
@@ -80,17 +82,11 @@ async function runBackgroundTasks() {
 
   for (const worker of activeWorkers) {
     try {
-      const formatter = new Intl.DateTimeFormat("en-US", {
-        timeZone: worker.timezone || "UTC",
-        hour: "numeric",
-        minute: "numeric",
-        hourCycle: "h23",
-      });
-      const parts = formatter.formatToParts(new Date());
-      const currentHour = Number(parts.find(part => part.type === "hour")?.value ?? 0);
-      const currentMinute = Number(parts.find(part => part.type === "minute")?.value ?? 0);
+      const operatorContext = await resolveWorkerOperatorContextById(worker.userId, db);
+      if (operatorContext.profileId !== worker.id || operatorContext.founderId !== worker.founderId) continue;
       const now = new Date();
-      const dateKey = dateKeyInTimeZone(now, worker.timezone);
+      const [currentHour, currentMinute] = timeKeyInTimeZone(now, operatorContext.timezone).split(':').map(Number);
+      const dateKey = dateKeyInTimeZone(now, operatorContext.timezone);
 
       if (currentHour === 0 && currentMinute <= 4) {
         await runScheduledJob({ jobKey: `auto-stop:${worker.userId}:${dateKey}` }, async context => {
@@ -100,7 +96,7 @@ async function runBackgroundTasks() {
       }
     } catch (error) {
       if (error instanceof ScheduledJobLeaseLostError) throw error;
-      console.error(`[ManusScheduler] Error processing worker ${worker.id}:`, error);
+      console.error(`[ManusScheduler] Error processing worker ${worker.id}`);
     }
   }
 }
@@ -114,7 +110,7 @@ async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect, cont
   const maxSeconds = 12 * 3600;
   const now = new Date();
   const running = await db.select().from(timeEntries).where(
-    and(eq(timeEntries.vaId, worker.userId), eq(timeEntries.founderId, worker.founderId),
+    and(eq(timeEntries.trackedUserId, worker.userId), eq(timeEntries.founderId, worker.founderId),
       eq(timeEntries.isVoided, false), isNull(timeEntries.endTime)),
   );
 
@@ -133,7 +129,7 @@ async function runAutoStopForWorker(worker: typeof vaProfiles.$inferSelect, cont
     const result = await db.update(timeEntries)
       .set({ endTime: now, durationSeconds, durationMinutes })
       .where(and(
-        eq(timeEntries.vaId, worker.userId), eq(timeEntries.founderId, worker.founderId),
+        eq(timeEntries.trackedUserId, worker.userId), eq(timeEntries.founderId, worker.founderId),
         eq(timeEntries.isVoided, false), isNull(timeEntries.endTime), unchangedTimer(entry),
       ));
     if (result.rowCount === 0) continue;
@@ -199,22 +195,24 @@ export async function collectComplianceSnapshot(
 ) {
   await checkpointOwnership(context);
   const now = new Date();
-  const dateKey = dateKeyInTimeZone(now, worker.timezone);
-  console.log(`[ManusScheduler] Collecting compliance for ${worker.name} on ${dateKey}`);
-
   const db = await getDb();
   if (!db) throw new Error("Database not available");
+  const operatorContext = await resolveWorkerOperatorContextById(worker.userId, db);
+  if (operatorContext.profileId !== worker.id || operatorContext.founderId !== worker.founderId) throw new Error('Worker ownership changed before compliance collection');
+  if (!(await timeCompleteness(db, worker.founderId)).complete) throw new Error('Historical time requires ownership review before compliance totals');
+  const dateKey = dateKeyInTimeZone(now, operatorContext.timezone);
+  console.log(`[ManusScheduler] Collecting compliance for ${worker.name} on ${dateKey}`);
 
   const apiKey = process.env.TRELLO_API_KEY;
   const apiToken = process.env.TRELLO_TOKEN;
   if (!apiKey || !apiToken) throw new Error("Trello API credentials not configured");
 
   const trelloMemberId = worker.trelloMemberId || "me";
-  const window = dateWindowInTimeZone(dateKey, worker.timezone);
+  const window = dateWindowInTimeZone(dateKey, operatorContext.timezone);
   const endInclusive = new Date(window.endExclusive.getTime() - 1);
-  const [allCards, commentedCardIds, messages, emails, trackedEntries, operatorContext] = await Promise.all([
+  const [allCards, commentedCardIds, messages, emails, trackedEntries] = await Promise.all([
     getWorkerCards(apiKey, apiToken, trelloMemberId),
-    getWorkerCommentedCardIdsToday(apiKey, apiToken, trelloMemberId, undefined, undefined, worker.timezone),
+    getWorkerCommentedCardIdsToday(apiKey, apiToken, trelloMemberId, undefined, undefined, operatorContext.timezone),
     db.select().from(replyThreads).where(and(
       eq(replyThreads.vaId, worker.userId),
       gte(replyThreads.lastNonWorkerMsgAt, window.start),
@@ -226,13 +224,13 @@ export async function collectComplianceSnapshot(
       lte(emailTasks.receivedAt, endInclusive),
     )),
     db.select().from(timeEntries).where(and(
-      eq(timeEntries.vaId, worker.userId),
+      eq(timeEntries.trackedUserId, worker.userId),
+      eq(timeEntries.founderId, worker.founderId),
       eq(timeEntries.isVoided, false),
       isNotNull(timeEntries.endTime),
       gte(timeEntries.startTime, window.start),
       lte(timeEntries.startTime, endInclusive),
     )),
-    resolveWorkerOperatorContextById(worker.userId),
   ]);
   const doingCards = allCards.filter(card => card.list && isDoingList(card.list.name));
   const onHoldCards = allCards.filter(card => card.list && isOnHoldList(card.list.name));
@@ -260,7 +258,9 @@ export async function collectComplianceSnapshot(
     email.status === "pending" && !email.suggestedNextAction?.trim() && !email.llmSummary?.trim()
   ).length;
   const emailMissed = Math.max(0, emails.length - emailCompleted);
-  const trackedSeconds = trackedEntries.reduce((total, entry) => total + (entry.durationSeconds ?? 0), 0);
+  // Provider reads can await while historical ownership changes.
+  if (!(await timeCompleteness(db, worker.founderId)).complete) throw new Error('Historical time requires ownership review before compliance totals');
+  const trackedSeconds = trackedEntries.reduce((total, entry) => total + recordedSeconds(entry), 0);
   const scheduledTargetSeconds = calculateScheduledTargetSeconds(operatorContext, dateKey);
   const clarificationOpen = messageNeedsClarification + emailNeedsClarification;
   const evidenceCount = allCards.length + messages.length + emails.length + trackedEntries.length;

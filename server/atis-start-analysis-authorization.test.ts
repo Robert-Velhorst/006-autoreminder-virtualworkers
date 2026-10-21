@@ -15,6 +15,6 @@ describe('ATIS start-analysis authorization', () => {
     const atis = source.slice(source.indexOf('atis: router({'), source.indexOf('scheduling: router({'));
 
     expect(atis).toContain('where(eq(vaProfiles.userId, workerUserId))');
-    expect(atis).toContain('aggregateCardContext(input.taskId, workerProfile?.id)');
+    expect(atis).toContain('aggregateCardContext(input.taskId, workerUserId)');
   });
 });

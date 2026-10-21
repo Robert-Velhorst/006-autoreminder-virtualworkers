@@ -57,13 +57,14 @@ describe('time entry ownership and attribution', () => {
     });
   });
 
-  it('queries worker time by active profile and account identity within its founder', async () => {
+  it('queries worker time only by its canonical account, without legacy alias matching', async () => {
     const workerQuery = await scopedSql({ id: 42, role: 'worker' });
     const founderQuery = await scopedSql({ id: 7, role: 'user' });
 
-    expect(workerQuery?.sql).toContain('vaId');
+    expect(workerQuery?.sql).toContain('trackedUserId');
+    expect(workerQuery?.sql).not.toContain('vaId');
     expect(workerQuery?.params).toContain(42);
-    expect(workerQuery?.params).toContain(12);
+    expect(workerQuery?.params).not.toContain(12);
     expect(workerQuery?.params).toContain(7);
     expect(workerQuery?.params).not.toContain(13);
     expect(workerQuery?.sql).toContain('founderId');
@@ -72,11 +73,11 @@ describe('time entry ownership and attribution', () => {
     expect(founderQuery?.sql).not.toMatch(/vaId/);
   });
 
-  it('attributes both legacy profile IDs and worker account IDs within their founder', () => {
+  it('attributes only an explicit canonical account and historical profile pair', () => {
     const profiles = [{ id: 12, userId: 42, founderId: 7 }];
     const entries = [
-      { id: 1, vaId: 12, founderId: 7 },
-      { id: 2, vaId: 42, founderId: 7 },
+      { id: 1, vaId: 12, trackedUserId: 42, trackedProfileId: 12, founderId: 7 },
+      { id: 2, vaId: 42, trackedUserId: 42, trackedProfileId: 12, founderId: 7 },
     ];
 
     const result = attributeTimeEntriesToProfiles(profiles, entries);
@@ -91,9 +92,9 @@ describe('time entry ownership and attribution', () => {
       { id: 7, userId: 99, founderId: 7 },
     ];
     const entries = [
-      { id: 1, vaId: 42, founderId: 7 },
-      { id: 2, vaId: 12, founderId: 9 },
-      { id: 3, vaId: 7, founderId: 7 },
+      { id: 1, vaId: 42, trackedUserId: null, trackedProfileId: null, founderId: 7 },
+      { id: 2, vaId: 12, trackedUserId: 42, trackedProfileId: 12, founderId: 9 },
+      { id: 3, vaId: 7, trackedUserId: 99, trackedProfileId: null, founderId: 7 },
     ];
 
     const result = attributeTimeEntriesToProfiles(profiles, entries);

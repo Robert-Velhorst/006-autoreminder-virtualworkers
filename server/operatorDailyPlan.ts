@@ -1,3 +1,4 @@
+import { assertTimerIdentityReady } from "./canonicalTimer";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { aptlssPlans, aptlssSteps, dailyPlans, timeEntries, userWorkingHours, users, vaProfiles } from "../drizzle/schema.postgres";
 import { readPersonalSetting } from "./personalAppSettings";
@@ -310,9 +311,11 @@ async function assertNoActiveTimer(
   expectedPlanVersion: string | null,
   currentPlanVersion: string | null,
 ) {
+  try { await assertTimerIdentityReady(tx); }
+  catch { throw new OperatorDailyPlanConflictError(expectedPlanVersion, currentPlanVersion, 'Stop or review the active timer before changing this day plan.'); }
   const [activeTimer] = await tx.select({ id: timeEntries.id }).from(timeEntries)
     .where(and(
-      eq(timeEntries.vaId, vaId),
+      eq(timeEntries.trackedUserId, vaId),
       eq(timeEntries.isVoided, false),
       isNull(timeEntries.endTime),
     ))

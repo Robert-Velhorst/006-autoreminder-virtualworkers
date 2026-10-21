@@ -44,6 +44,17 @@ export function WeeklyProgressDashboard() {
       const response = await fetch('/api/time-tracking/weekly-progress');
       if (response.ok) {
         const data = await response.json();
+        if (data.complete === false || data.unresolvedEntryCount > 0) {
+          setProgress(null);
+          setError('History needs owner review');
+          return;
+        }
+        if (data.complete !== true || data.unresolvedEntryCount !== 0) {
+          setProgress(null);
+          setError('History unavailable');
+          return;
+        }
+        setError(null);
         setProgress(data);
       } else {
         setProgress(null);
@@ -149,7 +160,7 @@ export function WeeklyProgressDashboard() {
     return (
       <Card>
         <CardContent className="py-6">
-          <div className="text-center text-muted-foreground">
+          <div role="status" className="text-center text-muted-foreground">
             {error || 'Unable to load weekly progress'}
           </div>
         </CardContent>
