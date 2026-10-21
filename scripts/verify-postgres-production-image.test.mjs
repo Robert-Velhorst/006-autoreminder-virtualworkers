@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import superjson from 'superjson';
-import { assertApplicationRolePrivileges, configureApplicationRole, verifyPostgresProductionImage } from './verify-postgres-production-image.mjs';
+import { assertApplicationRolePrivileges, configureApplicationRole, fixturePostgresOptions, verifyPostgresProductionImage } from './verify-postgres-production-image.mjs';
 
 const IMAGE = `sha256:${'a'.repeat(64)}`;
 const PG = `sha256:${'b'.repeat(64)}`;
@@ -30,7 +30,8 @@ function fixture(options = {}) {
     }
     if (args[0] === 'network' && args[1] === 'create') {
       const name = args.at(-1), [key, value] = valueAfter(args, '--label').split('=');
-      networks.set(name, { Id: `${name}-id`, Internal: args.includes('--internal'), Labels: { [key]: value } });
+      networks.set(name, { Id: `${name}-id`, Driver: 'bridge', Internal: args.includes('--internal'),
+        IPAM: { Config: [{ Subnet: '172.25.0.0/24' }] }, Labels: { [key]: value } });
       if (options.networkCreateTimeout) return { error: new Error('private Docker details'), status: null };
       return ok(`${name}-id`);
     }
@@ -44,8 +45,9 @@ function fixture(options = {}) {
       }
       containers.set(name, { Id: `${name}-id`, Config: { Labels: { [key]: value } }, Image: postgres ? PG : IMAGE,
         State: { Running: true }, HostConfig: { Tmpfs: tmpfs }, Mounts: [],
-        NetworkSettings: { Networks: { [valueAfter(args, '--network')]: {} },
-          Ports: { [`${internalPort}/tcp`]: [{ HostIp: '127.0.0.1', HostPort: postgres ? '41001' : '41002' }] } } });
+        NetworkSettings: { Networks: { [valueAfter(args, '--network')]: {
+          NetworkID: networks.get(valueAfter(args, '--network')).Id, IPAddress: postgres ? '172.25.0.2' : '172.25.0.3',
+        } }, Ports: { [`${internalPort}/tcp`]: null } } });
       if ((postgres && options.postgresRunFailure) || (!postgres && options.appRunFailure)) return { status: 125, stdout: '', stderr: 'private startup details' };
       return ok(`${name}-id`);
     }
@@ -145,7 +147,7 @@ test('passes only after exact-image, configured auth/offboarding checks and conf
   assert.equal(f.commands.some(c => c.args.includes('pull') || c.args.includes('prune')), false);
 });
 
-test('uses internal owned networking, tmpfs PG18 data, dynamic loopback ports, and no existing database URL', async () => {
+test('uses internal owned networking, tmpfs PG18 data, no published ports, and no existing database URL', async () => {
   const f = fixture();
   let pgEnv, appEnv;
   const write = f.resources.write;
@@ -155,8 +157,8 @@ test('uses internal owned networking, tmpfs PG18 data, dynamic loopback ports, a
   const create = f.commands.find(c => c.args[0] === 'network' && c.args[1] === 'create');
   assert.equal(create.args.includes('--internal'), true);
   const runs = f.commands.filter(c => c.args[0] === 'run');
-  assert.equal(valueAfter(runs[0].args, '--publish'), '127.0.0.1::5432');
-  assert.equal(valueAfter(runs[1].args, '--publish'), '127.0.0.1::3000');
+  assert.equal(runs.some(run => run.args.includes('--publish')), false);
+  assert.ok(f.requests.every(request => request.hostname === '172.25.0.3' && request.port === 3000));
   assert.equal(runs[0].args.includes('/var/lib/postgresql:rw,nosuid,nodev,size=768m'), true);
   assert.match(pgEnv, /^POSTGRES_DB=fixture_[a-f0-9]{32}$/m);
   assert.equal(appEnv.includes('production.invalid'), false);
@@ -167,14 +169,14 @@ test('uses internal owned networking, tmpfs PG18 data, dynamic loopback ports, a
   assert.equal(f.commands.some(c => c.args.some(arg => arg.includes(f.prepared.password))), false);
 });
 
-test('binds verified TLS to both the loopback host and app DNS; never mounts the CA private key in a container', async () => {
+test('binds verified TLS to the owned private host route and app DNS; never mounts the CA private key in a container', async () => {
   const f = fixture();
   let appEnv;
   const write = f.resources.write;
   f.resources.write = (path, content) => { write(path, content); if (path.endsWith('app.env')) appEnv = content; };
   await verifyPostgresProductionImage('candidate:test', f.dependencies);
   const hostUrl = new URL(f.prepared.url);
-  assert.equal(hostUrl.hostname, '127.0.0.1'); assert.equal(hostUrl.port, '41001');
+  assert.equal(hostUrl.hostname, '172.25.0.2'); assert.equal(hostUrl.port, '5432');
   assert.equal(hostUrl.searchParams.get('sslmode'), 'verify-full');
   assert.equal(hostUrl.searchParams.get('sslrootcert'), f.prepared.caPath);
   const appUrl = new URL(appEnv.split('\n').find(line => line.startsWith('DATABASE_URL=')).slice('DATABASE_URL='.length));
@@ -256,16 +258,44 @@ test('requires preloaded images and does not create resources if PG version is w
 test('reports bounded container and port diagnostics without raw engine output', async () => {
   const f = fixture({ command: ({ args, containers }) => {
     if (args[0] === 'container' && args[1] === 'inspect' && args[2].endsWith('-postgres') && containers.has(args[2])) {
-      containers.get(args[2]).NetworkSettings.Ports = {};
+      Object.values(containers.get(args[2]).NetworkSettings.Networks)[0].IPAddress = '';
     }
   } });
   const error = await verifyPostgresProductionImage('candidate:test', f.dependencies).catch(error => error);
   assert.match(error.message, /owned PostgreSQL/);
   assert.match(error.message, /"running":true/);
   assert.match(error.message, /"publishedPortCount":0/);
+  assert.match(error.message, /"hasIpv4Address":false/);
+  assert.equal(error.cleanupConfirmed, true);
   assert.equal(error.message.includes('postgresql:'), false);
   assert.equal(f.containers.size, 0); assert.equal(f.networks.size, 0);
 });
+
+test('host PostgreSQL routing retains strict DNS certificate verification without URL SSL overrides', () => {
+  const url = `postgresql://fixture:synthetic@172.25.0.2:5432/fixture_${'a'.repeat(32)}?sslmode=verify-full&sslrootcert=%2Fprivate%2Fca.crt&application_name=fixture-host`;
+  const options = fixturePostgresOptions(url, 'synthetic-ca');
+  assert.equal(options.host, '172.25.0.2'); assert.equal(options.port, 5432);
+  assert.equal(options.connectionString, undefined);
+  assert.deepEqual(options.ssl, { ca: 'synthetic-ca', rejectUnauthorized: true, servername: 'fixture-postgres' });
+  assert.equal(options.application_name, 'fixture-host');
+  assert.throws(() => fixturePostgresOptions(url.replace('verify-full', 'disable'), 'synthetic-ca'));
+});
+
+for (const [name, mutate] of [
+  ['public address', entry => { Object.values(entry.NetworkSettings.Networks)[0].IPAddress = '8.8.8.8'; }],
+  ['another private subnet', entry => { Object.values(entry.NetworkSettings.Networks)[0].IPAddress = '172.26.0.2'; }],
+  ['another network identity', entry => { Object.values(entry.NetworkSettings.Networks)[0].NetworkID = 'unrelated'; }],
+  ['published host port', entry => { entry.NetworkSettings.Ports = { '5432/tcp': [{ HostIp: '0.0.0.0', HostPort: '5432' }] }; }],
+]) {
+  test(`rejects an endpoint with ${name} before sending credentials or requests`, async () => {
+    const f = fixture({ command: ({ args, containers }) => {
+      if (args[0] === 'container' && args[1] === 'inspect' && args[2].endsWith('-postgres') && containers.has(args[2])) mutate(containers.get(args[2]));
+    } });
+    await assert.rejects(verifyPostgresProductionImage('candidate:test', f.dependencies), /owned PostgreSQL/);
+    assert.equal(f.prepared, undefined); assert.equal(f.requests.length, 0);
+    assert.equal(f.containers.size, 0); assert.equal(f.networks.size, 0);
+  });
+}
 
 for (const [name, options] of [
   ['ambiguous network creation', { networkCreateTimeout: true }],
@@ -304,7 +334,11 @@ test('requires committed epoch/audit evidence rather than trusting HTTP success'
 for (const options of [{ cleanupFailure: true }, { tempCleanupFailure: true }, { closeFailure: true }]) {
   test(`never returns passed when cleanup is unconfirmed: ${Object.keys(options)[0]}`, async () => {
     const f = fixture(options);
-    await assert.rejects(verifyPostgresProductionImage('candidate:test', f.dependencies), /cleanup was not confirmed/);
+    await assert.rejects(verifyPostgresProductionImage('candidate:test', f.dependencies), error => {
+      assert.match(error.message, /cleanup was not confirmed/);
+      assert.equal(error.cleanupConfirmed, false);
+      return true;
+    });
   });
 }
 

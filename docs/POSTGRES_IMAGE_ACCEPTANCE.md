@@ -7,7 +7,8 @@ CI=true node scripts/verify-postgres-production-image.mjs IMAGE
 ```
 
 Alternatively, an operator can explicitly set
-`POSTGRES_IMAGE_ACCEPTANCE_FIXTURE=isolated-owned`. Linux, a local Docker daemon,
+`POSTGRES_IMAGE_ACCEPTANCE_FIXTURE=isolated-owned`. Linux on the native Docker
+Engine host (not a Docker Desktop VM bridge), a local Docker daemon,
 OpenSSL, installed locked project dependencies, and already-loaded application
 and `postgres:18.6` images are prerequisites. The harness does not pull, build,
 publish, or promote images. An existing CI PostgreSQL service is not used; its
@@ -23,8 +24,13 @@ The caller owns registry-digest/source binding and any subsequent promotion.
 ## Isolation and TLS
 
 - A UUID supplies exact container/network names and an ownership label. The new
-  network is internal; both containers attach only to that network. Published
-  PostgreSQL and application ports bind to `127.0.0.1` with dynamic host ports.
+  bridge network is internal; both containers attach only to that network. No
+  ports are published. The Linux host probes the inspected container addresses
+  directly, as supported by [Docker internal networking](https://docs.docker.com/reference/cli/docker/network/create/#network-internal-mode---internal).
+  Each address must be private IPv4 inside the owned network's inspected subnet;
+  its attachment must match the exact network ID. Unexpected published bindings,
+  foreign network IDs, missing addresses, and out-of-subnet/public targets fail
+  before sending fixture credentials or HTTP requests.
 - PostgreSQL 18.6 uses tmpfs at its PostgreSQL 18 data-volume parent,
   `/var/lib/postgresql`, with no persistent/anonymous data volume. All accounts
   and records are synthetic. The disposable database is initialized inside this
@@ -34,8 +40,13 @@ The caller owns registry-digest/source binding and any subsequent promotion.
   mounted in a container. PostgreSQL receives only its server key/certificate and
   CA certificate. Its private key is copied into owned tmpfs with PostgreSQL
   ownership and mode 0600. The application receives only the public CA file.
-- Both PostgreSQL URLs use `sslmode=verify-full` and `sslrootcert`. The host driver
-  also sets `rejectUnauthorized: true` and checks the authorized TLS stream.
+- Both PostgreSQL URLs specify `sslmode=verify-full` and `sslrootcert`. The host
+  driver uses structured connection fields plus an explicit CA,
+  `rejectUnauthorized: true`, and `servername: fixture-postgres`: routing uses
+  the owned container IP while certificate verification uses its private DNS SAN.
+  It does not pass `connectionString`, because [node-postgres URL SSL options
+  replace an explicit SSL object](https://node-postgres.com/features/ssl#usage-with-connectionstring).
+  The host checks the authorized TLS stream.
   `pg_stat_ssl` confirms TLS on host and distinct application connections.
   There is no certificate-verification bypass or production test-mode override.
 - Migrations and seeding use the disposable fixture owner. The application uses
@@ -53,9 +64,9 @@ The caller owns registry-digest/source binding and any subsequent promotion.
   Trello configuration uses freshly generated nonfunctional values. Internal
   networking prevents provider egress even if an unintended provider path runs.
 
-The HTTP probe itself uses the loopback-published application port, not a browser
+The HTTP probe itself uses the owned private application IP, not a browser
 or a public HTTPS proxy. Production cookie flags are asserted, and the synthetic
-cookies are manually replayed over this isolated loopback channel. The HTTPS
+cookies are manually replayed over this isolated host-to-container channel. The HTTPS
 origin is configuration/CSRF context only. This does not establish browser cookie,
 public HTTPS, reverse-proxy, provider, or deployment acceptance.
 
@@ -114,7 +125,10 @@ operator to inspect this invocation's labeled resources, never broad-prune them.
 The JSON success report contains immutable image IDs, canonical migration/hash,
 table count, named checks, and `cleanupConfirmed: true`. It deliberately declares
 `providerAcceptance: false`. Command output, database URLs, passwords, cookies,
-and raw driver diagnostics are not emitted.
+and raw driver diagnostics are not emitted. Container-inspection failures expose
+only bounded booleans/counts/exit codes and fixed operation names, not raw engine
+output, addresses, mount paths, or credentials. Failure JSON also reports whether
+owned-resource cleanup was confirmed, separately from the failed acceptance.
 
 The new `.test.mjs` uses injected commands, filesystem resources, database fixture
 preparation, and HTTP responses. Run it with:

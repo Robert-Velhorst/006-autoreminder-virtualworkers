@@ -4,6 +4,7 @@ import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
+import { BlockList, isIP } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import superjson from 'superjson';
@@ -18,11 +19,11 @@ function command(program, args, { timeout = 60_000 } = {}) {
   return spawnSync(program, args, { encoding: 'utf8', timeout, maxBuffer: 2 * 1024 * 1024 });
 }
 
-function request({ port, path, method = 'GET', cookie, body, signal }) {
+function request({ hostname, port, path, method = 'GET', cookie, body, signal }) {
   return new Promise((resolveResponse, reject) => {
     const payload = body === undefined ? undefined : JSON.stringify(body);
     const req = httpRequest({
-      hostname: '127.0.0.1', port, path, method, agent: false, signal,
+      hostname, port, path, method, agent: false, signal,
       headers: { Origin: ORIGIN, ...(cookie ? { Cookie: cookie } : {}),
         ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}) },
     }, res => {
@@ -88,16 +89,29 @@ export async function configureApplicationRole(client, { appRole, appPassword, d
   await assertApplicationRolePrivileges(client, appRole);
 }
 
+export function fixturePostgresOptions(rawUrl, ca) {
+  const url = new URL(rawUrl);
+  assert.equal(url.protocol, 'postgresql:');
+  assert.equal(url.searchParams.get('sslmode'), 'verify-full');
+  assert.match(url.pathname, /^\/fixture_[a-f0-9]{32}$/);
+  // pg URL SSL options replace an explicit SSL object. Instead verify the
+  // certificate's private DNS SAN while routing directly to its container IP.
+  return {
+    host: url.hostname, port: Number(url.port), database: decodeURIComponent(url.pathname.slice(1)),
+    user: decodeURIComponent(url.username), password: decodeURIComponent(url.password),
+    application_name: url.searchParams.get('application_name'),
+    ssl: { ca, rejectUnauthorized: true, servername: 'fixture-postgres' },
+    connectionTimeoutMillis: 3000, query_timeout: 10_000, statement_timeout: 10_000,
+    options: '-c search_path=public',
+  };
+}
+
 async function prepareDatabase({ url, caPath, migrationsFolder, password, fixtureId, appRole, appPassword, signal, registerClose }) {
   const { Client } = await import('pg');
   const { drizzle } = await import('drizzle-orm/node-postgres');
   const { migrate } = await import('drizzle-orm/node-postgres/migrator');
   const { default: bcrypt } = await import('bcryptjs');
-  const makeClient = () => new Client({
-    connectionString: url, ssl: { ca: readFileSync(caPath, 'utf8'), rejectUnauthorized: true },
-    connectionTimeoutMillis: 3000, query_timeout: 10_000, statement_timeout: 10_000,
-    options: '-c search_path=public',
-  });
+  const makeClient = () => new Client(fixturePostgresOptions(url, readFileSync(caPath, 'utf8')));
   let client;
   const deadline = Date.now() + 30_000;
   while (true) {
@@ -216,6 +230,7 @@ export async function verifyPostgresProductionImage(image, dependencies = {}) {
   let failure;
   let report;
   let diagnostic;
+  let cleanupConfirmed = false;
   const checked = (program, args, timeout) => {
     controller.signal.throwIfAborted();
     const result = run(program, args, { timeout: timeout ?? 60_000 });
@@ -248,29 +263,39 @@ export async function verifyPostgresProductionImage(image, dependencies = {}) {
     assert.equal(inspect(type, name), null);
     tracked.push({ type, name });
   };
-  const port = (container, expectedImage, internalPort, network) => {
+  const endpoint = (container, expectedImage, internalPort, network, networkDetails) => {
     const value = inspect('container', container);
-    const binding = value?.NetworkSettings?.Ports?.[`${internalPort}/tcp`];
+    const attachment = value?.NetworkSettings?.Networks?.[network];
+    const published = Object.values(value?.NetworkSettings?.Ports ?? {});
     diagnostic = {
       running: value?.State?.Running === true,
       containerExitCode: Number.isInteger(value?.State?.ExitCode) ? value.State.ExitCode : null,
       imageMatches: value?.Image === expectedImage,
       ownerMatches: value?.Config?.Labels?.[OWNER_LABEL] === fixtureId,
       networkCount: Object.keys(value?.NetworkSettings?.Networks ?? {}).length,
-      publishedPortCount: Array.isArray(binding) ? binding.length : 0,
-      boundToLoopback: binding?.[0]?.HostIp === '127.0.0.1',
+      publishedPortCount: published.reduce((count, bindings) => count + (Array.isArray(bindings) ? bindings.length : 0), 0),
+      hasIpv4Address: isIP(attachment?.IPAddress ?? '') === 4,
     };
     assert.equal(value.Config.Labels[OWNER_LABEL], fixtureId);
     assert.equal(value.Image, expectedImage);
     assert.equal(value.State.Running, true);
     assert.deepEqual(Object.keys(value.NetworkSettings.Networks), [network]);
-    assert.ok(Array.isArray(binding));
-    assert.equal(binding.length, 1); assert.equal(binding[0].HostIp, '127.0.0.1');
-    assert.match(binding[0].HostPort, /^\d{1,5}$/);
-    const number = Number(binding[0].HostPort);
-    assert.ok(number > 0 && number <= 65535);
+    assert.equal(attachment.NetworkID, networkDetails.Id);
+    assert.ok(published.every(bindings => bindings === null));
+    assert.equal(isIP(attachment.IPAddress), 4);
+    const privateAddresses = new BlockList();
+    for (const [address, prefix] of [['10.0.0.0', 8], ['172.16.0.0', 12], ['192.168.0.0', 16]]) privateAddresses.addSubnet(address, prefix);
+    assert.ok(privateAddresses.check(attachment.IPAddress));
+    const subnets = networkDetails.IPAM?.Config;
+    assert.ok(Array.isArray(subnets) && subnets.length === 1);
+    const [subnet, prefix] = subnets[0].Subnet.split('/');
+    assert.equal(isIP(subnet), 4);
+    assert.match(prefix, /^\d{1,2}$/);
+    assert.ok(Number(prefix) <= 32);
+    const ownedSubnet = new BlockList(); ownedSubnet.addSubnet(subnet, Number(prefix));
+    assert.ok(ownedSubnet.check(attachment.IPAddress));
     diagnostic = undefined;
-    return { number, details: value };
+    return { hostname: attachment.IPAddress, port: internalPort, details: value };
   };
   try {
     const contexts = JSON.parse(checked('docker', ['context', 'inspect']));
@@ -312,17 +337,18 @@ export async function verifyPostgresProductionImage(image, dependencies = {}) {
     checked('docker', ['network', 'create', '--internal', '--label', `${OWNER_LABEL}=${fixtureId}`, network]);
     const networkDetails = inspect('network', network);
     assert.equal(networkDetails.Internal, true); assert.equal(networkDetails.Labels[OWNER_LABEL], fixtureId);
+    assert.equal(networkDetails.Driver, 'bridge');
     stage = 'owned PostgreSQL';
     reserve('container', pgName);
     checked('docker', ['run', '--detach', '--pull=never', '--name', pgName, '--label', `${OWNER_LABEL}=${fixtureId}`,
-      '--network', network, '--network-alias', 'fixture-postgres', '--publish', '127.0.0.1::5432', '--memory', '1g',
+      '--network', network, '--network-alias', 'fixture-postgres', '--memory', '1g',
       '--tmpfs', '/var/lib/postgresql:rw,nosuid,nodev,size=768m', '--tmpfs', '/run/acceptance-tls:rw,noexec,nosuid,nodev,size=4m',
       '--mount', `type=bind,source=${tls},target=/fixture-tls,readonly`, '--env-file', pgEnv,
       '--entrypoint', 'sh', postgres[0].Id, '-ec',
       'cp /fixture-tls/server.key /run/acceptance-tls/server.key; cp /fixture-tls/server.crt /run/acceptance-tls/server.crt; cp /fixture-tls/ca.crt /run/acceptance-tls/ca.crt; chown -R postgres:postgres /run/acceptance-tls; chmod 600 /run/acceptance-tls/server.key; exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/run/acceptance-tls/server.crt -c ssl_key_file=/run/acceptance-tls/server.key -c ssl_ca_file=/run/acceptance-tls/ca.crt -c shared_buffers=32MB -c max_connections=20']);
-    const published = port(pgName, postgres[0].Id, 5432, network);
-    assert.ok(published.details.HostConfig.Tmpfs['/var/lib/postgresql']);
-    assert.ok(!published.details.Mounts.some(mount => mount.Type === 'volume'));
+    const databaseEndpoint = endpoint(pgName, postgres[0].Id, 5432, network, networkDetails);
+    assert.ok(databaseEndpoint.details.HostConfig.Tmpfs['/var/lib/postgresql']);
+    assert.ok(!databaseEndpoint.details.Mounts.some(mount => mount.Type === 'volume'));
     const connectionUrl = ({ host, databasePort, certificate, name = applicationName, user, secret }) => {
       const url = new URL(`postgresql://${user}:${secret}@${host}:${databasePort}/${database}`);
       url.searchParams.set('sslmode', 'verify-full'); url.searchParams.set('sslrootcert', certificate);
@@ -331,7 +357,7 @@ export async function verifyPostgresProductionImage(image, dependencies = {}) {
     };
     stage = 'canonical migrations and synthetic accounts';
     const fixture = await bounded(resources.prepareDatabase({
-      url: connectionUrl({ host: '127.0.0.1', databasePort: published.number, certificate: ca,
+      url: connectionUrl({ host: databaseEndpoint.hostname, databasePort: databaseEndpoint.port, certificate: ca,
         name: `${applicationName}_host`, user: 'fixture', secret: databasePassword }), caPath: ca,
       migrationsFolder: join(ROOT, 'drizzle-postgres-v1'), password, fixtureId, appRole, appPassword, signal: controller.signal,
       registerClose: close => closers.push(close),
@@ -354,10 +380,10 @@ export async function verifyPostgresProductionImage(image, dependencies = {}) {
     resources.write(appEnv, Object.entries(appConfiguration).map(([name, value]) => `${name}=${value}\n`).join(''));
     reserve('container', appName);
     checked('docker', ['run', '--detach', '--pull=never', '--name', appName, '--label', `${OWNER_LABEL}=${fixtureId}`,
-      '--network', network, '--publish', '127.0.0.1::3000', '--memory', '512m', '--cpus', '1',
+      '--network', network, '--memory', '512m', '--cpus', '1',
       '--mount', `type=bind,source=${ca},target=/run/acceptance-ca.crt,readonly`, '--env-file', appEnv, imageId]);
-    const appPort = port(appName, imageId, 3000, network).number;
-    const call = options => bounded(send({ port: appPort, signal: controller.signal, ...options }), controller.signal);
+    const appEndpoint = endpoint(appName, imageId, 3000, network, networkDetails);
+    const call = options => bounded(send({ hostname: appEndpoint.hostname, port: appEndpoint.port, signal: controller.signal, ...options }), controller.signal);
     const readyDeadline = now() + 60_000;
     while (true) {
       controller.signal.throwIfAborted();
@@ -435,13 +461,14 @@ export async function verifyPostgresProductionImage(image, dependencies = {}) {
     }
     if (cleanupFailed) failure = new Error('PostgreSQL image acceptance incomplete: owned-resource cleanup was not confirmed.');
     else if (controller.signal.aborted) failure = new Error('PostgreSQL image acceptance interrupted or exceeded its deadline.');
+    cleanupConfirmed = !cleanupFailed;
     process.removeListener('SIGINT', interrupt); process.removeListener('SIGTERM', interrupt);
   }
-  if (failure) throw failure;
+  if (failure) { failure.cleanupConfirmed = cleanupConfirmed; throw failure; }
   return { ...report, cleanupConfirmed: true };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try { console.log(JSON.stringify(await verifyPostgresProductionImage(process.argv[2]))); }
-  catch (error) { console.error(JSON.stringify({ passed: false, error: error.message })); process.exitCode = 1; }
+  catch (error) { console.error(JSON.stringify({ passed: false, error: error.message, cleanupConfirmed: error.cleanupConfirmed === true })); process.exitCode = 1; }
 }
