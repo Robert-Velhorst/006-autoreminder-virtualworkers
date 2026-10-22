@@ -36,13 +36,13 @@ const MIGRATION_TABLE = "__drizzle_migrations";
 const BATCH_SIZE = 250;
 const SYSTEM_TABLES = new Set([MIGRATION_TABLE]);
 
-type SourceColumn = ColumnShape & { ordinalPosition: number };
+type SourceColumn = ColumnShape & { ordinalPosition: number; autoIncrement: boolean };
 type TargetColumn = ColumnShape & {
   udtName: string;
   identity: boolean;
   columnDefault: string | null;
 };
-type SourceTable = { name: string; engine: string | null };
+type SourceTable = { name: string; engine: string | null; autoIncrement: string | null };
 type KeyRow = {
   tableName: string;
   columnName: string;
@@ -114,16 +114,16 @@ async function getSourceTables(
   const [rows] = await connection
     .promise()
     .query<
-      Array<{ tableName: string; engine: string | null } & mysql.RowDataPacket>
+      Array<{ tableName: string; engine: string | null; autoIncrement: string | null } & mysql.RowDataPacket>
     >(
-      `SELECT TABLE_NAME AS tableName, ENGINE AS engine
+      `SELECT TABLE_NAME AS tableName, ENGINE AS engine, CAST(AUTO_INCREMENT AS CHAR) AS autoIncrement
      FROM information_schema.tables
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'
      ORDER BY TABLE_NAME`
     );
   return rows
     .filter(row => !SYSTEM_TABLES.has(row.tableName))
-    .map(row => ({ name: row.tableName, engine: row.engine }));
+    .map(row => ({ name: row.tableName, engine: row.engine, autoIncrement: row.autoIncrement ?? null }));
 }
 
 async function getSourceColumns(
@@ -161,6 +161,7 @@ async function getSourceColumns(
       generated: Boolean(row.generationExpression) || /generated/i.test(row.extra.replace(/\bDEFAULT_GENERATED\b/gi, "")),
       generationExpression: row.generationExpression,
       ordinalPosition: row.ordinalPosition,
+      autoIncrement: /\bauto_increment\b/i.test(row.extra),
     });
     columns.set(row.tableName, tableColumns);
   }
@@ -361,6 +362,15 @@ async function getPreflight(
         `MySQL table ${table.name} uses ${table.engine ?? "an unknown engine"}; a consistent read snapshot requires InnoDB`
       );
     }
+    const autoColumns = (sourceColumns.get(table.name) ?? []).filter(c => c.autoIncrement);
+    if (table.autoIncrement !== null || autoColumns.length) {
+      const mapped = autoColumns.length === 1
+        ? targetColumns.get(table.name)?.find(c => c.name === destinationColumnName(table.name, autoColumns[0]!.name)) : undefined;
+      if (table.autoIncrement === null || !/^[1-9]\d*$/.test(table.autoIncrement) || !mapped
+        || (!mapped.identity && !mapped.columnDefault?.startsWith("nextval("))) {
+        schemaErrors.push(`Unsupported auto-increment mapping for ${table.name}`);
+      }
+    }
   }
 
   const extraTargetTables = targetNames.filter(
@@ -415,6 +425,7 @@ async function getPreflight(
     importOrder: order,
     nullUpgradeSelfReferences,
     foldedIdenticalReplyAliases: aliasNormalization.folded,
+    sourceAutoIncrement: Object.fromEntries(sourceTables.filter(t => t.autoIncrement !== null).map(t => [t.name, t.autoIncrement])),
     errors: schemaErrors.sort(),
   };
 
@@ -646,7 +657,9 @@ async function verifyTargetTable(
 async function syncSequences(
   target: Client,
   table: string,
-  columns: TargetColumn[]
+  columns: TargetColumn[],
+  sourceColumns: SourceColumn[],
+  sourceNext: string | null
 ): Promise<void> {
   for (const column of columns) {
     if (!column.identity && !column.columnDefault?.startsWith("nextval("))
@@ -656,7 +669,7 @@ async function syncSequences(
       [`public.${table}`, column.name]
     );
     const sequence = sequenceResult.rows[0]?.sequenceName;
-    if (!sequence) continue;
+    if (!sequence) throw new Error(`Missing target sequence for ${table}.${column.name}`);
     const maximum = await target.query<{
       maxValue: string | null;
       hasRows: boolean;
@@ -667,7 +680,8 @@ async function syncSequences(
     );
     const reset = getSequenceReset(
       maximum.rows[0]?.maxValue ?? null,
-      maximum.rows[0]?.hasRows ?? false
+      maximum.rows[0]?.hasRows ?? false,
+      sourceColumns.some(c => c.autoIncrement && destinationColumnName(table, c.name) === column.name) ? sourceNext : null
     );
     await target.query("SELECT setval($1::regclass, $2::bigint, $3::boolean)", [
       sequence,
@@ -716,6 +730,7 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
   try {
     await target.connect();
     await source.promise().query("SET SESSION time_zone = '+00:00'");
+    await source.promise().query("SET SESSION information_schema_stats_expiry = 0");
     await source
       .promise()
       .query("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY");
@@ -811,7 +826,7 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
           `Row reconciliation failed for ${table}: source=${copied.count}/${copied.digest}, target=${reconciled.count}/${reconciled.digest}`
         );
       }
-      await syncSequences(target, table, targetColumnMap.get(table)!);
+      await syncSequences(target, table, targetColumnMap.get(table)!, sourceColumnMap.get(table)!, preflight.sourceTables.find(t => t.name === table)!.autoIncrement);
       results[table] = {
         sourceRows: copied.count,
         targetRows: reconciled.count,
@@ -835,6 +850,7 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
           optionalTargetOnlyTables: preflight.report.optionalTargetOnlyTables,
           foldedIdenticalReplyAliases: preflight.report.foldedIdenticalReplyAliases,
           nullUpgradeSelfReferences: preflight.report.nullUpgradeSelfReferences,
+          sourceAutoIncrement: preflight.report.sourceAutoIncrement,
           rowLevelReconciliation:
             "SHA-256 per table; source/target row values normalized by destination type",
           tables: results,

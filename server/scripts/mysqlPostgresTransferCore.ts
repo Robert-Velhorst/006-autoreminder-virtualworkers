@@ -236,11 +236,16 @@ export async function removeQueueBootstrap(
   await client.query("RELEASE SAVEPOINT queue_bootstrap_replacement");
 }
 
-export function getSequenceReset(maxValue: string | null, hasRows: boolean) {
-  if (!hasRows || maxValue === null) return { value: "1", isCalled: false };
-  const maximum = BigInt(maxValue);
-  if (maximum < 1n) return { value: "1", isCalled: false };
-  return { value: maximum.toString(), isCalled: true };
+export function getSequenceReset(maxValue: string | null, hasRows: boolean, sourceNext: string | null = null) {
+  const maximum = hasRows && maxValue !== null ? BigInt(maxValue) : 0n;
+  const nextFromRows = maximum < 1n ? 1n : maximum + 1n;
+  if (sourceNext !== null) {
+    if (!/^[1-9]\d*$/.test(sourceNext)) throw new Error("Invalid source auto-increment counter");
+    const next = BigInt(sourceNext);
+    if (next < nextFromRows) throw new Error("Source auto-increment counter precedes copied rows");
+    if (next > nextFromRows || maximum < 1n) return { value: next.toString(), isCalled: false };
+  }
+  return maximum < 1n ? { value: "1", isCalled: false } : { value: maximum.toString(), isCalled: true };
 }
 
 export function quoteMySqlIdentifier(identifier: string): string {

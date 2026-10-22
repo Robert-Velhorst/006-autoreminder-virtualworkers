@@ -134,24 +134,25 @@ the URL without an `ssl` override. Node.js then verifies the certificate and
 hostname using its TLS trust configuration. Set `REDIS_URL` only
 when an external Redis service is configured. Do not commit `.env`.
 
-**The approved production PostgreSQL target and VA Dashboard database have not
-been confirmed for this application.** The owner intends to consolidate their
-GitHub tools on a shared open-source PostgreSQL service. Confirm that intended
-service before provisioning another one; lack of configuration in this repo is
-not evidence that no shared service exists elsewhere. Verify private network
+The owner intends to consolidate their GitHub tools on a shared open-source
+PostgreSQL service. Confirm the intended service in the operator's current
+cutover record before provisioning another one; lack of configuration in this
+repo is not evidence that no shared service exists elsewhere. Live host setup,
+credentials and data-acceptance receipts are maintained privately, not inferred
+from this generic runbook. Verify private network
 access, TLS, automated backups, and tested recovery. Create or verify a separate VA
 Dashboard database and least-privilege role; other apps must have separate
-databases and credentials. No legacy data source or import plan has been
-identified. Apply this app's migrations to the new database, then test backup,
+databases and credentials. Identify and preserve any actual legacy source before
+choosing an empty installation. Apply this app's migrations, then test backup,
 restore, application behavior, and the live Hetzner runtime. Do not run a
 legacy transfer unless an actual source containing VA Dashboard data is
 identified and its import is explicitly approved.
 
 ### MySQL-to-PostgreSQL Transfer Rehearsal (Conditional)
 
-This procedure is retained for a possible future use only. It is not applicable
-to the new PostgreSQL installation unless an actual MySQL source containing VA
-Dashboard data is identified and an import is explicitly approved.
+Use this procedure only when an actual MySQL source containing VA Dashboard
+data has been identified and the import explicitly approved. Do not substitute
+an empty installation for an approved recovery of existing records.
 
 Use a trusted operator shell, not the app container. Configure
 `LEGACY_MYSQL_DATABASE_URL` with a read-only MySQL account and `DATABASE_URL`
@@ -186,6 +187,14 @@ ordering dependency when its source column is absent and the exact upgrade
 contract inserts NULL. This exception is reported explicitly. Source-present,
 unknown, non-null/defaulted and multi-column references remain dependencies;
 actual cycles still block the import. Foreign-key constraints stay enabled.
+
+Source auto-increment metadata is read with the MySQL statistics cache disabled.
+The exact auto-increment column must map to a PostgreSQL identity/sequence.
+After row reconciliation, its next value preserves any source-reserved IDs beyond
+the surviving maximum, including in empty tables. Invalid, stale or unmappable
+counters block the transfer; no deleted ID range is silently reused. Keep the
+target inactive during transfer/retry: PostgreSQL `setval` changes themselves are
+not transactional, even though target row changes are rolled back on failure.
 
 The sole nonempty-target exception is `aptlss_manager_queue_slots` containing
 exactly IDs 1, 2, 3 and 4 with `vaId`, `token` and `leaseUntil` all null and the
@@ -226,7 +235,8 @@ unsupported boolean values instead of guessing. Each copied table is checked
 for exact row count and a normalized SHA-256 digest of every row. Save the
 resulting report with the cutover record; it contains counts and hashes, not
 credentials. Keep the source and its backups intact through the rollback
-window. This command has not been accepted against the real source yet.
+window. Acceptance requires a retained real-source reconciliation report;
+passing mocked-driver tests is not evidence that an operational copy completed.
 
 The server accepts the old local names `TrelloAPIKey` and `TrelloAPIToken`
 during transition, but production configuration should use the canonical

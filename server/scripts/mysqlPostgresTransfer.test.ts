@@ -171,6 +171,16 @@ describe("MySQL to PostgreSQL transfer safeguards", () => {
     });
   });
 
+  it("preserves source counters beyond surviving rows without rounding big integers", () => {
+    expect(getSequenceReset("29", true, "100")).toEqual({ value: "100", isCalled: false });
+    expect(getSequenceReset(null, false, "100")).toEqual({ value: "100", isCalled: false });
+    expect(getSequenceReset("29", true, "30")).toEqual({ value: "29", isCalled: true });
+    expect(getSequenceReset("9007199254740993", true, "9007199254740999")).toEqual({ value: "9007199254740999", isCalled: false });
+    expect(() => getSequenceReset("29", true, "20")).toThrow("precedes copied rows");
+    for (const invalid of ["", "0", "-1", "1.5", "1e3", " 100", "01"])
+      expect(() => getSequenceReset(null, false, invalid)).toThrow("Invalid source");
+  });
+
   it("orders parent tables before dependent tables and rejects cycles", () => {
     expect(
       orderTablesByDependencies(

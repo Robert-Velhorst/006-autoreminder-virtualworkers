@@ -50,6 +50,7 @@ function fixture(options: {
   manager?: boolean; sourceGenerated?: boolean; badExpression?: boolean; defaultGenerated?: boolean;
   escapedGenerated?: boolean; table?: string; sourceColumns?: ColumnShape[]; targetColumns?: ColumnShape[];
   optionalTables?: string[];
+  sourceNext?: string | null; sourceAutoColumn?: string; targetSequenceMissing?: boolean;
   tamper?: (row: Row) => void;
 } = {}) {
   const table = options.table ?? (options.manager ? runs : queue);
@@ -62,6 +63,7 @@ function fixture(options: {
   const events: string[] = [];
   const batches: unknown[][] = [];
   const streamOptions: unknown[] = [];
+  const sequenceWrites: unknown[][] = [];
   const sourceRows = options.sourceRows ?? [
     { id: 1, vaId: 8, token: "retained-source-lease", leaseUntil: "2026-10-22 10:00:00" },
     { id: 9, vaId: null, token: null, leaseUntil: null },
@@ -71,17 +73,18 @@ function fixture(options: {
       tableName, columnName: c.name, dataType: c.dataType, udtName: c.dataType,
       generated: options.manager && pgGenerated[c.name] ? "ALWAYS" : "NEVER",
       generationExpression: options.manager ? pgGenerated[c.name] + (options.badExpression ? " || 'wrong'" : "") : null,
-      identity: "NO", nullable: c.nullable ? "YES" : "NO", columnDefault: null,
+      identity: c.identity ? "YES" : "NO", nullable: c.nullable ? "YES" : "NO", columnDefault: null,
       ...(tableName === table ? { columnDefault: c.columnDefault ?? null,
         characterMaximumLength: c.columnType?.match(/^varchar\((\d+)\)$/)?.[1] ?? null } : {}),
     })));
   const sourceQuery = async (sql: string) => {
     events.push(`source:${sql}`);
-    if (sql.includes("information_schema.tables")) return [options.sourceAbsent ? [] : [{ tableName: table, engine: "InnoDB" }]];
+    if (sql.includes("information_schema.tables")) return [options.sourceAbsent ? [] : [{ tableName: table, engine: "InnoDB", autoIncrement: options.sourceNext ?? null }]];
     if (sql.includes("information_schema.columns")) return [options.sourceAbsent ? [] : sourceColumns.map((c, i) => ({
       tableName: table, columnName: c.name,
       dataType: options.manager && c.name === "reviewDigest" ? "varchar" : options.manager && c.name === "reviewUrgent" ? "tinyint" : c.dataType,
-      ordinalPosition: i + 1, extra: options.sourceGenerated && mysqlGenerated[c.name] ? "VIRTUAL GENERATED" : options.defaultGenerated ? "DEFAULT_GENERATED" : "",
+      ordinalPosition: i + 1, extra: c.name === (options.sourceAutoColumn ?? (options.sourceNext != null ? "id" : undefined)) ? "auto_increment"
+        : options.sourceGenerated && mysqlGenerated[c.name] ? "VIRTUAL GENERATED" : options.defaultGenerated ? "DEFAULT_GENERATED" : "",
       generationExpression: options.sourceGenerated ? options.escapedGenerated
         ? mysqlGenerated[c.name]?.replaceAll("'", "\\'") : mysqlGenerated[c.name] : null,
     }))];
@@ -133,6 +136,9 @@ function fixture(options: {
       if (sql.includes("tc.constraint_type = 'PRIMARY KEY'")) return { rows: [{ tableName: table, columnName: "id", ordinalPosition: 1 }] };
       if (sql.includes("tc.constraint_type = 'FOREIGN KEY'")) return { rows: [] };
       if (sql.startsWith("SELECT EXISTS")) return { rows: [{ hasRows: options.otherRows ?? false }] };
+      if (sql.startsWith("SELECT pg_get_serial_sequence")) return { rows: [{ sequenceName: options.targetSequenceMissing ? null : "public.fixture_seq" }] };
+      if (sql.startsWith("SELECT MAX(")) return { rows: [{ maxValue: rows.length ? rows.map(r => BigInt(String(r.id))).reduce((a, b) => a > b ? a : b).toString() : null, hasRows: rows.length > 0 }] };
+      if (sql.startsWith("SELECT setval(")) { sequenceWrites.push(values); return { rows: [] }; }
       if (sql.startsWith('SELECT * FROM "public".')) {
         if (++inspections === 2) options.onRecheck?.(rows);
         return { rows: structuredClone(rows.slice(0, 5)) };
@@ -173,10 +179,37 @@ function fixture(options: {
       throw new Error(`Unexpected target SQL: ${sql}`);
     },
   };
-  return { events, rows: () => rows, sourceRows, batches, streamOptions };
+  return { events, rows: () => rows, sourceRows, batches, streamOptions, sequenceWrites };
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe("source auto-increment continuity through raw drivers", () => {
+  const identity = { ...columns[0], identity: true };
+  it.each([false, true])("retains reserved IDs beyond existing rows (empty=%s)", async empty => {
+    const f = fixture({ table: "clients", rows: [], sourceRows: empty ? [] : [{ id: 3 }],
+      sourceColumns: [columns[0]], targetColumns: [identity], sourceNext: "100" });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await runMysqlPostgresMigration(["copy", "--execute"], env);
+    expect(f.sequenceWrites).toEqual([["public.fixture_seq", "100", false]]);
+    expect(JSON.parse(log.mock.calls.at(-1)![0]).sourceAutoIncrement).toEqual({ clients: "100" });
+    expect(f.events.indexOf("source:SET SESSION information_schema_stats_expiry = 0")).toBeLessThan(f.events.findIndex(s => s.startsWith("source:START TRANSACTION")));
+  });
+  it("rejects a source counter behind imported rows without setting a sequence", async () => {
+    const f = fixture({ table: "clients", rows: [], sourceRows: [{ id: 3 }], sourceColumns: [columns[0]], targetColumns: [identity], sourceNext: "2" });
+    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow("precedes copied rows");
+    expect(f.sequenceWrites).toEqual([]);
+    expect(f.events).toContain("ROLLBACK");
+  });
+  it.each(["metadata", "mapping", "sequence"])("fails closed on missing or changed %s", async invalid => {
+    const f = fixture({ table: "clients", rows: [], sourceRows: [{ id: 3 }], sourceColumns: [columns[0]],
+      targetColumns: [invalid === "mapping" ? columns[0] : identity], sourceNext: invalid === "metadata" ? "invalid" : "100",
+      targetSequenceMissing: invalid === "sequence" });
+    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow(invalid === "sequence" ? "Missing target sequence" : "Unsupported auto-increment mapping");
+    expect(f.sequenceWrites).toEqual([]);
+    expect(f.events).toContain("ROLLBACK");
+  });
+});
 
 describe("manager snapshot migration through raw drivers", () => {
   const managerRow = (id: number, payload = "repeated ".repeat(3000)): Row => ({
