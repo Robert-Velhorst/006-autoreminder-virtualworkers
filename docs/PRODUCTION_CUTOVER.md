@@ -161,10 +161,29 @@ pnpm db:migrate:mysql-to-postgres preflight
 ```
 
 Preflight is read-only. It requires matching source/target tables, columns, and
-primary keys; InnoDB source tables; an empty PostgreSQL application schema; and
-only the three explicitly recognized PostgreSQL-only tables. Fix every
+primary keys; InnoDB source tables; an empty PostgreSQL application schema except
+for the exact migration-0003 queue bootstrap described below; and only the three
+explicitly recognized PostgreSQL-only tables. Fix every
 reported mismatch before proceeding. Take and restore-test a source backup
 first, then rehearse against that restored copy.
+
+The sole nonempty-target exception is `aptlss_manager_queue_slots` containing
+exactly IDs 1, 2, 3 and 4 with `vaId`, `token` and `leaseUntil` all null and the
+canonical four-column shape. Preflight reports this as `bootstrapSeedTables`,
+not as transferred data. Missing, additional, modified or leased rows (even
+expired leases) are rejected. The source must contain that same table with the
+existing schema and primary-key checks satisfied; absent-source compatibility
+is not inferred and the target seeds are not removed in that case.
+
+Copy obtains its transaction table locks before repeating preflight, then rereads
+the entire bounded seed set under an exclusive table lock before deleting only
+the four recognized defaults. This deletion and the full source copy share the
+existing PostgreSQL transaction: any subsequent copy or reconciliation failure
+rolls back the deletion as well. Source queue rows, including their original IDs
+and lease values, are copied and reconciled rather than replaced with defaults.
+Never clear tables manually to bypass these checks. Passing mocked-driver tests
+or preflight is not real-data migration acceptance; all remaining schema,
+capacity, backup/restore, identity and reconciliation gates still apply.
 
 The transfer sets the MySQL session timezone to UTC before opening its
 consistent snapshot. MySQL `TIMESTAMP` values are therefore read in UTC and

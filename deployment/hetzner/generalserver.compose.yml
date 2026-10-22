@@ -1,0 +1,46 @@
+# va-deployment-target: generalserver
+name: va-dashboard
+services:
+  app:
+    image: ${APP_IMAGE:?A verified VA image digest is required}
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+    ports:
+      - "127.0.0.1:3025:3000"
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOST: 0.0.0.0
+      LOCAL_AUTH_BYPASS: "false"
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-2}
+      SESSION_APP_ID: ${SESSION_APP_ID:-va-dashboard}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      APP_URL: ${APP_URL:-}
+      VITE_FRONTEND_URL: ${VITE_FRONTEND_URL:-}
+      TRELLO_WEBHOOK_CALLBACK_URL: ${TRELLO_WEBHOOK_CALLBACK_URL:-}
+    extra_hosts:
+      - "noodzakelijkonline-01:172.30.6.1"
+    networks:
+      private:
+        ipv4_address: 172.30.6.2
+    volumes:
+      - type: bind
+        source: /etc/ssl/certs/ssl-cert-snakeoil.pem
+        target: /run/va-postgres-root.crt
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+networks:
+  private:
+    external: true
+    name: va_dashboard_private

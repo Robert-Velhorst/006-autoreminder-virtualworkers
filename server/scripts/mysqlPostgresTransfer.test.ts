@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canonicalizeCell,
+  isCanonicalQueueBootstrap,
   getSequenceReset,
   getSchemaDifferences,
   orderTablesByDependencies,
@@ -10,6 +11,36 @@ import {
 } from "./mysqlPostgresTransferCore";
 
 describe("MySQL to PostgreSQL transfer safeguards", () => {
+  const queueColumns = [
+    { name: "id", dataType: "integer", nullable: false },
+    { name: "vaId", dataType: "integer", nullable: true },
+    { name: "token", dataType: "character varying", nullable: true },
+    { name: "leaseUntil", dataType: "timestamp without time zone", nullable: true },
+  ];
+  const seeds = () => [1, 2, 3, 4].map(id => ({ id, vaId: null, token: null, leaseUntil: null }));
+
+  it("recognizes only the exact complete unleased bootstrap rows and column shape", () => {
+    expect(isCanonicalQueueBootstrap(seeds().reverse(), queueColumns)).toBe(true);
+    for (const rows of [
+      [], seeds().slice(1), [...seeds(), { id: 5, vaId: null, token: null, leaseUntil: null }],
+      [seeds()[0], seeds()[0], ...seeds().slice(2)],
+      seeds().map(row => ({ ...row, id: String(row.id) })),
+      seeds().map(row => ({ ...row, unknown: null })),
+      seeds().map(({ token, ...row }) => row),
+      seeds().map(row => ({ ...row, vaId: 0 })),
+      seeds().map(row => ({ ...row, token: "" })),
+      seeds().map(row => ({ ...row, leaseUntil: "2000-01-01" })),
+      seeds().map(row => ({ ...row, leaseUntil: "2099-01-01" })),
+    ]) expect(isCanonicalQueueBootstrap(rows, queueColumns)).toBe(false);
+    for (const columns of [
+      queueColumns.slice(1), [...queueColumns, { name: "extra", dataType: "integer", nullable: true }],
+      queueColumns.map(c => c.name === "id" ? { ...c, dataType: "bigint" } : c),
+      queueColumns.map(c => c.name === "token" ? { ...c, nullable: false } : c),
+      queueColumns.map(c => ({ ...c, generated: true })),
+      [queueColumns[0], queueColumns[0], ...queueColumns.slice(2)],
+    ]) expect(isCanonicalQueueBootstrap(seeds(), columns)).toBe(false);
+  });
+
   it('allows only the two nullable canonical timer additions, never arbitrary parity drift', () => {
     const source = new Map([['time_entries', [{ name: 'vaId', dataType: 'int' }]]]);
     const canonical = [

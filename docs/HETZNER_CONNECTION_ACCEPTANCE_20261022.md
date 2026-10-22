@@ -75,3 +75,32 @@ separate requirements in the production cutover checklist.
 
 See [restricted connection operations](../deployment/hetzner/SSH_GATE.md) and
 [production target](../DEPLOYMENT_TARGET.md).
+
+## DNS Accepted Later On 22 October
+
+After the desktop restart restored browser control, the existing Hetzner zone
+received exactly one additional record: `006-va-dashboard`, type `A`, value
+`159.69.55.178`, TTL `300`. The seven prior records remained present; no AAAA
+record was added. A direct query to `hydrogen.ns.hetzner.com` returned the
+expected address and TTL. This supersedes the earlier NXDOMAIN/access blocker,
+not the outstanding runtime, TLS, data, provider, or release-acceptance gates.
+
+## Private Database Transport Accepted Later On 22 October
+
+Installed the reviewed VA-only systemd socket/firewall units and allocated the
+labelled `va_dashboard_private` network, subnet `172.30.6.0/29`. PostgreSQL itself
+still listens on loopback port 5432. The proxy binds only `br-va-db`, address
+`172.30.6.1:15433`, with an exact source/interface allow and terminal DROP.
+
+The credential-free probe from a disposable official Python container at
+`172.30.6.2` verified the public certificate pin and hostname. Wrong hostname and
+untrusted CA were rejected. A sequential probe on the default Docker bridge
+could not open TCP. The owned diagnostic containers and newly pulled image were
+removed afterward; no SQL, credentials or application database were used.
+
+This proves the tested transport boundary, not actual application-image query,
+external-ingress, reboot, database-migration or public HTTPS acceptance. HTTP
+proxy units are prepared but not enabled. No VA application is running yet.
+
+Quality run `39819248579` and CodeQL run `39819241084` passed for commit
+`ce00b2ae387d024849644027c7cce48955d7fff5`. Later source edits require new CI.

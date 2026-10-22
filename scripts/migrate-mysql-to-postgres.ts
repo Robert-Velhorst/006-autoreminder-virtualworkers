@@ -1,9 +1,13 @@
-import "dotenv/config";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import mysql from "mysql2";
 import { Client, types as pgTypes } from "pg";
 import { requirePostgresDatabaseUrl } from "../server/db/databaseUrl";
 import {
   canonicalizeCell,
+  QUEUE_BOOTSTRAP_TABLE,
+  inspectQueueBootstrap,
+  removeQueueBootstrap,
   createRowDigest,
   getSequenceReset,
   getSchemaDifferences,
@@ -337,12 +341,16 @@ async function getPreflight(
   const emptyChecks = await Promise.all(
     targetNames.map(async table => ({
       table,
-      empty: !(await targetHasRows(target, table)),
+      state: table === QUEUE_BOOTSTRAP_TABLE
+        ? await inspectQueueBootstrap(target, targetColumns.get(table)!, sourceNames.includes(table))
+        : await targetHasRows(target, table) ? "nonempty" : "empty",
     }))
   );
   const nonEmptyTargetTables = emptyChecks
-    .filter(item => !item.empty)
+    .filter(item => item.state === "nonempty")
     .map(item => item.table);
+  const bootstrapSeedTables = emptyChecks
+    .filter(item => item.state === "bootstrap-seed").map(item => item.table);
   const countRows = await Promise.all(
     sourceNames.map(async table => ({
       table,
@@ -363,6 +371,7 @@ async function getPreflight(
     extraTargetTables,
     missingTargetTables,
     nonEmptyTargetTables,
+    bootstrapSeedTables,
     sourceRowCounts: Object.fromEntries(
       countRows.map(item => [item.table, item.rows])
     ),
@@ -618,21 +627,21 @@ async function syncSequences(
   }
 }
 
-async function main() {
-  const mode = process.argv[2] ?? "preflight";
+export async function runMysqlPostgresMigration(args: string[], env: Record<string, string | undefined>) {
+  const mode = args[0] ?? "preflight";
   if (mode !== "preflight" && mode !== "copy") {
     throw new Error(
       "Usage: pnpm db:migrate:mysql-to-postgres [preflight|copy --execute]"
     );
   }
-  if (mode === "copy" && !process.argv.includes("--execute")) {
+  if (mode === "copy" && !args.includes("--execute")) {
     throw new Error(
       "Refusing to write: copy requires the explicit --execute flag"
     );
   }
 
-  const sourceUrl = process.env.LEGACY_MYSQL_DATABASE_URL;
-  const targetUrl = process.env.DATABASE_URL;
+  const sourceUrl = env.LEGACY_MYSQL_DATABASE_URL;
+  const targetUrl = env.DATABASE_URL;
   if (!sourceUrl?.startsWith("mysql://"))
     throw new Error("LEGACY_MYSQL_DATABASE_URL must be a MySQL connection URL");
   const verifiedTargetUrl = requirePostgresDatabaseUrl(targetUrl, {
@@ -678,8 +687,8 @@ async function main() {
           "PostgreSQL schema is empty; apply Drizzle migrations before copying data"
         );
       await target.query("BEGIN");
-      await target.query("SELECT set_config('aptlss.legacy_timer_import', txid_current()::text, true)");
       targetTransaction = true;
+      await target.query("SELECT set_config('aptlss.legacy_timer_import', txid_current()::text, true)");
       await target.query("SET LOCAL lock_timeout = '5s'");
       const lockList = targetTables
         .map(table => `"public".${quotePostgresIdentifier(table)}`)
@@ -693,6 +702,7 @@ async function main() {
       errors: string[];
       nonEmptyTargetTables: string[];
       sourceRowCounts: Record<string, string>;
+      bootstrapSeedTables: string[];
     };
     if (!report.success) {
       throw new Error(
@@ -717,6 +727,10 @@ async function main() {
     const targetColumnMap = preflight.targetColumns;
     const sourceKeyMap = preflight.sourceKeys;
     const targetKeyMap = preflight.targetKeys;
+    if (report.bootstrapSeedTables.includes(QUEUE_BOOTSTRAP_TABLE)) {
+      await removeQueueBootstrap(target, targetColumnMap.get(QUEUE_BOOTSTRAP_TABLE)!,
+        preflight.sourceTables.some(table => table.name === QUEUE_BOOTSTRAP_TABLE));
+    }
     const results: Record<
       string,
       { sourceRows: number; targetRows: number; sha256: string }
@@ -789,9 +803,12 @@ async function main() {
   }
 }
 
-main().catch(error => {
-  console.error(
-    `MySQL to PostgreSQL migration failed: ${error instanceof Error ? error.message : "unknown error"}`
-  );
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  await import("dotenv/config");
+  runMysqlPostgresMigration(process.argv.slice(2), process.env).catch(error => {
+    console.error(
+      `MySQL to PostgreSQL migration failed: ${error instanceof Error ? error.message : "unknown error"}`
+    );
+    process.exitCode = 1;
+  });
+}

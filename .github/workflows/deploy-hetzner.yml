@@ -83,7 +83,7 @@ jobs:
       - name: Check out the exact release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.validate-production-gate.outputs.release_tag }}
+          ref: ${{ needs.validate-production-gate.outputs.release_commit }}
 
       - name: Authenticate to GHCR and verify release provenance
         shell: bash
@@ -139,6 +139,6 @@ jobs:
             exit 1
           fi
           ssh -T "${ssh_options[@]}" "${HETZNER_SSH_USER}@${HETZNER_SSH_HOST}" \
-            va-dashboard-stage-compose < docker-compose.yml
+            va-dashboard-stage-compose < deployment/hetzner/generalserver.compose.yml
           ssh -T "${ssh_options[@]}" "${HETZNER_SSH_USER}@${HETZNER_SSH_HOST}" \
             "va-dashboard-deploy ${APP_IMAGE}" < /dev/null

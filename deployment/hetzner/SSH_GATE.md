@@ -39,7 +39,7 @@ user-writable authorized-keys path is granted. No private key is an installer in
 
 Keep the existing verified administrator SSH session open throughout bootstrap.
 Do not replace or reuse its key. Transfer an independently reviewed source tree
-(including root `docker-compose.yml`) to a root-controlled directory, for example
+(including `deployment/hetzner/generalserver.compose.yml`) to a root-controlled directory, for example
 `/root/va-deployment-source`. Transfer only the dedicated `.pub` file to
 `/root/va_dashboard_deploy_ed25519.pub`. Verify its fingerprint privately against
 the generated public key. Do not copy a private key into the repository or host.
@@ -48,10 +48,16 @@ On the host, as administrator:
 
 ```sh
 sudo /bin/bash /root/va-deployment-source/deployment/hetzner/install-ssh-gate.sh \
-  /root/va_dashboard_deploy_ed25519.pub
+  /root/va_dashboard_deploy_ed25519.pub generalserver
 ```
 
-The installer accepts exactly one Ed25519 public-key file. It preserves exact
+The installer accepts one Ed25519 public-key file and one fixed target name:
+`default` selects root `docker-compose.yml`; `generalserver` selects
+`deployment/hetzner/generalserver.compose.yml`. No arbitrary source path is accepted.
+The selected file is checked with the same source/ancestor ownership, symlink and
+LF checks, then installed as `docker-compose.yml`. The manifest retains exactly
+four entries: `ssh_gate.py`, `root-helper`, `deploy.sh`, `docker-compose.yml`.
+The installer preserves exact
 LF source bytes, installs root-owned copies and computes their root-only manifest.
 Reused accounts must have exactly `/bin/sh`, only their dedicated group and the
 exact expected home. An existing home and every ancestor must be root-owned and
@@ -106,11 +112,12 @@ or another repository. A PTY request must be refused. Inspect permissions and
 
 The four GitHub `production` SSH secrets use the dedicated account/key and pinned
 known-hosts data. Never use the administrator key as `HETZNER_SSH_PRIVATE_KEY`.
-The workflow verifies a stable release and its attestation, then uses only:
+The workflow checks out the validated `release_commit` SHA, verifies a stable
+release and its attestation, then stages that commit's exact GeneralServer file:
 
 ```sh
 ssh [verified-options] va-dashboard-deploy@159.69.55.178 \
-  va-dashboard-stage-compose < docker-compose.yml
+  va-dashboard-stage-compose < deployment/hetzner/generalserver.compose.yml
 ssh [verified-options] va-dashboard-deploy@159.69.55.178 \
   'va-dashboard-deploy ghcr.io/robert-velhorst/006-autoreminder-virtualworkers@sha256:FULL_64_HEX_DIGEST' < /dev/null
 ```
@@ -121,6 +128,21 @@ successful helper exit confirms only the installed script's local health checks.
 Timeout/failure is unconfirmed; inspect current runtime/rollback as administrator
 before any new deployment. Public HTTPS, WebSockets, authenticated workflows,
 provider acceptance and data/backup/restore checks remain separate.
+
+## GeneralServer Private Route
+
+See [GeneralServer preparation](GENERALSERVER.md). This target cannot deploy until
+the administrator has separately approved and provisioned the owned network,
+VA-only INPUT protection and interface-bound PostgreSQL proxy. After canonical
+hash equality but before candidate copy or deployment, the root helper inspects
+network metadata/membership, socket state/binding, firewall unit state, exact
+dedicated-chain order/content and the first/unique INPUT hook. Bounded read-only
+`iptables -S` output is parsed as canonical fixed tokens; extra/duplicate rules
+in the dedicated chain or a preceding bypass rule refuse deployment.
+Missing/mismatched prerequisites refuse deployment;
+they are never created or repaired by the gate. A successful preflight is not a
+TLS/query, concurrent-rule-change, Caddy or public-acceptance proof. `status` remains
+non-invasive and does not perform this deployment preflight.
 
 ## Tests
 

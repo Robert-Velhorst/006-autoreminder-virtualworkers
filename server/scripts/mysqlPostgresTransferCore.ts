@@ -8,6 +8,57 @@ export type ColumnShape = {
   nullable?: boolean;
 };
 
+export const QUEUE_BOOTSTRAP_TABLE = "aptlss_manager_queue_slots";
+
+export function isCanonicalQueueBootstrap(
+  rows: Record<string, unknown>[],
+  columns: ColumnShape[]
+): boolean {
+  const expected = new Map([
+    ["id", "integer"], ["vaId", "integer"],
+    ["token", "character varying"], ["leaseUntil", "timestamp without time zone"],
+  ]);
+  if (columns.length !== expected.size || new Set(columns.map(c => c.name)).size !== expected.size
+    || columns.some(c => expected.get(c.name) !== c.dataType || c.generated
+      || c.nullable !== (c.name !== "id"))) return false;
+  return rows.length === 4 && new Set(rows.map(row => row.id)).size === 4
+    && rows.every(row => Object.keys(row).length === expected.size
+      && Object.keys(row).every(key => expected.has(key))
+      && typeof row.id === "number" && [1, 2, 3, 4].includes(row.id)
+      && row.vaId === null && row.token === null && row.leaseUntil === null);
+}
+
+type BootstrapClient = {
+  query(sql: string): Promise<{ rows: Record<string, unknown>[] }>;
+};
+
+export async function inspectQueueBootstrap(
+  client: BootstrapClient, columns: ColumnShape[], sourceHasTable: boolean
+): Promise<"empty" | "bootstrap-seed" | "nonempty"> {
+  const { rows } = await client.query('SELECT * FROM "public"."aptlss_manager_queue_slots" ORDER BY "id" LIMIT 5');
+  if (!rows.length) return "empty";
+  return sourceHasTable && isCanonicalQueueBootstrap(rows, columns) ? "bootstrap-seed" : "nonempty";
+}
+
+export async function removeQueueBootstrap(
+  client: BootstrapClient, columns: ColumnShape[], sourceHasTable: boolean
+): Promise<void> {
+  if (!sourceHasTable) throw new Error("Queue bootstrap replacement requires the source table");
+  // SAVEPOINT refuses autocommit use; the caller owns the full copy transaction.
+  await client.query("SAVEPOINT queue_bootstrap_replacement");
+  await client.query('LOCK TABLE "public"."aptlss_manager_queue_slots" IN ACCESS EXCLUSIVE MODE');
+  if (await inspectQueueBootstrap(client, columns, sourceHasTable) !== "bootstrap-seed") {
+    throw new Error("Queue bootstrap changed before replacement; refusing to remove rows");
+  }
+  const removed = await client.query(`DELETE FROM "public"."aptlss_manager_queue_slots"
+    WHERE "id" IN (1,2,3,4) AND "vaId" IS NULL AND "token" IS NULL AND "leaseUntil" IS NULL
+    RETURNING *`);
+  if (!isCanonicalQueueBootstrap(removed.rows, columns)) {
+    throw new Error("Queue bootstrap deletion did not match exact defaults; rollback required");
+  }
+  await client.query("RELEASE SAVEPOINT queue_bootstrap_replacement");
+}
+
 export function getSequenceReset(maxValue: string | null, hasRows: boolean) {
   if (!hasRows || maxValue === null) return { value: "1", isCalled: false };
   const maximum = BigInt(maxValue);

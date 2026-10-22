@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Run from an independently reviewed checkout; the only input is a public key file.
-if [[ "$EUID" != 0 || "$#" != 1 || ! -f "$1" || -L "$1" ]]; then
-  echo 'Usage (root): install-ssh-gate.sh PUBLIC_KEY_FILE' >&2
+# Target names are fixed source choices, never caller-supplied paths.
+if [[ "$EUID" != 0 || "$#" != 2 || ! -f "$1" || -L "$1" ]]; then
+  echo 'Usage (root): install-ssh-gate.sh PUBLIC_KEY_FILE {default|generalserver}' >&2
   exit 2
 fi
 source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd -- "$source_dir/../.." && pwd)"
+case "$2" in
+  default) canonical_compose="$root/docker-compose.yml" ;;
+  generalserver) canonical_compose="$source_dir/generalserver.compose.yml" ;;
+  *) echo 'Unknown deployment target; no installation performed' >&2; exit 2 ;;
+esac
 installed=/usr/local/lib/va-dashboard-deploy
 account=va-dashboard-deploy
 home=/var/empty/va-dashboard-deploy
@@ -26,7 +31,7 @@ ssh-keygen -l -f "$1" >/dev/null
 for file in ssh_gate.py deploy.sh; do
   [[ -f "$source_dir/$file" && ! -L "$source_dir/$file" ]] || exit 2
 done
-/usr/bin/python3 -I - "$source_dir/ssh_gate.py" "$source_dir/deploy.sh" "$root/docker-compose.yml" <<'PY'
+/usr/bin/python3 -I - "$source_dir/ssh_gate.py" "$source_dir/deploy.sh" "$canonical_compose" <<'PY'
 import pathlib, stat, sys
 for name in sys.argv[1:]:
     path = pathlib.Path(name)
@@ -59,7 +64,7 @@ install -d -o root -g root -m 0700 /opt/va-dashboard
 install -o root -g root -m 0755 "$source_dir/ssh_gate.py" "$installed/ssh_gate.py"
 install -o root -g root -m 0755 "$source_dir/ssh_gate.py" "$installed/root-helper"
 install -o root -g root -m 0700 "$source_dir/deploy.sh" "$installed/deploy.sh"
-install -o root -g root -m 0600 "$root/docker-compose.yml" "$installed/docker-compose.yml"
+install -o root -g root -m 0600 "$canonical_compose" "$installed/docker-compose.yml"
 /usr/bin/python3 -I - "$installed" <<'PY'
 import hashlib, json, os, pathlib, sys
 root = pathlib.Path(sys.argv[1])

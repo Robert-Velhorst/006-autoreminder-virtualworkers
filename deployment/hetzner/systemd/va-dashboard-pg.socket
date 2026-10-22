@@ -1,0 +1,17 @@
+# Template only. Administrator must approve network/firewall before installation.
+[Unit]
+Description=VA-only PostgreSQL TCP entrypoint
+DefaultDependencies=no
+Requires=docker.service va-dashboard-pg-firewall.service
+After=sysinit.target docker.service va-dashboard-pg-firewall.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Socket]
+ListenStream=172.30.6.1:15433
+BindToDevice=br-va-db
+Accept=no
+FreeBind=no
+
+[Install]
+WantedBy=multi-user.target

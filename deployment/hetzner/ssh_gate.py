@@ -11,10 +11,13 @@ except ImportError:  # Portable parser tests; the installed gate requires Linux.
     pwd = None
 import re
 import secrets
+import selectors
+import shlex
 import signal
 import stat
 import subprocess
 import sys
+import time
 
 USER = "va-dashboard-deploy"
 INSTALL = Path("/usr/local/lib/va-dashboard-deploy")
@@ -23,6 +26,8 @@ STAGING = Path("/var/lib/va-dashboard-deploy")
 APP = Path("/opt/va-dashboard")
 STAGED_NAME = "compose.candidate"
 LIMIT = 64 * 1024
+FIREWALL_OUTPUT_LIMIT = 64 * 1024
+PREFLIGHT_OUTPUT_LIMIT = 64 * 1024
 DIGEST = r"ghcr\.io/robert-velhorst/006-autoreminder-virtualworkers@sha256:[a-f0-9]{64}"
 ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/root", "LANG": "C", "LC_ALL": "C"}
 
@@ -192,6 +197,125 @@ def run_installed_deploy(digest):
     print("VA deployment completed its local health checks; public acceptance is not implied")
 
 
+def preflight_output(arguments):
+    return bounded_output(arguments, PREFLIGHT_OUTPUT_LIMIT, "utf-8",
+                          "GeneralServer private route preflight")
+
+
+def firewall_output(chain):
+    if chain not in {"INPUT", "VA_DASHBOARD_PG"}:
+        raise Refused("Unexpected firewall inspection target")
+    return bounded_output(["/usr/sbin/iptables", "-w", "5", "-S", chain],
+                          FIREWALL_OUTPUT_LIMIT, "ascii", "Firewall inspection")
+
+
+def bounded_output(arguments, limit, encoding, description):
+    process = None
+    deadline = time.monotonic() + 10
+    try:
+        process = subprocess.Popen(
+            arguments, env=ENV,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            close_fds=True)
+        data = bytearray()
+        # Drain only a bounded stdout pipe; never retain or expose diagnostics.
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise Refused(f"{description} timed out")
+                chunk = os.read(process.stdout.fileno(), min(4096, limit + 1 - len(data)))
+                if not chunk:
+                    break
+                data.extend(chunk)
+                if len(data) > limit:
+                    raise Refused(f"{description} output exceeds its limit")
+        if process.wait(timeout=max(0, deadline - time.monotonic())) != 0:
+            raise Refused(f"{description} failed")
+        return data.decode(encoding)
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
+        raise Refused(f"{description} failed") from None
+    finally:
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=2)
+            except (OSError, subprocess.SubprocessError):
+                raise Refused(f"{description} cleanup failed") from None
+            finally:
+                try:
+                    process.stdout.close()
+                except OSError:
+                    raise Refused(f"{description} cleanup failed") from None
+
+
+def firewall_rules(output):
+    if (not isinstance(output, str) or len(output) > FIREWALL_OUTPUT_LIMIT
+            or not output.isascii() or any(ord(c) < 32 and c not in "\n\t" for c in output)):
+        raise Refused("Invalid firewall inspection output")
+    try:
+        rules = [shlex.split(line, comments=False, posix=True) for line in output.splitlines()]
+    except ValueError:
+        raise Refused("Invalid firewall inspection output") from None
+    if not rules or any(not rule for rule in rules):
+        raise Refused("Empty firewall inspection output")
+    return rules
+
+
+def firewall_preflight():
+    allow = ("-A VA_DASHBOARD_PG -s 172.30.6.2/32 -d 172.30.6.1/32 "
+             "-i br-va-db -p tcp -m tcp --dport 15433 -j ACCEPT").split()
+    if firewall_rules(firewall_output("VA_DASHBOARD_PG")) != [
+            ["-N", "VA_DASHBOARD_PG"], allow, ["-A", "VA_DASHBOARD_PG", "-j", "DROP"]]:
+        raise Refused("VA firewall chain differs from its exact reviewed rule order")
+    hook = ("-A INPUT -d 172.30.6.1/32 -p tcp -m tcp --dport 15433 "
+            "-j VA_DASHBOARD_PG").split()
+    rules = firewall_rules(firewall_output("INPUT"))
+    if (rules[:2] != [["-P", "INPUT", "ACCEPT"], hook]
+            or any(rule[:2] != ["-A", "INPUT"] or "VA_DASHBOARD_PG" in rule for rule in rules[2:])):
+        raise Refused("VA firewall hook must be the first and only INPUT reference")
+
+
+def generalserver_preflight():
+    # Inspect only network metadata, unit state and container labels, never env.
+    networks = json.loads(preflight_output([
+        "/usr/bin/docker", "network", "inspect", "va_dashboard_private"]))
+    if not isinstance(networks, list) or len(networks) != 1:
+        raise Refused("Expected exactly one VA private network")
+    network = networks[0]
+    if (network.get("Name") != "va_dashboard_private" or network.get("Driver") != "bridge"
+            or network.get("Scope") != "local" or network.get("Internal") is not False
+            or network.get("EnableIPv6") is not False
+            or network.get("Labels", {}).get("io.va-dashboard.owner") != "va-dashboard"
+            or network.get("Options", {}).get("com.docker.network.bridge.name") != "br-va-db"
+            or network.get("IPAM", {}).get("Config") != [
+                {"Subnet": "172.30.6.0/29", "Gateway": "172.30.6.1"}]):
+        raise Refused("VA private network does not match the reviewed target")
+    members = network.get("Containers")
+    if not isinstance(members, dict) or len(members) > 1:
+        raise Refused("VA private network has unexpected members")
+    for container, endpoint in members.items():
+        if (not re.fullmatch(r"[a-f0-9]{64}", container)
+                or endpoint.get("IPv4Address") != "172.30.6.2/29"):
+            raise Refused("VA private network address is occupied unexpectedly")
+        labels = json.loads(preflight_output([
+            "/usr/bin/docker", "inspect", "--format", "{{json .Config.Labels}}", container]))
+        if (labels.get("com.docker.compose.project") != "va-dashboard"
+                or labels.get("com.docker.compose.service") != "app"):
+            raise Refused("VA private network contains another application")
+    properties = dict(line.split("=", 1) for line in preflight_output([
+        "/usr/bin/systemctl", "show", "va-dashboard-pg.socket",
+        "--property=ActiveState,Listen,BindToDevice"]).splitlines() if "=" in line)
+    if (properties.get("ActiveState") != "active"
+            or properties.get("Listen") != "172.30.6.1:15433 (Stream)"
+            or properties.get("BindToDevice") != "br-va-db"):
+        raise Refused("VA PostgreSQL proxy socket is not available on its fixed interface")
+    preflight_output(["/usr/bin/systemctl", "is-active", "--quiet", "va-dashboard-pg-firewall.service"])
+    firewall_preflight()
+
+
 def root_command(arguments):
     if arguments == ["status"]:
         action, digest = "status", None
@@ -226,6 +350,8 @@ def root_command(arguments):
                 os.close(directory)
             if hashlib.sha256(candidate).digest() != hashlib.sha256(assets["docker-compose.yml"]).digest():
                 raise Refused("Staged Compose differs from the root-installed canonical release")
+            if candidate.startswith(b"# va-deployment-target: generalserver\n"):
+                generalserver_preflight()
             atomic_write(app, ".docker-compose.yml.candidate", candidate, 0)
             run_installed_deploy(digest)
         finally:
@@ -261,7 +387,7 @@ def main():
             root_command(sys.argv[1:])
             return 0
         return gate_command(os.environ.get("SSH_ORIGINAL_COMMAND", ""), sys.stdin.buffer)
-    except (Refused, OSError, ValueError, KeyError, TypeError):
+    except (Refused, OSError, ValueError, KeyError, TypeError, AttributeError):
         # Do not expose paths, provider output, manifests or runtime secrets.
         print("VA deployment request refused or unconfirmed; administrator review required", file=sys.stderr)
         return 1
