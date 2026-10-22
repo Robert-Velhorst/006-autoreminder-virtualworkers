@@ -235,6 +235,11 @@ jobs:
           DATABASE_URL="$RESTORE_DATABASE_URL" pnpm db:verify-parity
       - name: Validate Hetzner deployment script syntax
         run: bash -n deployment/hetzner/deploy.sh
+
+      - name: Validate restricted VA SSH gate
+        run: |
+          python3 -B -I deployment/hetzner/ssh_gate_test.py
+          bash -n deployment/hetzner/install-ssh-gate.sh
       - name: Verify migration metadata matches the schema
         shell: bash
         run: |

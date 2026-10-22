@@ -42,7 +42,7 @@ The repository has a manual GitHub Actions workflow named **Deploy to Hetzner**.
 
 Bootstrap the host before using the workflow:
 
-1. Provision Docker Engine and the Compose plugin, then create `/opt/va-dashboard` owned by a dedicated deployment account that can run Docker. This account has control of the host through Docker; restrict its SSH key and access accordingly.
+1. Provision Docker Engine and the Compose plugin, then install the [restricted SSH deployment gate](deployment/hetzner/SSH_GATE.md) from reviewed source using a dedicated public key. The account is `va-dashboard-deploy`, without Docker-group membership or a general shell/sudo grant. `/opt/va-dashboard` and the installed deployment code remain root-owned; only `/var/lib/va-dashboard-deploy` is writable through this account's staging command.
 2. Put the production `.env` at `/opt/va-dashboard/.env`, set its permissions to `0600`, and configure the verified PostgreSQL URL, application secrets, and integrations. The deploy workflow never reads or transfers this file.
 3. Configure a stable HTTPS reverse proxy to the Compose loopback port. The published port is derived from `PORT` in the host `.env`; do not expose it publicly.
 4. Protect the `main` branch. In GitHub, create a `production` environment with at least one required reviewer and restrict deployments to protected branches. This repository allows the deployment initiator to approve their own deployment, as configured for its single-owner workflow; this is not an independent second-person approval. The workflow's preflight fails unless the reviewer and protected-branch rules exist and dispatch runs from `main`. Add these environment secrets: `HETZNER_SSH_HOST` (DNS name or IPv4, standard SSH port 22), `HETZNER_SSH_USER`, `HETZNER_SSH_PRIVATE_KEY`, and `HETZNER_SSH_KNOWN_HOSTS`. The last secret must contain the host key obtained and verified through a trusted channel; the workflow does not use unauthenticated `ssh-keyscan`.
@@ -50,6 +50,14 @@ Bootstrap the host before using the workflow:
 6. From the protected `main` branch, start **Deploy to Hetzner** with a stable published release tag and explicitly select `deploy`. GitHub's `production` environment approval is an additional gate. The current `v1.0.0-rc.1` release is a prerelease and is rejected.
 
 The deployment workflow uses one Compose service. Before replacing it, the host pins the running container's exact image ID under a local rollback tag; rollback uses that tag without pulling a mutable registry tag and checks the restored container's health. If the first deployment fails, its application container is removed because there is no previous version to restore. Rollback tags and other old images are intentionally retained for recovery and are not automatically pruned. The workflow does not remove database data.
+
+The SSH workflow stages Compose bytes and requests an immutable digest; it never
+uploads executable shell code. A root-owned helper accepts only the fixed VA
+repository digest format and verifies staged Compose against the root-installed
+canonical file before invoking the installed, hash-pinned `deploy.sh`. A changed
+Compose or deploy script requires a separate administrator-reviewed installation.
+`va-dashboard-status` reports connection/configuration readiness without reading
+runtime secret values or claiming application, DNS or TLS acceptance.
 
 ## PostgreSQL database and legacy transfer status
 
