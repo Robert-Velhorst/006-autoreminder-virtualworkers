@@ -34,6 +34,15 @@ not acceptance. Generated review values must also reconcile; they must not be
 inserted as ordinary writable columns. Import batches and verification reads
 must remain bounded for multi-megabyte source records.
 
+Legacy schema upgrades use explicit manifests in `mysqlPostgresTransferCore.ts`:
+four `reply_threads` column aliases retain the old Joyce-named values under their
+worker-neutral names; collisions are refused. Thirty known added columns are
+checked for exact type, nullability and default, and their expected initial
+values participate in row reconciliation. Known new feature tables must be
+empty; if a table already exists in the source, its rows are copied rather than
+skipped. Unknown columns, tables or generated expressions remain errors. This
+does not invent worker ownership or scheduled-job approvals for legacy records.
+
 Before production import, require:
 
 - Original backup retained and verified, with no edits to the source database.

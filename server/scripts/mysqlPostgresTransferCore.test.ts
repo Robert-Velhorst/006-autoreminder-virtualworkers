@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { getSchemaDifferences, insertRowBytes, isCanonicalManagerGeneratedColumn, type ColumnShape } from "./mysqlPostgresTransferCore";
+import { getSchemaDifferences, getTransferPairs, LEGACY_UPGRADE_COLUMNS, LEGACY_REPLY_ALIASES,
+  OPTIONAL_FEATURE_TABLES, insertRowBytes, isCanonicalManagerGeneratedColumn, type ColumnShape } from "./mysqlPostgresTransferCore";
 
 const table = "aptlss_manager_runs";
 const pgDigest: ColumnShape = {
@@ -12,6 +13,31 @@ const pgUrgent: ColumnShape = {
 };
 
 describe("fail-closed generated review column compatibility", () => {
+  const escapedSource = [
+    { name: "reviewDigest", dataType: "varchar", columnType: "varchar(64)", generated: true,
+      generationExpression: "json_unquote(json_extract(`snapshotJson`,_utf8mb4\\'$.implementationDigest\\'))" },
+    { name: "reviewUrgent", dataType: "tinyint", columnType: "tinyint(1)", generated: true,
+      generationExpression: "coalesce(json_contains(json_extract(`snapshotJson`,_utf8mb4\\'$.interventions[*].severity\\'),_utf8mb4\\'\"urgent\"\\'),0)" },
+  ];
+
+  it("accepts the exact actual MySQL escaped metadata expressions", () => {
+    expect(getSchemaDifferences(new Map([[table, escapedSource]]), new Map([[table, [pgDigest, pgUrgent]]]), new Set())).toEqual([]);
+  });
+
+  it.each([
+    [0, "implementationDigest", "implementationdigest"],
+    [0, "implementationDigest", "implementationDigest_utf8mb4"],
+    [0, "implementationDigest", "otherDigest"],
+    [1, "severity", "Severity"],
+    [1, "urgent", "URGENT"],
+    [1, "urgent", "urgent "],
+    [1, ",0)", ",1)"],
+    [1, "[*]", "[0]"],
+  ] as const)("rejects modified escaped literals/operators %s %s", (index, from, to) => {
+    const source = escapedSource[index];
+    expect(isCanonicalManagerGeneratedColumn(table, { ...source,
+      generationExpression: source.generationExpression.replace(from, to) }, "mysql")).toBe(false);
+  });
   it("accepts schema expressions and PostgreSQL information_schema casts", () => {
     for (const column of [pgDigest, pgUrgent]) {
       expect(isCanonicalManagerGeneratedColumn(table, column, "postgres")).toBe(true);
@@ -64,5 +90,70 @@ describe("fail-closed generated review column compatibility", () => {
 
   it("accounts for UTF-8, buffers, nulls, and parameter overhead", () => {
     expect(insertRowBytes(["\u20ac", Buffer.alloc(7), null, 123])).toBe(4 * 16 + 3 + 7 + 3);
+  });
+});
+
+describe("explicit legacy upgrade manifest", () => {
+  // Independent observed metadata shapes. No private file or source records are needed.
+  const observed: Record<string, Record<string, string>> = {
+    aptlss_manager_state: { currentCheckId: "integer", historyScopeHash: "varchar(64)" },
+    aptlss_manager_updates: { reportKind: "varchar(24)", actionId: "varchar(256)", assessmentRunId: "integer", requestKey: "varchar(36)" },
+    browser_tab_states: { captureSequence: "bigint", sourceCapturedAt: "timestamp" },
+    digest_jobs: { windowKey: "varchar(96)", deliveryPhase: "varchar(24)", recipientEmail: "text", subject: "text", html: "text",
+      payloadHash: "varchar(64)", attemptId: "varchar(64)", attemptCount: "integer", attemptedAt: "timestamp", nextAttemptAt: "timestamp",
+      providerReceipt: "text", reconciledAt: "timestamp", reconciledBy: "integer", reconciliationNote: "text" },
+    payment_cycles: { predecessorCycleId: "integer" },
+    scheduled_jobs: { approvedByUserId: "integer", approvedSessionEpoch: "bigint", approvedAt: "timestamp", approvalHash: "varchar(64)" },
+    time_entries: { trackedUserId: "integer", trackedProfileId: "integer" },
+    users: { sessionEpoch: "bigint" },
+  };
+  const defaults: Record<string, string> = { reportKind: "'update'::character varying", captureSequence: "0", attemptCount: "0", sessionEpoch: "1" };
+  const cases = Object.entries(observed).flatMap(([table, fields]) => Object.entries(fields).map(([name, type]) => ({ table, column: {
+    name, dataType: type.startsWith("varchar") ? "character varying" : type === "timestamp" ? "timestamp without time zone" : type,
+    columnType: type, nullable: !(name in defaults), columnDefault: defaults[name] ?? null, generated: false,
+  } })));
+
+  it("covers exactly all 30 observed additions", () => {
+    expect(LEGACY_UPGRADE_COLUMNS.map(c => `${c.table}.${c.name}:${c.type}`).sort())
+      .toEqual(cases.map(({ table, column: c }) => `${table}.${c.name}:${c.columnType}`).sort());
+    expect(cases).toHaveLength(30);
+  });
+
+  it.each(cases)("accepts only the exact shape of $table.$column.name", ({ table, column }) => {
+    const differences = (c: ColumnShape) => getSchemaDifferences(new Map([[table, []]]), new Map([[table, [c]]]), new Set());
+    expect(differences(column)).toEqual([]);
+    for (const change of [
+      { nullable: !column.nullable }, { dataType: "unknown" }, { generated: true },
+      { generationExpression: "1" }, { identity: true }, { columnDefault: "now()" },
+      { name: `${column.name}Unknown` },
+      ...(column.columnType.startsWith("varchar") ? [{ columnType: "varchar(999)" }] : []),
+      ...(column.columnDefault !== null ? [{ columnDefault: null }, { columnDefault: "'context'::character varying" }, { columnDefault: "999" }] : []),
+    ]) expect(differences({ ...column, ...change }).length).toBeGreaterThan(0);
+    expect(getSchemaDifferences(new Map([["unrelated", []]]), new Map([["unrelated", [column]]]), new Set()).length).toBeGreaterThan(0);
+    const pairs = getTransferPairs(table, [], [column]);
+    expect(pairs[0].defaultValue).toBe(column.nullable ? null : column.name === "reportKind" ? "update" : column.name === "sessionEpoch" ? 1 : 0);
+    // A source-present field always wins, even if the target has a migration default.
+    expect(getTransferPairs(table, [column], [column])[0]).not.toHaveProperty("defaultValue");
+  });
+
+  it.each(Object.entries(LEGACY_REPLY_ALIASES))("maps %s and rejects old/new collisions", (oldName, newName) => {
+    const old = { name: oldName, dataType: "text" };
+    const current = { ...old, name: newName };
+    expect(getTransferPairs("reply_threads", [old], [current])[0]).toEqual({ source: old, target: current });
+    expect(() => getTransferPairs("reply_threads", [old, current], [current])).toThrow("alias collision");
+    expect(() => getTransferPairs("reply_threads", [old], [old, current])).toThrow("alias collision");
+    expect(() => getTransferPairs("other", [old], [current])).toThrow("missing");
+  });
+
+  it("allows only named optional tables and still copies source-present feature tables", () => {
+    const names = ["aptlss_manager_checks", "assignment_events", "atis_analysis_items", "atis_analysis_requests", "atis_chatbot_conversations",
+      "atis_checklist_sync", "digest_job_items", "financial_ledger_events", "revoked_sessions", "worker_lifecycle_audit"];
+    expect([...OPTIONAL_FEATURE_TABLES].sort()).toEqual(names.sort());
+    const target = new Map(names.map(name => [name, [] as ColumnShape[]]));
+    expect(getSchemaDifferences(new Map(), target, new Set())).toEqual([]);
+    expect(getSchemaDifferences(target, target, new Set(names))).toEqual([]);
+    expect(getSchemaDifferences(new Map(), new Map([["unknown", []]]), new Set())).toContain("PostgreSQL has unexpected table unknown");
+    expect(getSchemaDifferences(new Map([["unknown", []]]), new Map(), new Set())).toContain("PostgreSQL is missing table unknown");
+    expect(getSchemaDifferences(new Map([["atis_checklist_completion", []]]), new Map([["atis_checklist_completion", []]]), new Set(["atis_checklist_completion"]))).toEqual([]);
   });
 });

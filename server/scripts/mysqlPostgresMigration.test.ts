@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { runMysqlPostgresMigration } from "../../scripts/migrate-mysql-to-postgres";
 import { removeQueueBootstrap } from "./mysqlPostgresTransferCore";
 import { decodeManagerSnapshotStorage } from "../db/managerSnapshotStorage";
-import { INSERT_BATCH_MAX_BYTES, insertRowBytes } from "./mysqlPostgresTransferCore";
+import { INSERT_BATCH_MAX_BYTES, insertRowBytes, LEGACY_REPLY_ALIASES, LEGACY_UPGRADE_COLUMNS, OPTIONAL_FEATURE_TABLES, type ColumnShape } from "./mysqlPostgresTransferCore";
 
 const drivers = vi.hoisted(() => ({ source: null as any, target: null as any }));
 vi.mock("mysql2", () => ({ default: { createConnection: () => drivers.source } }));
@@ -13,7 +13,7 @@ vi.mock("pg", () => ({
 
 const queue = "aptlss_manager_queue_slots";
 const targetOnly = ["atis_chatbot_conversations", "atis_checklist_completion", "atis_checklist_sync"];
-const columns = [
+const columns: ColumnShape[] = [
   { name: "id", dataType: "integer", nullable: false },
   { name: "vaId", dataType: "integer", nullable: true },
   { name: "token", dataType: "character varying", nullable: true },
@@ -25,7 +25,7 @@ const managerColumns = [
   { name: "id", dataType: "integer", nullable: false },
   { name: "snapshotJson", dataType: "text", nullable: false },
   { name: "otherText", dataType: "text", nullable: false },
-  { name: "reviewDigest", dataType: "character varying", nullable: true },
+  { name: "reviewDigest", dataType: "character varying", columnType: "varchar(64)", nullable: true },
   { name: "reviewUrgent", dataType: "boolean", nullable: true },
 ];
 const pgGenerated: Record<string, string> = {
@@ -48,10 +48,13 @@ function fixture(options: {
   failReconciliation?: boolean; wrongDelete?: boolean; failSetup?: boolean;
   failCopy?: boolean; corruptDigest?: boolean;
   manager?: boolean; sourceGenerated?: boolean; badExpression?: boolean; defaultGenerated?: boolean;
+  escapedGenerated?: boolean; table?: string; sourceColumns?: ColumnShape[]; targetColumns?: ColumnShape[];
+  optionalTables?: string[];
   tamper?: (row: Row) => void;
 } = {}) {
-  const table = options.manager ? runs : queue;
-  const tableColumns = options.manager ? managerColumns : columns;
+  const table = options.table ?? (options.manager ? runs : queue);
+  const tableColumns: ColumnShape[] = options.targetColumns ?? (options.manager ? managerColumns : columns);
+  const sourceColumns = options.sourceColumns ?? tableColumns;
   let rows = structuredClone(options.rows ?? (options.manager ? [] : seeds()));
   let snapshot: Row[] | undefined;
   let locked = false;
@@ -63,21 +66,24 @@ function fixture(options: {
     { id: 1, vaId: 8, token: "retained-source-lease", leaseUntil: "2026-10-22 10:00:00" },
     { id: 9, vaId: null, token: null, leaseUntil: null },
   ];
-  const targetColumns = [table, ...targetOnly].flatMap(tableName =>
+  const targetColumns = [...new Set([table, ...targetOnly, ...(options.optionalTables ?? [])])].flatMap(tableName =>
     (tableName === table ? tableColumns : [columns[0]]).map(c => ({
       tableName, columnName: c.name, dataType: c.dataType, udtName: c.dataType,
       generated: options.manager && pgGenerated[c.name] ? "ALWAYS" : "NEVER",
       generationExpression: options.manager ? pgGenerated[c.name] + (options.badExpression ? " || 'wrong'" : "") : null,
       identity: "NO", nullable: c.nullable ? "YES" : "NO", columnDefault: null,
+      ...(tableName === table ? { columnDefault: c.columnDefault ?? null,
+        characterMaximumLength: c.columnType?.match(/^varchar\((\d+)\)$/)?.[1] ?? null } : {}),
     })));
   const sourceQuery = async (sql: string) => {
     events.push(`source:${sql}`);
     if (sql.includes("information_schema.tables")) return [options.sourceAbsent ? [] : [{ tableName: table, engine: "InnoDB" }]];
-    if (sql.includes("information_schema.columns")) return [options.sourceAbsent ? [] : tableColumns.map((c, i) => ({
+    if (sql.includes("information_schema.columns")) return [options.sourceAbsent ? [] : sourceColumns.map((c, i) => ({
       tableName: table, columnName: c.name,
       dataType: options.manager && c.name === "reviewDigest" ? "varchar" : options.manager && c.name === "reviewUrgent" ? "tinyint" : c.dataType,
       ordinalPosition: i + 1, extra: options.sourceGenerated && mysqlGenerated[c.name] ? "VIRTUAL GENERATED" : options.defaultGenerated ? "DEFAULT_GENERATED" : "",
-      generationExpression: options.sourceGenerated ? mysqlGenerated[c.name] : null,
+      generationExpression: options.sourceGenerated ? options.escapedGenerated
+        ? mysqlGenerated[c.name]?.replaceAll("'", "\\'") : mysqlGenerated[c.name] : null,
     }))];
     if (sql.includes("information_schema.TABLE_CONSTRAINTS")) return [[{ tableName: table, columnName: "id", ordinalPosition: 1 }]];
     if (sql.startsWith("SELECT COUNT")) return [[{ count: String(sourceRows.length) }]];
@@ -86,7 +92,8 @@ function fixture(options: {
   };
   drivers.source = {
     promise: () => ({ query: sourceQuery, end: async () => {} }),
-    query: () => ({ stream: (options: unknown) => {
+    query: (sql: string) => ({ stream: (options: unknown) => {
+      events.push(`source:${sql}`);
       streamOptions.push(options);
       return (async function* () { for (const row of sourceRows) yield row; })();
     } }),
@@ -184,6 +191,15 @@ describe("manager snapshot migration through raw drivers", () => {
     expect(f.events).toContain("COMMIT");
   });
 
+  it("roundtrips actual escaped MySQL generated metadata without dropping generated values", async () => {
+    const f = fixture({ manager: true, sourceGenerated: true, escapedGenerated: true, sourceRows: [managerRow(1)] });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await runMysqlPostgresMigration(["copy", "--execute"], env);
+    expect(f.rows()[0].reviewDigest).toBe("d".repeat(64));
+    expect(f.rows()[0].reviewUrgent).toBe(true);
+    expect(f.events).toContain("COMMIT");
+  });
+
   it.each(["reviewDigest", "reviewUrgent", "snapshot checksum", "snapshot projection", "otherText"])("rolls back %s tampering", async field => {
     const f = fixture({ manager: true, sourceRows: [managerRow(1)], tamper: row => {
       if (field === "reviewDigest") row.reviewDigest = "wrong";
@@ -232,6 +248,124 @@ describe("manager snapshot migration through raw drivers", () => {
       expect(bytes <= INSERT_BATCH_MAX_BYTES || batch.length === 3).toBe(true);
     }
   }, 30_000);
+});
+
+describe("legacy schema upgrades through raw drivers", () => {
+  const replyColumns: ColumnShape[] = [columns[0], ...Object.keys(LEGACY_REPLY_ALIASES).map(name => ({
+    name, dataType: name.endsWith("At") ? "timestamp without time zone" : "text", nullable: true,
+  }))];
+  const replyTarget = replyColumns.map(c => ({ ...c, name: LEGACY_REPLY_ALIASES[c.name] ?? c.name }));
+  const replyRow = { id: 7, lastNonJoyceMsgAt: "2026-10-22 09:10:11.123456", lastNonJoyceAuthor: "Exact Author",
+    lastNonJoyceText: " Exact original text\n\"quoted\" ", lastJoyceReplyAt: "2026-10-22 09:12:00" };
+
+  it("copies all four aliases with physical source SELECT/ORDER BY and unchanged values", async () => {
+    const f = fixture({ table: "reply_threads", sourceColumns: replyColumns, targetColumns: replyTarget, rows: [],
+      sourceRows: [replyRow, { ...replyRow, id: 9, lastNonJoyceMsgAt: null, lastNonJoyceAuthor: null, lastNonJoyceText: null, lastJoyceReplyAt: null }] });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await runMysqlPostgresMigration(["copy", "--execute"], env);
+    expect(f.rows()).toEqual(f.sourceRows.map(row => Object.fromEntries(Object.entries(row).map(([name, value]) => [LEGACY_REPLY_ALIASES[name] ?? name, value]))));
+    const select = f.events.find(sql => sql.startsWith("source:SELECT ") && sql.includes("FROM `reply_threads` ORDER BY"))!;
+    expect(select).toContain("ORDER BY `id`");
+    for (const [oldName, newName] of Object.entries(LEGACY_REPLY_ALIASES)) {
+      expect(select).toContain(`\`${oldName}\``);
+      expect(select).not.toContain(`\`${newName}\``);
+    }
+  });
+
+  it.each(Object.values(LEGACY_REPLY_ALIASES))("rolls back changed alias value %s", async field => {
+    const f = fixture({ table: "reply_threads", sourceColumns: replyColumns, targetColumns: replyTarget, rows: [],
+      sourceRows: [replyRow], tamper: row => { row[field] = "modified"; } });
+    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow("Row reconciliation failed");
+    expect(f.events).toContain("ROLLBACK");
+    expect(f.rows()).toEqual([]);
+  });
+
+  it.each(["source", "target"])("rejects %s alias collisions before inserting", async side => {
+    const f = fixture({ table: "reply_threads", rows: [], sourceRows: [replyRow],
+      sourceColumns: side === "source" ? [...replyColumns, replyTarget[1]] : replyColumns,
+      targetColumns: side === "target" ? [...replyTarget, replyColumns[1]] : replyTarget });
+    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow("alias collision");
+    expect(f.batches).toEqual([]);
+  });
+
+  const upgrades = LEGACY_UPGRADE_COLUMNS.map(c => ({ table: c.table, column: {
+    name: c.name, dataType: c.type.startsWith("varchar") ? "character varying" : c.type === "timestamp" ? "timestamp without time zone" : c.type,
+    columnType: c.type, nullable: c.defaultValue === undefined,
+    columnDefault: c.defaultValue === undefined ? null : typeof c.defaultValue === "string" ? `'${c.defaultValue}'::character varying` : String(c.defaultValue),
+  }, value: c.defaultValue ?? null }));
+
+  it.each(upgrades)("copies and reconciles explicit added field $table.$column.name", async ({ table, column, value }) => {
+    const f = fixture({ table, rows: [], sourceRows: [{ id: 3, original: "preserve me" }],
+      sourceColumns: [columns[0], { name: "original", dataType: "text" }], targetColumns: [columns[0], { name: "original", dataType: "text" }, column] });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await runMysqlPostgresMigration(["copy", "--execute"], env);
+    expect(f.rows()).toEqual([{ id: 3, original: "preserve me", [column.name]: value }]);
+    expect(f.events).toContain("COMMIT");
+  });
+
+  it.each(upgrades)("detects added field tampering $table.$column.name", async ({ table, column }) => {
+    const f = fixture({ table, rows: [], sourceRows: [{ id: 3 }], sourceColumns: [columns[0]], targetColumns: [columns[0], column],
+      tamper: row => { row[column.name] = column.nullable ? "invented" : column.name === "reportKind" ? "context" : 99; } });
+    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow("Row reconciliation failed");
+    expect(f.events).toContain("ROLLBACK");
+    expect(f.rows()).toEqual([]);
+  });
+
+  it.each(upgrades)("preserves source-present $table.$column.name instead of using upgrade defaults", async ({ table, column }) => {
+    const value = column.dataType.startsWith("timestamp") ? "2026-10-22 09:10:11.123456"
+      : ["bigint", "integer"].includes(column.dataType) ? "42" : "original source value";
+    const f = fixture({ table, rows: [], sourceRows: [{ id: 3, [column.name]: value }],
+      sourceColumns: [columns[0], column], targetColumns: [columns[0], column] });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await runMysqlPostgresMigration(["copy", "--execute"], env);
+    expect(f.rows()).toEqual([{ id: 3, [column.name]: value }]);
+  });
+
+  it("copies every source-present checklist completion row and reports only absent optional tables", async () => {
+    const f = fixture({ table: "atis_checklist_completion", rows: [], sourceRows: [{ id: 1 }, { id: 2 }, { id: 3 }],
+      sourceColumns: [columns[0]], targetColumns: [columns[0]], optionalTables: [...OPTIONAL_FEATURE_TABLES] });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await runMysqlPostgresMigration(["copy", "--execute"], env);
+    expect(f.rows()).toEqual(f.sourceRows);
+    const report = JSON.parse(log.mock.calls.at(-1)![0]);
+    expect(report.tables.atis_checklist_completion.sourceRows).toBe(3);
+    expect(report.targetOnlyTables).toEqual([...OPTIONAL_FEATURE_TABLES].sort());
+    expect(report.optionalTargetOnlyTables).toEqual([...OPTIONAL_FEATURE_TABLES].filter(table => !targetOnly.includes(table)).sort());
+    expect(report.expectedTargetOnlyTables).not.toContain("atis_checklist_completion");
+  });
+
+  it.each([...OPTIONAL_FEATURE_TABLES])("copies source-present optional table %s instead of skipping it", async table => {
+    const f = fixture({ table, rows: [], sourceRows: [{ id: 1 }, { id: 5 }],
+      sourceColumns: [columns[0]], targetColumns: [columns[0]] });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await runMysqlPostgresMigration(["copy", "--execute"], env);
+    expect(f.rows()).toEqual(f.sourceRows);
+    const report = JSON.parse(log.mock.calls.at(-1)![0]);
+    expect(report.tables[table].sourceRows).toBe(2);
+    expect(report.targetOnlyTables).not.toContain(table);
+  });
+
+  it("rejects a missing physical source cell instead of inventing null", async () => {
+    const f = fixture({ table: "reply_threads", sourceColumns: replyColumns, targetColumns: replyTarget, rows: [],
+      sourceRows: [{ id: 7 }] });
+    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow("Missing source row column");
+    expect(f.batches).toEqual([]);
+    expect(f.events).toContain("ROLLBACK");
+  });
+
+  it("rejects a missing target null cell during full-row reconciliation", async () => {
+    const column = upgrades.find(c => c.column.name === "currentCheckId")!.column;
+    const f = fixture({ table: "aptlss_manager_state", rows: [], sourceRows: [{ id: 3 }],
+      sourceColumns: [columns[0]], targetColumns: [columns[0], column], tamper: row => { delete row.currentCheckId; } });
+    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow("Missing target row column");
+    expect(f.events).toContain("ROLLBACK");
+  });
+
+  it("still rejects nonempty optional feature tables", async () => {
+    const f = fixture({ rows: [], optionalTables: [...OPTIONAL_FEATURE_TABLES], otherRows: true });
+    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow("nonEmptyTargetTables");
+    expect(f.batches).toEqual([]);
+  });
 });
 
 describe("bootstrap seed replacement in the actual transfer transaction (mock drivers)", () => {

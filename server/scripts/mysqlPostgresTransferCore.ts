@@ -7,13 +7,106 @@ export type ColumnShape = {
   generated?: boolean;
   generationExpression?: string | null;
   nullable?: boolean;
+  columnDefault?: string | null;
+  identity?: boolean;
 };
+
+export const OPTIONAL_FEATURE_TABLES = new Set([
+  "aptlss_manager_checks", "assignment_events", "atis_analysis_items",
+  "atis_analysis_requests", "atis_chatbot_conversations", "atis_checklist_sync",
+  "digest_job_items", "financial_ledger_events", "revoked_sessions", "worker_lifecycle_audit",
+]);
+
+export const LEGACY_REPLY_ALIASES: Readonly<Record<string, string>> = {
+  lastNonJoyceMsgAt: "lastNonWorkerMsgAt",
+  lastNonJoyceAuthor: "lastNonWorkerAuthor",
+  lastNonJoyceText: "lastNonWorkerText",
+  lastJoyceReplyAt: "lastWorkerReplyAt",
+};
+
+export function destinationColumnName(table: string, name: string): string {
+  return table === "reply_threads" && Object.hasOwn(LEGACY_REPLY_ALIASES, name) ? LEGACY_REPLY_ALIASES[name]! : name;
+}
+
+type UpgradeColumn = { table: string; name: string; type: string; defaultValue?: string | number };
+// Exact post-migration shapes, not a blanket permission for nullable/defaulted fields.
+export const LEGACY_UPGRADE_COLUMNS: readonly UpgradeColumn[] = [
+  { table: "aptlss_manager_state", name: "currentCheckId", type: "integer" },
+  { table: "aptlss_manager_state", name: "historyScopeHash", type: "varchar(64)" },
+  { table: "aptlss_manager_updates", name: "reportKind", type: "varchar(24)", defaultValue: "update" },
+  { table: "aptlss_manager_updates", name: "actionId", type: "varchar(256)" },
+  { table: "aptlss_manager_updates", name: "assessmentRunId", type: "integer" },
+  { table: "aptlss_manager_updates", name: "requestKey", type: "varchar(36)" },
+  { table: "browser_tab_states", name: "captureSequence", type: "bigint", defaultValue: 0 },
+  { table: "browser_tab_states", name: "sourceCapturedAt", type: "timestamp" },
+  { table: "digest_jobs", name: "windowKey", type: "varchar(96)" },
+  { table: "digest_jobs", name: "deliveryPhase", type: "varchar(24)" },
+  { table: "digest_jobs", name: "recipientEmail", type: "text" },
+  { table: "digest_jobs", name: "subject", type: "text" },
+  { table: "digest_jobs", name: "html", type: "text" },
+  { table: "digest_jobs", name: "payloadHash", type: "varchar(64)" },
+  { table: "digest_jobs", name: "attemptId", type: "varchar(64)" },
+  { table: "digest_jobs", name: "attemptCount", type: "integer", defaultValue: 0 },
+  { table: "digest_jobs", name: "attemptedAt", type: "timestamp" },
+  { table: "digest_jobs", name: "nextAttemptAt", type: "timestamp" },
+  { table: "digest_jobs", name: "providerReceipt", type: "text" },
+  { table: "digest_jobs", name: "reconciledAt", type: "timestamp" },
+  { table: "digest_jobs", name: "reconciledBy", type: "integer" },
+  { table: "digest_jobs", name: "reconciliationNote", type: "text" },
+  { table: "payment_cycles", name: "predecessorCycleId", type: "integer" },
+  { table: "scheduled_jobs", name: "approvedByUserId", type: "integer" },
+  { table: "scheduled_jobs", name: "approvedSessionEpoch", type: "bigint" },
+  { table: "scheduled_jobs", name: "approvedAt", type: "timestamp" },
+  { table: "scheduled_jobs", name: "approvalHash", type: "varchar(64)" },
+  { table: "time_entries", name: "trackedUserId", type: "integer" },
+  { table: "time_entries", name: "trackedProfileId", type: "integer" },
+  { table: "users", name: "sessionEpoch", type: "bigint", defaultValue: 1 },
+];
+
+function upgradeDefinition(table: string, column: ColumnShape): UpgradeColumn | undefined {
+  const definition = LEGACY_UPGRADE_COLUMNS.find(c => c.table === table && c.name === column.name);
+  if (!definition || column.generated || column.generationExpression || column.identity) return undefined;
+  const type = column.dataType === "character varying" ? column.columnType
+    : column.dataType === "timestamp without time zone" ? "timestamp" : column.dataType;
+  const hasDefault = definition.defaultValue !== undefined;
+  const expectedDefault = typeof definition.defaultValue === "string"
+    ? `'${definition.defaultValue}'::character varying` : String(definition.defaultValue);
+  return type === definition.type && column.nullable === !hasDefault
+    && (hasDefault ? column.columnDefault === expectedDefault : column.columnDefault == null)
+    ? definition : undefined;
+}
+
+export function getTransferPairs<S extends ColumnShape, T extends ColumnShape>(
+  table: string, source: S[], target: T[]
+): Array<{ source: ColumnShape; target: T; defaultValue?: string | number | null }> {
+  const errors = getSchemaDifferences(new Map([[table, source]]), new Map([[table, target]]), new Set());
+  if (errors.length) throw new Error(errors.join("; "));
+  const pairs: Array<{ source: ColumnShape; target: T; defaultValue?: string | number | null }> =
+    [...source].sort((a, b) => a.name.localeCompare(b.name)).map(column => ({
+      source: column,
+      target: target.find(t => t.name === destinationColumnName(table, column.name))!,
+    }));
+  for (const column of target) {
+    if (pairs.some(pair => pair.target.name === column.name)) continue;
+    const definition = upgradeDefinition(table, column)!;
+    pairs.push({ source: column, target: column, defaultValue: definition.defaultValue ?? null });
+  }
+  return pairs;
+}
 
 export const QUEUE_BOOTSTRAP_TABLE = "aptlss_manager_queue_slots";
 
 // Normalize syntax only, never literals or arbitrary casts/operators. These are
 // the schema DDL and information_schema deparses, not a general SQL equivalence test.
 function normalizeGeneration(expression: string, dialect: "mysql" | "postgres"): string {
+  // Only these complete information_schema escape spellings are known equivalents.
+  if (dialect === "mysql") {
+    const escaped = [
+      "json_unquote(json_extract(`snapshotJson`,_utf8mb4\\'$.implementationDigest\\'))",
+      "coalesce(json_contains(json_extract(`snapshotJson`,_utf8mb4\\'$.interventions[*].severity\\'),_utf8mb4\\'\"urgent\"\\'),0)",
+    ];
+    if (escaped.includes(expression)) expression = expression.replaceAll("\\'", "'");
+  }
   const tokens = expression.match(/'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\s+|[^\s'"`]+/g) ?? [];
   if (tokens.join("") !== expression) return "<invalid expression>";
   let normalized = tokens.map(token => {
@@ -160,7 +253,8 @@ export function isStringDatabaseType(type: string): boolean {
 export function getSchemaDifferences(
   source: Map<string, ColumnShape[]>,
   target: Map<string, ColumnShape[]>,
-  targetOnlyTables: Set<string>
+  targetOnlyTables: Set<string>,
+  optionalTables: Set<string> = OPTIONAL_FEATURE_TABLES
 ): string[] {
   const errors: string[] = [];
   const sourceNames = new Set(source.keys());
@@ -171,13 +265,11 @@ export function getSchemaDifferences(
       errors.push(`PostgreSQL is missing table ${table}`);
   }
   for (const table of targetNames) {
-    if (!sourceNames.has(table) && !targetOnlyTables.has(table)) {
+    if (!sourceNames.has(table) && !targetOnlyTables.has(table) && !optionalTables.has(table)) {
       errors.push(`PostgreSQL has unexpected table ${table}`);
     }
   }
   for (const table of targetOnlyTables) {
-    if (sourceNames.has(table))
-      errors.push(`Table ${table} must be copied from MySQL, not skipped`);
     if (!targetNames.has(table))
       errors.push(`PostgreSQL is missing expected new table ${table}`);
   }
@@ -186,17 +278,22 @@ export function getSchemaDifferences(
     const sourceColumns = source.get(table);
     const targetColumns = target.get(table);
     if (!sourceColumns || !targetColumns) continue;
-    const sourceSet = new Set(sourceColumns.map(column => column.name));
+    const sourceSet = new Set(sourceColumns.map(column => destinationColumnName(table, column.name)));
+    if (sourceSet.size !== sourceColumns.length) errors.push(`MySQL alias collision in ${table}`);
+    if (table === "reply_threads") {
+      for (const [oldName, newName] of Object.entries(LEGACY_REPLY_ALIASES)) {
+        if (targetColumns.some(c => c.name === oldName) && targetColumns.some(c => c.name === newName))
+          errors.push(`PostgreSQL alias collision in ${table}.${oldName}/${newName}`);
+      }
+    }
     const targetSet = new Set(targetColumns.map(column => column.name));
     for (const column of sourceSet) {
       if (!targetSet.has(column))
         errors.push(`PostgreSQL is missing ${table}.${column}`);
     }
     for (const column of targetSet) {
-      const reviewOnlyTimerColumn = table === 'time_entries' && ['trackedUserId', 'trackedProfileId'].includes(column)
-        && targetColumns.find(item => item.name === column)?.nullable === true
-        && targetColumns.find(item => item.name === column)?.dataType === 'integer';
-      if (!sourceSet.has(column) && !reviewOnlyTimerColumn)
+      const upgrade = upgradeDefinition(table, targetColumns.find(item => item.name === column)!);
+      if (!sourceSet.has(column) && !upgrade)
         errors.push(`PostgreSQL has unexpected column ${table}.${column}`);
     }
     for (const column of sourceColumns) {

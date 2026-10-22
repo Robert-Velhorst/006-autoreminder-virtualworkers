@@ -6,6 +6,9 @@ import { requirePostgresDatabaseUrl } from "../server/db/databaseUrl";
 import { encodeManagerSnapshotStorage, decodeManagerSnapshotStorage } from "../server/db/managerSnapshotStorage";
 import {
   canonicalizeCell,
+  destinationColumnName,
+  getTransferPairs,
+  OPTIONAL_FEATURE_TABLES,
   INSERT_BATCH_MAX_BYTES,
   insertRowBytes,
   QUEUE_BOOTSTRAP_TABLE,
@@ -79,7 +82,7 @@ function normalizeBooleanForInsert(
 function hashRow(
   digest: ReturnType<typeof createRowDigest>,
   values: unknown[],
-  columns: Array<{ source: SourceColumn; target: TargetColumn }>,
+  columns: Array<{ source: ColumnShape; target: TargetColumn }>,
   table: string
 ) {
   digest.add(
@@ -175,11 +178,13 @@ async function getTargetColumns(
     identity: string;
     nullable: string;
     columnDefault: string | null;
+    characterMaximumLength: number | null;
   }>(
     client,
     `SELECT table_name AS "tableName", column_name AS "columnName", data_type AS "dataType",
             udt_name AS "udtName", is_generated AS "generated", is_identity AS "identity", column_default AS "columnDefault",
             generation_expression AS "generationExpression",
+            character_maximum_length AS "characterMaximumLength",
             ordinal_position AS "ordinalPosition", is_nullable AS nullable
      FROM information_schema.columns
      WHERE table_schema = current_schema()
@@ -192,6 +197,8 @@ async function getTargetColumns(
     tableColumns.push({
       name: row.columnName,
       dataType: row.dataType,
+      columnType: row.dataType === "character varying"
+        ? `varchar(${row.characterMaximumLength})` : row.dataType,
       udtName: row.udtName,
       generated: row.generated === "ALWAYS",
       generationExpression: row.generationExpression,
@@ -327,7 +334,7 @@ async function getPreflight(
     if (
       sourceKeys.has(table) &&
       targetKeys.has(table) &&
-      JSON.stringify(sourceKeys.get(table)) !==
+      JSON.stringify(sourceKeys.get(table)!.map(key => destinationColumnName(table, key))) !==
         JSON.stringify(targetKeys.get(table))
     ) {
       schemaErrors.push(`Primary key differs for ${table}`);
@@ -343,7 +350,7 @@ async function getPreflight(
   }
 
   const extraTargetTables = targetNames.filter(
-    table => !sourceNames.includes(table) && !TARGET_ONLY_TABLES.has(table)
+    table => !sourceNames.includes(table) && !TARGET_ONLY_TABLES.has(table) && !OPTIONAL_FEATURE_TABLES.has(table)
   );
   const missingTargetTables = [...TARGET_ONLY_TABLES].filter(
     table => !targetNames.includes(table)
@@ -377,7 +384,10 @@ async function getPreflight(
     sourceTables: sourceNames.length,
     targetTables: targetNames.length,
     copiedTables: sourceNames.length,
-    expectedTargetOnlyTables: [...TARGET_ONLY_TABLES].sort(),
+    expectedTargetOnlyTables: [...TARGET_ONLY_TABLES].filter(table => !sourceNames.includes(table)).sort(),
+    optionalTargetOnlyTables: targetNames.filter(table => !sourceNames.includes(table)
+      && !TARGET_ONLY_TABLES.has(table) && OPTIONAL_FEATURE_TABLES.has(table)).sort(),
+    optionalTargetTableAllowlist: [...OPTIONAL_FEATURE_TABLES].sort(),
     extraTargetTables,
     missingTargetTables,
     nonEmptyTargetTables,
@@ -475,15 +485,7 @@ async function importTable(
   const columns = [...sourceColumns].sort((left, right) =>
     left.name.localeCompare(right.name)
   );
-  const targetByName = new Map(
-    targetColumns.map(column => [column.name, column])
-  );
-  const pairs = columns.map(column => {
-    const targetColumn = targetByName.get(column.name);
-    if (!targetColumn)
-      throw new Error(`Missing destination column ${table}.${column.name}`);
-    return { source: column, target: targetColumn };
-  });
+  const pairs = getTransferPairs(table, sourceColumns, targetColumns);
   const select = columns
     .map(column => quoteMySqlIdentifier(column.name))
     .join(", ");
@@ -499,8 +501,12 @@ async function importTable(
 
   for await (const sourceRow of stream) {
     const values = pairs.map(
-      ({ source: sourceColumn, target: targetColumn }) => {
-        const value = sourceRow[sourceColumn.name];
+      pair => {
+        const { source: sourceColumn, target: targetColumn } = pair;
+        if (!("defaultValue" in pair) && !Object.hasOwn(sourceRow, sourceColumn.name)) {
+          throw new Error(`Missing source row column ${table}.${sourceColumn.name}`);
+        }
+        const value = "defaultValue" in pair ? pair.defaultValue : sourceRow[sourceColumn.name];
         const transformed = normalizeBooleanForInsert(
           value,
           targetColumn,
@@ -565,20 +571,12 @@ async function verifyTargetTable(
   targetColumns: TargetColumn[],
   keys: string[]
 ): Promise<{ count: number; digest: string }> {
-  const columns = [...sourceColumns].sort((left, right) =>
-    left.name.localeCompare(right.name)
-  );
+  const pairs = getTransferPairs(table, sourceColumns, targetColumns);
   const targetByName = new Map(
     targetColumns.map(column => [column.name, column])
   );
-  const pairs = columns.map(column => {
-    const targetColumn = targetByName.get(column.name);
-    if (!targetColumn)
-      throw new Error(`Missing destination column ${table}.${column.name}`);
-    return { source: column, target: targetColumn };
-  });
-  const select = columns
-    .map(column => quotePostgresIdentifier(column.name))
+  const select = pairs
+    .map(pair => quotePostgresIdentifier(pair.target.name))
     .join(", ");
   const keyColumns = new Set(keys);
   for (const key of keys) {
@@ -611,7 +609,8 @@ async function verifyTargetTable(
     );
     if (!result.rows.length) break;
     for (const row of result.rows) {
-      const values = columns.map(column => {
+      const values = pairs.map(({ target: column }) => {
+        if (!Object.hasOwn(row, column.name)) throw new Error(`Missing target row column ${table}.${column.name}`);
         const value = row[column.name];
         return table === "aptlss_manager_runs" && column.name === "snapshotJson" && value !== null
           ? decodeManagerSnapshotStorage(value as string) : value;
@@ -812,7 +811,9 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
           mode,
           success: true,
           sourceTables: Object.keys(results).length,
-          targetOnlyTables: [...TARGET_ONLY_TABLES].sort(),
+          targetOnlyTables: [...targetColumnMap.keys()].filter(table => !sourceColumnMap.has(table)).sort(),
+          expectedTargetOnlyTables: preflight.report.expectedTargetOnlyTables,
+          optionalTargetOnlyTables: preflight.report.optionalTargetOnlyTables,
           rowLevelReconciliation:
             "SHA-256 per table; source/target row values normalized by destination type",
           tables: results,

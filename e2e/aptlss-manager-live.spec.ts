@@ -10,6 +10,7 @@ import { requireIsolatedPostgresTestDatabase } from "../shared/isolatedPostgresT
 import superjson from "superjson";
 import type { ManagerSnapshot } from "../shared/aptlssManager";
 import { dateKeyInTimeZone } from "../shared/workerTime";
+import { decodeManagerSnapshotStorage } from "../server/db/managerSnapshotStorage";
 
 // Isolated application acceptance: real login, persisted evidence and business APIs.
 // No routes are intercepted. Providers are disabled; this is not live-provider proof.
@@ -497,7 +498,8 @@ for (const scenario of [
       );
       return row
         ? ({
-            ...JSON.parse(row.snapshotJson),
+            // Raw pg queries bypass the typed application's storage decoder.
+            ...JSON.parse(decodeManagerSnapshotStorage(row.snapshotJson)),
             runId: row.id,
           } as ManagerSnapshot)
         : null;
