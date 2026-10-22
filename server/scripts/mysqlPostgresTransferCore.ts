@@ -5,10 +5,72 @@ export type ColumnShape = {
   dataType: string;
   columnType?: string;
   generated?: boolean;
+  generationExpression?: string | null;
   nullable?: boolean;
 };
 
 export const QUEUE_BOOTSTRAP_TABLE = "aptlss_manager_queue_slots";
+
+// Normalize syntax only, never literals or arbitrary casts/operators. These are
+// the schema DDL and information_schema deparses, not a general SQL equivalence test.
+function normalizeGeneration(expression: string, dialect: "mysql" | "postgres"): string {
+  const tokens = expression.match(/'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\s+|[^\s'"`]+/g) ?? [];
+  if (tokens.join("") !== expression) return "<invalid expression>";
+  let normalized = tokens.map(token => {
+    if (token.startsWith("'")) return token;
+    if (token.startsWith('"') || token.startsWith('`')) {
+      return dialect === "mysql" && token === '`snapshotJson`' ? "snapshotjson" : token;
+    }
+    const syntax = token.trim().toLowerCase();
+    return dialect === "mysql" ? syntax.replace(/_utf8mb4$/, "") : syntax;
+  }).join("");
+  normalized = normalized.replace(/\("snapshotJson"\)/g, '"snapshotJson"');
+  while (normalized.startsWith("(") && normalized.endsWith(")")) {
+    // Check that the outer pair spans the entire expression, ignoring literals.
+    let depth = 0;
+    let outer = true;
+    const syntax = normalized.replace(/'(?:''|[^'])*'/g, "''");
+    for (let i = 0; i < syntax.length - 1; i++) {
+      if (syntax[i] === "(") depth++;
+      if (syntax[i] === ")") depth--;
+      if (depth === 0) { outer = false; break; }
+    }
+    if (!outer) break;
+    normalized = normalized.slice(1, -1);
+  }
+  return normalized;
+}
+
+export function isCanonicalManagerGeneratedColumn(
+  table: string, column: ColumnShape, dialect: "mysql" | "postgres"
+): boolean {
+  if (table !== "aptlss_manager_runs" || !column.generated || !column.generationExpression) return false;
+  const digest = column.name === "reviewDigest";
+  if (!digest && column.name !== "reviewUrgent") return false;
+  const types = dialect === "postgres"
+    ? digest ? ["character varying"] : ["boolean"]
+    : digest ? ["varchar"] : ["tinyint", "boolean", "bool"];
+  if (!types.includes(column.dataType.toLowerCase())) return false;
+  if (digest && column.columnType && column.columnType.toLowerCase() !== "varchar(64)") return false;
+  const expected = dialect === "mysql"
+    ? [digest
+      ? "JSON_UNQUOTE(JSON_EXTRACT(snapshotJson, '$.implementationDigest'))"
+      : `COALESCE(JSON_CONTAINS(JSON_EXTRACT(snapshotJson, '$.interventions[*].severity'), '"urgent"'), 0)`]
+    : digest
+      ? [`("snapshotJson"::jsonb ->> 'implementationDigest')`, `("snapshotJson"::jsonb ->> 'implementationDigest'::text)`]
+      : [`("snapshotJson"::jsonb @> '{"interventions":[{"severity":"urgent"}]}'::jsonb)`,
+        `("snapshotJson"::jsonb @> '{"interventions": [{"severity": "urgent"}]}'::jsonb)`];
+  return expected.some(expression => normalizeGeneration(expression, dialect) === normalizeGeneration(column.generationExpression!, dialect));
+}
+
+export const INSERT_BATCH_MAX_BYTES = 8 * 1024 * 1024;
+
+export function insertRowBytes(values: unknown[]): number {
+  // Include per-parameter protocol/placeholder overhead as well as UTF-8 payloads.
+  return values.reduce<number>((total, value) => total + 16 +
+    (value == null ? 0 : Buffer.isBuffer(value) ? value.length :
+      Buffer.byteLength(typeof value === "object" ? JSON.stringify(value) : String(value), "utf8")), 0);
+}
 
 export function isCanonicalQueueBootstrap(
   rows: Record<string, unknown>[],
@@ -138,14 +200,18 @@ export function getSchemaDifferences(
         errors.push(`PostgreSQL has unexpected column ${table}.${column}`);
     }
     for (const column of sourceColumns) {
-      if (column.generated) {
+      if (column.generated && !(isCanonicalManagerGeneratedColumn(table, column, "mysql")
+        && targetColumns.some(targetColumn => targetColumn.name === column.name
+          && isCanonicalManagerGeneratedColumn(table, targetColumn, "postgres")))) {
         errors.push(
           `MySQL generated column ${table}.${column.name} cannot be copied`
         );
       }
     }
+  }
+  for (const [table, targetColumns] of target) {
     for (const column of targetColumns) {
-      if (column.generated) {
+      if (column.generated && !isCanonicalManagerGeneratedColumn(table, column, "postgres")) {
         errors.push(
           `PostgreSQL generated column ${table}.${column.name} cannot be copied`
         );

@@ -39,6 +39,11 @@ secret, or a signing secret configured without the callback.
 
 ## Release and Deployment Gate
 
+For legacy manager history, use the lossless [snapshot storage contract](SNAPSHOT_STORAGE.md).
+Retain the original backup and reconcile decoded row values before accepting an
+import. Older, codec-unaware application images are not valid rollback targets
+after encoded snapshots have been written.
+
 Both CI and release verification require explicit native PostgreSQL fixtures;
 `scripts/verify-native-test-fixture.mjs` rejects missing, mismatched, or unsafe
 test URLs rather than allowing database suites to silently skip. A separate

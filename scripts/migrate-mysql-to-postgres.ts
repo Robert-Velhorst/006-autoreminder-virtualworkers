@@ -3,8 +3,11 @@ import { pathToFileURL } from "node:url";
 import mysql from "mysql2";
 import { Client, types as pgTypes } from "pg";
 import { requirePostgresDatabaseUrl } from "../server/db/databaseUrl";
+import { encodeManagerSnapshotStorage, decodeManagerSnapshotStorage } from "../server/db/managerSnapshotStorage";
 import {
   canonicalizeCell,
+  INSERT_BATCH_MAX_BYTES,
+  insertRowBytes,
   QUEUE_BOOTSTRAP_TABLE,
   inspectQueueBootstrap,
   removeQueueBootstrap,
@@ -129,12 +132,14 @@ async function getSourceColumns(
         dataType: string;
         columnType: string;
         extra: string;
+        generationExpression: string | null;
         ordinalPosition: number;
       } & mysql.RowDataPacket
     >
   >(
     `SELECT TABLE_NAME AS tableName, COLUMN_NAME AS columnName, DATA_TYPE AS dataType,
-            COLUMN_TYPE AS columnType, EXTRA AS extra, ORDINAL_POSITION AS ordinalPosition
+            COLUMN_TYPE AS columnType, EXTRA AS extra, GENERATION_EXPRESSION AS generationExpression,
+            ORDINAL_POSITION AS ordinalPosition
      FROM information_schema.columns
      WHERE TABLE_SCHEMA = DATABASE()
      ORDER BY TABLE_NAME, ORDINAL_POSITION`
@@ -147,7 +152,9 @@ async function getSourceColumns(
       name: row.columnName,
       dataType: row.dataType,
       columnType: row.columnType,
-      generated: /generated/i.test(row.extra),
+      // DEFAULT_GENERATED describes a default expression, not a computed column.
+      generated: Boolean(row.generationExpression) || /generated/i.test(row.extra.replace(/\bDEFAULT_GENERATED\b/gi, "")),
+      generationExpression: row.generationExpression,
       ordinalPosition: row.ordinalPosition,
     });
     columns.set(row.tableName, tableColumns);
@@ -164,6 +171,7 @@ async function getTargetColumns(
     dataType: string;
     udtName: string;
     generated: string;
+    generationExpression: string | null;
     identity: string;
     nullable: string;
     columnDefault: string | null;
@@ -171,6 +179,7 @@ async function getTargetColumns(
     client,
     `SELECT table_name AS "tableName", column_name AS "columnName", data_type AS "dataType",
             udt_name AS "udtName", is_generated AS "generated", is_identity AS "identity", column_default AS "columnDefault",
+            generation_expression AS "generationExpression",
             ordinal_position AS "ordinalPosition", is_nullable AS nullable
      FROM information_schema.columns
      WHERE table_schema = current_schema()
@@ -185,6 +194,7 @@ async function getTargetColumns(
       dataType: row.dataType,
       udtName: row.udtName,
       generated: row.generated === "ALWAYS",
+      generationExpression: row.generationExpression,
       identity: row.identity === "YES",
       nullable: row.nullable === 'YES',
       columnDefault: row.columnDefault,
@@ -480,9 +490,11 @@ async function importTable(
   const sql = `SELECT ${select} FROM ${quoteMySqlIdentifier(table)} ORDER BY ${sourceOrderBy(columns, keys)}`;
   const stream = source
     .query(sql)
-    .stream({ highWaterMark: BATCH_SIZE }) as AsyncIterable<Row>;
+    .stream({ highWaterMark: 2 }) as AsyncIterable<Row>;
   const digest = createRowDigest();
+  const insertPairs = pairs.filter(pair => !pair.target.generated);
   let batch: unknown[][] = [];
+  let batchBytes = 0;
   let count = 0;
 
   for await (const sourceRow of stream) {
@@ -509,22 +521,37 @@ async function importTable(
       }
     );
     hashRow(digest, values, pairs, table);
-    batch.push(values);
+    // Hash the uncompressed source, including generated values; only storage
+    // parameters bypassing Drizzle's customType need encoding.
+    const insertValues = values.filter((_, index) => !pairs[index]!.target.generated);
+    const rowBytes = insertRowBytes(insertValues);
+    if (batch.length && batchBytes + rowBytes > INSERT_BATCH_MAX_BYTES) {
+      await insertBatch(target, table, insertPairs.map(pair => pair.target), batch);
+      batch = [];
+      batchBytes = 0;
+    }
+    const snapshotIndex = insertPairs.findIndex(pair => table === "aptlss_manager_runs" && pair.target.name === "snapshotJson");
+    if (snapshotIndex >= 0 && insertValues[snapshotIndex] !== null) {
+      insertValues[snapshotIndex] = encodeManagerSnapshotStorage(insertValues[snapshotIndex] as string);
+    }
+    batch.push(insertValues);
+    batchBytes += rowBytes;
     count += 1;
-    if (batch.length >= BATCH_SIZE) {
+    if (batch.length >= BATCH_SIZE || batchBytes >= INSERT_BATCH_MAX_BYTES) {
       await insertBatch(
         target,
         table,
-        pairs.map(pair => pair.target),
+        insertPairs.map(pair => pair.target),
         batch
       );
       batch = [];
+      batchBytes = 0;
     }
   }
   await insertBatch(
     target,
     table,
-    pairs.map(pair => pair.target),
+    insertPairs.map(pair => pair.target),
     batch
   );
 
@@ -573,22 +600,27 @@ async function verifyTargetTable(
   const digest = createRowDigest();
   let cursor: unknown[] | undefined;
   let count = 0;
+  const pageSize = table === "aptlss_manager_runs" ? 4 : BATCH_SIZE;
   while (true) {
     const where = cursor ? targetCursorWhere(targetColumns, keys, 1) : "";
     const values = cursor ?? [];
     const result = await target.query<Row>(
       `SELECT ${select} FROM "public".${quotePostgresIdentifier(table)} ${where}
-       ORDER BY ${targetOrderBy(targetColumns, keys)} LIMIT ${BATCH_SIZE}`,
+       ORDER BY ${targetOrderBy(targetColumns, keys)} LIMIT ${pageSize}`,
       values
     );
     if (!result.rows.length) break;
     for (const row of result.rows) {
-      const values = columns.map(column => row[column.name]);
+      const values = columns.map(column => {
+        const value = row[column.name];
+        return table === "aptlss_manager_runs" && column.name === "snapshotJson" && value !== null
+          ? decodeManagerSnapshotStorage(value as string) : value;
+      });
       hashRow(digest, values, pairs, table);
       cursor = keys.map(key => row[key]);
       count += 1;
     }
-    if (result.rows.length < BATCH_SIZE) break;
+    if (result.rows.length < pageSize) break;
   }
   return { count, digest: digest.digest() };
 }
