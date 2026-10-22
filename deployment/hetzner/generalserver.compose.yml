@@ -4,6 +4,11 @@ services:
   app:
     image: ${APP_IMAGE:?A verified VA image digest is required}
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       replicas: 1
     ports:

@@ -214,7 +214,8 @@ class GeneralServerTests(unittest.TestCase):
                          b"noodzakelijkonline-01:172.30.6.1", b"DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-2}",
                          b"external: true", b"name: va_dashboard_private", b"replicas: 1",
                          b"source: /etc/ssl/certs/ssl-cert-snakeoil.pem", b"read_only: true",
-                         b"create_host_path: false", b"target: /run/va-postgres-root.crt"]:
+                         b"create_host_path: false", b"target: /run/va-postgres-root.crt",
+                         b"driver: json-file", b'max-size: "10m"', b'max-file: "3"']:
             self.assertIn(expected, source)
         for forbidden in [b"docker.sock", b"network_mode:", b"host-gateway", b"sslkey", b"build:", b"DATABASE_URL:"]:
             self.assertNotIn(forbidden, source)

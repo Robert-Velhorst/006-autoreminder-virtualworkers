@@ -14,6 +14,8 @@ to `/opt/va-dashboard` after installation, NOT to the source checkout.
 
 One `app` container uses `172.30.6.2/29` on the external network
 `va_dashboard_private`, with HTTP published only on `127.0.0.1:3025`.
+Docker rotates this app's logs at 10 MB per file, retaining at most three files;
+this does not change other applications' logs or historical database records.
 The network is root-administrator managed via Docker, not a Unix-owned file.
 Its ownership label is a configuration assertion, not independent authorization:
 
