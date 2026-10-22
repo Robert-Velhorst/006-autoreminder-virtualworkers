@@ -174,6 +174,11 @@ drift still fails closed. Fix every
 reported mismatch before proceeding. Take and restore-test a source backup
 first, then rehearse against that restored copy.
 
+Preflight checks the introduced founder/task, payment-period and weekly-pay
+identities on the source before copying large history tables. Duplicate groups
+are stop conditions under the assignment/financial cutover procedures; the
+importer does not delete, merge or choose an authoritative financial row.
+
 When both historical Joyce-named and current worker-named reply columns exist,
 the importer compares every pair with binary, NULL-safe equality inside its
 consistent read transaction. Only exact allowlisted aliases with matching types
@@ -188,7 +193,8 @@ contract inserts NULL. This exception is reported explicitly. Source-present,
 unknown, non-null/defaulted and multi-column references remain dependencies;
 actual cycles still block the import. Foreign-key constraints stay enabled.
 
-Source auto-increment metadata is read with the MySQL statistics cache disabled.
+Source auto-increment metadata is read with the MySQL statistics cache disabled
+and refreshed after row-count reads have opened the restored InnoDB tables.
 The exact auto-increment column must map to a PostgreSQL identity/sequence.
 After row reconciliation, its next value preserves any source-reserved IDs beyond
 the surviving maximum, including in empty tables. Invalid, stale or unmappable

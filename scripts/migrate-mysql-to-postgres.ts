@@ -35,6 +35,11 @@ const TARGET_ONLY_TABLES = new Set([
 const MIGRATION_TABLE = "__drizzle_migrations";
 const BATCH_SIZE = 250;
 const SYSTEM_TABLES = new Set([MIGRATION_TABLE]);
+const LEGACY_IDENTITY_KEYS = [
+  { table: "task_assignments", columns: ["founderId", "fullTaskId"] },
+  { table: "payment_cycles", columns: ["founderId", "cycleStart", "cycleEnd"] },
+  { table: "weekly_pay_log", columns: ["founderId", "vaId", "weekStart"] },
+];
 
 type SourceColumn = ColumnShape & { ordinalPosition: number; autoIncrement: boolean };
 type TargetColumn = ColumnShape & {
@@ -316,7 +321,7 @@ async function getPreflight(
   importOrder: string[];
   report: Record<string, unknown>;
 }> {
-  const sourceTables = (await getSourceTables(source)).filter(
+  let sourceTables = (await getSourceTables(source)).filter(
     table => !SYSTEM_TABLES.has(table.name)
   );
   const aliasNormalization = await foldIdenticalLegacyReplyAliases(
@@ -362,14 +367,23 @@ async function getPreflight(
         `MySQL table ${table.name} uses ${table.engine ?? "an unknown engine"}; a consistent read snapshot requires InnoDB`
       );
     }
-    const autoColumns = (sourceColumns.get(table.name) ?? []).filter(c => c.autoIncrement);
-    if (table.autoIncrement !== null || autoColumns.length) {
-      const mapped = autoColumns.length === 1
-        ? targetColumns.get(table.name)?.find(c => c.name === destinationColumnName(table.name, autoColumns[0]!.name)) : undefined;
-      if (table.autoIncrement === null || !/^[1-9]\d*$/.test(table.autoIncrement) || !mapped
-        || (!mapped.identity && !mapped.columnDefault?.startsWith("nextval("))) {
-        schemaErrors.push(`Unsupported auto-increment mapping for ${table.name}`);
-      }
+  }
+
+  const legacyIdentityConflicts: Array<{ table: string; columns: string[]; groups: string }> = [];
+  for (const identity of LEGACY_IDENTITY_KEYS) {
+    const available = sourceColumns.get(identity.table);
+    if (!available || !identity.columns.every(name => available.some(c => c.name === name))) continue;
+    const group = identity.columns.map(name => sourceOrderExpression(available.find(c => c.name === name)!)).join(", ");
+    const nonNull = identity.columns.map(name => `${quoteMySqlIdentifier(name)} IS NOT NULL`).join(" AND ");
+    const [rows] = await source.promise().query<Array<{ duplicateGroups: string } & mysql.RowDataPacket>>(
+      `SELECT CAST(COUNT(*) AS CHAR) AS duplicateGroups FROM (
+         SELECT 1 FROM ${quoteMySqlIdentifier(identity.table)} WHERE ${nonNull}
+         GROUP BY ${group} HAVING COUNT(*) > 1
+       ) AS conflicting_identities`);
+    if (rows.length !== 1 || !/^\d+$/.test(rows[0]!.duplicateGroups)) throw new Error("Incomplete legacy identity check");
+    if (BigInt(rows[0]!.duplicateGroups) > 0n) {
+      legacyIdentityConflicts.push({ ...identity, groups: rows[0]!.duplicateGroups });
+      schemaErrors.push(`Legacy identity conflicts in ${identity.table}; approved reconciliation is required before transfer`);
     }
   }
 
@@ -399,6 +413,24 @@ async function getPreflight(
     }))
   );
 
+  // A freshly restored InnoDB table can report an uninitialized counter until
+  // opened. Read again after the exact row counts have opened every table.
+  const openedTables = await getSourceTables(source);
+  if (JSON.stringify(openedTables.map(t => [t.name, t.engine])) !== JSON.stringify(sourceTables.map(t => [t.name, t.engine])))
+    throw new Error("Source table identity changed during preflight");
+  sourceTables = openedTables;
+  for (const table of sourceTables) {
+    const autoColumns = (sourceColumns.get(table.name) ?? []).filter(c => c.autoIncrement);
+    if (table.autoIncrement !== null || autoColumns.length) {
+      const mapped = autoColumns.length === 1
+        ? targetColumns.get(table.name)?.find(c => c.name === destinationColumnName(table.name, autoColumns[0]!.name)) : undefined;
+      if (table.autoIncrement === null || !/^[1-9]\d*$/.test(table.autoIncrement) || !mapped
+        || (!mapped.identity && !mapped.columnDefault?.startsWith("nextval("))) {
+        schemaErrors.push(`Unsupported auto-increment mapping for ${table.name}`);
+      }
+    }
+  }
+
   const dependencies = await getTargetDependencies(target);
   // These exact new columns are inserted explicitly as NULL. Keep every real
   // source dependency and all database constraints; no row ordering is guessed.
@@ -426,6 +458,7 @@ async function getPreflight(
     nullUpgradeSelfReferences,
     foldedIdenticalReplyAliases: aliasNormalization.folded,
     sourceAutoIncrement: Object.fromEntries(sourceTables.filter(t => t.autoIncrement !== null).map(t => [t.name, t.autoIncrement])),
+    legacyIdentityConflicts,
     errors: schemaErrors.sort(),
   };
 

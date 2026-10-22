@@ -51,6 +51,7 @@ function fixture(options: {
   escapedGenerated?: boolean; table?: string; sourceColumns?: ColumnShape[]; targetColumns?: ColumnShape[];
   optionalTables?: string[];
   sourceNext?: string | null; sourceAutoColumn?: string; targetSequenceMissing?: boolean;
+  lazySourceCounter?: boolean; sourceTableChanges?: boolean;
   tamper?: (row: Row) => void;
 } = {}) {
   const table = options.table ?? (options.manager ? runs : queue);
@@ -60,6 +61,7 @@ function fixture(options: {
   let snapshot: Row[] | undefined;
   let locked = false;
   let inspections = 0;
+  let sourceTableReads = 0;
   const events: string[] = [];
   const batches: unknown[][] = [];
   const streamOptions: unknown[] = [];
@@ -79,7 +81,11 @@ function fixture(options: {
     })));
   const sourceQuery = async (sql: string) => {
     events.push(`source:${sql}`);
-    if (sql.includes("information_schema.tables")) return [options.sourceAbsent ? [] : [{ tableName: table, engine: "InnoDB", autoIncrement: options.sourceNext ?? null }]];
+    if (sql.includes("information_schema.tables")) {
+      sourceTableReads++;
+      return [options.sourceAbsent ? [] : [{ tableName: options.sourceTableChanges && sourceTableReads > 1 ? table + "_changed" : table,
+        engine: "InnoDB", autoIncrement: options.lazySourceCounter && sourceTableReads === 1 ? null : options.sourceNext ?? null }]];
+    }
     if (sql.includes("information_schema.columns")) return [options.sourceAbsent ? [] : sourceColumns.map((c, i) => ({
       tableName: table, columnName: c.name,
       dataType: options.manager && c.name === "reviewDigest" ? "varchar" : options.manager && c.name === "reviewUrgent" ? "tinyint" : c.dataType,
@@ -101,6 +107,18 @@ function fixture(options: {
       return [[{ rows: String(sourceRows.length), different: String(different) }]];
     }
     if (sql.startsWith("SELECT COUNT")) return [[{ count: String(sourceRows.length) }]];
+    if (sql.startsWith("SELECT CAST(COUNT(*) AS CHAR) AS duplicateGroups")) {
+      const group = sql.match(/GROUP BY (.*?) HAVING/s)?.[1];
+      const names = [...(group ?? "").matchAll(/`([A-Za-z0-9_]+)`/g)].map(m => m[1]);
+      expect(names.length).toBeGreaterThan(0);
+      const counts = new Map<string, number>();
+      for (const row of sourceRows) {
+        if (names.some(name => row[name] == null)) continue;
+        const key = JSON.stringify(names.map(name => row[name]));
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      return [[{ duplicateGroups: String([...counts.values()].filter(n => n > 1).length) }]];
+    }
     if (/^(SET |START TRANSACTION|COMMIT|ROLLBACK)/.test(sql)) return [[]];
     throw new Error(`Unexpected source SQL: ${sql}`);
   };
@@ -201,6 +219,20 @@ describe("source auto-increment continuity through raw drivers", () => {
     expect(f.sequenceWrites).toEqual([]);
     expect(f.events).toContain("ROLLBACK");
   });
+  it("refreshes counters after restored source tables have been opened", async () => {
+    const f = fixture({ table: "clients", rows: [], sourceRows: [{ id: 3 }], sourceColumns: [columns[0]],
+      targetColumns: [identity], sourceNext: "100", lazySourceCounter: true });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await runMysqlPostgresMigration(["copy", "--execute"], env);
+    expect(f.sequenceWrites).toEqual([["public.fixture_seq", "100", false]]);
+  });
+  it("rejects source-table identity changes while refreshing counters", async () => {
+    const f = fixture({ table: "clients", rows: [], sourceRows: [{ id: 3 }], sourceColumns: [columns[0]],
+      targetColumns: [identity], sourceNext: "100", sourceTableChanges: true });
+    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow("Source table identity changed");
+    expect(f.batches).toEqual([]);
+    expect(f.events).toContain("ROLLBACK");
+  });
   it.each(["metadata", "mapping", "sequence"])("fails closed on missing or changed %s", async invalid => {
     const f = fixture({ table: "clients", rows: [], sourceRows: [{ id: 3 }], sourceColumns: [columns[0]],
       targetColumns: [invalid === "mapping" ? columns[0] : identity], sourceNext: invalid === "metadata" ? "invalid" : "100",
@@ -208,6 +240,31 @@ describe("source auto-increment continuity through raw drivers", () => {
     await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow(invalid === "sequence" ? "Missing target sequence" : "Unsupported auto-increment mapping");
     expect(f.sequenceWrites).toEqual([]);
     expect(f.events).toContain("ROLLBACK");
+  });
+});
+
+describe("legacy natural identity preflight before any data copy", () => {
+  it.each([
+    { table: "weekly_pay_log", keys: ["founderId", "vaId", "weekStart"] },
+    { table: "payment_cycles", keys: ["founderId", "cycleStart", "cycleEnd"] },
+    { table: "task_assignments", keys: ["founderId", "fullTaskId"] },
+  ])("rejects duplicate $table identities without choosing a record", async ({ table, keys }) => {
+    const cols = [columns[0], ...keys.map(name => ({ name, dataType: "text" }))];
+    const row = Object.fromEntries(keys.map(name => [name, "same"]));
+    const f = fixture({ table, rows: [], sourceRows: [{ id: 1, ...row }, { id: 2, ...row }], sourceColumns: cols, targetColumns: cols });
+    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow(`Legacy identity conflicts in ${table}`);
+    expect(f.batches).toEqual([]);
+    expect(f.events).toContain("ROLLBACK");
+    expect(f.events.some(sql => sql.includes("GROUP BY BINARY"))).toBe(true);
+  });
+  it("accepts distinct weekly identities without inventing financial values", async () => {
+    const cols = [columns[0], ...["founderId", "vaId", "weekStart"].map(name => ({ name, dataType: "text" }))];
+    const rows = [{ id: 1, founderId: "1", vaId: "2", weekStart: "2026-07-26" }, { id: 2, founderId: "1", vaId: "2", weekStart: "2026-08-02" }];
+    const f = fixture({ table: "weekly_pay_log", rows: [], sourceRows: rows, sourceColumns: cols, targetColumns: cols });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await runMysqlPostgresMigration(["copy", "--execute"], env);
+    expect(f.rows()).toEqual(rows);
+    expect(f.events).toContain("COMMIT");
   });
 });
 
