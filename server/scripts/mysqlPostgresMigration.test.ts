@@ -86,6 +86,17 @@ function fixture(options: {
         ? mysqlGenerated[c.name]?.replaceAll("'", "\\'") : mysqlGenerated[c.name] : null,
     }))];
     if (sql.includes("information_schema.TABLE_CONSTRAINTS")) return [[{ tableName: table, columnName: "id", ordinalPosition: 1 }]];
+    if (sql.startsWith("SELECT CAST(COUNT(*) AS CHAR) AS `rows`")) {
+      expect(sql).toContain("<=>");
+      const names = [...sql.matchAll(/CAST\(`([A-Za-z0-9_]+)` AS BINARY\)/g)].map(m => m[1]);
+      expect(names).toHaveLength(2);
+      const different = sourceRows.filter(row => {
+        const left = row[names[0]], right = row[names[1]];
+        return left == null || right == null ? left != null || right != null
+          : !Buffer.from(String(left)).equals(Buffer.from(String(right)));
+      }).length;
+      return [[{ rows: String(sourceRows.length), different: String(different) }]];
+    }
     if (sql.startsWith("SELECT COUNT")) return [[{ count: String(sourceRows.length) }]];
     if (/^(SET |START TRANSACTION|COMMIT|ROLLBACK)/.test(sql)) return [[]];
     throw new Error(`Unexpected source SQL: ${sql}`);
@@ -280,12 +291,38 @@ describe("legacy schema upgrades through raw drivers", () => {
     expect(f.rows()).toEqual([]);
   });
 
-  it.each(["source", "target"])("rejects %s alias collisions before inserting", async side => {
+  it.each(["source", "target"])("rejects unproved %s alias collisions before inserting", async side => {
     const f = fixture({ table: "reply_threads", rows: [], sourceRows: [replyRow],
       sourceColumns: side === "source" ? [...replyColumns, replyTarget[1]] : replyColumns,
       targetColumns: side === "target" ? [...replyTarget, replyColumns[1]] : replyTarget });
-    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow("alias collision");
+    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow(side === "source" ? "Legacy reply aliases differ" : "alias collision");
     expect(f.batches).toEqual([]);
+    expect(f.events).toContain("ROLLBACK");
+  });
+
+  it("proves all duplicate alias values in the source transaction and reconciles their canonical destination", async () => {
+    const duplicate = (row: Row) => ({ ...row, ...Object.fromEntries(Object.entries(LEGACY_REPLY_ALIASES).map(([old, current]) => [current, row[old]])) });
+    const sourceRows = [duplicate(replyRow), duplicate({ ...replyRow, id: 9, lastNonJoyceText: null, lastJoyceReplyAt: null })];
+    const f = fixture({ table: "reply_threads", rows: [], sourceRows,
+      sourceColumns: [...replyColumns, ...replyTarget.slice(1)], targetColumns: replyTarget });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await runMysqlPostgresMigration(["copy", "--execute"], env);
+    expect(f.rows()).toEqual(sourceRows.map(row => Object.fromEntries(replyTarget.map(c => [c.name, row[c.name]]))));
+    const report = JSON.parse(log.mock.calls.at(-1)![0]);
+    expect(report.foldedIdenticalReplyAliases).toEqual(Object.entries(LEGACY_REPLY_ALIASES).map(([oldName, currentName]) => ({ oldName, currentName, rows: "2" })));
+    const compareIndices = f.events.flatMap((sql, i) => sql.startsWith("source:SELECT CAST(COUNT(*) AS CHAR)") ? [i] : []);
+    expect(compareIndices).toHaveLength(4);
+    expect(compareIndices.every(i => i > f.events.findIndex(sql => sql.startsWith("source:START TRANSACTION")) && i < f.events.findIndex(sql => sql.startsWith("INSERT INTO")))).toBe(true);
+    expect(f.events).toContain("COMMIT");
+  });
+
+  it.each(["different", " Exact original text\n\"quoted\"  ", null, ""])("rejects byte or NULL differences in duplicate reply aliases: %j", async value => {
+    const sourceRows = [{ ...replyRow, lastNonWorkerText: value }];
+    const f = fixture({ table: "reply_threads", rows: [], sourceRows,
+      sourceColumns: [...replyColumns, replyTarget.find(c => c.name === "lastNonWorkerText")!], targetColumns: replyTarget });
+    await expect(runMysqlPostgresMigration(["copy", "--execute"], env)).rejects.toThrow("Legacy reply aliases differ");
+    expect(f.batches).toEqual([]);
+    expect(f.events).toContain("ROLLBACK");
   });
 
   const upgrades = LEGACY_UPGRADE_COLUMNS.map(c => ({ table: c.table, column: {
