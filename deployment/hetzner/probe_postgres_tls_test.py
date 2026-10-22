@@ -12,6 +12,12 @@ spec.loader.exec_module(probe)
 
 
 class ProbeTests(unittest.TestCase):
+    def test_tls_context_requires_modern_protocol_and_certificate_verification(self):
+        context = probe.tls_context()
+        self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+
     def test_tls_pin_and_both_negative_checks_are_required(self):
         with patch.object(probe.CA.__class__, "read_text", return_value="pem"), \
              patch.object(probe.ssl, "PEM_cert_to_DER_cert", return_value=b"cert"), \

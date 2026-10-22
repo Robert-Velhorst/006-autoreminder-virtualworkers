@@ -328,9 +328,8 @@ class GeneralServerTests(unittest.TestCase):
         self.assertIn("('ssh_gate.py', 'root-helper', 'deploy.sh', 'docker-compose.yml')", installer)
 
     def test_actual_installer_target_case_rejects_paths_and_shell_text(self):
-        bash = (str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe")
-                if os.name == "nt" else shutil.which("bash"))
-        if not bash or not Path(bash).is_file():
+        bash = "C:/Program Files/Git/bin/bash.exe" if os.name == "nt" else "/bin/bash"
+        if not Path(bash).is_file():
             self.skipTest("Bash is not installed")
         installer = Path(__file__).with_name("install-ssh-gate.sh").read_text()
         start = installer.index('case "$2" in')

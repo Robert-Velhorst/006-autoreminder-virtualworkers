@@ -13,6 +13,12 @@ HOSTNAME = "noodzakelijkonline-01"
 CA = Path("/run/va-postgres-root.crt")
 
 
+def tls_context(cafile=None):
+    context = ssl.create_default_context(cafile=cafile)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
 def handshake(context, hostname):
     with socket.create_connection(ADDRESS, timeout=4) as connection:
         connection.sendall(struct.pack("!II", 8, 80877103))
@@ -34,12 +40,12 @@ def run(expect_denied=False):
         raise RuntimeError("Another network could reach the private database proxy")
 
     certificate = ssl.PEM_cert_to_DER_cert(CA.read_text(encoding="ascii"))
-    peer = handshake(ssl.create_default_context(cafile=str(CA)), HOSTNAME)
+    peer = handshake(tls_context(cafile=str(CA)), HOSTNAME)
     if hashlib.sha256(peer).digest() != hashlib.sha256(certificate).digest():
         raise RuntimeError("The public certificate pin did not match")
     for context, hostname in (
-        (ssl.create_default_context(cafile=str(CA)), "wrong-va-host.invalid"),
-        (ssl.create_default_context(), HOSTNAME),
+        (tls_context(cafile=str(CA)), "wrong-va-host.invalid"),
+        (tls_context(), HOSTNAME),
     ):
         try:
             handshake(context, hostname)
