@@ -1,6 +1,71 @@
 import { describe, expect, it } from "vitest";
 import { getSchemaDifferences, getTransferPairs, LEGACY_UPGRADE_COLUMNS, LEGACY_REPLY_ALIASES,
-  OPTIONAL_FEATURE_TABLES, insertRowBytes, isCanonicalManagerGeneratedColumn, type ColumnShape } from "./mysqlPostgresTransferCore";
+  OPTIONAL_FEATURE_TABLES, insertRowBytes, isCanonicalManagerGeneratedColumn,
+  isNullLegacyUpgradeSelfReference, orderTablesByDependencies, foldIdenticalLegacyReplyAliases, type ColumnShape } from "./mysqlPostgresTransferCore";
+
+describe("exact duplicate legacy reply alias preservation", () => {
+  const old: ColumnShape = { name: "lastNonJoyceText", dataType: "text", columnType: "text" };
+  const current = { ...old, name: "lastNonWorkerText" };
+  const source = new Map([["reply_threads", [old, current]]]);
+  it("folds only byte-identical checked aliases without mutating source metadata", async () => {
+    const calls: string[][] = [];
+    const result = await foldIdenticalLegacyReplyAliases(source, async (...names) => {
+      calls.push(names); return { rows: "33", different: "0" };
+    });
+    expect(calls).toEqual([[old.name, current.name]]);
+    expect(result.columns.get("reply_threads")).toEqual([current]);
+    expect(result.folded).toEqual([{ oldName: old.name, currentName: current.name, rows: "33" }]);
+    expect(source.get("reply_threads")).toEqual([old, current]);
+  });
+  it.each(["1", "33", "", "unknown"])("rejects different or missing comparison %s", async different => {
+    await expect(foldIdenticalLegacyReplyAliases(source, async () => ({ rows: "33", different }))).rejects.toThrow("aliases differ");
+  });
+  it("rejects missing row-count evidence and retains unproved collisions", async () => {
+    await expect(foldIdenticalLegacyReplyAliases(source, async () => ({ rows: "", different: "0" }))).rejects.toThrow("comparison is incomplete");
+    const result = await foldIdenticalLegacyReplyAliases(new Map([["reply_threads", [old, { ...current, dataType: "varchar" }]]]), async () => { throw new Error("must not compare incompatible types"); });
+    expect(result.folded).toEqual([]);
+    expect(getSchemaDifferences(result.columns, new Map([["reply_threads", [current]]]), new Set())).toContain("MySQL alias collision in reply_threads");
+  });
+  it("does not fold source-only aliases or other tables", async () => {
+    const result = await foldIdenticalLegacyReplyAliases(new Map([["reply_threads", [old]], ["other", [old, current]]]), async () => { throw new Error("unexpected comparison"); });
+    expect(result.folded).toEqual([]);
+  });
+});
+
+describe("legacy NULL-only self-reference dependencies", () => {
+  const edge = { table: "payment_cycles", dependsOn: "payment_cycles", columns: ["predecessorCycleId"] };
+  const id: ColumnShape = { name: "id", dataType: "integer", nullable: false };
+  const added: ColumnShape = { name: "predecessorCycleId", dataType: "integer", nullable: true, columnDefault: null };
+  const source = new Map([[edge.table, [id]]]);
+  const target = new Map([[edge.table, [id, added]]]);
+  it("ignores only a known absent-source column inserted as exact NULL", () => {
+    expect(isNullLegacyUpgradeSelfReference(edge, source, target)).toBe(true);
+    expect(getTransferPairs(edge.table, [id], [id, added]).find(p => p.target.name === added.name)?.defaultValue).toBeNull();
+  });
+  it("retains source-present references even when nullable", () => {
+    expect(isNullLegacyUpgradeSelfReference(edge, new Map([[edge.table, [id, added]]]), target)).toBe(false);
+    expect(() => orderTablesByDependencies([edge.table], [edge])).toThrow("Foreign-key cycle");
+  });
+  it.each([
+    { nullable: false }, { columnDefault: "1" }, { generated: true },
+    { identity: true }, { dataType: "text" }, { generationExpression: "1" },
+  ])("rejects changed post-migration shape %j", change => {
+    expect(isNullLegacyUpgradeSelfReference(edge, source,
+      new Map([[edge.table, [id, { ...added, ...change }]]]))).toBe(false);
+  });
+  it("retains unknown, mixed-column, missing-column and external references", () => {
+    for (const changed of [
+      { ...edge, columns: ["unknown"] }, { ...edge, columns: [added.name, "id"] },
+      { ...edge, columns: [] }, { ...edge, columns: [added.name, added.name] },
+      { ...edge, dependsOn: "other" },
+    ]) expect(isNullLegacyUpgradeSelfReference(changed, source, target)).toBe(false);
+    expect(isNullLegacyUpgradeSelfReference(edge, new Map(), target)).toBe(false);
+    expect(isNullLegacyUpgradeSelfReference(edge, source, new Map())).toBe(false);
+    expect(() => orderTablesByDependencies(["a", "b"], [
+      { table: "a", dependsOn: "b" }, { table: "b", dependsOn: "a" },
+    ])).toThrow("Foreign-key cycle");
+  });
+});
 
 const table = "aptlss_manager_runs";
 const pgDigest: ColumnShape = {

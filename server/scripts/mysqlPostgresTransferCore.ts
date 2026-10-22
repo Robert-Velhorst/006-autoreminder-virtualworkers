@@ -28,6 +28,28 @@ export function destinationColumnName(table: string, name: string): string {
   return table === "reply_threads" && Object.hasOwn(LEGACY_REPLY_ALIASES, name) ? LEGACY_REPLY_ALIASES[name]! : name;
 }
 
+export async function foldIdenticalLegacyReplyAliases<S extends ColumnShape>(
+  columns: Map<string, S[]>,
+  compare: (oldName: string, currentName: string) => Promise<{ rows: string; different: string }>
+): Promise<{ columns: Map<string, S[]>; folded: Array<{ oldName: string; currentName: string; rows: string }> }> {
+  const reply = columns.get("reply_threads") ?? [];
+  const folded: Array<{ oldName: string; currentName: string; rows: string }> = [];
+  for (const [oldName, currentName] of Object.entries(LEGACY_REPLY_ALIASES)) {
+    const old = reply.filter(c => c.name === oldName), current = reply.filter(c => c.name === currentName);
+    if (old.length !== 1 || current.length !== 1) continue;
+    if (old[0]!.dataType !== current[0]!.dataType || old[0]!.columnType !== current[0]!.columnType
+      || old[0]!.generated || current[0]!.generated || old[0]!.generationExpression || current[0]!.generationExpression) continue;
+    const proof = await compare(oldName, currentName);
+    if (!/^\d+$/.test(proof.rows) || proof.different !== "0") {
+      throw new Error(`Legacy reply aliases differ or comparison is incomplete: ${oldName}/${currentName}`);
+    }
+    folded.push({ oldName, currentName, rows: proof.rows });
+  }
+  const result = new Map(columns);
+  if (folded.length) result.set("reply_threads", reply.filter(c => !folded.some(f => f.oldName === c.name)));
+  return { columns: result, folded };
+}
+
 type UpgradeColumn = { table: string; name: string; type: string; defaultValue?: string | number };
 // Exact post-migration shapes, not a blanket permission for nullable/defaulted fields.
 export const LEGACY_UPGRADE_COLUMNS: readonly UpgradeColumn[] = [
@@ -316,6 +338,22 @@ export function getSchemaDifferences(
     }
   }
   return errors.sort();
+}
+
+export function isNullLegacyUpgradeSelfReference(
+  edge: { table: string; dependsOn: string; columns: string[] },
+  source: Map<string, ColumnShape[]>,
+  target: Map<string, ColumnShape[]>
+): boolean {
+  if (edge.table !== edge.dependsOn || !source.has(edge.table) || !edge.columns.length
+    || new Set(edge.columns).size !== edge.columns.length) return false;
+  return edge.columns.every(name => {
+    if (source.get(edge.table)!.some(c => destinationColumnName(edge.table, c.name) === name)) return false;
+    const matches = target.get(edge.table)?.filter(c => c.name === name) ?? [];
+    if (matches.length !== 1) return false;
+    const definition = upgradeDefinition(edge.table, matches[0]!);
+    return !!definition && definition.defaultValue === undefined;
+  });
 }
 
 export function orderTablesByDependencies(

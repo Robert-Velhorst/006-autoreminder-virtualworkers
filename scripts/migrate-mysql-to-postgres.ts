@@ -19,6 +19,8 @@ import {
   getSchemaDifferences,
   isStringDatabaseType,
   orderTablesByDependencies,
+  isNullLegacyUpgradeSelfReference,
+  foldIdenticalLegacyReplyAliases,
   quoteMySqlIdentifier,
   quotePostgresIdentifier,
   transformSourceValue,
@@ -261,10 +263,11 @@ function groupKeys(rows: KeyRow[]): Map<string, string[]> {
 
 async function getTargetDependencies(
   client: Client
-): Promise<Array<{ table: string; dependsOn: string }>> {
+): Promise<Array<{ table: string; dependsOn: string; columns: string[] }>> {
   return queryRows(
     client,
-    `SELECT tc.table_name AS "table", ccu.table_name AS "dependsOn"
+    `SELECT tc.table_name AS "table", ccu.table_name AS "dependsOn",
+       array_agg(DISTINCT kcu.column_name::text ORDER BY kcu.column_name::text) AS "columns"
      FROM information_schema.table_constraints tc
      JOIN information_schema.key_column_usage kcu
        ON kcu.constraint_catalog = tc.constraint_catalog
@@ -276,6 +279,7 @@ async function getTargetDependencies(
       AND ccu.constraint_schema = tc.constraint_schema
       AND ccu.constraint_name = tc.constraint_name
      WHERE tc.constraint_schema = current_schema() AND tc.constraint_type = 'FOREIGN KEY'
+     GROUP BY tc.table_name, tc.constraint_name, ccu.table_name
      ORDER BY tc.table_name, ccu.table_name`
   );
 }
@@ -314,7 +318,17 @@ async function getPreflight(
   const sourceTables = (await getSourceTables(source)).filter(
     table => !SYSTEM_TABLES.has(table.name)
   );
-  const sourceColumns = await getSourceColumns(source);
+  const aliasNormalization = await foldIdenticalLegacyReplyAliases(
+    await getSourceColumns(source), async (oldName, currentName) => {
+      const [rows] = await source.promise().query<Array<{ rows: string; different: string } & mysql.RowDataPacket>>(
+        `SELECT CAST(COUNT(*) AS CHAR) AS \`rows\`,
+           CAST(COALESCE(SUM(NOT(CAST(${quoteMySqlIdentifier(oldName)} AS BINARY)
+             <=> CAST(${quoteMySqlIdentifier(currentName)} AS BINARY))),0) AS CHAR) AS different
+         FROM \`reply_threads\``);
+      if (rows.length !== 1) throw new Error("Incomplete legacy alias comparison");
+      return rows[0]!;
+    });
+  const sourceColumns = aliasNormalization.columns;
   const targetColumns = await getTargetColumns(target);
   const sourceKeys = await getSourcePrimaryKeys(source);
   const targetKeys = await getTargetPrimaryKeys(target);
@@ -375,10 +389,13 @@ async function getPreflight(
     }))
   );
 
-  const order = orderTablesByDependencies(
-    sourceNames,
-    await getTargetDependencies(target)
-  );
+  const dependencies = await getTargetDependencies(target);
+  // These exact new columns are inserted explicitly as NULL. Keep every real
+  // source dependency and all database constraints; no row ordering is guessed.
+  const nullUpgradeSelfReferences = dependencies.filter(edge =>
+    isNullLegacyUpgradeSelfReference(edge, sourceColumns, targetColumns));
+  const order = orderTablesByDependencies(sourceNames,
+    dependencies.filter(edge => !nullUpgradeSelfReferences.includes(edge)));
   const report = {
     success: schemaErrors.length === 0 && nonEmptyTargetTables.length === 0,
     sourceTables: sourceNames.length,
@@ -396,6 +413,8 @@ async function getPreflight(
       countRows.map(item => [item.table, item.rows])
     ),
     importOrder: order,
+    nullUpgradeSelfReferences,
+    foldedIdenticalReplyAliases: aliasNormalization.folded,
     errors: schemaErrors.sort(),
   };
 
@@ -814,6 +833,8 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
           targetOnlyTables: [...targetColumnMap.keys()].filter(table => !sourceColumnMap.has(table)).sort(),
           expectedTargetOnlyTables: preflight.report.expectedTargetOnlyTables,
           optionalTargetOnlyTables: preflight.report.optionalTargetOnlyTables,
+          foldedIdenticalReplyAliases: preflight.report.foldedIdenticalReplyAliases,
+          nullUpgradeSelfReferences: preflight.report.nullUpgradeSelfReferences,
           rowLevelReconciliation:
             "SHA-256 per table; source/target row values normalized by destination type",
           tables: results,

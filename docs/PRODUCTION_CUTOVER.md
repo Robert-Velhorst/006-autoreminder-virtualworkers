@@ -165,12 +165,27 @@ pnpm db:migrate
 pnpm db:migrate:mysql-to-postgres preflight
 ```
 
-Preflight is read-only. It requires matching source/target tables, columns, and
-primary keys; InnoDB source tables; an empty PostgreSQL application schema except
-for the exact migration-0003 queue bootstrap described below; and only the three
-explicitly recognized PostgreSQL-only tables. Fix every
+Preflight is read-only. It requires explicitly compatible source/target tables,
+columns and primary keys; InnoDB source tables; an empty PostgreSQL application
+schema except for the exact migration-0003 queue bootstrap described below;
+and only the recognized PostgreSQL-only feature tables. Unknown table/column
+drift still fails closed. Fix every
 reported mismatch before proceeding. Take and restore-test a source backup
 first, then rehearse against that restored copy.
+
+When both historical Joyce-named and current worker-named reply columns exist,
+the importer compares every pair with binary, NULL-safe equality inside its
+consistent read transaction. Only exact allowlisted aliases with matching types
+and zero differing rows can share the canonical destination column. The report
+records the original/current names and checked row count; any difference blocks
+the transfer without choosing a value. The original source/backup retains both
+column names. Canonical target values are still included in row reconciliation.
+
+The new nullable payment predecessor self-reference does not impose a table
+ordering dependency when its source column is absent and the exact upgrade
+contract inserts NULL. This exception is reported explicitly. Source-present,
+unknown, non-null/defaulted and multi-column references remain dependencies;
+actual cycles still block the import. Foreign-key constraints stay enabled.
 
 The sole nonempty-target exception is `aptlss_manager_queue_slots` containing
 exactly IDs 1, 2, 3 and 4 with `vaId`, `token` and `leaseUntil` all null and the
