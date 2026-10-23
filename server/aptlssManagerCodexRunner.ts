@@ -1,4 +1,4 @@
-import { atomicWriteLocalFile, confinedLocalPath } from "../shared/local-filesystem-policy.mjs";
+import { atomicWriteLocalFile, atomicWriteQueueFile, confinedLocalPath } from "../shared/local-filesystem-policy.mjs";
 import { lstatSync, realpathSync, statSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
@@ -164,7 +164,7 @@ export async function startCodexManagerRunner(root: string, work: string, execut
     if (heartbeatBusy) return;
     heartbeatBusy = true;
     try {
-      await atomicWriteLocalFile(localPath(root, "heartbeat.json"), JSON.stringify({ at: new Date().toISOString(), model: CODEX_MANAGER_MODEL, route: CODEX_MANAGER_ROUTE, efforts: CODEX_MANAGER_EFFORTS }));
+      await atomicWriteQueueFile(localPath(root, "heartbeat.json"), JSON.stringify({ at: new Date().toISOString(), model: CODEX_MANAGER_MODEL, route: CODEX_MANAGER_ROUTE, efforts: CODEX_MANAGER_EFFORTS }));
     } finally { heartbeatBusy = false; }
   };
   await heartbeat();
@@ -211,7 +211,7 @@ export async function startCodexManagerRunner(root: string, work: string, execut
           } finally { clearTimeout(timeout); clearInterval(check); signal.removeEventListener("abort", cancel); }
           if (!controller.signal.aborted && Date.now() < expiry) {
             try { await stat(confinedLocalPath(path)); } catch { continue; }
-            await atomicWriteLocalFile(confinedLocalPath(replyPath), JSON.stringify(codexReplySchema.parse(reply)));
+            await atomicWriteQueueFile(confinedLocalPath(replyPath), JSON.stringify(codexReplySchema.parse(reply)));
             console.log(JSON.stringify({ at: new Date().toISOString(), id: request.id, model: CODEX_MANAGER_MODEL,
               effort: reply.effort, status: reply.status, attempts: reply.attempts }));
           }

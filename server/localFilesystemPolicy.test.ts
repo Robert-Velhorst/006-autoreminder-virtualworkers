@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { link, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { atomicWriteLocalFile, confinedLocalPath } from "../shared/local-filesystem-policy.mjs";
+import { atomicWriteLocalFile, atomicWriteQueueFile, confinedLocalPath } from "../shared/local-filesystem-policy.mjs";
 import { codexInvocation } from "./aptlssManagerCodexRunner";
 import { normalizeReminderWorkerInterval } from "./reminderOrchestration";
 
@@ -18,6 +18,46 @@ afterEach(async () => {
 });
 
 describe("local manager filesystem and process boundaries", () => {
+  it("keeps transport private unless group sharing is explicitly enabled", async () => {
+    const directory = await fixture();
+    vi.stubEnv("APTLSS_CODEX_SHARED_QUEUE", "false");
+    const file = join(directory, "request.json");
+    await atomicWriteQueueFile(file, "private");
+    expect(await readFile(file, "utf8")).toBe("private");
+    if (process.platform !== "win32") expect((await stat(file)).mode & 0o777).toBe(0o600);
+  });
+  it("refuses shared writes without an explicit queue or outside its boundary", async () => {
+    const directory = await fixture();
+    const outside = await fixture();
+    vi.stubEnv("APTLSS_CODEX_SHARED_QUEUE", "true");
+    vi.stubEnv("APTLSS_CODEX_QUEUE_DIR", "");
+    await expect(atomicWriteQueueFile(join(directory, "request.json"), "data")).rejects.toThrow(/explicit queue/);
+    vi.stubEnv("APTLSS_CODEX_QUEUE_DIR", directory);
+    await expect(atomicWriteQueueFile(join(outside, "request.json"), "data")).rejects.toThrow(/inside its queue/);
+    await expect(atomicWriteQueueFile(directory, "data")).rejects.toThrow(/inside its queue/);
+    expect(await readdir(outside)).toEqual([]);
+  });
+  it.skipIf(process.platform === "win32")("shares only transport files and refuses world-accessible queue roots", async () => {
+    const directory = await fixture();
+    vi.stubEnv("APTLSS_CODEX_SHARED_QUEUE", "true");
+    vi.stubEnv("APTLSS_CODEX_QUEUE_DIR", directory);
+    await chmod(directory, 0o2770);
+    const transport = join(directory, "heartbeat.json"), privateFile = join(directory, "private-test.json");
+    await atomicWriteQueueFile(transport, "transport");
+    await atomicWriteLocalFile(privateFile, "private");
+    expect((await stat(transport)).mode & 0o777).toBe(0o660);
+    expect((await stat(privateFile)).mode & 0o777).toBe(0o600);
+    const nested = join(directory, "requests");
+    await mkdir(nested);
+    await chmod(nested, 0o770);
+    await expect(atomicWriteQueueFile(join(nested, "request.json"), "rejected")).rejects.toThrow(/setgid/);
+    await chmod(nested, 0o2770);
+    await atomicWriteQueueFile(join(nested, "request.json"), "allowed");
+    expect((await stat(join(nested, "request.json"))).mode & 0o777).toBe(0o660);
+    await chmod(directory, 0o777);
+    await expect(atomicWriteQueueFile(transport, "rejected")).rejects.toThrow(/group-only/);
+    expect(await readFile(transport, "utf8")).toBe("transport");
+  });
   it("confines ordinary configuration to a child of the application workspace", () => {
     const old = process.env.NODE_ENV;
     try {
