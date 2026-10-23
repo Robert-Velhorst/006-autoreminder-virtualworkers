@@ -1,4 +1,5 @@
 import { type Express } from "express";
+import { rateLimit } from "express-rate-limit";
 import fs from "fs";
 import { type Server } from "http";
 import { nanoid } from "nanoid";
@@ -7,6 +8,9 @@ import { createServer as createViteServer } from "vite";
 import viteConfig from "../../vite.config";
 
 export async function setupVite(app: Express, server: Server) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Development Vite middleware is forbidden in production');
+  }
   const serverOptions = {
     middlewareMode: true,
     hmr: { server },
@@ -20,6 +24,7 @@ export async function setupVite(app: Express, server: Server) {
     appType: "custom",
   });
 
+  app.use(rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: 'draft-8', legacyHeaders: false }));
   app.use(vite.middlewares);
   app.use("*", async (req, res, next) => {
     const url = req.originalUrl;
