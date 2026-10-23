@@ -83,7 +83,7 @@ jobs:
       - name: Check out the exact release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.validate-production-gate.outputs.release_tag }}
+          ref: ${{ needs.validate-production-gate.outputs.release_commit }}
 
       - name: Authenticate to GHCR and verify release provenance
         shell: bash
@@ -106,7 +106,7 @@ jobs:
             --source-digest "$RELEASE_COMMIT"
           echo "APP_IMAGE=$image_ref" >> "$GITHUB_ENV"
 
-      - name: Stage the release Compose configuration
+      - name: Stage and deploy through the restricted VA SSH gate
         env:
           HETZNER_SSH_HOST: ${{ secrets.HETZNER_SSH_HOST }}
           HETZNER_SSH_USER: ${{ secrets.HETZNER_SSH_USER }}
@@ -134,8 +134,11 @@ jobs:
           printf '%s\n' "$HETZNER_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/va-dashboard-deploy" "$HOME/.ssh/known_hosts"
           ssh_options=(-i "$HOME/.ssh/va-dashboard-deploy" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
-          candidate="$APP_DIR/.docker-compose.yml.candidate"
-          scp "${ssh_options[@]}" docker-compose.yml "${HETZNER_SSH_USER}@${HETZNER_SSH_HOST}:${candidate}"
-          ssh "${ssh_options[@]}" "${HETZNER_SSH_USER}@${HETZNER_SSH_HOST}" \
-            "APP_DIR='${APP_DIR}' APP_IMAGE='${APP_IMAGE}' COMPOSE_CANDIDATE='${candidate}' bash -s" \
-            < deployment/hetzner/deploy.sh
+          if [[ "$HETZNER_SSH_USER" != va-dashboard-deploy ]]; then
+            echo "Production SSH must use the restricted va-dashboard-deploy account" >&2
+            exit 1
+          fi
+          ssh -T "${ssh_options[@]}" "${HETZNER_SSH_USER}@${HETZNER_SSH_HOST}" \
+            va-dashboard-stage-compose < deployment/hetzner/generalserver.compose.yml
+          ssh -T "${ssh_options[@]}" "${HETZNER_SSH_USER}@${HETZNER_SSH_HOST}" \
+            "va-dashboard-deploy ${APP_IMAGE}" < /dev/null

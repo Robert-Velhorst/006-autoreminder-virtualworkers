@@ -6,12 +6,14 @@
 import { and, asc, desc, eq, inArray, isNull, lte, notInArray } from "drizzle-orm";
 import { replyThreads, unsignedMessageFlags, vagueReplyFlags } from "../drizzle/schema.postgres";
 import { getDb, incrementPayLogD1 } from "./db";
+import { assertFinancialFeaturesEnabled } from './financialAvailability';
 
 const REPLY_FLAG_GRACE_MS = 60 * 60 * 1000;
 class FlagNoLongerChargeable extends Error {}
 
 async function chargeReplyFlag(table: typeof vagueReplyFlags | typeof unsignedMessageFlags,
   kind: 'vague' | 'unsigned', id: number, workerUserId?: number): Promise<boolean> {
+  assertFinancialFeaturesEnabled();
   if (!Number.isSafeInteger(id) || id <= 0
     || (workerUserId !== undefined && (!Number.isSafeInteger(workerUserId) || workerUserId <= 0))) {
     throw new Error('A positive reply flag and worker identity is required');
@@ -192,6 +194,7 @@ export async function markReplyThreadReplied(vaId: number, cardId: string, sourc
 }
 
 export async function markReplyThreadDemerited(vaId: number, cardId: string, source: ReplySource): Promise<void> {
+  assertFinancialFeaturesEnabled();
   const db = await getDb();
   if (!db) return;
   try {
@@ -294,6 +297,7 @@ export async function getAllVagueReplyFlags(vaId: number, limit = 50): Promise<V
  * Auto-demerit any vague reply flags that have been unresolved for >1 hour.
  */
 export async function autoDemeriteExpiredVagueFlags(vaId: number): Promise<number> {
+  assertFinancialFeaturesEnabled();
   if (!Number.isSafeInteger(vaId) || vaId <= 0) throw new Error('A positive worker identity is required');
   const db = await getDb();
   if (!db) throw new Error('Database not available');
@@ -404,6 +408,7 @@ export async function getAllUnsignedFlags(vaId: number, limit = 50): Promise<Uns
  * Auto-demerit any unsigned message flags that have been unresolved for >1 hour.
  */
 export async function autoDemeriteExpiredUnsignedFlags(vaId: number): Promise<number> {
+  assertFinancialFeaturesEnabled();
   if (!Number.isSafeInteger(vaId) || vaId <= 0) throw new Error('A positive worker identity is required');
   const db = await getDb();
   if (!db) throw new Error('Database not available');

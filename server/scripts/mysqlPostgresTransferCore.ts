@@ -5,14 +5,247 @@ export type ColumnShape = {
   dataType: string;
   columnType?: string;
   generated?: boolean;
+  generationExpression?: string | null;
   nullable?: boolean;
+  columnDefault?: string | null;
+  identity?: boolean;
 };
 
-export function getSequenceReset(maxValue: string | null, hasRows: boolean) {
-  if (!hasRows || maxValue === null) return { value: "1", isCalled: false };
-  const maximum = BigInt(maxValue);
-  if (maximum < 1n) return { value: "1", isCalled: false };
-  return { value: maximum.toString(), isCalled: true };
+export const OPTIONAL_FEATURE_TABLES = new Set([
+  "aptlss_manager_checks", "assignment_events", "atis_analysis_items",
+  "atis_analysis_requests", "atis_chatbot_conversations", "atis_checklist_sync",
+  "digest_job_items", "financial_ledger_events", "revoked_sessions", "worker_lifecycle_audit",
+]);
+
+export const LEGACY_REPLY_ALIASES: Readonly<Record<string, string>> = {
+  lastNonJoyceMsgAt: "lastNonWorkerMsgAt",
+  lastNonJoyceAuthor: "lastNonWorkerAuthor",
+  lastNonJoyceText: "lastNonWorkerText",
+  lastJoyceReplyAt: "lastWorkerReplyAt",
+};
+
+export function destinationColumnName(table: string, name: string): string {
+  return table === "reply_threads" && Object.hasOwn(LEGACY_REPLY_ALIASES, name) ? LEGACY_REPLY_ALIASES[name]! : name;
+}
+
+export async function foldIdenticalLegacyReplyAliases<S extends ColumnShape>(
+  columns: Map<string, S[]>,
+  compare: (oldName: string, currentName: string) => Promise<{ rows: string; different: string }>
+): Promise<{ columns: Map<string, S[]>; folded: Array<{ oldName: string; currentName: string; rows: string }> }> {
+  const reply = columns.get("reply_threads") ?? [];
+  const folded: Array<{ oldName: string; currentName: string; rows: string }> = [];
+  for (const [oldName, currentName] of Object.entries(LEGACY_REPLY_ALIASES)) {
+    const old = reply.filter(c => c.name === oldName), current = reply.filter(c => c.name === currentName);
+    if (old.length !== 1 || current.length !== 1) continue;
+    if (old[0]!.dataType !== current[0]!.dataType || old[0]!.columnType !== current[0]!.columnType
+      || old[0]!.generated || current[0]!.generated || old[0]!.generationExpression || current[0]!.generationExpression) continue;
+    const proof = await compare(oldName, currentName);
+    if (!/^\d+$/.test(proof.rows) || proof.different !== "0") {
+      throw new Error(`Legacy reply aliases differ or comparison is incomplete: ${oldName}/${currentName}`);
+    }
+    folded.push({ oldName, currentName, rows: proof.rows });
+  }
+  const result = new Map(columns);
+  if (folded.length) result.set("reply_threads", reply.filter(c => !folded.some(f => f.oldName === c.name)));
+  return { columns: result, folded };
+}
+
+type UpgradeColumn = { table: string; name: string; type: string; defaultValue?: string | number };
+// Exact post-migration shapes, not a blanket permission for nullable/defaulted fields.
+export const LEGACY_UPGRADE_COLUMNS: readonly UpgradeColumn[] = [
+  { table: "aptlss_manager_state", name: "currentCheckId", type: "integer" },
+  { table: "aptlss_manager_state", name: "historyScopeHash", type: "varchar(64)" },
+  { table: "aptlss_manager_updates", name: "reportKind", type: "varchar(24)", defaultValue: "update" },
+  { table: "aptlss_manager_updates", name: "actionId", type: "varchar(256)" },
+  { table: "aptlss_manager_updates", name: "assessmentRunId", type: "integer" },
+  { table: "aptlss_manager_updates", name: "requestKey", type: "varchar(36)" },
+  { table: "browser_tab_states", name: "captureSequence", type: "bigint", defaultValue: 0 },
+  { table: "browser_tab_states", name: "sourceCapturedAt", type: "timestamp" },
+  { table: "digest_jobs", name: "windowKey", type: "varchar(96)" },
+  { table: "digest_jobs", name: "deliveryPhase", type: "varchar(24)" },
+  { table: "digest_jobs", name: "recipientEmail", type: "text" },
+  { table: "digest_jobs", name: "subject", type: "text" },
+  { table: "digest_jobs", name: "html", type: "text" },
+  { table: "digest_jobs", name: "payloadHash", type: "varchar(64)" },
+  { table: "digest_jobs", name: "attemptId", type: "varchar(64)" },
+  { table: "digest_jobs", name: "attemptCount", type: "integer", defaultValue: 0 },
+  { table: "digest_jobs", name: "attemptedAt", type: "timestamp" },
+  { table: "digest_jobs", name: "nextAttemptAt", type: "timestamp" },
+  { table: "digest_jobs", name: "providerReceipt", type: "text" },
+  { table: "digest_jobs", name: "reconciledAt", type: "timestamp" },
+  { table: "digest_jobs", name: "reconciledBy", type: "integer" },
+  { table: "digest_jobs", name: "reconciliationNote", type: "text" },
+  { table: "payment_cycles", name: "predecessorCycleId", type: "integer" },
+  { table: "scheduled_jobs", name: "approvedByUserId", type: "integer" },
+  { table: "scheduled_jobs", name: "approvedSessionEpoch", type: "bigint" },
+  { table: "scheduled_jobs", name: "approvedAt", type: "timestamp" },
+  { table: "scheduled_jobs", name: "approvalHash", type: "varchar(64)" },
+  { table: "time_entries", name: "trackedUserId", type: "integer" },
+  { table: "time_entries", name: "trackedProfileId", type: "integer" },
+  { table: "users", name: "sessionEpoch", type: "bigint", defaultValue: 1 },
+];
+
+function upgradeDefinition(table: string, column: ColumnShape): UpgradeColumn | undefined {
+  const definition = LEGACY_UPGRADE_COLUMNS.find(c => c.table === table && c.name === column.name);
+  if (!definition || column.generated || column.generationExpression || column.identity) return undefined;
+  const type = column.dataType === "character varying" ? column.columnType
+    : column.dataType === "timestamp without time zone" ? "timestamp" : column.dataType;
+  const hasDefault = definition.defaultValue !== undefined;
+  const expectedDefault = typeof definition.defaultValue === "string"
+    ? `'${definition.defaultValue}'::character varying` : String(definition.defaultValue);
+  return type === definition.type && column.nullable === !hasDefault
+    && (hasDefault ? column.columnDefault === expectedDefault : column.columnDefault == null)
+    ? definition : undefined;
+}
+
+export function getTransferPairs<S extends ColumnShape, T extends ColumnShape>(
+  table: string, source: S[], target: T[]
+): Array<{ source: ColumnShape; target: T; defaultValue?: string | number | null }> {
+  const errors = getSchemaDifferences(new Map([[table, source]]), new Map([[table, target]]), new Set());
+  if (errors.length) throw new Error(errors.join("; "));
+  const pairs: Array<{ source: ColumnShape; target: T; defaultValue?: string | number | null }> =
+    [...source].sort((a, b) => a.name.localeCompare(b.name)).map(column => ({
+      source: column,
+      target: target.find(t => t.name === destinationColumnName(table, column.name))!,
+    }));
+  for (const column of target) {
+    if (pairs.some(pair => pair.target.name === column.name)) continue;
+    const definition = upgradeDefinition(table, column)!;
+    pairs.push({ source: column, target: column, defaultValue: definition.defaultValue ?? null });
+  }
+  return pairs;
+}
+
+export const QUEUE_BOOTSTRAP_TABLE = "aptlss_manager_queue_slots";
+
+// Normalize syntax only, never literals or arbitrary casts/operators. These are
+// the schema DDL and information_schema deparses, not a general SQL equivalence test.
+function normalizeGeneration(expression: string, dialect: "mysql" | "postgres"): string {
+  // Only these complete information_schema escape spellings are known equivalents.
+  if (dialect === "mysql") {
+    const escaped = [
+      "json_unquote(json_extract(`snapshotJson`,_utf8mb4\\'$.implementationDigest\\'))",
+      "coalesce(json_contains(json_extract(`snapshotJson`,_utf8mb4\\'$.interventions[*].severity\\'),_utf8mb4\\'\"urgent\"\\'),0)",
+    ];
+    if (escaped.includes(expression)) expression = expression.replaceAll("\\'", "'");
+  }
+  const tokens = expression.match(/'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\s+|[^\s'"`]+/g) ?? [];
+  if (tokens.join("") !== expression) return "<invalid expression>";
+  let normalized = tokens.map(token => {
+    if (token.startsWith("'")) return token;
+    if (token.startsWith('"') || token.startsWith('`')) {
+      return dialect === "mysql" && token === '`snapshotJson`' ? "snapshotjson" : token;
+    }
+    const syntax = token.trim().toLowerCase();
+    return dialect === "mysql" ? syntax.replace(/_utf8mb4$/, "") : syntax;
+  }).join("");
+  normalized = normalized.replace(/\("snapshotJson"\)/g, '"snapshotJson"');
+  while (normalized.startsWith("(") && normalized.endsWith(")")) {
+    // Check that the outer pair spans the entire expression, ignoring literals.
+    let depth = 0;
+    let outer = true;
+    const syntax = normalized.replace(/'(?:''|[^'])*'/g, "''");
+    for (let i = 0; i < syntax.length - 1; i++) {
+      if (syntax[i] === "(") depth++;
+      if (syntax[i] === ")") depth--;
+      if (depth === 0) { outer = false; break; }
+    }
+    if (!outer) break;
+    normalized = normalized.slice(1, -1);
+  }
+  return normalized;
+}
+
+export function isCanonicalManagerGeneratedColumn(
+  table: string, column: ColumnShape, dialect: "mysql" | "postgres"
+): boolean {
+  if (table !== "aptlss_manager_runs" || !column.generated || !column.generationExpression) return false;
+  const digest = column.name === "reviewDigest";
+  if (!digest && column.name !== "reviewUrgent") return false;
+  const types = dialect === "postgres"
+    ? digest ? ["character varying"] : ["boolean"]
+    : digest ? ["varchar"] : ["tinyint", "boolean", "bool"];
+  if (!types.includes(column.dataType.toLowerCase())) return false;
+  if (digest && column.columnType && column.columnType.toLowerCase() !== "varchar(64)") return false;
+  const expected = dialect === "mysql"
+    ? [digest
+      ? "JSON_UNQUOTE(JSON_EXTRACT(snapshotJson, '$.implementationDigest'))"
+      : `COALESCE(JSON_CONTAINS(JSON_EXTRACT(snapshotJson, '$.interventions[*].severity'), '"urgent"'), 0)`]
+    : digest
+      ? [`("snapshotJson"::jsonb ->> 'implementationDigest')`, `("snapshotJson"::jsonb ->> 'implementationDigest'::text)`]
+      : [`("snapshotJson"::jsonb @> '{"interventions":[{"severity":"urgent"}]}'::jsonb)`,
+        `("snapshotJson"::jsonb @> '{"interventions": [{"severity": "urgent"}]}'::jsonb)`];
+  return expected.some(expression => normalizeGeneration(expression, dialect) === normalizeGeneration(column.generationExpression!, dialect));
+}
+
+export const INSERT_BATCH_MAX_BYTES = 8 * 1024 * 1024;
+
+export function insertRowBytes(values: unknown[]): number {
+  // Include per-parameter protocol/placeholder overhead as well as UTF-8 payloads.
+  return values.reduce<number>((total, value) => total + 16 +
+    (value == null ? 0 : Buffer.isBuffer(value) ? value.length :
+      Buffer.byteLength(typeof value === "object" ? JSON.stringify(value) : String(value), "utf8")), 0);
+}
+
+export function isCanonicalQueueBootstrap(
+  rows: Record<string, unknown>[],
+  columns: ColumnShape[]
+): boolean {
+  const expected = new Map([
+    ["id", "integer"], ["vaId", "integer"],
+    ["token", "character varying"], ["leaseUntil", "timestamp without time zone"],
+  ]);
+  if (columns.length !== expected.size || new Set(columns.map(c => c.name)).size !== expected.size
+    || columns.some(c => expected.get(c.name) !== c.dataType || c.generated
+      || c.nullable !== (c.name !== "id"))) return false;
+  return rows.length === 4 && new Set(rows.map(row => row.id)).size === 4
+    && rows.every(row => Object.keys(row).length === expected.size
+      && Object.keys(row).every(key => expected.has(key))
+      && typeof row.id === "number" && [1, 2, 3, 4].includes(row.id)
+      && row.vaId === null && row.token === null && row.leaseUntil === null);
+}
+
+type BootstrapClient = {
+  query(sql: string): Promise<{ rows: Record<string, unknown>[] }>;
+};
+
+export async function inspectQueueBootstrap(
+  client: BootstrapClient, columns: ColumnShape[], sourceHasTable: boolean
+): Promise<"empty" | "bootstrap-seed" | "nonempty"> {
+  const { rows } = await client.query('SELECT * FROM "public"."aptlss_manager_queue_slots" ORDER BY "id" LIMIT 5');
+  if (!rows.length) return "empty";
+  return sourceHasTable && isCanonicalQueueBootstrap(rows, columns) ? "bootstrap-seed" : "nonempty";
+}
+
+export async function removeQueueBootstrap(
+  client: BootstrapClient, columns: ColumnShape[], sourceHasTable: boolean
+): Promise<void> {
+  if (!sourceHasTable) throw new Error("Queue bootstrap replacement requires the source table");
+  // SAVEPOINT refuses autocommit use; the caller owns the full copy transaction.
+  await client.query("SAVEPOINT queue_bootstrap_replacement");
+  await client.query('LOCK TABLE "public"."aptlss_manager_queue_slots" IN ACCESS EXCLUSIVE MODE');
+  if (await inspectQueueBootstrap(client, columns, sourceHasTable) !== "bootstrap-seed") {
+    throw new Error("Queue bootstrap changed before replacement; refusing to remove rows");
+  }
+  const removed = await client.query(`DELETE FROM "public"."aptlss_manager_queue_slots"
+    WHERE "id" IN (1,2,3,4) AND "vaId" IS NULL AND "token" IS NULL AND "leaseUntil" IS NULL
+    RETURNING *`);
+  if (!isCanonicalQueueBootstrap(removed.rows, columns)) {
+    throw new Error("Queue bootstrap deletion did not match exact defaults; rollback required");
+  }
+  await client.query("RELEASE SAVEPOINT queue_bootstrap_replacement");
+}
+
+export function getSequenceReset(maxValue: string | null, hasRows: boolean, sourceNext: string | null = null) {
+  const maximum = hasRows && maxValue !== null ? BigInt(maxValue) : 0n;
+  const nextFromRows = maximum < 1n ? 1n : maximum + 1n;
+  if (sourceNext !== null) {
+    if (!/^[1-9]\d*$/.test(sourceNext)) throw new Error("Invalid source auto-increment counter");
+    const next = BigInt(sourceNext);
+    if (next < nextFromRows) throw new Error("Source auto-increment counter precedes copied rows");
+    if (next > nextFromRows || maximum < 1n) return { value: next.toString(), isCalled: false };
+  }
+  return maximum < 1n ? { value: "1", isCalled: false } : { value: maximum.toString(), isCalled: true };
 }
 
 export function quoteMySqlIdentifier(identifier: string): string {
@@ -47,7 +280,8 @@ export function isStringDatabaseType(type: string): boolean {
 export function getSchemaDifferences(
   source: Map<string, ColumnShape[]>,
   target: Map<string, ColumnShape[]>,
-  targetOnlyTables: Set<string>
+  targetOnlyTables: Set<string>,
+  optionalTables: Set<string> = OPTIONAL_FEATURE_TABLES
 ): string[] {
   const errors: string[] = [];
   const sourceNames = new Set(source.keys());
@@ -58,13 +292,11 @@ export function getSchemaDifferences(
       errors.push(`PostgreSQL is missing table ${table}`);
   }
   for (const table of targetNames) {
-    if (!sourceNames.has(table) && !targetOnlyTables.has(table)) {
+    if (!sourceNames.has(table) && !targetOnlyTables.has(table) && !optionalTables.has(table)) {
       errors.push(`PostgreSQL has unexpected table ${table}`);
     }
   }
   for (const table of targetOnlyTables) {
-    if (sourceNames.has(table))
-      errors.push(`Table ${table} must be copied from MySQL, not skipped`);
     if (!targetNames.has(table))
       errors.push(`PostgreSQL is missing expected new table ${table}`);
   }
@@ -73,28 +305,37 @@ export function getSchemaDifferences(
     const sourceColumns = source.get(table);
     const targetColumns = target.get(table);
     if (!sourceColumns || !targetColumns) continue;
-    const sourceSet = new Set(sourceColumns.map(column => column.name));
+    const sourceSet = new Set(sourceColumns.map(column => destinationColumnName(table, column.name)));
+    if (sourceSet.size !== sourceColumns.length) errors.push(`MySQL alias collision in ${table}`);
+    if (table === "reply_threads") {
+      for (const [oldName, newName] of Object.entries(LEGACY_REPLY_ALIASES)) {
+        if (targetColumns.some(c => c.name === oldName) && targetColumns.some(c => c.name === newName))
+          errors.push(`PostgreSQL alias collision in ${table}.${oldName}/${newName}`);
+      }
+    }
     const targetSet = new Set(targetColumns.map(column => column.name));
     for (const column of sourceSet) {
       if (!targetSet.has(column))
         errors.push(`PostgreSQL is missing ${table}.${column}`);
     }
     for (const column of targetSet) {
-      const reviewOnlyTimerColumn = table === 'time_entries' && ['trackedUserId', 'trackedProfileId'].includes(column)
-        && targetColumns.find(item => item.name === column)?.nullable === true
-        && targetColumns.find(item => item.name === column)?.dataType === 'integer';
-      if (!sourceSet.has(column) && !reviewOnlyTimerColumn)
+      const upgrade = upgradeDefinition(table, targetColumns.find(item => item.name === column)!);
+      if (!sourceSet.has(column) && !upgrade)
         errors.push(`PostgreSQL has unexpected column ${table}.${column}`);
     }
     for (const column of sourceColumns) {
-      if (column.generated) {
+      if (column.generated && !(isCanonicalManagerGeneratedColumn(table, column, "mysql")
+        && targetColumns.some(targetColumn => targetColumn.name === column.name
+          && isCanonicalManagerGeneratedColumn(table, targetColumn, "postgres")))) {
         errors.push(
           `MySQL generated column ${table}.${column.name} cannot be copied`
         );
       }
     }
+  }
+  for (const [table, targetColumns] of target) {
     for (const column of targetColumns) {
-      if (column.generated) {
+      if (column.generated && !isCanonicalManagerGeneratedColumn(table, column, "postgres")) {
         errors.push(
           `PostgreSQL generated column ${table}.${column.name} cannot be copied`
         );
@@ -102,6 +343,22 @@ export function getSchemaDifferences(
     }
   }
   return errors.sort();
+}
+
+export function isNullLegacyUpgradeSelfReference(
+  edge: { table: string; dependsOn: string; columns: string[] },
+  source: Map<string, ColumnShape[]>,
+  target: Map<string, ColumnShape[]>
+): boolean {
+  if (edge.table !== edge.dependsOn || !source.has(edge.table) || !edge.columns.length
+    || new Set(edge.columns).size !== edge.columns.length) return false;
+  return edge.columns.every(name => {
+    if (source.get(edge.table)!.some(c => destinationColumnName(edge.table, c.name) === name)) return false;
+    const matches = target.get(edge.table)?.filter(c => c.name === name) ?? [];
+    if (matches.length !== 1) return false;
+    const definition = upgradeDefinition(edge.table, matches[0]!);
+    return !!definition && definition.defaultValue === undefined;
+  });
 }
 
 export function orderTablesByDependencies(

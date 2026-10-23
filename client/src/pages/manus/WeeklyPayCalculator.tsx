@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { trpc } from "@/lib/trpc";
 import { weeklyPayRevision } from "@shared/financialRevision";
+import { FinancialFeatureGate } from '@/components/FinancialFeatureGate';
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -360,7 +361,7 @@ interface WeeklyPayCalculatorProps {
 
 export default function WeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps = {}) {
   const { user } = useAuth();
-  return <ScopedWeeklyPayCalculator key={`${user?.id}:${vaId ?? "self"}`} vaId={vaId} />;
+  return <FinancialFeatureGate><ScopedWeeklyPayCalculator key={`${user?.id}:${vaId ?? "self"}`} vaId={vaId} /></FinancialFeatureGate>;
 }
 
 function ScopedWeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps) {

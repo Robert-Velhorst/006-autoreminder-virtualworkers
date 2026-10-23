@@ -6,6 +6,7 @@ import { InsertUser, users } from "../drizzle/schema.postgres";
 import * as schema from "../drizzle/schema.postgres";
 import { ENV } from "./_core/env";
 import { incrementWeeklyD1 } from './financialLedger';
+import { assertFinancialFeaturesEnabled } from './financialAvailability';
 import { DatabaseUnavailableError } from "./databaseAvailability";
 import { requirePostgresDatabaseUrl } from "./db/databaseUrl";
 import { hasRequiredPostgresSchema } from "./db/readiness";
@@ -167,6 +168,7 @@ export async function incrementPayLogD1(
   eventKey?: string,
   beforeIncrement?: (tx: Parameters<Parameters<NonNullable<Awaited<ReturnType<typeof getDb>>>['transaction']>[0]>[0]) => Promise<void>,
 ): Promise<{ id: number; projectedPay: number }> {
+  assertFinancialFeaturesEnabled();
   const db = await getDb();
   if (!db) throw new DatabaseUnavailableError();
   const { log } = beforeIncrement

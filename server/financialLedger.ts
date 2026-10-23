@@ -4,6 +4,7 @@ import { financialLedgerEvents, paymentCycles, weeklyPayLog, timeDayReviews, use
 import type { getDb } from './db';
 import { parseDateKey } from './utils/date-only';
 import { weeklyPayRevision } from '../shared/financialRevision';
+import { assertFinancialFeaturesEnabled } from './financialAvailability';
 
 type Database = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -128,6 +129,7 @@ function countsAndEstimate(input: Partial<Record<PayCountKey, number>>) {
 }
 
 export async function settlePaymentCycle(db: Database, actor: FinancialActor, input: { cycleId: number }) {
+  assertFinancialFeaturesEnabled();
   admin(actor); positiveId(input.cycleId);
   return db.transaction(async tx => {
     const scope = await lockScope(tx, actor);
@@ -190,6 +192,7 @@ async function saveInScope(tx: Transaction, scope: Scope, input: WeeklyPayInput,
 }
 
 export async function saveWeeklyPayLog(db: Database, actor: FinancialActor, input: WeeklyPayInput): Promise<WeeklyLogResult> {
+  assertFinancialFeaturesEnabled();
   admin(actor); positiveId(input.vaId);
   if (!Object.prototype.hasOwnProperty.call(input, 'expectedRevision')
     || (input.expectedRevision !== null && typeof input.expectedRevision !== 'string')) {
@@ -209,6 +212,7 @@ export async function saveWeeklyPayLog(db: Database, actor: FinancialActor, inpu
 }
 type ReadInput = { vaId?: number; weekStart?: string; limit?: number };
 export async function getWeeklyPayLogs(db: Database, actor: FinancialActor, input: ReadInput = {}): Promise<WeeklyLog[]> {
+  assertFinancialFeaturesEnabled();
   const workerId = actor.role === 'worker' ? actor.id : input.vaId;
   if (actor.role === 'worker' && input.vaId !== undefined && input.vaId !== actor.id) fail(403, 'Worker access denied');
   if (input.limit !== undefined && (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100)) fail(400, 'Ledger limit must be between 1 and 100');
@@ -226,6 +230,7 @@ export async function getWeeklyPayLog(db: Database, actor: FinancialActor, input
 
 export async function incrementWeeklyD1(db: Database, workerUserId: number, dateKey: string, count: number, eventKey?: string,
   beforeIncrement?: (tx: Transaction) => Promise<void>): Promise<WeeklyLogResult> {
+  assertFinancialFeaturesEnabled();
   positiveId(workerUserId); const day = date(dateKey);
   if (!Number.isSafeInteger(count) || count <= 0) fail(400, 'A positive integer D1 increment is required');
   if (eventKey !== undefined && (typeof eventKey !== 'string' || eventKey.trim() !== eventKey || eventKey.length < 3 || eventKey.length > 256)) fail(400, 'Invalid financial event key');
