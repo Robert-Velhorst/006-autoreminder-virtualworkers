@@ -73,6 +73,14 @@ jobs:
           exit "$status"
       - run: pnpm check
       - run: pnpm check:db-transfer
+      - name: Verify isolated host preparation and cross-UID queue permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -I deployment/hetzner/prepare_codex_host_test.py
+          sudo env VA_TEST_NODE="$(command -v node)" \
+            VA_TEST_FILESYSTEM_POLICY="$PWD/shared/local-filesystem-policy.mjs" \
+            python3 -B -I deployment/hetzner/codex_queue_permissions_test.py
       - name: Test deployment release-source validation
         run: node --test deployment/hetzner/release-source.test.mjs
       - name: Validate production URL and webhook Compose configuration

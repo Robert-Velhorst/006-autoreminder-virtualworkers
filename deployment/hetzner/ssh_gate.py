@@ -279,6 +279,7 @@ def firewall_preflight():
 
 
 def generalserver_preflight():
+    codex_queue_preflight()
     # Inspect only network metadata, unit state and container labels, never env.
     networks = json.loads(preflight_output([
         "/usr/bin/docker", "network", "inspect", "va_dashboard_private"]))
@@ -314,6 +315,31 @@ def generalserver_preflight():
         raise Refused("VA PostgreSQL proxy socket is not available on its fixed interface")
     preflight_output(["/usr/bin/systemctl", "is-active", "--quiet", "va-dashboard-pg-firewall.service"])
     firewall_preflight()
+
+
+def codex_queue_preflight():
+    # The app receives only this fixed transport mount, never auth or private work.
+    root = Path('/srv/va-dashboard-bridge')
+    try:
+        ancestor = root.parent.lstat()
+        if not stat.S_ISDIR(ancestor.st_mode) or ancestor.st_uid != 0 or ancestor.st_mode & 0o022:
+            raise Refused('Untrusted Codex transport ancestor')
+        private = root.lstat()
+        if (not stat.S_ISDIR(private.st_mode) or private.st_uid != 16006
+                or private.st_gid != 16006 or stat.S_IMODE(private.st_mode) != 0o700):
+            raise Refused('Codex private workspace ownership or permissions differ')
+        account = pwd.getpwnam('va-dashboard-codex')
+        if (account.pw_uid != 16006 or account.pw_gid != 16006
+                or account.pw_shell != '/usr/sbin/nologin'):
+            raise Refused('Unexpected Codex service account')
+        for child in ('', 'requests', 'replies', 'llm-v1', 'llm-v1/requests',
+                      'llm-v1/replies', 'llm-v1/dispatch'):
+            info = (root / 'queue' / child).lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 16006
+                    or info.st_gid != 16006 or stat.S_IMODE(info.st_mode) != 0o2770):
+                raise Refused('Codex queue ownership or group-only setgid permissions differ')
+    except (OSError, KeyError):
+        raise Refused('Dedicated Codex transport has not been prepared') from None
 
 
 def root_command(arguments):
