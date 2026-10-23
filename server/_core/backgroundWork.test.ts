@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import ts from "typescript-legacy";
+import { parse } from "@babel/parser";
+import { VISITOR_KEYS, type Node } from "@babel/types";
 import { describe, expect, it } from "vitest";
 import { getBackgroundWorkConfiguration } from "./backgroundWork";
 
@@ -59,22 +60,23 @@ describe("automatic startup work configuration", () => {
   });
 
   it("guards all six starter calls and retains callback configuration without automatic registration", () => {
-    const source = ts.createSourceFile("index.ts", readFileSync(new URL("./index.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
+    const text = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    const source = parse(text, { sourceType: "module", plugins: ["typescript"] });
     const starters = new Set(["startBriefingScheduler", "startManusScheduler", "startReminderWorker",
       "startMaintenanceCenter", "startManagerScheduler", "startFounderDecisionAlertWorker"]);
     const found: string[] = [];
     let callbackConfigured = false;
-    function visit(node: ts.Node) {
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
-        const name = node.expression.text;
+    function visit(node: Node, ancestors: Node[] = []) {
+      if (node.type === "CallExpression" && node.callee.type === "Identifier") {
+        const name = node.callee.name;
         if (starters.has(name)) {
           found.push(name);
           let guarded = false;
-          for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) {
-            if (ts.isIfStatement(ancestor) && ancestor.expression.getText(source) === "backgroundWork.enabled") {
-              let branch: ts.Node = node;
-              while (branch.parent !== ancestor) branch = branch.parent;
-              guarded = branch === ancestor.thenStatement;
+          for (let index = ancestors.length - 1; index >= 0; index--) {
+            const ancestor = ancestors[index];
+            if (ancestor.type === "IfStatement" && text.slice(ancestor.test.start!, ancestor.test.end!) === "backgroundWork.enabled") {
+              const branch = ancestors[index + 1] ?? node;
+              guarded = branch === ancestor.consequent;
               break;
             }
           }
@@ -82,11 +84,18 @@ describe("automatic startup work configuration", () => {
         }
         if (name === "initializeWebhookAutoRegister") {
           expect(node.arguments.length).toBe(2);
-          expect(node.arguments[1].kind).toBe(ts.SyntaxKind.FalseKeyword);
+          expect(node.arguments[1]).toMatchObject({ type: "BooleanLiteral", value: false });
           callbackConfigured = true;
         }
       }
-      ts.forEachChild(node, visit);
+      for (const key of VISITOR_KEYS[node.type] ?? []) {
+        const value = (node as unknown as Record<string, unknown>)[key];
+        for (const child of Array.isArray(value) ? value : [value]) {
+          if (child && typeof child === "object" && "type" in child) {
+            visit(child as Node, [...ancestors, node]);
+          }
+        }
+      }
     }
     visit(source);
     expect(found.sort()).toEqual([...starters].sort());

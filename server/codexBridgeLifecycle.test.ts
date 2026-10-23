@@ -4,6 +4,7 @@ import { runCodexBridge } from "../scripts/run-codex-bridge";
 import { resolveCodexBridgePaths } from "../shared/codex-bridge-paths.mjs";
 
 const env = {
+  CODEX_HOME: resolve("mock-bridge/synthetic-codex-auth"),
   APTLSS_CODEX_EXECUTABLE: "mock-official-codex",
   APTLSS_CODEX_QUEUE_DIR: resolve("mock-bridge/queue"),
   APTLSS_CODEX_PRIVATE_DIR: resolve("mock-bridge/manager-private"),

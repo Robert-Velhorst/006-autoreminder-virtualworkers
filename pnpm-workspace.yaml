@@ -13,19 +13,27 @@ overrides:
   "@trpc/client>typescript": "-"
   "@trpc/react-query>typescript": "-"
   "@trpc/server>typescript": "-"
-  tailwindcss>nanoid: 3.3.7
   dompurify: 3.4.17
   engine.io: 6.6.11
   proxy-addr: 2.0.8
   lodash: 4.18.1
   lodash-es: 4.18.1
   mdast-util-to-hast: 13.2.1
-  mermaid: 11.17.2
-  path-to-regexp: 0.1.13
+  mermaid: 12.2.0
+  path-to-regexp: 9.0.0
   socket.io-parser: 4.2.7
-  uuid: 13.0.2
-  ws: 8.21.1
+  uuid: 14.0.3
+  ws: 8.22.0
   katex: 0.19.0
-  qs: 6.16.0
-  "@esbuild-kit/core-utils>esbuild": ^0.25.10
-  postcss-selector-parser: 7.1.6
+  qs: 6.16.1
+  "@esbuild-kit/core-utils>esbuild": 0.28.2
+  postcss-selector-parser: 7.1.7
+
+minimumReleaseAgeExclude:
+  - "@aws-sdk/client-s3@3.1156.0"
+  - "@aws-sdk/s3-request-presigner@3.1156.0"
+  - "@tanstack/react-virtual@3.14.22"
+  - "@tanstack/virtual-core@3.19.7"
+  - dotenv@18.0.9
+  - nodemailer@10.2.1
+  - path-to-regexp@9.0.0

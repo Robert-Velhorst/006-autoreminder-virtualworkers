@@ -1,5 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { staticAssetCacheControl, staticAssetResourcePolicy } from "./static";
+import { describe, expect, it, vi } from "vitest";
+import express from "express";
+import fs from "node:fs";
+import { serveStatic, staticAssetCacheControl, staticAssetResourcePolicy } from "./static";
+
+it("registers the SPA fallback with the current Express router", () => {
+  const exists = vi.spyOn(fs, "existsSync").mockReturnValue(true);
+  try {
+    expect(() => serveStatic(express())).not.toThrow();
+  } finally { exists.mockRestore(); }
+});
 
 describe("static asset caching", () => {
   it("marks Vite-hashed assets as immutable", () => {

@@ -1,6 +1,6 @@
 import express from 'express';
 import request from 'supertest';
-import { parse as parseCookies } from 'cookie';
+import { parseCookie as parseCookies } from 'cookie';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { users } from '../../drizzle/schema.postgres';
 import { COOKIE_NAME } from '../../shared/const';

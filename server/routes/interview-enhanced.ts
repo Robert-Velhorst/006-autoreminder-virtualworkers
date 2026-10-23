@@ -45,7 +45,7 @@ function respondInterviewError(res: Response, error: unknown, fallback: string) 
  * POST /api/interview/start
  * Start a new interview session for a card
  */
-router.post('/start', async (req: Request, res: Response) => {
+router.post('/start', async (req, res) => {
   try {
     const user = (req as any).user;
     if (!user) {
@@ -73,7 +73,7 @@ router.post('/start', async (req: Request, res: Response) => {
  * POST /api/interview/:sessionId/respond
  * Process user response and get next question
  */
-router.post('/:sessionId/respond', async (req: Request, res: Response) => {
+router.post('/:sessionId/respond', async (req, res) => {
   try {
     const user = (req as any).user;
     if (!user) {
@@ -139,7 +139,7 @@ router.post('/:sessionId/respond', async (req: Request, res: Response) => {
  * Get the latest interview session for the current user on a card.
  * Prefer active sessions so the UI can resume where the user left off.
  */
-router.get('/card/:cardId/latest', async (req: Request, res: Response) => {
+router.get('/card/:cardId/latest', async (req, res) => {
   try {
     const user = (req as any).user;
     if (!user) {
@@ -221,7 +221,7 @@ router.get('/card/:cardId/latest', async (req: Request, res: Response) => {
  * GET /api/interview/:sessionId
  * Get interview session details
  */
-router.get('/:sessionId', async (req: Request, res: Response) => {
+router.get('/:sessionId', async (req, res) => {
   try {
     const user = (req as any).user;
     if (!user) {
@@ -250,7 +250,7 @@ router.get('/:sessionId', async (req: Request, res: Response) => {
  * GET /api/interview/:sessionId/history
  * Get interview history (all questions and responses)
  */
-router.get('/:sessionId/history', async (req: Request, res: Response) => {
+router.get('/:sessionId/history', async (req, res) => {
   try {
     const user = (req as any).user;
     if (!user) {
@@ -280,7 +280,7 @@ router.get('/:sessionId/history', async (req: Request, res: Response) => {
  * GET /api/interview/:sessionId/results
  * Get interview results
  */
-router.get('/:sessionId/results', async (req: Request, res: Response) => {
+router.get('/:sessionId/results', async (req, res) => {
   try {
     const user = (req as any).user;
     if (!user) {
@@ -310,7 +310,7 @@ router.get('/:sessionId/results', async (req: Request, res: Response) => {
  * GET /api/interview/user/sessions
  * Get all interview sessions for current user
  */
-router.get('/user/sessions', async (req: Request, res: Response) => {
+router.get('/user/sessions', async (req, res) => {
   try {
     const user = (req as any).user;
     if (!user) {
@@ -329,7 +329,7 @@ router.get('/user/sessions', async (req: Request, res: Response) => {
  * GET /api/interview/user/stats
  * Get interview statistics for current user
  */
-router.get('/user/stats', async (req: Request, res: Response) => {
+router.get('/user/stats', async (req, res) => {
   try {
     const user = (req as any).user;
     if (!user) {
@@ -348,7 +348,7 @@ router.get('/user/stats', async (req: Request, res: Response) => {
  * GET /api/interview/card/:cardId/sessions
  * Get all interview sessions for a card
  */
-router.get('/card/:cardId/sessions', async (req: Request, res: Response) => {
+router.get('/card/:cardId/sessions', async (req, res) => {
   try {
     const { cardId } = req.params;
     const sessions = await getCardInterviewSessions(cardId);
@@ -363,7 +363,7 @@ router.get('/card/:cardId/sessions', async (req: Request, res: Response) => {
  * POST /api/interview/:sessionId/abandon
  * Abandon an interview session
  */
-router.post('/:sessionId/abandon', async (req: Request, res: Response) => {
+router.post('/:sessionId/abandon', async (req, res) => {
   try {
     const user = (req as any).user;
     if (!user) {

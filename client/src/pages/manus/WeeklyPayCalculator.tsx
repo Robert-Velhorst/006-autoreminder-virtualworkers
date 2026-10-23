@@ -766,7 +766,7 @@ function ScopedWeeklyPayCalculator({ vaId }: WeeklyPayCalculatorProps) {
                   tickFormatter={(v) => `$${v}`}
                 />
                 <Tooltip
-                  formatter={(value: number) => [`$${value.toFixed(2)}`, "Projected Pay"]}
+                  formatter={(value) => [typeof value === "number" ? `$${value.toFixed(2)}` : "-", "Projected Pay"]}
                   contentStyle={{
                     background: "hsl(var(--card))",
                     border: "1px solid hsl(var(--border))",

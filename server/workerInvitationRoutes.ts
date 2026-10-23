@@ -33,7 +33,7 @@ router.get("/:token", async (req, res) => {
   }
 });
 
-router.post("/:token/accept", async (req: Request, res: Response) => {
+router.post("/:token/accept", async (req, res) => {
   try {
     const password = typeof req.body?.password === "string" ? req.body.password : "";
     const accepted = await acceptWorkerInvitation(req.params.token, password);
