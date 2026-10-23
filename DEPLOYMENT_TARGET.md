@@ -5,7 +5,7 @@ use unapproved serverless hosting or public-tunnel services.
 
 The owner confirmed General-Server (`159.69.55.178`) and the public origin
 `https://006-va-dashboard.noodzakelijkonline.de`. On 23 October 2026 the stable
-v1.0.0 release was deployed there through the reviewed GitHub workflow. The
+v1.0.1 release was deployed there through the reviewed GitHub workflow. The
 earlier discovery state (NXDOMAIN, no VA database or application) is superseded
 by the verified checkpoint below. Use the dedicated restricted
 SSH connection described in [the installation guide](deployment/hetzner/SSH_GATE.md),
@@ -24,15 +24,17 @@ verify its data only if Redis is configured or used by the current deployment.
 
 ## Verified Deployment Checkpoint: 23 October 2026
 
-- Release v1.0.0 targets commit `5034569911de03bf6ce55b73d3c9fa877c017b13`.
-  Exact-head quality and CodeQL checks passed before merge. Release publication
-  run [39944380798](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/39944380798), attempt 2, passed image scanning, configured PostgreSQL
+- Release v1.0.1 targets commit `e19b53c8d724eeaebedf774efaf471cfb899e84d`.
+  PR #153 passed exact-head checks and merged with an identical source tree.
+  Post-merge quality run [39964023338](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/39964023338)
+  and CodeQL run [39964022908](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/39964022908) succeeded on that commit before publication.
+  Release publication run [39967830416](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/39967830416) passed image scanning, configured PostgreSQL
   runtime acceptance and provenance attestation.
 - The published immutable image digest is
-  `sha256:79ba7e354129f7afc0c1e215b12cf53de14da610c4268901ec4017f369b8ed8a`.
+  `sha256:30990b106ca3b22ee7c1353fd1c3a826a2804f6fdc064a8fb25614bb108fd7a3`.
   The scan reported no vulnerabilities under its recorded scanner/database;
   this is a dated result, not a guarantee against future findings.
-- Deployment run [39953635968](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/39953635968) completed after the owner's registered production
+- Deployment run [39970379495](https://github.com/Robert-Velhorst/006-autoreminder-virtualworkers/actions/runs/39970379495) completed after the owner's registered production
   review. It used the restricted SSH gate and verified release provenance.
 - Exactly one VA app container runs on loopback port 3025. Public HTTPS health
   reports healthy/database connected. HTTP redirects to HTTPS. The VA-only
@@ -45,6 +47,11 @@ verify its data only if Redis is configured or used by the current deployment.
   originals and independently decoded manager history were verified. Raw records,
   credentials, private audit material and backups remain outside Git.
 - No server expansion, shared database restart or source/backup deletion occurred.
+- Existing provider disk backups are enabled; three available daily copies were
+  observed, latest `2026-10-22T18:48:21Z`. PostgreSQL data and WAL are on the
+  backed-up root filesystem, with no external tablespaces. This establishes
+  storage scope, not successful recovery or database consistency in a particular
+  provider image. No backup was created, deleted or converted during inspection.
 
 ## Not Yet Accepted
 
@@ -55,21 +62,22 @@ verify its data only if Redis is configured or used by the current deployment.
 - Gmail/Drive callbacks, browser collector pairing and the private Codex
   subscription connection require real production acceptance. Paid API fallback
   is not enabled. Retained credentials and mocks are not provider acceptance.
-- Financial functions and database writes remain held pending currency-aware
+- Financial functions and financial writes remain held pending currency-aware
   historical display and separately confirmed future terms. Background/outbound
   jobs are off; AI management remains shadow-only. These holds are not proof of
   completed functionality.
-- Current repository security findings require individual triage/remediation;
-  passing PR checks alone do not mean the whole repository is alert-free.
-  Historical credential alerts have not been declared revoked or dismissed.
+- The default-branch CodeQL inventory was empty after the v1.0.1 analysis.
+  This is a dated code-scanning result, not evidence that all security concerns
+  are resolved. Historical secret-scanning alerts remain open; their credentials
+  have not been declared revoked or their alerts dismissed.
 - Restore-tested off-server backups exist, but a recurring consolidated
-  off-server database backup schedule and current provider backup coverage have
-  not yet been verified. Do not provision new paid storage or remove retained
+  off-server database backup schedule and recovery from the provider's disk
+  images have not yet been verified. Do not provision new paid storage or remove retained
   backups without the owner's approval.
 - Monitoring, recovery after reboot and the operational shadow trial remain
   separate gates. No disruptive shared-server reboot test was performed.
 
-This checkpoint proves a deployed authenticated shell and tested runtime
+This checkpoint proves a deployed login-protected shell and tested runtime
 boundaries, not completion of all production workflows. See
 [GeneralServer contracts](deployment/hetzner/GENERALSERVER.md) for infrastructure
 boundaries and [Production Cutover](docs/PRODUCTION_CUTOVER.md) for acceptance.

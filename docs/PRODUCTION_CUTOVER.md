@@ -1,5 +1,14 @@
 # Production Cutover
 
+## Current Checkpoint
+
+The owner-approved v1.0.1 deployment is live. See
+[Production Deployment Target](../DEPLOYMENT_TARGET.md) for exact source,
+workflow, image and observed runtime evidence, and the
+[Goal Completion Matrix](GOAL_COMPLETION_MATRIX.md) for remaining acceptance.
+The procedure below remains the contract for future cutovers; successful
+deployment does not imply real-provider or complete operational acceptance.
+
 ## Target Runtime
 
 The consolidated application requires a persistent Node.js container runtime,
