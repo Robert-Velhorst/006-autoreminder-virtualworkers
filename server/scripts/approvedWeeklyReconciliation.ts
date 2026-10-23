@@ -15,6 +15,23 @@ export type WeeklyReconciliationPlan = {
   originals: RawRow[];
 };
 
+export function readWeeklyReconciliationPlan(env: Record<string, string | undefined>): WeeklyReconciliationPlan | undefined {
+  if (env.LEGACY_WEEKLY_RECONCILIATION_FILE !== undefined) {
+    throw new Error('File-path input is no longer accepted; provide private LEGACY_WEEKLY_RECONCILIATION_JSON instead');
+  }
+  const json = env.LEGACY_WEEKLY_RECONCILIATION_JSON;
+  if (json === undefined) return undefined;
+  if (!json.trim() || Buffer.byteLength(json, 'utf8') > 131072) {
+    throw new Error('Weekly reconciliation JSON must be nonempty and at most 128 KiB');
+  }
+  let plan: unknown;
+  try { plan = JSON.parse(json); } catch { throw new Error('Invalid weekly reconciliation JSON'); }
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) {
+    throw new Error('Weekly reconciliation JSON must be an object');
+  }
+  return plan as WeeklyReconciliationPlan;
+}
+
 function fingerprint(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }

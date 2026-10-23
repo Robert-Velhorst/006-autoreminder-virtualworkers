@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { reconcileWeeklyRows, initializeApprovedWeeklySource, prepareApprovedWeeklySource, archiveApprovedWeeklySource, sourceReadTable, type WeeklyReconciliationPlan } from './approvedWeeklyReconciliation';
+import { reconcileWeeklyRows, initializeApprovedWeeklySource, prepareApprovedWeeklySource, archiveApprovedWeeklySource, sourceReadTable, readWeeklyReconciliationPlan, type WeeklyReconciliationPlan } from './approvedWeeklyReconciliation';
 import type mysql from 'mysql2';
 import type { Client } from 'pg';
 
@@ -14,6 +14,15 @@ function fixture(): WeeklyReconciliationPlan {
 }
 
 describe('explicit historical weekly reconciliation', () => {
+  it('accepts only bounded JSON input without opening caller-supplied file paths', () => {
+    expect(readWeeklyReconciliationPlan({})).toBeUndefined();
+    expect(readWeeklyReconciliationPlan({ LEGACY_WEEKLY_RECONCILIATION_JSON: JSON.stringify(fixture()) })).toEqual(fixture());
+    expect(() => readWeeklyReconciliationPlan({ LEGACY_WEEKLY_RECONCILIATION_FILE: '../../private.env' })).toThrow('File-path input');
+    for (const json of ['', ' ', '{', 'null', '[]', '7', '"text"', ' '.repeat(131073), '"' + '\u00e9'.repeat(65536) + '"']) {
+      expect(() => readWeeklyReconciliationPlan({ LEGACY_WEEKLY_RECONCILIATION_JSON: json })).toThrow();
+    }
+    expect(() => readWeeklyReconciliationPlan({ LEGACY_WEEKLY_RECONCILIATION_JSON: '{private-content' })).toThrow('Invalid weekly reconciliation JSON');
+  });
   function sourceFixture(options: { links?: number; collision?: number; ownerRole?: string; drift?: boolean } = {}) {
     const plan = fixture(); const calls: string[] = [];
     const source = { promise: () => ({ query: async (sql: string) => {

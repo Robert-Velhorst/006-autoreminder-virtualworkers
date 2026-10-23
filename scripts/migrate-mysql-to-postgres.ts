@@ -1,7 +1,6 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { readFile } from "node:fs/promises";
-import { initializeApprovedWeeklySource, prepareApprovedWeeklySource, archiveApprovedWeeklySource, sourceReadTable, type WeeklyReconciliationPlan } from "../server/scripts/approvedWeeklyReconciliation";
+import { initializeApprovedWeeklySource, prepareApprovedWeeklySource, archiveApprovedWeeklySource, sourceReadTable, readWeeklyReconciliationPlan } from "../server/scripts/approvedWeeklyReconciliation";
 import mysql from "mysql2";
 import { Client, types as pgTypes } from "pg";
 import { requirePostgresDatabaseUrl } from "../server/db/databaseUrl";
@@ -750,6 +749,7 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
     requireVerifiedTls: true,
   });
 
+  const weeklyPlan = readWeeklyReconciliationPlan(env);
   const source = mysql.createConnection({
     uri: sourceUrl,
     dateStrings: true,
@@ -769,9 +769,6 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
     await target.connect();
     await source.promise().query("SET SESSION time_zone = '+00:00'");
     await source.promise().query("SET SESSION information_schema_stats_expiry = 0");
-    const weeklyPlan = env.LEGACY_WEEKLY_RECONCILIATION_FILE
-      ? JSON.parse(await readFile(env.LEGACY_WEEKLY_RECONCILIATION_FILE, 'utf8')) as WeeklyReconciliationPlan
-      : undefined;
     if (weeklyPlan) await initializeApprovedWeeklySource(source, weeklyPlan);
     await source
       .promise()

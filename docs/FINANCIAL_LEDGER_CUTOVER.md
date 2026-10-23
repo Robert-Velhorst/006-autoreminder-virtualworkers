@@ -37,10 +37,14 @@ This procedure applies only after the release's native financial tests pass.
 
 ## Explicitly Approved Identical Weekly Records
 
-The transfer command optionally accepts `LEGACY_WEEKLY_RECONCILIATION_FILE`, a
-private JSON plan with version 1, the owner's verbatim approval, verified source
+The transfer command optionally accepts `LEGACY_WEEKLY_RECONCILIATION_JSON`, a
+private JSON plan (at most 128 KiB) with version 1, the owner's verbatim approval, verified source
 backup SHA-256, owner/worker user IDs, explicitly confirmed EUR amount and every
 field of every original weekly row. Never commit this record-bearing plan.
+Inject its contents through the private operator environment, not command-line
+arguments or logs; clear the variable afterward. The importer does not open any
+plan file. The former `LEGACY_WEEKLY_RECONCILIATION_FILE` variable is rejected
+explicitly, rather than silently ignoring an intended reconciliation.
 This is not automatic deduplication: the default importer still rejects conflicts.
 
 The narrow reviewed path accepts only identical business values, zero adjustments,
