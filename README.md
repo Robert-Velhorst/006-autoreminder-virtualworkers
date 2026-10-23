@@ -24,7 +24,7 @@ The application has two main surfaces:
 | `/worker/decisions` | Worker | Decision inbox and recorded outcomes |
 | `/worker/evidence` | Worker | Evidence and integration state |
 
-This repository is actively developed. A versioned container image and tagged release are produced only by the GitHub Release workflow after its verification gates pass. The project does not currently provide a hosted production service.
+This repository is actively developed. A versioned container image and tagged release are produced only by the GitHub Release workflow after its verification gates pass. The project is self-hosted, not a managed public-signup service. The owner's authenticated [Hetzner installation](https://006-va-dashboard.noodzakelijkonline.de/worker) is deployed; its verified state and remaining operational gates are recorded in [Production Deployment Target](DEPLOYMENT_TARGET.md).
 
 ## Current Status
 
