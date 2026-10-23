@@ -3,6 +3,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import { paymentCycles, users, vaProfiles, type User } from '../drizzle/schema.postgres';
 import type { getDb } from './db';
 import { selectWorkerProfile } from './workerOperatorContext';
+import { assertFinancialFeaturesEnabled } from './financialAvailability';
 
 type Database = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 type Actor = Pick<User, 'id' | 'role'>;
@@ -13,6 +14,7 @@ function denied(): never {
 
 /** A worker's tracker uses its canonical founder, never the worker/profile ID as a founder ID. */
 export async function readPaymentCycles(db: Database, actor: Actor, currentOnly = false) {
+  assertFinancialFeaturesEnabled();
   if (!validId(actor.id) || (actor.role !== 'admin' && actor.role !== 'worker')) denied();
   return db.transaction(async tx => {
     const profileFields = { id: vaProfiles.id, userId: vaProfiles.userId, founderId: vaProfiles.founderId, status: vaProfiles.status };

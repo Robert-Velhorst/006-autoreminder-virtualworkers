@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
+import { FinancialFeatureGate } from '@/components/FinancialFeatureGate';
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -46,6 +47,10 @@ function useNow(intervalMs = 60_000): Date {
 }
 
 export default function PaymentTracker() {
+  return <FinancialFeatureGate><EnabledPaymentTracker /></FinancialFeatureGate>;
+}
+
+function EnabledPaymentTracker() {
   const { user } = useAuth();
   const [showHistory, setShowHistory] = useState(false);
 

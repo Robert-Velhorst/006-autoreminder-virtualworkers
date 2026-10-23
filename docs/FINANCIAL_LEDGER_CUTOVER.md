@@ -63,6 +63,23 @@ the plan hash and preserved original count. Original totals and canonical totals
 must be reconciled explicitly rather than treating the smaller row count as loss.
 This records a historical allowance, not a payment or evidence of settlement.
 
+## Production Financial Hold
+
+Financial APIs and the routed pay/payment components are withheld in production
+unless `FINANCIAL_FEATURES_ENABLED=true`. Explicit `false` also disables them in
+development/test environments. The default outside production preserves existing
+test and development behavior. Availability is an authenticated capability, not
+permission to read the restricted migration archive.
+
+Keep the production hold in place until row-local historical currency display and
+future payment terms have been reviewed and implemented. Existing dollar labels
+and fixed estimates are not evidence of an approved agreement. The hold does not
+change, quarantine or delete the approved historical row or its originals; it
+prevents misleading displays, financial reads/writes, settlement, successor
+creation and automatic monetary adjustments. Nonfinancial work can remain usable.
+The backend enforces the hold independently of UI state. Initial availability
+loading/errors fail closed; a positive background refetch preserves form state.
+
 ## Runtime Acceptance
 
 - Validate canonical migration receipts and actual nondeferrable financial
