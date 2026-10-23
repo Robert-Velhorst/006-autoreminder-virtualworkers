@@ -29,7 +29,7 @@ and container. Never publish authentication files, mount them into the app, or
 seed personal account authentication into public GitHub Actions.
 
 The app and bridge must access the shared queue using compatible unprivileged
-ownership. The default application image uses UID 1000. Verify actual file
+ownership. The default application image uses UID 1001. Verify actual file
 permissions before starting; do not make the queue or private authentication
 world-readable to work around a mismatch. Private execution directories must
 remain separate from both the queue and each other.

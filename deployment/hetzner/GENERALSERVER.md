@@ -26,6 +26,29 @@ Its ownership label is a configuration assertion, not independent authorization:
 - No members, or only the existing Compose project `va-dashboard`, service `app`,
   at `172.30.6.2/29`. No other application may join; no Docker socket is mounted.
 
+### Dedicated Codex Transport
+
+The prepared source configuration adds supplementary GID 16006 and exactly one
+transport mount: `/srv/va-dashboard-bridge/queue` to `/app/codex-queue`, with
+`create_host_path: false`. It never mounts the bridge workspace, authentication
+home, instructions or private schemas. The existing PostgreSQL CA mount remains
+read-only. The app remains its image's non-root UID 1001; do not change it to
+the bridge account or an unrelated host identity.
+
+Before deploying this canonical configuration, prepare the dedicated
+`va-dashboard-codex` account at UID/GID 16006 with nologin shell, private workspace
+mode 0700, and all seven transport directories at mode 2770. The root gate
+verifies these exact metadata constraints before app replacement. See
+[Private Codex Subscription Bridge](../../docs/CODEX_SUBSCRIPTION_BRIDGE.md)
+for the directory list and acceptance boundaries. The preparation script
+refuses existing targets and is not an updater.
+
+Sharing defaults off. Do not set `APTLSS_CODEX_SHARED_QUEUE=true` or select the
+mounted queue in private runtime configuration until matching accepted bridge
+bundles are installed and the cross-UID test passes. A mount does not enable
+the pilot or prove account/model acceptance. Root-installed gate assets and
+the running container are not updated by editing these source files.
+
 Parent reported on 22 October 2026: existing Docker networks use 172.17/18/19/20,
 localhost HBA uses SCRAM (Unix local uses peer), and UFW is inactive with INPUT
 ACCEPT. These are parent observations, not verification by these source tests.
