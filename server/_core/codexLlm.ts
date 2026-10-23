@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { atomicWriteLocalFile, confinedLocalPath } from '../../shared/local-filesystem-policy.mjs';
+import { atomicWriteQueueFile, confinedLocalPath } from '../../shared/local-filesystem-policy.mjs';
 import type { InvokeParams, InvokeResult } from './llm';
 import { CODEX_LLM_EFFORTS, CODEX_LLM_GRANT_MS, CODEX_LLM_MODEL, CODEX_LLM_PROTOCOL, CODEX_LLM_TTL_MS,
   compileLlmOutput, llmGrantSchema, llmInputHash, llmInputSchema, llmReadySchema, llmReplySchema, llmRequestSchema,
@@ -79,7 +79,7 @@ export async function invokeCodexLlm(params: InvokeParams): Promise<InvokeResult
     signal.throwIfAborted();
     await params.beforeDispatch?.();
     signal.throwIfAborted();
-    await atomicWriteLocalFile(paths.request,JSON.stringify(request));
+    await atomicWriteQueueFile(paths.request,JSON.stringify(request));
     while (true) {
       signal.throwIfAborted();
       try {
@@ -112,7 +112,7 @@ export async function invokeCodexLlm(params: InvokeParams): Promise<InvokeResult
           await params.beforeDispatch?.();
           signal.throwIfAborted();
           const grant = llmGrantSchema.parse({ ...ready,expiresAt: new Date(Math.min(Date.now()+CODEX_LLM_GRANT_MS,Date.parse(request.expiresAt))).toISOString() });
-          await atomicWriteLocalFile(dispatch.grant,JSON.stringify(grant));
+          await atomicWriteQueueFile(dispatch.grant,JSON.stringify(grant));
           nextAttempt++;
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       }

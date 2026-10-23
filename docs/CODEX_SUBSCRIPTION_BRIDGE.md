@@ -29,10 +29,44 @@ and container. Never publish authentication files, mount them into the app, or
 seed personal account authentication into public GitHub Actions.
 
 The app and bridge must access the shared queue using compatible unprivileged
-ownership. The default application image uses UID 1000. Verify actual file
+ownership. The default application image uses UID 1001. Verify actual file
 permissions before starting; do not make the queue or private authentication
 world-readable to work around a mismatch. Private execution directories must
 remain separate from both the queue and each other.
+
+For separate host/container UIDs, opt in with `APTLSS_CODEX_SHARED_QUEUE=true`
+on both sides and give the app only the dedicated queue supplementary group.
+Precreate the queue and its `requests`, `replies`, `llm-v1`,
+`llm-v1/requests`, `llm-v1/replies`, and `llm-v1/dispatch` directories with
+the shared GID and mode `2770` (setgid, no other-user access). Only protocol
+requests, replies, heartbeats and dispatch grants use mode `0660`; private
+instructions, schemas, runner locks and authentication stay `0600` under
+private `0700` directories. Sharing is disabled by default. Never reuse an
+unrelated application's UID or mount the private workspace or auth home.
+The synthetic Linux cross-UID test exercises group inheritance, restrictive
+umasks, bidirectional claim/reply cleanup, and denial to an unrelated group.
+It also runs the actual manager and general conversation transports under
+different runner/client UIDs, with synthetic CLI replies: manager output,
+text, locally validated JSON schema, private-instruction denial and graceful
+lease/transport cleanup. The isolated fixture is removed after shutdown.
+It does not establish real account/model acceptance or a live queue mount.
+The Linux proof does not accept executable or asset paths from environment
+variables. Assets are bound to the source checkout; the Node binary must be
+regular, root-controlled and selected from the two fixed test/host locations.
+CI prepares and removes only its own isolated runtime copy. The synthetic
+queue is fixed beneath the test working directory, not a caller-selected path.
+
+`deployment/hetzner/prepare-codex-host.py` prepares fixed, separate host paths
+and an inactive service from pinned distributions and the accepted v1.0.1
+image seal. It refuses existing targets rather than overwriting them. It is
+not an upgrade command or an application deployment: login, queue wiring,
+matching rebuilt bridge bundles and the acceptance checks below are separate
+gates. The prepared canonical GeneralServer configuration adds only the fixed
+queue mount and supplementary GID 16006; its root gate checks the dedicated
+account and every transport directory before deployment. This source change
+does not alter the already-installed production gate or running container.
+Queue dispatch remains unconfigured until the runtime explicitly selects its
+mounted queue and enables sharing, after matching bridge bundles are accepted.
 
 For an approved shared filesystem, run from a dedicated private workspace. All
 queue and execution paths must be beneath that workspace, without symlinks.
