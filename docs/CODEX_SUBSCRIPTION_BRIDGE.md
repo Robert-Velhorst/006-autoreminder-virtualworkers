@@ -50,6 +50,11 @@ different runner/client UIDs, with synthetic CLI replies: manager output,
 text, locally validated JSON schema, private-instruction denial and graceful
 lease/transport cleanup. The isolated fixture is removed after shutdown.
 It does not establish real account/model acceptance or a live queue mount.
+The Linux proof does not accept executable or asset paths from environment
+variables. Assets are bound to the source checkout; the Node binary must be
+regular, root-controlled and selected from the two fixed test/host locations.
+CI prepares and removes only its own isolated runtime copy. The synthetic
+queue is fixed beneath the test working directory, not a caller-selected path.
 
 `deployment/hetzner/prepare-codex-host.py` prepares fixed, separate host paths
 and an inactive service from pinned distributions and the accepted v1.0.1

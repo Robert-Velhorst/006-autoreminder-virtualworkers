@@ -3,17 +3,54 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+
+SOURCE = Path(__file__).resolve().parents[2]
+
+
+def test_node():
+    for candidate in (Path('/opt/va-dashboard-codex/node/node'),
+                      Path('/usr/local/lib/va-dashboard-transport-test/node')):
+        if not candidate.exists():
+            continue
+        for item in (candidate, *candidate.parents):
+            info = item.lstat()
+            if info.st_uid != 0 or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):
+                raise RuntimeError('Synthetic proof requires a root-controlled regular Node installation')
+        if not stat.S_ISREG(candidate.lstat().st_mode):
+            raise RuntimeError('Synthetic proof requires a regular Node executable')
+        return str(candidate)
+    raise RuntimeError('The fixed isolated test Node runtime has not been prepared')
 
 
 @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0, 'requires isolated Linux root test runner')
 class QueuePermissionsTests(unittest.TestCase):
+    def test_caller_cannot_override_test_tools_or_assets(self):
+        selected = test_node()
+        with patch.dict(os.environ, {'VA_TEST_NODE': '/untrusted/node',
+                                     'VA_TEST_PROTOCOL_BUNDLE': '/untrusted/protocol',
+                                     'VA_TEST_FILESYSTEM_POLICY': '/untrusted/policy'}):
+            self.assertEqual(test_node(), selected)
+            self.assertEqual(SOURCE, Path(__file__).resolve().parents[2])
+
+    def test_untrusted_runtime_metadata_is_refused(self):
+        for uid, mode in ((16006, stat.S_IFREG | 0o755),
+                          (0, stat.S_IFREG | 0o777), (0, stat.S_IFLNK | 0o777)):
+            with self.subTest(uid=uid, mode=mode), \
+                    patch.object(Path, 'exists', return_value=True), \
+                    patch.object(Path, 'lstat', return_value=SimpleNamespace(st_uid=uid, st_mode=mode)), \
+                    self.assertRaisesRegex(RuntimeError, 'root-controlled'):
+                test_node()
+
     def test_real_protocols_with_separate_runner_and_client_uids(self):
-        node = os.environ['VA_TEST_NODE']
-        bundle = Path(os.environ['VA_TEST_PROTOCOL_BUNDLE']).resolve(strict=True)
+        node = test_node()
+        bundle = SOURCE / 'dist/test-codex-shared-transport.mjs'
         producer, consumer, group = 46006, 46007, 46006
         root = Path(tempfile.mkdtemp(prefix='va-codex-protocol-proof-'))
         runner = None
@@ -57,8 +94,8 @@ class QueuePermissionsTests(unittest.TestCase):
                 shutil.rmtree(root)
 
     def test_distinct_uids_exchange_only_group_transport(self):
-        node = os.environ['VA_TEST_NODE']
-        policy = Path(os.environ['VA_TEST_FILESYSTEM_POLICY']).resolve(strict=True)
+        node = test_node()
+        policy = SOURCE / 'shared/local-filesystem-policy.mjs'
         # These synthetic identities do not require creating or changing OS accounts.
         producer, consumer, group = 46006, 46007, 46006
         with tempfile.TemporaryDirectory(prefix='va-codex-transport-proof-') as root:
