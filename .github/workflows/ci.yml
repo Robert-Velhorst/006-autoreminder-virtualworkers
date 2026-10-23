@@ -233,6 +233,8 @@ jobs:
           fi
           BACKUP_TEST
           DATABASE_URL="$RESTORE_DATABASE_URL" pnpm db:verify-parity
+      - name: Verify capacity-guarded native backup boundaries
+        run: sudo python3 -B -I deployment/hetzner/postgres_backup_test.py
       - name: Validate Hetzner deployment script syntax
         run: bash -n deployment/hetzner/deploy.sh
 
