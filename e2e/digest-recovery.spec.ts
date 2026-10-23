@@ -79,6 +79,9 @@ async function fixture(page: Page, baseURL: string, info: TestInfo, role: "admin
       "/__local-preview/status": { available: false }, "/api/auth/owner-bootstrap/status": { available: false },
       "/api/trello-webhook/status": { status: null }, "/api/trello-webhook/list": { webhooks: [] },
       "/api/trello-webhook/analytics": {},
+      "/api/chatbot/analytics": { totalConversations: 0, totalCommands: {}, avgResponseTimeMs: 0,
+        totalCheckins: 0, totalResponses: 0, overallResponseRate: 0, avgCheckinResponseMinutes: 0,
+        activeWorkers: 0, activeCards: 0, topCommands: [] },
       "/api/trello-boards": { boards: [] },
     };
     if (url.pathname in rest) return route.fulfill({ json: rest[url.pathname] });
