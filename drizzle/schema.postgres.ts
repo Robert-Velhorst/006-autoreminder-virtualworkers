@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import type { AtisAnalysisSelection } from "../shared/atisAnalysis";
+import { decodeManagerSnapshotStorage, encodeManagerSnapshotStorage } from "../server/db/managerSnapshotStorage";
 import {
   integer,
   bigint,
@@ -29,6 +30,14 @@ const sessionEpochType = customType<{ data: string; driverData: string }>({
     }
     return value;
   },
+});
+
+// Keep SQL review/timing projections readable while decoding full snapshots at
+// the driver boundary. The physical column remains text; plain history still reads.
+const managerSnapshotType = customType<{ data: string; driverData: string }>({
+  dataType: () => "text",
+  fromDriver: decodeManagerSnapshotStorage,
+  toDriver: encodeManagerSnapshotStorage,
 });
 
 export const pgEnumType01 = pgEnum("enum_role_1pxhzfx", [
@@ -3982,7 +3991,7 @@ export const aptlssManagerRuns = pgTable("aptlss_manager_runs", {
   proposalHash: varchar("proposalHash", { length: 64 }),
   previousPlanJson: text("previousPlanJson"),
   appliedPlanHash: varchar("appliedPlanHash", { length: 64 }),
-  snapshotJson: text("snapshotJson").notNull(),
+  snapshotJson: managerSnapshotType("snapshotJson").notNull(),
   reviewDigest: varchar("reviewDigest", { length: 64 }).generatedAlwaysAs(sql`("snapshotJson"::jsonb ->> 'implementationDigest')`),
   reviewUrgent: boolean("reviewUrgent").generatedAlwaysAs(sql`("snapshotJson"::jsonb @> '{"interventions":[{"severity":"urgent"}]}'::jsonb)`),
   createdAt: timestamp("createdAt").defaultNow().notNull(),

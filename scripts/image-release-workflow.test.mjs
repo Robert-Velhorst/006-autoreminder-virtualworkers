@@ -7,6 +7,19 @@ import { spawnSync } from 'node:child_process';
 
 const read = name => readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8');
 
+test('production image refreshes the vulnerable runtime libraries before dropping root', () => {
+  const source = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8');
+  const stage = source.match(/^FROM [^\r\n]+ AS production\r?$/m);
+  assert.ok(stage, 'final production stage is required');
+  const runtime = source.slice(stage.index + stage[0].length);
+  const upgrade = runtime.match(/^RUN apk upgrade --no-cache ([^\r\n]+) && \\/m);
+  assert.ok(upgrade, 'runtime security refresh must run in the final image stage');
+  for (const name of ['zlib', 'musl', 'musl-utils']) {
+    assert.ok(upgrade[1].split(/\s+/).includes(name), `missing runtime patch: ${name}`);
+  }
+  assert.ok(runtime.indexOf('apk upgrade') < runtime.indexOf('USER nodejs'));
+});
+
 // These are source-wiring tripwires, not a YAML interpreter or a substitute
 // for an actual scanned candidate, PostgreSQL acceptance and promotion run.
 function ordered(source, values) {

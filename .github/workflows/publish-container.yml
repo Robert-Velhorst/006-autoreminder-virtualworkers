@@ -95,6 +95,9 @@ jobs:
       - name: Verify database schema parity
         run: pnpm db:verify-parity
 
+      - name: Install Chromium for financial UI regression tests
+        run: pnpm exec playwright install --with-deps chromium
+
       - name: Run test suite
         run: pnpm test
 

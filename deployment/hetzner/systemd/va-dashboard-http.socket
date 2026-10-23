@@ -1,0 +1,16 @@
+# Template only: confirm the existing Caddy volume and socket access identity.
+[Unit]
+Description=VA HTTP entrypoint in the existing Caddy data volume
+RequiresMountsFor=/var/lib/docker/volumes/sharet_caddy-data/_data
+
+[Socket]
+ListenStream=/var/lib/docker/volumes/sharet_caddy-data/_data/va-dashboard-http.sock
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+DirectoryMode=0700
+Accept=no
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

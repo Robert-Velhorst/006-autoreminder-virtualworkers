@@ -57,6 +57,7 @@ async function fixture(page: Page, info: TestInfo, role: 'admin' | 'worker' = 'a
   const origin = 'http://financial.test';
   const calls: Call[] = []; const unexpected: string[] = []; const errors: string[] = [];
   const state = { records: new Map<number, any>([[1002, saved(1002, 2, 'Worker A saved note')]]),
+    financialAvailability: 'enabled' as 'enabled' | 'held' | 'error',
     holdWorkerB: false, releaseWorkerB: () => {}, holdSaveA: false, releaseSaveA: () => {} };
   let releaseB: () => void;
   const heldB = new Promise<void>(resolvePromise => { releaseB = resolvePromise; });
@@ -83,6 +84,15 @@ async function fixture(page: Page, info: TestInfo, role: 'admin' | 'worker' = 'a
     calls.push({ procedure, input, method: request.method() });
     const fulfill = (value: unknown) => route.fulfill({ json: { result: { data: superjson.serialize(value) } } });
     if (procedure === 'auth.me') return fulfill(user);
+    if (procedure === 'payment.availability') {
+      if (state.financialAvailability === 'error') {
+        return route.fulfill({ status: 503, json: { error: superjson.serialize({
+          message: 'Availability check unavailable', code: -32603,
+          data: { code: 'INTERNAL_SERVER_ERROR', httpStatus: 503, path: procedure },
+        }) } });
+      }
+      return fulfill({ enabled: state.financialAvailability === 'enabled' });
+    }
     if (procedure === 'payLog.getByWeek') {
       if ((input as any)?.vaId === 1003 && state.holdWorkerB) await heldB;
       return fulfill(state.records.get((input as any)?.vaId ?? user.id) ?? null);
@@ -130,7 +140,10 @@ async function fixture(page: Page, info: TestInfo, role: 'admin' | 'worker' = 'a
   await page.addScriptTag({ content: bundle });
   const open = async (view = 'calculator', vaId?: number) => {
     await page.evaluate(({ view, vaId }) => (window as any).mountFinancial(view, vaId), { view, vaId });
-    if (view === 'calculator') await expect(page.getByRole('heading', { name: 'Weekly Pay Calculator', exact: true })).toBeVisible();
+    if (view === 'calculator') {
+      const heading = state.financialAvailability === 'enabled' ? 'Weekly Pay Calculator' : 'Pay and payments paused';
+      await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible();
+    }
   };
   const verify = async () => {
     expect(errors, 'No uncaught browser errors').toEqual([]);
@@ -145,6 +158,20 @@ async function fixture(page: Page, info: TestInfo, role: 'admin' | 'worker' = 'a
 function firstMerit(page: Page) {
   const row = page.getByText('Realized Financial Opportunity', { exact: true }).locator('..');
   return { plus: row.getByRole('button', { name: '+', exact: true }), value: row.getByRole('button', { name: '+', exact: true }).locator('..').locator('span') };
+}
+
+for (const availability of ['held', 'error'] as const) {
+  test(`financial ${availability} blocks the real editor without reading or mutating pay records`, async ({ page }, info) => {
+    const f = await fixture(page, info);
+    f.state.financialAvailability = availability;
+    await f.open('calculator', 1002);
+    await expect(page.getByRole('heading', { name: 'Weekly Pay Calculator', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('textbox')).toHaveCount(0);
+    expect(f.calls.some(call => call.procedure === 'payment.availability')).toBe(true);
+    expect(f.calls.filter(call => call.procedure.startsWith('payLog.') || call.procedure.startsWith('financialLedger.'))).toEqual([]);
+    expect(f.writes()).toEqual([]);
+    await f.verify();
+  });
 }
 
 test('switching workers clears unsaved counts and notes and saves only the selected vaId', async ({ page }, info) => {

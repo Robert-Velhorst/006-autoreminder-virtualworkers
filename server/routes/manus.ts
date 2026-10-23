@@ -2,7 +2,8 @@ import { z } from "zod";
 import { closeCanonicalTimer, insertCanonicalTimer, withTimerAccountTransaction, lockTimerAccount, timerFailure, timeCompleteness, correctCanonicalTimer, assertTimerIdentityReady } from "../canonicalTimer";
 import { recordedSeconds } from "../../shared/timerDuration";
 import { TRPCError } from "@trpc/server";
-import { adminProcedure, operatorAccountProcedure, router, publicProcedure } from "../_core/trpc";
+import { adminProcedure, operatorAccountProcedure, protectedProcedure, router, publicProcedure } from "../_core/trpc";
+import { assertFinancialFeaturesEnabled, financialFeaturesEnabled } from '../financialAvailability';
 import { getDb } from "../db";
 import {
   timeEntries,
@@ -59,21 +60,30 @@ function throwFinancialRouteError(error: unknown): never {
       : failure.status === 409 ? 'CONFLICT' : 'INTERNAL_SERVER_ERROR', message: failure.error });
 }
 
+// Gate before operator profile resolution, which can access the database.
+const financialProcedure = protectedProcedure.use(async ({ next }) => {
+  assertFinancialFeaturesEnabled();
+  return next();
+});
+const financialOperatorProcedure = financialProcedure.concat(operatorAccountProcedure);
+const financialAdminProcedure = financialProcedure.concat(adminProcedure);
+
 export const paymentRouter = router({
-  getAllCycles: operatorAccountProcedure.query(async ({ ctx }) => {
+  availability: protectedProcedure.query(() => ({ enabled: financialFeaturesEnabled() })),
+  getAllCycles: financialOperatorProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB not available' });
     return readPaymentCycles(db, ctx.user);
   }),
 
-  getCurrentCycle: operatorAccountProcedure.query(async ({ ctx }) => {
+  getCurrentCycle: financialOperatorProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB not available' });
     const all = await readPaymentCycles(db, ctx.user, true);
     return all[0] ?? null;
   }),
 
-  markPaid: adminProcedure
+  markPaid: financialAdminProcedure
     .input(z.object({ cycleId: financialId }).strict())
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
@@ -87,7 +97,7 @@ export const paymentRouter = router({
 
 // ─── Weekly Pay Log Router ──────────────────────────────────────────────────
 export const payLogRouter = router({
-  getAll: operatorAccountProcedure
+  getAll: financialOperatorProcedure
     .input(z.object({ limit: z.number().int().min(1).max(100).optional(), vaId: financialId.optional() }).strict())
     .query(async ({ input, ctx }) => {
       if (ctx.user.role === 'admin' && input.vaId === undefined) {
@@ -102,7 +112,7 @@ export const payLogRouter = router({
       catch (error) { throwFinancialRouteError(error); }
     }),
 
-  getByWeek: operatorAccountProcedure
+  getByWeek: financialOperatorProcedure
     .input(z.object({ weekStart: financialDateKey, vaId: financialId.optional() }).strict())
     .query(async ({ input, ctx }) => {
       if (ctx.user.role === 'admin' && input.vaId === undefined) {
@@ -117,7 +127,7 @@ export const payLogRouter = router({
       catch (error) { throwFinancialRouteError(error); }
     }),
 
-  upsert: adminProcedure
+  upsert: financialAdminProcedure
     .input(z.object({
       vaId: financialId,
       weekStart: financialDateKey,
