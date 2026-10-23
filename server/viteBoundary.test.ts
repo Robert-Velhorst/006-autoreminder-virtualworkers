@@ -14,6 +14,23 @@ vi.mock('../vite.config', () => ({ default: {} }));
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); fixture.create.mockReset(); fixture.transform.mockClear(); });
 
 describe('development Vite boundary', () => {
+  it('does not spend the template budget on the Vite module graph', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    fixture.create.mockResolvedValue({
+      middlewares: (req: express.Request, res: express.Response, next: () => void) => {
+        if (req.path.startsWith('/src/')) res.type('application/javascript').send('export default 1');
+        else next();
+      },
+      transformIndexHtml: fixture.transform, ssrFixStacktrace: vi.fn(),
+    });
+    const read = vi.spyOn(fs.promises, 'readFile').mockResolvedValue('<html>Login</html>');
+    const app = express();
+    await setupVite(app, createServer(app));
+    for (let index = 0; index < 650; index++) await request(app).get(`/src/module-${index}.ts`).expect(200);
+    await request(app).get('/worker').expect(200).expect(/Login/);
+    expect(read).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
   it('rejects production before loading the development server or template', async () => {
     vi.stubEnv('NODE_ENV', 'production');
     const read = vi.spyOn(fs.promises, 'readFile');

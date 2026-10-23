@@ -24,9 +24,9 @@ export async function setupVite(app: Express, server: Server) {
     appType: "custom",
   });
 
-  app.use(rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: 'draft-8', legacyHeaders: false }));
   app.use(vite.middlewares);
-  app.use("*", async (req, res, next) => {
+  const templateRateLimiter = rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: 'draft-8', legacyHeaders: false });
+  app.use("*", templateRateLimiter, async (req, res, next) => {
     const url = req.originalUrl;
 
     try {
