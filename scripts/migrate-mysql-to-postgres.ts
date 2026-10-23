@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { readFile } from "node:fs/promises";
-import { prepareApprovedWeeklySource, archiveApprovedWeeklySource, type WeeklyReconciliationPlan } from "../server/scripts/approvedWeeklyReconciliation";
+import { initializeApprovedWeeklySource, prepareApprovedWeeklySource, archiveApprovedWeeklySource, sourceReadTable, type WeeklyReconciliationPlan } from "../server/scripts/approvedWeeklyReconciliation";
 import mysql from "mysql2";
 import { Client, types as pgTypes } from "pg";
 import { requirePostgresDatabaseUrl } from "../server/db/databaseUrl";
@@ -294,13 +294,14 @@ async function getTargetDependencies(
 
 async function getSourceRowCount(
   connection: mysql.Connection,
-  table: string
+  table: string,
+  approvedWeekly = false
 ): Promise<string> {
   const [rows] = await connection
     .promise()
     .query<
       Array<{ count: string } & mysql.RowDataPacket>
-    >(`SELECT COUNT(*) AS count FROM ${quoteMySqlIdentifier(table)}`);
+    >(`SELECT COUNT(*) AS count FROM ${sourceReadTable(table, approvedWeekly)}`);
   return String(rows[0]?.count ?? "0");
 }
 
@@ -313,7 +314,8 @@ async function targetHasRows(client: Client, table: string): Promise<boolean> {
 
 async function getPreflight(
   source: mysql.Connection,
-  target: Client
+  target: Client,
+  approvedWeekly = false
 ): Promise<{
   sourceTables: SourceTable[];
   sourceColumns: Map<string, SourceColumn[]>;
@@ -379,7 +381,7 @@ async function getPreflight(
     const nonNull = identity.columns.map(name => `${quoteMySqlIdentifier(name)} IS NOT NULL`).join(" AND ");
     const [rows] = await source.promise().query<Array<{ duplicateGroups: string } & mysql.RowDataPacket>>(
       `SELECT CAST(COUNT(*) AS CHAR) AS duplicateGroups FROM (
-         SELECT 1 FROM ${quoteMySqlIdentifier(identity.table)} WHERE ${nonNull}
+         SELECT 1 FROM ${sourceReadTable(identity.table, approvedWeekly)} WHERE ${nonNull}
          GROUP BY ${group} HAVING COUNT(*) > 1
        ) AS conflicting_identities`);
     if (rows.length !== 1 || !/^\d+$/.test(rows[0]!.duplicateGroups)) throw new Error("Incomplete legacy identity check");
@@ -411,7 +413,7 @@ async function getPreflight(
   const countRows = await Promise.all(
     sourceNames.map(async table => ({
       table,
-      rows: await getSourceRowCount(source, table),
+      rows: await getSourceRowCount(source, table, approvedWeekly),
     }))
   );
 
@@ -545,7 +547,8 @@ async function importTable(
   table: string,
   sourceColumns: SourceColumn[],
   targetColumns: TargetColumn[],
-  keys: string[]
+  keys: string[],
+  approvedWeekly = false
 ): Promise<{ count: number; digest: string }> {
   const columns = [...sourceColumns].sort((left, right) =>
     left.name.localeCompare(right.name)
@@ -554,7 +557,7 @@ async function importTable(
   const select = columns
     .map(column => quoteMySqlIdentifier(column.name))
     .join(", ");
-  const sql = `SELECT ${select} FROM ${quoteMySqlIdentifier(table)} ORDER BY ${sourceOrderBy(columns, keys)}`;
+  const sql = `SELECT ${select} FROM ${sourceReadTable(table, approvedWeekly)} ORDER BY ${sourceOrderBy(columns, keys)}`;
   const stream = source
     .query(sql)
     .stream({ highWaterMark: 2 }) as AsyncIterable<Row>;
@@ -766,12 +769,16 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
     await target.connect();
     await source.promise().query("SET SESSION time_zone = '+00:00'");
     await source.promise().query("SET SESSION information_schema_stats_expiry = 0");
+    const weeklyPlan = env.LEGACY_WEEKLY_RECONCILIATION_FILE
+      ? JSON.parse(await readFile(env.LEGACY_WEEKLY_RECONCILIATION_FILE, 'utf8')) as WeeklyReconciliationPlan
+      : undefined;
+    if (weeklyPlan) await initializeApprovedWeeklySource(source, weeklyPlan);
     await source
       .promise()
       .query("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY");
     sourceTransaction = true;
-    const approvedWeekly = env.LEGACY_WEEKLY_RECONCILIATION_FILE
-      ? await prepareApprovedWeeklySource(source, JSON.parse(await readFile(env.LEGACY_WEEKLY_RECONCILIATION_FILE, 'utf8')) as WeeklyReconciliationPlan)
+    const approvedWeekly = weeklyPlan
+      ? await prepareApprovedWeeklySource(source, weeklyPlan)
       : undefined;
     const schemaName = await target.query<{ schema: string }>(
       "SELECT current_schema() AS schema"
@@ -799,7 +806,7 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
       await target.query(`LOCK TABLE ${lockList} IN ACCESS EXCLUSIVE MODE`);
     }
 
-    const preflight = await getPreflight(source, target);
+    const preflight = await getPreflight(source, target, !!approvedWeekly);
     const report = preflight.report as {
       success: boolean;
       errors: string[];
@@ -852,7 +859,8 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
         table,
         sourceColumnMap.get(table)!,
         targetColumnMap.get(table)!,
-        sourceKeyMap.get(table)!
+        sourceKeyMap.get(table)!,
+        !!approvedWeekly
       );
       const reconciled = await verifyTargetTable(
         target,

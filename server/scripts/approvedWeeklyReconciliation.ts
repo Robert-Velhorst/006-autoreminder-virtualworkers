@@ -57,6 +57,17 @@ export function reconcileWeeklyRows(plan: WeeklyReconciliationPlan, actual: RawR
   return { canonical, originals: ordered(originals), planSha256: fingerprint(plan) };
 }
 
+export async function initializeApprovedWeeklySource(source: mysql.Connection, plan: WeeklyReconciliationPlan) {
+  reconcileWeeklyRows(plan, plan.originals);
+  // MySQL forbids even temporary DDL inside READ ONLY transactions. Create an
+  // empty session-only staging table before starting the consistent snapshot.
+  await source.promise().query('CREATE TEMPORARY TABLE va_reviewed_weekly LIKE weekly_pay_log');
+}
+
+export function sourceReadTable(table: string, approved = false): string {
+  return quoteMySqlIdentifier(approved && table === 'weekly_pay_log' ? 'va_reviewed_weekly' : table);
+}
+
 export async function prepareApprovedWeeklySource(source: mysql.Connection, plan: WeeklyReconciliationPlan) {
   reconcileWeeklyRows(plan, plan.originals);
   const query = async (sql: string, args: unknown[] = []) => {
@@ -86,16 +97,11 @@ export async function prepareApprovedWeeklySource(source: mysql.Connection, plan
   const collision = await query('SELECT COUNT(*) AS n FROM weekly_pay_log WHERE founderId=? AND vaId=? AND weekStart=? AND id NOT IN (' + ids.map(() => '?').join(',') + ')',
     [plan.ownerId, plan.workerId, result.canonical.weekStart, ...ids]);
   if (String(collision[0]?.n) !== '0') throw new Error('Approved financial destination already exists');
-  // Session-local temporary tables may be written in MySQL READ ONLY transactions.
-  // Never update or delete a permanent source row, or disable constraints.
-  await query('CREATE TEMPORARY TABLE va_reviewed_weekly LIKE weekly_pay_log');
+  // Only temporary-table DML runs inside the read-only consistent snapshot.
+  // Keep the permanent table name visible for independent source inspection.
   await query('INSERT INTO va_reviewed_weekly SELECT * FROM weekly_pay_log');
   await query(`DELETE FROM va_reviewed_weekly WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
   await query(`INSERT INTO va_reviewed_weekly (${names.map(quoteMySqlIdentifier).join(',')}) VALUES (${names.map(() => '?').join(',')})`, names.map(n => result.canonical[n]));
-  // Avoid ALTER/RENAME TABLE, which can implicitly commit the consistent snapshot.
-  await query('CREATE TEMPORARY TABLE weekly_pay_log LIKE va_reviewed_weekly');
-  await query('INSERT INTO weekly_pay_log SELECT * FROM va_reviewed_weekly');
-  await query('DROP TEMPORARY TABLE va_reviewed_weekly');
   return { ...result, plan };
 }
 

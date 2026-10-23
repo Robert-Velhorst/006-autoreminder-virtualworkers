@@ -46,8 +46,10 @@ This is not automatic deduplication: the default importer still rejects conflict
 The narrow reviewed path accepts only identical business values, zero adjustments,
 no notes or payment-cycle links, confirmed admin/worker identities, no incoming
 references and no collision at the approved destination. Any source drift fails.
-It uses session-local temporary source tables inside the consistent read-only
-snapshot; permanent source records remain unchanged. The lowest original ID is
+It creates one empty session-local staging table before starting the consistent
+read-only snapshot; only temporary-table DML then runs inside that snapshot.
+Preflight counts, identity checks and copy read the approved staging projection;
+permanent source records remain visible and unchanged. The lowest original ID is
 retained only as a technical reference anchor, not as an inferred authority.
 The canonical row records confirmed currency and provenance in its notes.
 

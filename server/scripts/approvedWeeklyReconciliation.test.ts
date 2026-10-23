@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { reconcileWeeklyRows, prepareApprovedWeeklySource, archiveApprovedWeeklySource, type WeeklyReconciliationPlan } from './approvedWeeklyReconciliation';
+import { reconcileWeeklyRows, initializeApprovedWeeklySource, prepareApprovedWeeklySource, archiveApprovedWeeklySource, sourceReadTable, type WeeklyReconciliationPlan } from './approvedWeeklyReconciliation';
 import type mysql from 'mysql2';
 import type { Client } from 'pg';
 
@@ -28,11 +28,19 @@ describe('explicit historical weekly reconciliation', () => {
     } }) } as unknown as mysql.Connection;
     return { plan, calls, source };
   }
-  it('uses only temporary DDL and writes, with no snapshot-committing ALTER/RENAME', async () => {
+  it('creates its empty staging table before READ ONLY and does not shadow the original source', async () => {
+    const f = sourceFixture(); await initializeApprovedWeeklySource(f.source, f.plan);
+    expect(f.calls).toEqual(['CREATE TEMPORARY TABLE va_reviewed_weekly LIKE weekly_pay_log']);
+    expect(sourceReadTable('weekly_pay_log', true)).toBe('`va_reviewed_weekly`');
+    expect(sourceReadTable('weekly_pay_log')).toBe('`weekly_pay_log`');
+    expect(sourceReadTable('users', true)).toBe('`users`');
+  });
+  it('uses only temporary DML inside the snapshot, with no DDL or commit', async () => {
     const f = sourceFixture(); await prepareApprovedWeeklySource(f.source, f.plan);
     const writes = f.calls.filter(sql => /^(CREATE|INSERT|DELETE|DROP|ALTER|RENAME|UPDATE)/.test(sql));
-    expect(writes).toHaveLength(7);
-    expect(writes.every(sql => /^(CREATE TEMPORARY TABLE|DROP TEMPORARY TABLE|INSERT INTO (va_reviewed_weekly|weekly_pay_log)|DELETE FROM va_reviewed_weekly)/.test(sql))).toBe(true);
+    expect(writes).toHaveLength(3);
+    expect(writes.every(sql => /^(INSERT INTO va_reviewed_weekly|DELETE FROM va_reviewed_weekly)/.test(sql))).toBe(true);
+    expect(f.calls.some(sql => /^(CREATE|DROP)/.test(sql))).toBe(false);
     expect(f.calls.some(sql => /^(ALTER|RENAME|UPDATE|COMMIT)/.test(sql))).toBe(false);
   });
   it.each([{ links: 1 }, { collision: 1 }, { ownerRole: 'worker' }, { drift: true }])('refuses unsafe source before temporary writes: %j', async options => {
