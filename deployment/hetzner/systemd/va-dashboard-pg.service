@@ -1,0 +1,17 @@
+# Verify the executable path against the target's installed systemd package.
+[Unit]
+Description=VA PostgreSQL transparent loopback proxy
+Requires=va-dashboard-pg.socket
+After=va-dashboard-pg.socket
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --connections-max=4 127.0.0.1:5432
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
+TasksMax=16
+MemoryMax=64M

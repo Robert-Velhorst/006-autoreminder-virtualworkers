@@ -3,6 +3,16 @@
 Hetzner is the production hosting target. New production deployments must not
 use unapproved serverless hosting or public-tunnel services.
 
+On 22 October 2026 the owner explicitly confirmed General-Server
+(`159.69.55.178`) and the intended public origin
+`https://006-va-dashboard.noodzakelijkonline.de`. The coordinator reported
+Hetzner nameservers, NXDOMAIN for the application hostname, approximately
+3 GiB free host memory and an unused candidate loopback port 3025. These are
+target/discovery facts, not proof of DNS provisioning, a deployed application,
+TLS, database readiness or production acceptance. Use the dedicated restricted
+SSH connection described in [the installation guide](deployment/hetzner/SSH_GATE.md),
+not the existing administrator key, for workflow deployments.
+
 The application runtime uses PostgreSQL. The owner intends to use one shared,
 open-source PostgreSQL service for their GitHub tools; the VA Dashboard
 production database has not yet been provisioned. Share the service, not

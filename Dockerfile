@@ -34,8 +34,8 @@ RUN pnpm install --frozen-lockfile --prod
 # Stage 3: Minimal production image
 FROM node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797 AS production
 
-# Refresh the runtime library patch; installation tools stay in earlier stages.
-RUN apk upgrade --no-cache zlib && \
+# Refresh runtime security fixes; installation tools stay in earlier stages.
+RUN apk upgrade --no-cache zlib musl musl-utils && \
     rm -rf /usr/local/lib/node_modules/npm /opt/yarn-* && \
     rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/yarn /usr/local/bin/yarnpkg
 

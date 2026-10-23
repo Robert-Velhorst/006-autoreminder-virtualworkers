@@ -1,3 +1,11 @@
 
 browser-extension/* text eol=lf
+.gitattributes text eol=lf
 drizzle-postgres-v1/*.sql text eol=lf
+deployment/hetzner/*.py text eol=lf
+deployment/hetzner/*.sh text eol=lf
+deployment/hetzner/*.yml text eol=lf
+deployment/hetzner/*.md text eol=lf
+deployment/hetzner/systemd/* text eol=lf
+.github/workflows/deploy-hetzner.yml text eol=lf
+docker-compose.yml text eol=lf

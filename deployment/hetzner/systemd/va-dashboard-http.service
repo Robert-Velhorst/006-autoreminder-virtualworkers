@@ -1,0 +1,16 @@
+[Unit]
+Description=VA HTTP Unix socket to loopback proxy
+Requires=va-dashboard-http.socket
+After=va-dashboard-http.socket
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --connections-max=32 127.0.0.1:3025
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
+TasksMax=16
+MemoryMax=64M

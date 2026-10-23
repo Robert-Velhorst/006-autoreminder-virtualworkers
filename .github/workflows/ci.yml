@@ -150,10 +150,10 @@ jobs:
             artifacts/image-security/postgres-image-ci.json
           retention-days: 7
           if-no-files-found: warn
-      - run: pnpm test
-      - run: pnpm build
       - name: Install Chromium for browser smoke tests
         run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test
+      - run: pnpm build
       - name: Verify exact timer identity browser contracts
         run: node --test client/src/components/timer.identity.test.mjs
       - name: Verify generation-history retry browser contracts
@@ -235,6 +235,12 @@ jobs:
           DATABASE_URL="$RESTORE_DATABASE_URL" pnpm db:verify-parity
       - name: Validate Hetzner deployment script syntax
         run: bash -n deployment/hetzner/deploy.sh
+
+      - name: Validate restricted VA SSH gate
+        run: |
+          python3 -B -I deployment/hetzner/ssh_gate_test.py
+          python3 -B -I deployment/hetzner/probe_postgres_tls_test.py
+          bash -n deployment/hetzner/install-ssh-gate.sh
       - name: Verify migration metadata matches the schema
         shell: bash
         run: |

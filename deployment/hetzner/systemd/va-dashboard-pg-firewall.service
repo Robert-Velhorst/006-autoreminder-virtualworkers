@@ -1,0 +1,17 @@
+# Template only: parent must verify iptables backend and existing INPUT ordering.
+# No ExecStop: stopping this unit must NOT silently remove the protection.
+[Unit]
+Description=VA PostgreSQL scoped INPUT protection
+After=docker.service
+Before=va-dashboard-pg.socket
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/iptables -w 5 -N VA_DASHBOARD_PG
+ExecStart=/usr/sbin/iptables -w 5 -A VA_DASHBOARD_PG -i br-va-db -s 172.30.6.2/32 -d 172.30.6.1/32 -p tcp --dport 15433 -j ACCEPT
+ExecStart=/usr/sbin/iptables -w 5 -A VA_DASHBOARD_PG -j DROP
+ExecStart=/usr/sbin/iptables -w 5 -I INPUT 1 -d 172.30.6.1/32 -p tcp --dport 15433 -j VA_DASHBOARD_PG
+
+[Install]
+WantedBy=multi-user.target

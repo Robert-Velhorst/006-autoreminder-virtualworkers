@@ -8,8 +8,9 @@ describe("financial mutation authorization", () => {
     const payment = source.slice(source.indexOf("export const paymentRouter"), source.indexOf("export const payLogRouter"));
     const payLog = source.slice(source.indexOf("export const payLogRouter"), source.indexOf("export const triageRouter"));
 
-    expect(payment).toMatch(/markPaid:\s*adminProcedure/);
-    expect(payLog).toMatch(/upsert:\s*adminProcedure/);
+    expect(source).toContain('const financialAdminProcedure = financialProcedure.concat(adminProcedure)');
+    expect(payment).toMatch(/markPaid:\s*financialAdminProcedure/);
+    expect(payLog).toMatch(/upsert:\s*financialAdminProcedure/);
     expect(payment).toContain('return readPaymentCycles(db, ctx.user)');
     expect(payment).toContain('await settlePaymentCycle(db, ctx.user, input)');
     expect(payLog).toContain('await saveWeeklyPayLog(db, ctx.user, input)');
