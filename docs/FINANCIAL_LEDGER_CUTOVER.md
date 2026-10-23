@@ -35,6 +35,32 @@ This procedure applies only after the release's native financial tests pass.
    proof that historical financial meaning or ownership is correct. `vaId` in
    `weekly_pay_log` identifies a user account, not a worker-profile row.
 
+## Explicitly Approved Identical Weekly Records
+
+The transfer command optionally accepts `LEGACY_WEEKLY_RECONCILIATION_FILE`, a
+private JSON plan with version 1, the owner's verbatim approval, verified source
+backup SHA-256, owner/worker user IDs, explicitly confirmed EUR amount and every
+field of every original weekly row. Never commit this record-bearing plan.
+This is not automatic deduplication: the default importer still rejects conflicts.
+
+The narrow reviewed path accepts only identical business values, zero adjustments,
+no notes or payment-cycle links, confirmed admin/worker identities, no incoming
+references and no collision at the approved destination. Any source drift fails.
+It uses session-local temporary source tables inside the consistent read-only
+snapshot; permanent source records remain unchanged. The lowest original ID is
+retained only as a technical reference anchor, not as an inferred authority.
+The canonical row records confirmed currency and provenance in its notes.
+
+All original fields and timestamps, the approval and canonical row are archived in
+`migration_audit.approved_weekly_reconciliations` in the same PostgreSQL transaction
+as the import. Its schema and table revoke PUBLIC access. Application-runtime
+roles must not receive audit-schema access. The archive is included in full
+backups and must be checked during restore acceptance. Source/target digests
+cover the approved canonical source projection; the report separately identifies
+the plan hash and preserved original count. Original totals and canonical totals
+must be reconciled explicitly rather than treating the smaller row count as loss.
+This records a historical allowance, not a payment or evidence of settlement.
+
 ## Runtime Acceptance
 
 - Validate canonical migration receipts and actual nondeferrable financial

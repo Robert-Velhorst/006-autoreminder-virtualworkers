@@ -1,5 +1,7 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { readFile } from "node:fs/promises";
+import { prepareApprovedWeeklySource, archiveApprovedWeeklySource, type WeeklyReconciliationPlan } from "../server/scripts/approvedWeeklyReconciliation";
 import mysql from "mysql2";
 import { Client, types as pgTypes } from "pg";
 import { requirePostgresDatabaseUrl } from "../server/db/databaseUrl";
@@ -768,6 +770,9 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
       .promise()
       .query("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY");
     sourceTransaction = true;
+    const approvedWeekly = env.LEGACY_WEEKLY_RECONCILIATION_FILE
+      ? await prepareApprovedWeeklySource(source, JSON.parse(await readFile(env.LEGACY_WEEKLY_RECONCILIATION_FILE, 'utf8')) as WeeklyReconciliationPlan)
+      : undefined;
     const schemaName = await target.query<{ schema: string }>(
       "SELECT current_schema() AS schema"
     );
@@ -813,7 +818,13 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
       sourceTransaction = false;
       console.log(
         JSON.stringify(
-          { mode, ...preflight.report, writesPerformed: false },
+          { mode, ...preflight.report, writesPerformed: false,
+            approvedWeeklyReconciliation: approvedWeekly ? {
+              planSha256: approvedWeekly.planSha256,
+              originalRowsReviewed: approvedWeekly.originals.length,
+              sourcePermanentRowsChanged: false,
+              archivePersisted: false,
+            } : undefined },
           null,
           2
         )
@@ -870,6 +881,7 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
 
     await source.promise().query("COMMIT");
     sourceTransaction = false;
+    if (approvedWeekly) await archiveApprovedWeeklySource(target, approvedWeekly);
     await target.query("COMMIT");
     targetTransaction = false;
     console.log(
@@ -884,6 +896,13 @@ export async function runMysqlPostgresMigration(args: string[], env: Record<stri
           foldedIdenticalReplyAliases: preflight.report.foldedIdenticalReplyAliases,
           nullUpgradeSelfReferences: preflight.report.nullUpgradeSelfReferences,
           sourceAutoIncrement: preflight.report.sourceAutoIncrement,
+          approvedWeeklyReconciliation: approvedWeekly ? {
+            planSha256: approvedWeekly.planSha256,
+            originalRowsPreserved: approvedWeekly.originals.length,
+            canonicalRows: 1,
+            sourcePermanentRowsChanged: false,
+            archive: 'migration_audit.approved_weekly_reconciliations',
+          } : undefined,
           rowLevelReconciliation:
             "SHA-256 per table; source/target row values normalized by destination type",
           tables: results,
