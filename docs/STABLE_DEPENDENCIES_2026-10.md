@@ -32,10 +32,13 @@ stable releases; the audit thresholds and install-script allow-list are unchange
 
 Under Node 26.12.1 and pnpm 12.14.0: TypeScript checking, frozen lock verification,
 the production build, and the complete dependency audit pass. All 119 installed
-direct versions match the recorded stable targets. The test runs pass 5,011
-Vitest cases and 315 Node cases, with 473 and three existing skips respectively.
+direct versions match the recorded stable targets. The test runs pass 5,373
+Vitest cases and 316 Node cases, with 474 and three skips respectively. These
+results include main `5034569911de03bf6ce55b73d3c9fa877c017b13`, preserving its
+financial feature gates and Hetzner/PostgreSQL preparation. Under Python 3.15.1,
+43 offline deployment-contract tests pass; three Linux-only tests are skipped.
 
-The Home and digest browser workflows pass 18 cases. An isolated fixture renders
+The Home, digest and financial browser workflows pass 28 cases. An isolated fixture renders
 the actual calendar, chart and resizable-panel components at 1440 and 390 pixels;
 date selection, legend/tooltip content and panel resizing pass without page or
 console errors. This fixture uses no backend or provider. Real static middleware
