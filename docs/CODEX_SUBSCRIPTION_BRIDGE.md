@@ -45,6 +45,10 @@ private `0700` directories. Sharing is disabled by default. Never reuse an
 unrelated application's UID or mount the private workspace or auth home.
 The synthetic Linux cross-UID test exercises group inheritance, restrictive
 umasks, bidirectional claim/reply cleanup, and denial to an unrelated group.
+It also runs the actual manager and general conversation transports under
+different runner/client UIDs, with synthetic CLI replies: manager output,
+text, locally validated JSON schema, private-instruction denial and graceful
+lease/transport cleanup. The isolated fixture is removed after shutdown.
 It does not establish real account/model acceptance or a live queue mount.
 
 `deployment/hetzner/prepare-codex-host.py` prepares fixed, separate host paths

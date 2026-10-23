@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -10,6 +11,51 @@ import unittest
 
 @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0, 'requires isolated Linux root test runner')
 class QueuePermissionsTests(unittest.TestCase):
+    def test_real_protocols_with_separate_runner_and_client_uids(self):
+        node = os.environ['VA_TEST_NODE']
+        bundle = Path(os.environ['VA_TEST_PROTOCOL_BUNDLE']).resolve(strict=True)
+        producer, consumer, group = 46006, 46007, 46006
+        root = Path(tempfile.mkdtemp(prefix='va-codex-protocol-proof-'))
+        runner = None
+        try:
+            os.chmod(root, 0o755)
+            shutil.copyfile(bundle, root / 'protocol.mjs')
+            os.chmod(root / 'protocol.mjs', 0o444)
+            for name in ('queue', 'queue/requests', 'queue/replies', 'queue/llm-v1',
+                         'queue/llm-v1/requests', 'queue/llm-v1/replies', 'queue/llm-v1/dispatch',
+                         'manager-private', 'llm-private'):
+                path = root / name
+                path.mkdir(mode=0o700)
+                os.chown(path, producer, group)
+                os.chmod(path, 0o2770 if name.startswith('queue') else 0o700)
+            env = {'PATH': '/usr/bin:/bin', 'NODE_ENV': 'test',
+                   'APTLSS_CODEX_QUEUE_DIR': str(root / 'queue'), 'APTLSS_CODEX_SHARED_QUEUE': 'true'}
+            def command(uid, role):
+                return ['setpriv', '--reuid', str(uid), '--regid', str(uid), '--groups', str(group),
+                        node, str(root / 'protocol.mjs'), role]
+            runner = subprocess.Popen(command(producer, 'runner'), cwd=root, env=env,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                      start_new_session=True)
+            result = subprocess.run(command(consumer, 'client'), cwd=root, env=env,
+                                    capture_output=True, text=True, timeout=25)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('"transportCleaned":true', result.stdout)
+            runner.send_signal(signal.SIGTERM)
+            self.assertEqual(runner.wait(timeout=15), 0)
+            for name in ('manager-private/runner.lock', 'llm-private/runner.lock', 'queue/llm-v1/runner.lock'):
+                self.assertFalse((root / name).exists(), name)
+            for name in ('manager-private/instructions.txt', 'llm-private/instructions.txt'):
+                self.assertEqual((root / name).stat().st_mode & 0o777, 0o600)
+        finally:
+            if runner is not None and runner.poll() is None:
+                os.killpg(runner.pid, signal.SIGKILL)
+                runner.wait(timeout=15)
+            # Only this newly created synthetic test space; never a production queue.
+            if runner is None or runner.poll() is not None:
+                self.assertEqual(root.parent, Path(tempfile.gettempdir()))
+                self.assertTrue(root.name.startswith('va-codex-protocol-proof-'))
+                shutil.rmtree(root)
+
     def test_distinct_uids_exchange_only_group_transport(self):
         node = os.environ['VA_TEST_NODE']
         policy = Path(os.environ['VA_TEST_FILESYSTEM_POLICY']).resolve(strict=True)
