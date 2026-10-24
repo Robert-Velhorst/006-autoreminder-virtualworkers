@@ -142,7 +142,7 @@ export async function scanProductionImage(imageRef, proofPath, {
     const scannerPath = await provisionScanner(work, run);
     const environment = scannerEnvironment();
     const version = run(scannerPath, ['--version'], { env: environment });
-    if (!/^Version:\s*0\.76\.0\s*$/m.test(version)) throw new Error('Unexpected scanner executable version');
+    if (!/^Version:\s*0\.76\.1\s*$/m.test(version)) throw new Error('Unexpected scanner executable version');
     const configPath = join(work, 'empty-config.json');
     const ignorePath = join(work, 'empty-ignore');
     writeFileSync(configPath, '{}', { flag: 'wx' });
