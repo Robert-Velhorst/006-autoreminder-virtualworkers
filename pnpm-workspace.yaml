@@ -9,6 +9,7 @@ patchedDependencies:
   wouter@3.13.0: patches/wouter@3.13.0.patch
 
 overrides:
+  "express>body-parser": 1.20.9
   # tRPC publishes compiled JavaScript; its compiler peer is build-time only.
   "@trpc/client>typescript": "-"
   "@trpc/react-query>typescript": "-"
