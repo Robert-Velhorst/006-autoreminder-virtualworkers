@@ -495,6 +495,7 @@ export function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone:
   const timerQuery = trpc.timer.getActive.useQuery(undefined, { staleTime: 15_000 });
   const planQuery = trpc.operator.getDailyPlan.useQuery(undefined, { staleTime: 60_000 });
   const browserQuery = trpc.operator.getBrowserTabStatus.useQuery(undefined, { retry: false, staleTime: 60_000 });
+  const browserConnection = describeBrowserConnection(browserQuery.data);
   const startInFlight = useRef(false);
   const [timerStopError, setTimerStopError] = useState<string | null>(null);
   const stopTimer = trpc.timer.stop.useMutation({
@@ -735,7 +736,7 @@ export function TodayView({ timeZone, onOpenPlan, onOpenDecisions }: { timeZone:
           <ContextMetric icon={CalendarDays} label="Day plan" value={plan ? (plan.planHealth.availableMinutes === 0 && !plan.blocks.length ? "Protected day" : "Available") : "Not generated"} detail={hasCurrentSuggestion ? planImpact?.planChanges?.length ? `${planImpact.planChanges.length} suggested changes to review` : "Plan suggestion to review" : plan ? `${plan.planHealth.scheduledMinutes} min scheduled` : "Create today's time blocks"} onClick={onOpenPlan} />
           <ContextMetric icon={Timer} label="Time now" value={timerQuery.data ? "Tracking" : "Stopped"} detail={timerQuery.data?.cardName ?? "No active timer"} />
           <ContextMetric icon={BrainCircuit} label="Decisions" value={`${openDecisions} open`} detail="Outcome required to close" onClick={onOpenDecisions} />
-          <ContextMetric icon={Archive} label="Browser hygiene" value={browserQuery.data?.connected ? `${browserQuery.data.actionableTabs} tabs` : "Disconnected"} detail={browserQuery.data?.connected ? `Limit ${browserQuery.data.allowedTabs}` : "Collector has not reported"} />
+          <ContextMetric icon={Archive} label="Browser hygiene" value={browserQuery.data?.connected ? `${browserQuery.data.actionableTabs} tabs` : browserConnection.label} detail={browserQuery.data?.connected ? `Limit ${browserQuery.data.allowedTabs}` : browserConnection.detail} />
           </>}
         </aside>
       </div>

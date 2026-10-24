@@ -4,6 +4,14 @@ import { describe, expect, it } from "vitest";
 const client = (path: string) => readFileSync(new URL(`../client/src/${path}`, import.meta.url), "utf8");
 
 describe("additive shadow manager UI integration", () => {
+  it("uses the shared observed collector status on Today instead of inventing a missing report", () => {
+    const worker = client("pages/worker/WorkerOperator.tsx");
+    expect(worker).toContain("const browserConnection = describeBrowserConnection(browserQuery.data)");
+    expect(worker).toContain('`${browserQuery.data.actionableTabs} tabs` : browserConnection.label');
+    expect(worker).toContain('`Limit ${browserQuery.data.allowedTabs}` : browserConnection.detail');
+    expect(worker).not.toContain("Collector has not reported");
+  });
+
   it("adds worker guidance without removing reminders, Google intake or the inspector", () => {
     const worker = client("pages/worker/WorkerOperator.tsx");
     expect(worker).toContain("<ManagerCoach />");

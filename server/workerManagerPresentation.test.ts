@@ -5,6 +5,7 @@ import ManagerCoach from "../client/src/components/ManagerCoach";
 import { ManagerVerificationDetails } from "../client/src/components/ManagerVerificationDetails";
 import ManagerVerificationFollowups from "../client/src/components/ManagerVerificationFollowups";
 import type { ManagerIntervention } from "../shared/aptlssManager";
+import { trpc } from "../client/src/lib/trpc";
 
 const previousReact = (globalThis as any).React;
 beforeAll(() => Object.assign(globalThis, { React }));
@@ -35,8 +36,8 @@ vi.mock("@/lib/trpc", () => ({
     operator: {
       getManagerStatus: { useQuery: () => mocks.managerStatus },
       getWorkQueueContext: { useQuery: () => mocks.queue },
-      getCardEvidence: { useQuery: () => mocks.evidence },
-      getVerificationFollowups: { useQuery: () => mocks.followups },
+      getCardEvidence: { useQuery: vi.fn(() => mocks.evidence) },
+      getVerificationFollowups: { useQuery: vi.fn(() => mocks.followups) },
       runManager: { useMutation: () => mocks.mutation },
       submitManagerUpdate: { useMutation: () => mocks.mutation },
       reportManagerActionCompletion: { useMutation: () => mocks.mutation },
@@ -60,6 +61,7 @@ function setManagerStatus(snapshot: any) {
 }
 
 beforeEach(() => {
+  vi.clearAllMocks();
   mocks.managerStatus = {};
   mocks.queue = {};
   mocks.evidence = {};
@@ -158,6 +160,7 @@ describe("worker-facing APTLSS presentation", () => {
   });
 
   it("replaces raw verification failure details with a worker-safe recovery instruction", () => {
+    setManagerStatus(null);
     mocks.evidence = { data: [], error: null, isLoading: false, isFetching: false, refetch: () => undefined };
     mocks.followups = { data: [{ id: 7, conflictId: null, title: "Review this follow-up", question: "Which original record confirms the current status?" }], error: null, isLoading: false };
     mocks.resolveMutation = { isPending: false, mutate: () => undefined, error: new Error(`${sentinel}: database/provider stack`) };
@@ -169,5 +172,38 @@ describe("worker-facing APTLSS presentation", () => {
     expect(html).toContain("Try again, or contact your supervisor if the problem continues.");
     expect(html).toContain("Which original record confirms the current status?");
     expect(html).toContain("What did you find?");
+  });
+
+  it("does not mount pilot-only queries or cached content for a non-pilot worker", () => {
+    setManagerStatus(null);
+    mocks.managerStatus.error = { message: "Manager pilot requires an explicitly allowlisted worker, valid APTLSS_MANAGER_PILOT_WORKER_IDS, and APTLSS_MANAGER_SHADOW_ONLY=true.", data: { code: "FORBIDDEN" } };
+    mocks.evidence = { data: [{ title: sentinel }] };
+    const html = renderToStaticMarkup(React.createElement(ManagerVerificationFollowups, { cardId: card.id }));
+    expect(html).toBe("");
+    expect(trpc.operator.getCardEvidence.useQuery).not.toHaveBeenCalled();
+    expect(trpc.operator.getVerificationFollowups.useQuery).not.toHaveBeenCalled();
+  });
+
+  it("waits for availability before mounting pilot-only queries", () => {
+    const html = renderToStaticMarkup(React.createElement(ManagerVerificationFollowups, { cardId: card.id }));
+    expect(html).toContain("Checking task follow-up availability");
+    expect(trpc.operator.getCardEvidence.useQuery).not.toHaveBeenCalled();
+    expect(trpc.operator.getVerificationFollowups.useQuery).not.toHaveBeenCalled();
+  });
+
+  it.each(["UNAUTHORIZED", "FORBIDDEN", "INTERNAL_SERVER_ERROR"])("does not hide unrelated %s failures", code => {
+    setManagerStatus(null);
+    mocks.managerStatus.error = { message: sentinel, data: { code } };
+    const html = renderToStaticMarkup(React.createElement(ManagerVerificationFollowups, { cardId: card.id }));
+    expect(html).toContain("Task follow-up status could not be loaded");
+    expect(html).not.toContain(sentinel);
+    expect(trpc.operator.getCardEvidence.useQuery).not.toHaveBeenCalled();
+  });
+
+  it("handles pilot revocation between status and follow-up reads without a retry instruction", () => {
+    setManagerStatus(null);
+    mocks.evidence = { data: [], error: { message: "Manager pilot requires an explicitly allowlisted worker, valid APTLSS_MANAGER_PILOT_WORKER_IDS, and APTLSS_MANAGER_SHADOW_ONLY=true.", data: { code: "FORBIDDEN" } } };
+    mocks.followups = { data: [] };
+    expect(renderToStaticMarkup(React.createElement(ManagerVerificationFollowups, { cardId: card.id }))).toBe("");
   });
 });
