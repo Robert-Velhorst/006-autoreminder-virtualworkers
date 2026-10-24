@@ -47,7 +47,8 @@ jobs:
           const requested = spec.updates.map(item => item.group + '/' + item.name).sort();
           if (JSON.stringify(requested) !== JSON.stringify(allowed)) throw new Error('Unexpected public update scope');
           for (const item of spec.updates) {
-            if (manifest[item.group][item.name] !== item.from) throw new Error('Source declaration changed');
+            const current = manifest[item.group][item.name];
+            if (current !== item.from && current !== item.to) throw new Error('Source declaration changed');
             manifest[item.group][item.name] = item.to;
           }
           fs.writeFileSync(path.join(output, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
