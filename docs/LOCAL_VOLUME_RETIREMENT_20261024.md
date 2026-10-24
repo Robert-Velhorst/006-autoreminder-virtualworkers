@@ -66,8 +66,20 @@ The source report estimates approximately 9.46 GB across these 21 volumes.
 The JSON records exact logical source bytes and compressed archive bytes.
 The completed preservation contains 9,461,158,747 logical source bytes in
 376,685,923 compressed archive bytes (approximately 3.98%). All 21 archives
-passed the complete member/source checks. The volumes remain present until
-the separately recorded scoped removal confirmation is acted on.
+passed the complete member/source checks. After the operator explicitly
+confirmed removal of exactly these 21 volumes, every archive checksum and
+source file was checked again, together with volume creation identity and
+zero container references. All 21 volumes were then removed individually,
+without force. Final inventory changed from 346 to 325 volumes: no unrelated
+volume disappeared and the running-container set remained unchanged. All
+private archives were retained and their SHA-256 checks revalidated after
+removal. The JSON records each actual removal time and preserved archive hash.
+
+No Docker restart, global prune or VHDX compaction was performed. Windows
+free space did not show a corresponding immediate increase; this operation
+reclaimed Docker-internal volume storage, not an observed 9.46 GB host-disk
+shrink. Keep the private archives and do not compact Docker while other apps
+are in use without separate approval.
 
 The private copies remain on access-controlled local storage. The operator's
 removable exFAT drive cannot enforce those access controls, so no plaintext
