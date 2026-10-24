@@ -1,0 +1,398 @@
+{
+  "version": 1,
+  "project": "006 - VA Dashboard",
+  "sourceInventory": "Docker-per-repo.json",
+  "sourceInventorySha256": "ae46de20b325b6d0faeefd68f479ed4825907af63ba78705aaca459d25701de7",
+  "sourceSnapshotAt": "2026-10-24T13:30:25.553764+02:00",
+  "reviewedAt": "2026-10-24T13:04:22.8707285Z",
+  "scope": "21 legacy local MySQL test/rehearsal volumes only",
+  "backupLocation": "Operator-private local storage outside Git; not a GitHub artifact",
+  "logicalBytes": 9461158747,
+  "archiveBytes": 376685923,
+  "volumes": [
+    {
+      "volume": "fdbd3cc899014694092ac137a35ee17df8f05b53aa5e2855dfb2c53b5f3ba536",
+      "createdAt": "2026-09-30T22:42:11Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 1630154317,
+      "archiveBytes": 65267610,
+      "archiveSha256": "4d4558687e790dcd4f9524aa9878f918f3d860ccd6138a321232a5e904c5461f",
+      "entryCount": 315,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:09.8927596Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "04f6fa204b8448d90f3d7026ff437138ee058859139aa06aac6608e39c4e7bb2",
+      "createdAt": "2026-09-17T19:00:55Z",
+      "databaseDirectories": [
+        "recovery_test"
+      ],
+      "logicalBytes": 815743162,
+      "archiveBytes": 24594006,
+      "archiveSha256": "9419dc1862b8839cd1f4d4685b057f6bd56146f5908fc9e55849b06ee3b60db0",
+      "entryCount": 323,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:10.6208708Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "79ac1dc78b69e3dc3e238b4c284a4db68e537ac143f8e187e03615ba8acc3c8b",
+      "createdAt": "2026-09-26T14:40:48Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 790514961,
+      "archiveBytes": 27285084,
+      "archiveSha256": "a7f0071fa18084cda742734904580e77ae52c6766ba90fb06046bf8f2304ac55",
+      "entryCount": 313,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:11.3509619Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "982fd35f778c37797a33ef3c39d6e40c2a7ba762915e75e01397b2eb58a409d9",
+      "createdAt": "2026-09-30T20:58:07Z",
+      "databaseDirectories": [
+        "aptlss_test",
+        "recovery_test"
+      ],
+      "logicalBytes": 773743408,
+      "archiveBytes": 26697720,
+      "archiveSha256": "db1dde0d5ea75b19bd302b0937c9580878f389f5156feb1a5e8f91729ce6e4c1",
+      "entryCount": 447,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:12.0741352Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "dd76ac1f5951b10c22d4a4e39d5ef806a437de66763ea2bda281c68709e4db4f",
+      "createdAt": "2026-09-26T16:15:10Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 697985100,
+      "archiveBytes": 26976504,
+      "archiveSha256": "ea79a4793076505b3e91108b1566b1c0707aab4a1f3ebffb4cd874c6db36c7ae",
+      "entryCount": 324,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:12.7761349Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "db0185383aa11a048d335dd3b4612b0898725cc644d94deb55adc8ea5900383b",
+      "createdAt": "2026-09-04T21:16:28Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 506773814,
+      "archiveBytes": 18571871,
+      "archiveSha256": "66737795bcd8d5f3ed1050efdba18ea21408754068c994cc790089468fa880de",
+      "entryCount": 314,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:13.4405253Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "c38a63eb7a774ec1ec1755cdfb5166b878b87c5ca136d3098a2b250a5640bae3",
+      "createdAt": "2026-09-26T15:46:41Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 430431556,
+      "archiveBytes": 20553407,
+      "archiveSha256": "25343c4d922923016ef3b798e892316082080efa8fa21cab43a65a7fa637d3ca",
+      "entryCount": 324,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:14.1054354Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "02fc3223f3bdb1d6f47dcb17a5984f2174569c10ded946d2b40a5cb481ff7eed",
+      "createdAt": "2026-09-26T08:55:51Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 430299612,
+      "archiveBytes": 20748831,
+      "archiveSha256": "770d703c610b42b1e40defbfc51b83f7d9884f9e9b5d8dc860b837c77ae778f3",
+      "entryCount": 324,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:14.7839006Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "609040b66a8dd20b1626b1776d0570575967a5d44695cbfc394c835795e58211",
+      "createdAt": "2026-09-26T09:08:56Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 430299602,
+      "archiveBytes": 20807238,
+      "archiveSha256": "a75170c31e44e40d067bbc527e682627dec61d1a7be968b0df324e9bc807f8f0",
+      "entryCount": 324,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:15.4706485Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "c099dfb37a578aa6dc0a5e89b2f2ca798b8ae585bc91ba9902157505788e5007",
+      "createdAt": "2026-09-25T18:58:59Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 416581313,
+      "archiveBytes": 21019474,
+      "archiveSha256": "096c5af8eb175126f25045dc6e0ccf6c57279c7ce851f26e5b6629fd5c358202",
+      "entryCount": 313,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:16.1078386Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "19208d2ad741096b7c449d5b136fc2eb59ae535ddef064a360343ab4205e1e3b",
+      "createdAt": "2026-09-25T13:22:39Z",
+      "databaseDirectories": [
+        "recovery_test"
+      ],
+      "logicalBytes": 280308411,
+      "archiveBytes": 17065309,
+      "archiveSha256": "317b8e0e1101f37673daa179c440db71a3efd34984e8ab714439e15db4949c55",
+      "entryCount": 313,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:16.7455143Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "174852a925ac101d1d9f1b798c16b5910526781aaddbe556812ba03f71675890",
+      "createdAt": "2026-09-26T09:26:44Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 241089659,
+      "archiveBytes": 10959073,
+      "archiveSha256": "9a228e54788f90f5e9fb0b01b64e044b397e7fcb4496d42643a024daa03a0d0e",
+      "entryCount": 324,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:17.3669785Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "d84d53e15373850394467365a35bc0386b5702c86e1e7154ca87f8764294c232",
+      "createdAt": "2026-09-25T15:25:33Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 241000008,
+      "archiveBytes": 10870806,
+      "archiveSha256": "976e18a9ea0b7b056ac0607119c119fbac37afe07ebc52acae7092810e68513b",
+      "entryCount": 324,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:17.9832009Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "20fd2f991bc3261a0fee6eb67b5bbb659aa32bd6b96dfcbf1573c83fb78fac9d",
+      "createdAt": "2026-09-25T12:53:34Z",
+      "databaseDirectories": [
+        "recovery_test"
+      ],
+      "logicalBytes": 228234290,
+      "archiveBytes": 11051485,
+      "archiveSha256": "adea501e46479253f0db364ad6acef13564dc065603795a64461818935212099",
+      "entryCount": 313,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:18.6107812Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "f63fa78f8f764d25dd0012e4ba0ae518e38e7a7f6015afe8290e302a78d521b1",
+      "createdAt": "2026-09-25T07:33:19Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 228042941,
+      "archiveBytes": 10828437,
+      "archiveSha256": "147f6244d718a95f3c2f7d322d801399f646a1d583a45e57dec412c622dc506d",
+      "entryCount": 313,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:19.2728721Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "36b188b8bf5175834e05c87127ff13819185fb32e053d03d98f07d1bbeada01f",
+      "createdAt": "2026-10-01T02:14:21Z",
+      "databaseDirectories": [
+        "recovery_test"
+      ],
+      "logicalBytes": 227908946,
+      "archiveBytes": 7402839,
+      "archiveSha256": "aabb86fe56edaf942c7bc706d523d4a14a191283d7bdf6d88faae953d5f90d15",
+      "entryCount": 317,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:19.8909054Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "131239cfc25824af75a1aff46c8df9f808b2a397132c4ce66f1e06d4c3fbced9",
+      "createdAt": "2026-10-02T09:46:21Z",
+      "databaseDirectories": [
+        "aptlss_pilot_rehearsal"
+      ],
+      "logicalBytes": 218437095,
+      "archiveBytes": 6567187,
+      "archiveSha256": "22701dc0dca9042973d7c7c1cbfeb28064ea7eaea83a3b223e9de7251a5ec45a",
+      "entryCount": 192,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:20.4524769Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "2cacd58f010d91ebdafab30b64397252fbedba55006986a95e0991d03aa946f6",
+      "createdAt": "2026-09-25T21:46:34Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 218414085,
+      "archiveBytes": 6450242,
+      "archiveSha256": "95b67556fa9d1be2040b14d71c5dd0945e480c15eff3dffccbfc4256ab1f59fe",
+      "entryCount": 191,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:21.0643815Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "9b16a6e272c07acbe605326c4ad7f8bf96ae1f8c7491a010fe8dae5cd805f50f",
+      "createdAt": "2026-10-02T09:47:10Z",
+      "databaseDirectories": [
+        "aptlss_pilot_rehearsal"
+      ],
+      "logicalBytes": 218437371,
+      "archiveBytes": 6559887,
+      "archiveSha256": "eb8d7a4f65dd8e2dbb96b6bbccd72d2a5114e0ff2a5e193235c71c58f8add48d",
+      "entryCount": 192,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:21.6422973Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "a19ef92a79cb0ea53b640602a21ad44425ed5597e826e31bcc9f9a6e47d23765",
+      "createdAt": "2026-10-02T09:48:20Z",
+      "databaseDirectories": [
+        "aptlss_pilot_rehearsal"
+      ],
+      "logicalBytes": 218437914,
+      "archiveBytes": 6687740,
+      "archiveSha256": "8a6967369b859fe4e4236cd9e2323f89fcab44809ce014a24b93b7784d55ee3d",
+      "entryCount": 192,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:22.2131031Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    },
+    {
+      "volume": "6d0d05f45a0e7bb845ce62c74f59405d569696eaa0bad3f2d4c66c5caf3c0565",
+      "createdAt": "2026-09-26T09:25:35Z",
+      "databaseDirectories": [
+        "aptlss_test"
+      ],
+      "logicalBytes": 218321182,
+      "archiveBytes": 9721173,
+      "archiveSha256": "2bde779229df88c0d2450fe79f7b9eced92566b262f71cdb1c358e2309c9dbdd",
+      "entryCount": 190,
+      "archiveContentVerified": true,
+      "sourceRechecked": true,
+      "databaseBootRestoreTested": false,
+      "consumerCountAtReview": 0,
+      "retirementState": "removed-private-archive-retained",
+      "removedAt": "2026-10-24T21:39:22.784867Z",
+      "sourceMatchedVerifiedManifestBeforeRemoval": true
+    }
+  ],
+  "removedCount": 21,
+  "removalApproval": "Operator explicitly confirmed removal of exactly these 21 VA volumes after final verification; private backups retained.",
+  "finalObservedVolumeCount": 325,
+  "unrelatedVolumesRemoved": 0,
+  "runningContainerSetUnchanged": true
+}
