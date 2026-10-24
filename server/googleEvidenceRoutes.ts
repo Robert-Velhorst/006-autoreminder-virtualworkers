@@ -1,5 +1,5 @@
 import { createHash, createHmac, createSecretKey, randomBytes, timingSafeEqual } from "crypto";
-import { parse as parseCookies } from "cookie";
+import { parseCookie as parseCookies } from "cookie";
 import express, { type Request, type Response } from "express";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { requireActiveWorkerProfile } from "./middleware/auth";

@@ -1,5 +1,5 @@
 import { COOKIE_NAME } from "@shared/const";
-import { parse as parseCookieHeader } from "cookie";
+import { parseCookie as parseCookieHeader } from "cookie";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, operatorAccountProcedure, publicProcedure, protectedProcedure, router } from "./_core/trpc";

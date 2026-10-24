@@ -6,7 +6,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { sql } from 'drizzle-orm';
 import express from 'express';
 import request from 'supertest';
-import { parse as parseCookies } from 'cookie';
+import { parseCookie as parseCookies } from 'cookie';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { requireIsolatedPostgresTestDatabase } from '../shared/isolatedPostgresTestDatabase.mjs';
 import { getDb, closeDb } from './db';

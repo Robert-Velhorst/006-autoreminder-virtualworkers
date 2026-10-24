@@ -738,7 +738,7 @@ export function scheduleTasksByTime(
 }
 
 // Get all workspaces (organizations)
-router.get('/trello/workspaces', async (req: Request, res: Response) => {
+router.get('/trello/workspaces', async (req, res) => {
   try {
     const apiKey = process.env.TRELLO_API_KEY;
     const token = process.env.TRELLO_TOKEN;
@@ -793,7 +793,7 @@ router.get('/trello/workspaces', async (req: Request, res: Response) => {
 });
 
 // Get all boards
-router.get('/trello/boards', async (req: Request, res: Response) => {
+router.get('/trello/boards', async (req, res) => {
   try {
     const apiKey = process.env.TRELLO_API_KEY;
     const token = process.env.TRELLO_TOKEN;
@@ -844,7 +844,7 @@ router.get('/trello/boards', async (req: Request, res: Response) => {
 });
 
 // Get cards for a specific board
-router.get('/trello/boards/:boardId/cards', async (req: Request, res: Response) => {
+router.get('/trello/boards/:boardId/cards', async (req, res) => {
   try {
     const { boardId } = req.params;
     const forceRefresh = req.query.refresh === 'true';
@@ -925,7 +925,7 @@ router.get('/trello/boards/:boardId/cards', async (req: Request, res: Response) 
 });
 
 // Clear cache for a specific board
-router.post('/trello/boards/:boardId/cache/clear', async (req: Request, res: Response) => {
+router.post('/trello/boards/:boardId/cache/clear', async (req, res) => {
   try {
     const { boardId } = req.params;
     invalidateBoardCache(boardId);
@@ -938,7 +938,7 @@ router.post('/trello/boards/:boardId/cache/clear', async (req: Request, res: Res
 });
 
 // Generate APTLSS for a card
-router.post('/aptlss/generate', async (req: Request, res: Response) => {
+router.post('/aptlss/generate', async (req, res) => {
   let operation: ReturnType<typeof generationRequestContext> | undefined;
   try {
     const { cardId, cardData, settings } = req.body;
@@ -986,7 +986,7 @@ router.post('/aptlss/generate', async (req: Request, res: Response) => {
 });
 
 // Get generation history
-router.get('/aptlss/history', async (req: Request, res: Response) => {
+router.get('/aptlss/history', async (req, res) => {
   try {
     const db = await getDb();
     if (!db) {
@@ -1002,7 +1002,7 @@ router.get('/aptlss/history', async (req: Request, res: Response) => {
 });
 
 // Get job details with items
-router.get('/aptlss/history/:jobId', async (req: Request, res: Response) => {
+router.get('/aptlss/history/:jobId', async (req, res) => {
   try {
     const db = await getDb();
     if (!db) {
@@ -1032,7 +1032,7 @@ router.get('/aptlss/history/:jobId', async (req: Request, res: Response) => {
 });
 
 // Retry failed items
-router.post('/aptlss/history/:jobId/retry', async (req: Request, res: Response) => {
+router.post('/aptlss/history/:jobId/retry', async (req, res) => {
   let operation: ReturnType<typeof generationRequestContext> | undefined;
   let retryJobId: string | undefined;
   try {
@@ -1140,7 +1140,7 @@ router.post('/aptlss/history/:jobId/retry', async (req: Request, res: Response) 
 });
 
 // Batch generate APTLSS
-router.post('/aptlss/generate-batch', async (req: Request, res: Response) => {
+router.post('/aptlss/generate-batch', async (req, res) => {
   let operation: ReturnType<typeof generationRequestContext> | undefined;
   try {
     const { cardIds, settings } = req.body;
@@ -1177,7 +1177,7 @@ router.post('/aptlss/generate-batch', async (req: Request, res: Response) => {
 });
 
 // Get generation status
-router.get('/aptlss/status/:jobId', async (req: Request, res: Response) => {
+router.get('/aptlss/status/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
     const db = await getDb();
@@ -1794,7 +1794,7 @@ router.get('/aptlss/scheduled', async (req: any, res: Response) => {
   } catch (error) { scheduleRouteFailure(res,error); }
 });
 
-router.get('/aptlss/scheduled/:id/approval', async (req: Request,res: Response) => {
+router.get('/aptlss/scheduled/:id/approval', async (req, res) => {
   try {
     const approval = await withScheduleIdentity(req,async (user,tx) => {
       const [row] = await tx.select().from(scheduledJobs).where(scheduleOwnerWhere(req.params.id,user)).limit(1).for('share');
@@ -1805,7 +1805,7 @@ router.get('/aptlss/scheduled/:id/approval', async (req: Request,res: Response) 
   } catch (error) { scheduleRouteFailure(res,error); }
 });
 
-router.post('/aptlss/scheduled/:id/approval', async (req: Request,res: Response) => {
+router.post('/aptlss/scheduled/:id/approval', async (req, res) => {
   try {
     const { expectedSnapshotHash,scheduledTime } = req.body;
     if (typeof expectedSnapshotHash !== 'string' || !/^[a-f0-9]{64}$/.test(expectedSnapshotHash)) {

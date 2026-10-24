@@ -6,7 +6,7 @@ import { InfoTooltip } from "@/components/manus/InfoTooltip";
 import {
   Monitor, FolderOpen, Laptop, Inbox, RefreshCw, HardDrive,
   ListTodo, Battery, Target, CheckCircle2, Circle,
-  Trello, Mail, MessageSquare, Briefcase, Clock
+  Columns3, Mail, MessageSquare, Briefcase, Clock
 } from "lucide-react";
 
 // Get the relevant Sunday for the checklist:

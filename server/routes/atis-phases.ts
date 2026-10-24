@@ -47,7 +47,7 @@ async function canAccessTask(req: Request, taskId: string) {
  * POST /api/atis/phases/start
  * Start a new ATIS analysis session
  */
-router.post('/start', async (req: Request, res: Response) => {
+router.post('/start', async (req, res) => {
   try {
     const { taskId, taskDescription } = req.body;
     const userId = (req as any).user?.openId;
@@ -76,7 +76,7 @@ router.post('/start', async (req: Request, res: Response) => {
  * POST /api/atis/phases/phase3
  * Run Phase 3: Task Decomposition
  */
-router.post('/phase3', async (req: Request, res: Response) => {
+router.post('/phase3', async (req, res) => {
   try {
     const { taskId, taskDescription } = req.body;
     const userId = (req as any).user?.openId;
@@ -100,7 +100,7 @@ router.post('/phase3', async (req: Request, res: Response) => {
  * POST /api/atis/phases/phase4
  * Run Phase 4: Risk Assessment
  */
-router.post('/phase4', async (req: Request, res: Response) => {
+router.post('/phase4', async (req, res) => {
   try {
     const { taskId, taskDescription } = req.body;
     const userId = (req as any).user?.openId;
@@ -124,7 +124,7 @@ router.post('/phase4', async (req: Request, res: Response) => {
  * POST /api/atis/phases/phase5
  * Run Phase 5: Resource Estimation
  */
-router.post('/phase5', async (req: Request, res: Response) => {
+router.post('/phase5', async (req, res) => {
   try {
     const { taskId, taskDescription } = req.body;
     const userId = (req as any).user?.openId;
@@ -148,7 +148,7 @@ router.post('/phase5', async (req: Request, res: Response) => {
  * POST /api/atis/phases/phase6
  * Run Phase 6: Timeline Optimization
  */
-router.post('/phase6', async (req: Request, res: Response) => {
+router.post('/phase6', async (req, res) => {
   try {
     const { taskId, taskDescription } = req.body;
     const userId = (req as any).user?.openId;
@@ -172,7 +172,7 @@ router.post('/phase6', async (req: Request, res: Response) => {
  * POST /api/atis/phases/phase7
  * Run Phase 7: QA Strategy
  */
-router.post('/phase7', async (req: Request, res: Response) => {
+router.post('/phase7', async (req, res) => {
   try {
     const { taskId, taskDescription } = req.body;
     const userId = (req as any).user?.openId;
@@ -196,7 +196,7 @@ router.post('/phase7', async (req: Request, res: Response) => {
  * POST /api/atis/phases/phase8
  * Run Phase 8: Documentation Requirements
  */
-router.post('/phase8', async (req: Request, res: Response) => {
+router.post('/phase8', async (req, res) => {
   try {
     const { taskId, taskDescription } = req.body;
     const userId = (req as any).user?.openId;
@@ -220,7 +220,7 @@ router.post('/phase8', async (req: Request, res: Response) => {
  * POST /api/atis/phases/phase9
  * Run Phase 9: External Dependencies
  */
-router.post('/phase9', async (req: Request, res: Response) => {
+router.post('/phase9', async (req, res) => {
   try {
     const { taskId, taskDescription } = req.body;
     const userId = (req as any).user?.openId;
@@ -244,7 +244,7 @@ router.post('/phase9', async (req: Request, res: Response) => {
  * POST /api/atis/phases/phase10
  * Run Phase 10: Finalization & Execution Plan
  */
-router.post('/phase10', async (req: Request, res: Response) => {
+router.post('/phase10', async (req, res) => {
   try {
     const { taskId, taskDescription } = req.body;
     const userId = (req as any).user?.openId;
@@ -268,7 +268,7 @@ router.post('/phase10', async (req: Request, res: Response) => {
  * GET /api/atis/phases/session/:sessionId
  * Get analysis session details
  */
-router.get('/session/:sessionId', async (req: Request, res: Response) => {
+router.get('/session/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
     const session = await atisDb.getAnalysisSession(sessionId);
@@ -298,7 +298,7 @@ router.get('/session/:sessionId', async (req: Request, res: Response) => {
  * GET /api/atis/phases/task/:taskId
  * Get all analysis data for a task
  */
-router.get('/task/:taskId', async (req: Request, res: Response) => {
+router.get('/task/:taskId', async (req, res) => {
   try {
     const { taskId } = req.params;
     if (!(await canAccessTask(req, taskId))) {
@@ -321,7 +321,7 @@ router.get('/task/:taskId', async (req: Request, res: Response) => {
  * Compatibility read model for the retained phase-analysis dashboard. This
  * reads the latest persisted run only; it never starts a new analysis.
  */
-router.get('/analyze/:taskId', async (req: Request, res: Response) => {
+router.get('/analyze/:taskId', async (req, res) => {
   try {
     const { taskId } = req.params;
     if (!(await canAccessTask(req, taskId))) {
@@ -366,7 +366,7 @@ router.get('/analyze/:taskId', async (req: Request, res: Response) => {
  * GET /api/atis/phases/subtasks/:taskId
  * Get subtasks for a task
  */
-router.get('/subtasks/:taskId', async (req: Request, res: Response) => {
+router.get('/subtasks/:taskId', async (req, res) => {
   try {
     const { taskId } = req.params;
     if (!(await canAccessTask(req, taskId))) {
@@ -388,7 +388,7 @@ router.get('/subtasks/:taskId', async (req: Request, res: Response) => {
  * GET /api/atis/phases/risks/:taskId
  * Get risks for a task
  */
-router.get('/risks/:taskId', async (req: Request, res: Response) => {
+router.get('/risks/:taskId', async (req, res) => {
   try {
     const { taskId } = req.params;
     if (!(await canAccessTask(req, taskId))) {
@@ -410,7 +410,7 @@ router.get('/risks/:taskId', async (req: Request, res: Response) => {
  * GET /api/atis/phases/resources/:taskId
  * Get resource requirements for a task
  */
-router.get('/resources/:taskId', async (req: Request, res: Response) => {
+router.get('/resources/:taskId', async (req, res) => {
   try {
     const { taskId } = req.params;
     if (!(await canAccessTask(req, taskId))) {

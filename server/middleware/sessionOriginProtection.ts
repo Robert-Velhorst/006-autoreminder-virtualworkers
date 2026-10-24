@@ -1,4 +1,4 @@
-import { parse as parseCookies } from 'cookie';
+import { parseCookie as parseCookies } from 'cookie';
 import type { NextFunction, Request, Response } from 'express';
 import { COOKIE_NAME } from '@shared/const';
 
