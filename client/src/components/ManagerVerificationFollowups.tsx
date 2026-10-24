@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ManagerTimestamp } from "./AptlssManagerReview";
 import { toast } from "sonner";
+import { isManagerPilotDenied, managerStatusQueryOptions } from "@/lib/managerPilotAvailability";
 
 type Evidence = { id: string; evidenceId: number | null; source: string; role: "source" | "source_preview" | "linked_source" | "worker_update" | "reviewed_resolution"; title: string; content: string | null; sourceUrl: string | null; observedAt: Date | string; modifiedAt: Date | string | null; contentNote: string | null; statusLabel: string | null };
 
@@ -113,10 +114,19 @@ function VerificationFollowup({ followup, evidence, evidenceUnavailable, refresh
 }
 
 export default function ManagerVerificationFollowups({ cardId }: { cardId: string }) {
+  const manager = trpc.operator.getManagerStatus.useQuery(undefined, managerStatusQueryOptions);
+  if (isManagerPilotDenied(manager.error)) return null;
+  if (manager.error) return <p role="alert" className="text-sm text-destructive">Task follow-up status could not be loaded. Reload the task details to try again.</p>;
+  if (!manager.data) return <p role="status" className="text-sm text-muted-foreground">Checking task follow-up availability...</p>;
+  return <AvailableVerificationFollowups key={cardId} cardId={cardId} />;
+}
+
+function AvailableVerificationFollowups({ cardId }: { cardId: string }) {
   const evidence = trpc.operator.getCardEvidence.useQuery({ cardId, limit: 100 }, { retry: false, staleTime: 60_000 });
   const verification = trpc.operator.getVerificationFollowups.useQuery({ cardId }, { retry: false, staleTime: 30_000 });
   const records = evidence.data ?? [];
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  if (isManagerPilotDenied(evidence.error) || isManagerPilotDenied(verification.error)) return null;
   return <section className="min-w-0 space-y-3">
     <CaseFile evidence={records} loading={evidence.isLoading} error={!!evidence.error} timeZone={timeZone} />
     <h3 className="border-t pt-4 text-sm font-semibold">Needs your response</h3>

@@ -163,6 +163,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  express>body-parser: 2.4.0
   '@trpc/client>typescript': '-'
   '@trpc/react-query>typescript': '-'
   '@trpc/server>typescript': '-'
