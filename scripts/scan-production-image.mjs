@@ -6,8 +6,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { evaluateImageVulnerabilityReport } from './image-vulnerability-policy.mjs';
 
 export const SCANNER = Object.freeze({
-  name: 'trivy', version: '0.76.0',
-  archiveSha256: 'e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7',
+  name: 'trivy', version: '0.76.1',
+  archiveSha256: 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0',
 });
 export const IMAGE_REPOSITORY = 'ghcr.io/robert-velhorst/006-autoreminder-virtualworkers';
 export const IMAGE_POLICY_PATH = fileURLToPath(new URL('../security/image-vulnerability-exceptions.json', import.meta.url));

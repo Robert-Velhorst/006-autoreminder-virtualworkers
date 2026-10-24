@@ -27,7 +27,7 @@ function fixture() {
   const policy = Buffer.from(JSON.stringify({ version: 1 }));
   const database = Buffer.from(JSON.stringify(databaseMetadata(now)));
   const proof = { version: 1, passed: true, sourceRef, imageId, imageDigest: digest, platform: 'linux/amd64',
-    scanner: { name: 'trivy', version: '0.76.0', archiveSha256: 'e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7' },
+    scanner: { name: 'trivy', version: '0.76.1', archiveSha256: 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0' },
     reportSha256: sha(report), databaseMetadataSha256: sha(database), policySha256: sha(policy), scannedAt: now.toISOString(), summary: { passed: true } };
   const runtime = { mediaType: imageType, digest: runtimeDigest, platform: { os: 'linux', architecture: 'amd64' } };
   const state = { proof, report, policy, database, calls: [], evaluations: [], reads: [], mutate: () => {},
@@ -98,7 +98,7 @@ test('bounded reader enforces lexical and realpath roots, including symlink esca
 
 function completeReport(createdAt) {
   return { SchemaVersion: 2, ArtifactType: 'container_image', CreatedAt: createdAt,
-    Trivy: { Version: '0.76.0' }, Metadata: { ImageID: imageId, OS: { Family: 'alpine', Name: '3.24.0', EOSL: false } },
+    Trivy: { Version: '0.76.1' }, Metadata: { ImageID: imageId, OS: { Family: 'alpine', Name: '3.24.0', EOSL: false } },
     Results: [
       { Target: 'alpine', Class: 'os-pkgs', Type: 'alpine', Packages: [{ ID: 'musl', Name: 'musl', Version: '1.2.5' }] },
       { Target: 'Node.js', Class: 'lang-pkgs', Type: 'node-pkg', Packages: ['express', 'pg', 'drizzle-orm'].map(Name => ({
