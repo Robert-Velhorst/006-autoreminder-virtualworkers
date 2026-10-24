@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join, relative, isAbsolute, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { atomicWriteLocalFile, confinedLocalPath } from '../shared/local-filesystem-policy.mjs';
+import { atomicWriteLocalFile, atomicWriteQueueFile, confinedLocalPath } from '../shared/local-filesystem-policy.mjs';
 import { codexAssessmentArgs, codexInvocation, parseCodexAssessment } from './aptlssManagerCodexRunner';
 import { CODEX_LLM_EFFORTS, CODEX_LLM_GRANT_MS, CODEX_LLM_MODEL, CODEX_LLM_OUTPUT_SCHEMA, CODEX_LLM_PROTOCOL,
   CODEX_LLM_TTL_MS, compileLlmOutput, llmGrantSchema, llmInputHash, llmOutputSchema, llmReadySchema, llmReplySchema,
@@ -71,7 +71,7 @@ async function grantAttempt(root: string, request: CodexLlmRequest, attempt: num
     effort: CODEX_LLM_EFFORTS[attempt],nonce: randomBytes(32).toString('hex') });
   const readyPath = localPath(root,'dispatch',`${request.id}.${attempt}.ready`);
   const grantPath = localPath(root,'dispatch',`${request.id}.${attempt}.grant`);
-  await atomicWriteLocalFile(readyPath,JSON.stringify(ready));
+  await atomicWriteQueueFile(readyPath,JSON.stringify(ready));
   while (true) {
     signal.throwIfAborted();
     try {
@@ -183,7 +183,7 @@ export async function startCodexLlmRunner(root: string, work: string, executable
     await writeFile(queueLock,owner,{ flag: 'wx',mode: 0o600 }); ownsQueue = true;
     for (const child of ['requests','replies','dispatch']) await mkdir(localPath(root,child),{ recursive: true });
     const heartbeat = () => {
-      heartbeatPending ??= atomicWriteLocalFile(localPath(root,'heartbeat.json'),JSON.stringify({ version: 1,protocol: CODEX_LLM_PROTOCOL,
+      heartbeatPending ??= atomicWriteQueueFile(localPath(root,'heartbeat.json'),JSON.stringify({ version: 1,protocol: CODEX_LLM_PROTOCOL,
         model: CODEX_LLM_MODEL,efforts: CODEX_LLM_EFFORTS,at: new Date().toISOString() })).finally(() => { heartbeatPending = undefined; });
       return heartbeatPending;
     };
@@ -209,7 +209,7 @@ export async function startCodexLlmRunner(root: string, work: string, executable
             if (handled.has(request.id)) continue;
             handled.add(request.id);
             // A restarted worker cannot know whether its predecessor dispatched. Never replay.
-            await atomicWriteLocalFile(replyPath,JSON.stringify(llmReplySchema.parse({ version: 1,protocol: CODEX_LLM_PROTOCOL,
+            await atomicWriteQueueFile(replyPath,JSON.stringify(llmReplySchema.parse({ version: 1,protocol: CODEX_LLM_PROTOCOL,
               id: request.id,inputHash: request.inputHash,model: CODEX_LLM_MODEL,status: 'uncertain',attempts: [] })));
             continue;
           }
@@ -229,7 +229,7 @@ export async function startCodexLlmRunner(root: string, work: string, executable
           try {
             const reply = await runRequest(root,work,executable,request,controller.signal);
             await stat(confinedLocalPath(claimed));
-            if (!controller.signal.aborted && Date.now() < expiry) await atomicWriteLocalFile(replyPath,JSON.stringify(reply));
+            if (!controller.signal.aborted && Date.now() < expiry) await atomicWriteQueueFile(replyPath,JSON.stringify(reply));
           } catch { /* No confirmed result is preferable to replaying an unknown attempt. */ }
           finally { clearTimeout(timer); clearInterval(check); signal.removeEventListener('abort',cancel); }
         } catch { /* Malformed, cancelled and replaced transport files never execute. */ }

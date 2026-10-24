@@ -73,6 +73,16 @@ jobs:
           exit "$status"
       - run: pnpm check
       - run: pnpm check:db-transfer
+      - name: Verify isolated host preparation and cross-UID queue permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -I deployment/hetzner/prepare_codex_host_test.py
+          node scripts/build-codex-transport-test.mjs
+          sudo mkdir -m 0755 /usr/local/lib/va-dashboard-transport-test
+          trap 'sudo rm -f /usr/local/lib/va-dashboard-transport-test/node; sudo rmdir /usr/local/lib/va-dashboard-transport-test' EXIT
+          sudo install -m 0755 "$(command -v node)" /usr/local/lib/va-dashboard-transport-test/node
+          sudo python3 -B -I deployment/hetzner/codex_queue_permissions_test.py
       - name: Test deployment release-source validation
         run: node --test deployment/hetzner/release-source.test.mjs
       - name: Validate production URL and webhook Compose configuration
@@ -233,6 +243,8 @@ jobs:
           fi
           BACKUP_TEST
           DATABASE_URL="$RESTORE_DATABASE_URL" pnpm db:verify-parity
+      - name: Verify capacity-guarded native backup boundaries
+        run: sudo python3 -B -I deployment/hetzner/postgres_backup_test.py
       - name: Validate Hetzner deployment script syntax
         run: bash -n deployment/hetzner/deploy.sh
 

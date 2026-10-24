@@ -4,6 +4,8 @@ services:
   app:
     image: ${APP_IMAGE:?A verified VA image digest is required}
     restart: unless-stopped
+    group_add:
+      - "16006"
     logging:
       driver: json-file
       options:
@@ -22,6 +24,7 @@ services:
       HOST: 0.0.0.0
       LOCAL_AUTH_BYPASS: "false"
       DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-2}
+      APTLSS_CODEX_SHARED_QUEUE: ${APTLSS_CODEX_SHARED_QUEUE:-false}
       SESSION_APP_ID: ${SESSION_APP_ID:-va-dashboard}
       PUBLIC_URL: ${PUBLIC_URL:-}
       APP_URL: ${APP_URL:-}
@@ -33,6 +36,12 @@ services:
       private:
         ipv4_address: 172.30.6.2
     volumes:
+      - type: bind
+        source: /srv/va-dashboard-bridge/queue
+        target: /app/codex-queue
+        read_only: false
+        bind:
+          create_host_path: false
       - type: bind
         source: /etc/ssl/certs/ssl-cert-snakeoil.pem
         target: /run/va-postgres-root.crt

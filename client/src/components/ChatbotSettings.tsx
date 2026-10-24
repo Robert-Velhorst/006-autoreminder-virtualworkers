@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { parseTrelloModelId } from '@shared/trelloIdentifiers';
 import { ConversationBrowser } from './ConversationBrowser';
 import { ComplianceDashboard } from './ComplianceDashboard';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -131,28 +132,9 @@ export function ChatbotSettings() {
       return;
     }
 
-    // Extract board ID from Trello URL if full URL is provided
-    let boardId = modelId.trim();
-    if (boardId.includes('trello.com')) {
-      // Extract ID from URL like https://trello.com/b/ckEuBpNz/board-name
-      const match = boardId.match(/\/b\/([a-zA-Z0-9]+)/);
-      if (match && match[1]) {
-        boardId = match[1];
-      } else {
-        toast.error('Invalid Trello URL. Please use format: https://trello.com/b/BOARD_ID/board-name');
-        return;
-      }
-    }
-
-    // Validate board ID format (Trello IDs are typically 24 characters or similar)
-    if (boardId.length < 8 || boardId.length > 32) {
-      toast.error('Invalid board ID. Trello board IDs are typically 24-32 characters long.');
-      return;
-    }
-
-    // Check if board ID contains only valid characters
-    if (!/^[a-zA-Z0-9]+$/.test(boardId)) {
-      toast.error('Invalid board ID. Board IDs can only contain letters and numbers.');
+    const boardId = parseTrelloModelId(modelId);
+    if (!boardId) {
+      toast.error('Invalid Trello board/workspace ID or board URL.');
       return;
     }
 

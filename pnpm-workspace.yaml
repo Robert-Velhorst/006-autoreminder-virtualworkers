@@ -30,6 +30,8 @@ overrides:
   postcss-selector-parser: 7.1.7
 
 minimumReleaseAgeExclude:
+  # Current stable security fix GHSA-27r3-jxmh-p828; exact version only.
+  - body-parser@2.4.0
   - "@aws-sdk/client-s3@3.1156.0"
   - "@aws-sdk/s3-request-presigner@3.1156.0"
   - "@tanstack/react-virtual@3.14.22"

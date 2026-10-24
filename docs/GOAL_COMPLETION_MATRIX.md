@@ -2,9 +2,29 @@
 
 Statuses describe the repository, not provider consent outside the repository.
 
-## Current Release Decision, 2026-10-21
+## Current Release Decision, 2026-10-23
 
-**Not cleared for production deployment or active automatic planning.** The
+**v1.0.1 is deployed; full production acceptance and active automatic planning
+remain incomplete.** The authoritative dated release, image, deployment and
+provider-backup checkpoint is [Production Deployment Target](../DEPLOYMENT_TARGET.md).
+Do not duplicate its release identifiers in historical capability records below.
+
+| Requirement | Current evidence | Still required |
+| --- | --- | --- |
+| Accepted source and release | PR #153 merged after exact-head checks; identical merge tree passed post-merge quality and CodeQL. Stable release and exact-digest publisher completed. | Fresh checks and artifact acceptance for subsequent changes. |
+| Live single-container deployment | Owner-approved restricted workflow deployed v1.0.1. One healthy loopback-bound VA container, verified release digest/revision, HTTPS health/readiness and database connectivity. | Real authenticated owner/worker workflow acceptance; a rendered login page is not that evidence. |
+| Data preservation and recovery | Original migration records and backups retained; independent native restore and complete-value reconciliation passed. Existing provider disk backups and database storage scope were inspected. | Recurring database backup validation and successful recovery from the selected provider backup; disk capture alone is not a database-consistency proof. |
+| Access controls and providers | Public unauthenticated API and WebSocket access are denied. Financial/background/bypass holds remain intact and management is shadow-only. | Approved Trello origin and actual login, Google callbacks, browser pairing and private subscription bridge acceptance. Holds are not working integrations. |
+| Security | Default-branch CodeQL inventory empty after v1.0.1; release image scan and provenance verified. | Historical exposed credential remediation remains unresolved; no revocation is inferred from code removal. |
+| Operational activation | Production route and runtime are deployed without server expansion. | Monitoring/recovery acceptance, financial operational acceptance, controlled outbound work and the supervised shadow trial described below. |
+
+The following 2026-10-21 and older sections retain their original evidence scope.
+Their no-deployment/no-database statements are historical, not current state.
+No section below authorizes bypassing the remaining real-account or recovery gates.
+
+## Historical Release Decision, 2026-10-21
+
+**At that checkpoint: not cleared for production deployment or active automatic planning.** The
 accepted PR #144 source receipt is `c43dee7`. PR #144 merged as
 `b92be39f88d66e4f53fae782900b70705f9ade90`, with a tree identical to
 `12ed4cfa58c5f3a35da0f144ff92d5b65c26c279`. Quality run `39557268165`,

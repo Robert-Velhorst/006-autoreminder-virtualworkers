@@ -117,19 +117,20 @@ describe('Chatbot Extractor Service', () => {
   describe('Platform Identification', () => {
     it('should identify ChatGPT platform from URL', () => {
       const url = 'https://chatgpt.com/share/abc123';
-      const isChatGPT = url.includes('chatgpt.com') || url.includes('chat.openai.com');
+      const isChatGPT = ['chatgpt.com', 'chat.openai.com'].includes(new URL(url).hostname);
       expect(isChatGPT).toBe(true);
     });
 
     it('should identify Gemini platform from URL', () => {
       const url = 'https://g.co/gemini/share/abc123';
-      const isGemini = url.includes('g.co/gemini') || url.includes('gemini.google.com');
+      const parsed = new URL(url);
+      const isGemini = (parsed.hostname === 'g.co' && parsed.pathname.startsWith('/gemini/')) || parsed.hostname === 'gemini.google.com';
       expect(isGemini).toBe(true);
     });
 
     it('should identify Claude platform from URL', () => {
       const url = 'https://claude.ai/share/abc123';
-      const isClaude = url.includes('claude.ai');
+      const isClaude = new URL(url).hostname === 'claude.ai';
       expect(isClaude).toBe(true);
     });
   });

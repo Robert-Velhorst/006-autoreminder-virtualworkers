@@ -51,3 +51,28 @@ binds only to loopback, and is removed afterward.
 The build retains its existing bundle-size warning. These checks do not establish
 live PostgreSQL migration, provider, account, image-publication or deployment
 acceptance, nor prove that all upstream transitive dependencies are current.
+
+## 24 October main reconciliation
+
+Integrate main `81230f4bbabda2bfa79b1f920917aff4919bf4cb` without discarding its
+PostgreSQL backup/host preparation, transport, financial controls, deployment
+directives or development Vite request protections. Keep the newer migration
+pins for ws and Zod; retain the development template rate limiter after Vite's
+module middleware and the production refusal, using Express 5-compatible
+middleware registration rather than the obsolete unnamed wildcard.
+
+The lock initially exposed GHSA-27r3-jxmh-p828 in body-parser 2.3.0. Resolve
+2.4.0 within Express's declared range and add only that exact version to the
+existing release-age exclusions. The complete lock audits with zero known
+findings; no advisory or audit threshold is waived. Update pnpm to public
+stable 12.15.0 and use the npm-published SHA-512 converted to Corepack's
+hexadecimal hash format. Both the package-manager and project YAML documents
+are retained; the manager lock now also resolves 12.15.0.
+
+Frozen lock consistency, manifest/YAML parsing, the resolved Vite source AST
+and whitespace checks pass. Dependency installation used ignored lifecycle
+scripts; no global package manager was installed or changed. No local app
+suite, build, live service/database/provider or deployment was run for this
+new source. Existing main test cases are preserved; none were authored or
+relaxed for this reconciliation. Prior local and hosted results above remain
+historical. Fresh hosted CI must qualify the new merged source head.
