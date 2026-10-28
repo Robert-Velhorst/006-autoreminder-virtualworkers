@@ -20,11 +20,11 @@ ACCOUNT = 'va-dashboard-codex'
 IDENTITY = 16006
 IMAGE = ('ghcr.io/robert-velhorst/006-autoreminder-virtualworkers@'
          'sha256:30990b106ca3b22ee7c1353fd1c3a826a2804f6fdc064a8fb25614bb108fd7a3')
-NODE_URL = 'https://nodejs.org/dist/v26.12.0/node-v26.12.0-linux-x64.tar.xz'
-NODE_SHA = 'fd47865ecd6391ebb431fc815e01b9135bf83ded5cf373247e9331e196b7aded'
-CODEX_URL = ('https://github.com/openai/codex/releases/download/rust-v0.164.0/'
+NODE_URL = 'https://nodejs.org/dist/v26.12.1/node-v26.12.1-linux-x64.tar.xz'
+NODE_SHA = '6170b2d474e1c626f43cff3adc118df9fe3b573258a4fc3d850c8dbc6b079bbd'
+CODEX_URL = ('https://github.com/openai/codex/releases/download/rust-v0.165.0/'
              'codex-x86_64-unknown-linux-musl.tar.gz')
-CODEX_SHA = '90dd0b03b28afcb7fa733a4f73b413db2916a47347efd43fb669cc1c774ee8e4'
+CODEX_SHA = 'be635d3486a5bd060d0fff582ae6d30160280c31344dd85719707fa920e187f0'
 BUNDLES = ('run-codex-bridge.js', 'run-manager-codex.js', 'run-codex-llm.js',
            'manager-codex-supervisor.js')
 
@@ -107,7 +107,7 @@ def main():
     for name in ('downloads', 'node', 'bin', 'bridge'):
         directory(BASE / name, 0o700 if name == 'downloads' else 0o755)
     download(NODE_URL, BASE / 'downloads/node.tar.xz', NODE_SHA)
-    binary(BASE / 'downloads/node.tar.xz', 'node-v26.12.0-linux-x64/bin/node', BASE / 'node/node')
+    binary(BASE / 'downloads/node.tar.xz', 'node-v26.12.1-linux-x64/bin/node', BASE / 'node/node')
     download(CODEX_URL, BASE / 'downloads/codex.tar.gz', CODEX_SHA)
     binary(BASE / 'downloads/codex.tar.gz', 'codex-x86_64-unknown-linux-musl', BASE / 'bin/codex')
     for name in BUNDLES:
@@ -116,9 +116,9 @@ def main():
         if len(data) > 16 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != seal['toolBundleHashes'][source]:
             raise RuntimeError('Accepted bridge bundle integrity mismatch')
         exclusive(BASE / 'bridge' / name, data)
-    if run(str(BASE / 'node/node'), '--version') != 'v26.12.0':
+    if run(str(BASE / 'node/node'), '--version') != 'v26.12.1':
         raise RuntimeError('Unexpected isolated Node version')
-    if run(str(BASE / 'bin/codex'), '--version') != 'codex-cli 0.164.0':
+    if run(str(BASE / 'bin/codex'), '--version') != 'codex-cli 0.165.0':
         raise RuntimeError('Unexpected isolated Codex version')
     run('groupadd', '--gid', str(IDENTITY), ACCOUNT)
     run('useradd', '--system', '--uid', str(IDENTITY), '--gid', ACCOUNT, '--no-create-home',
@@ -186,7 +186,7 @@ WantedBy=multi-user.target
     run('systemctl', 'daemon-reload')
     print(json.dumps({'prepared': True, 'serviceStarted': False, 'serviceEnabled': False,
         'credentialsCopied': False, 'appChanged': False, 'image': IMAGE,
-        'node': '26.12.0', 'codex': '0.164.0', 'accountUid': IDENTITY,
+        'node': '26.12.1', 'codex': '0.165.0', 'accountUid': IDENTITY,
         'next': 'Owner completes dedicated ChatGPT login; app queue wiring remains separate'}))
 
 

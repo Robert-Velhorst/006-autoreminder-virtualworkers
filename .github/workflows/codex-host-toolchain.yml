@@ -1,0 +1,33 @@
+name: VA isolated host toolchain proof
+on:
+  pull_request:
+    paths:
+      - deployment/hetzner/prepare-codex-host.py
+      - deployment/hetzner/prepare_codex_host_test.py
+      - deployment/hetzner/codex-host-toolchain.json
+      - .github/scripts/verify-codex-host-toolchain.py
+      - .github/workflows/codex-host-toolchain.yml
+permissions:
+  contents: read
+jobs:
+  native-proof:
+    name: Current Node and Codex archives plus original preparation cases
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.15.2'
+      - name: Exercise original cases and actual binaries without network or privilege
+        run: python3 -B -I .github/scripts/verify-codex-host-toolchain.py
+      - name: Retain source, case and actual native execution evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: va-host-toolchain-proof
+          path: HOST_TOOLCHAIN_EVIDENCE
+          if-no-files-found: error
+          retention-days: 14
