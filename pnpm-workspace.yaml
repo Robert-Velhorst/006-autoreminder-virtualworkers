@@ -10,10 +10,6 @@ patchedDependencies:
 
 overrides:
   "express>body-parser": 2.4.0
-  # tRPC publishes compiled JavaScript; its compiler peer is build-time only.
-  "@trpc/client>typescript": "-"
-  "@trpc/react-query>typescript": "-"
-  "@trpc/server>typescript": "-"
   dompurify: 3.4.17
   engine.io: 6.6.11
   proxy-addr: 2.0.8
