@@ -147,7 +147,12 @@ function sendGridAddress(value: string) {
   if (typeof value !== 'string') throw new Error('Invalid email address');
   const bracket = value.indexOf('<');
   if (bracket < 0) return { email: value };
-  return { name: value.slice(0, bracket).trim(), email: value.slice(bracket + 1).replace('>', '').trim() };
+  const end = value.lastIndexOf('>');
+  if (end <= bracket || value.slice(end + 1).trim() || value.indexOf('<', bracket + 1) !== -1
+    || value.indexOf('>', bracket + 1) !== end) {
+    throw new Error('Invalid email address');
+  }
+  return { name: value.slice(0, bracket).trim(), email: value.slice(bracket + 1, end).trim() };
 }
 
 function escapeEmailHtml(value: string) {

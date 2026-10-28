@@ -50,6 +50,14 @@ describe('guarded SendGrid HTTP delivery', () => {
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('private provider body');
   });
 
+  it.each(['Worker <worker@example.invalid', 'Worker <worker@example.invalid> extra', 'Worker <<worker@example.invalid>>', 'Worker <worker@example.invalid>>'])(
+    'rejects ambiguous address syntax before dispatch: %s', async to => {
+      const { sendEmailWithOutcome } = await import('./email');
+      expect(await sendEmailWithOutcome({ ...message, to })).not.toEqual({ status: 'sent' });
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['TimeoutError', 'AbortError', 'TypeError'])('keeps %s uncertain and hides transport details', async name => {
     request.mockRejectedValue(Object.assign(new Error('private key SG.synthetic-only'), { name }));
     const { sendEmailWithOutcome } = await import('./email');
