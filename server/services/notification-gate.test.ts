@@ -9,12 +9,6 @@ vi.mock("../googleEvidence", () => ({
   validateGoogleMailDeliveryConnection: vi.fn(),
 }));
 
-vi.mock("@sendgrid/mail", () => ({
-  default: {
-    setApiKey: vi.fn(),
-    send,
-  },
-}));
 
 vi.mock("axios", () => ({
   default: { post: axiosPost },
@@ -29,9 +23,10 @@ describe("outbound notification gate", () => {
     vi.stubEnv("SENDGRID_API_KEY", "test-sendgrid-key");
     vi.stubEnv("SENDGRID_FROM_EMAIL", "verified-synthetic@example.test");
     vi.stubEnv("EMAIL_PROVIDER", "sendgrid");
-    send.mockReset().mockResolvedValue([{}]);
+    send.mockReset().mockImplementation(async () => new Response(null, { status: 202 }));
     axiosPost.mockReset().mockResolvedValue({ data: { id: "action-id", date: "2026-10-13T12:00:00.000Z" } });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
+    vi.stubGlobal("fetch", vi.fn(async (url, init) => url === 'https://api.sendgrid.com/v3/mail/send'
+      ? send(url, init) : new Response(null, { status: 200 })));
   });
 
   afterEach(() => {
@@ -74,6 +69,6 @@ describe("outbound notification gate", () => {
     });
     expect(send).toHaveBeenCalledOnce();
     expect(axiosPost).toHaveBeenCalledOnce();
-    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

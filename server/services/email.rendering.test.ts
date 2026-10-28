@@ -10,7 +10,6 @@ vi.mock('../googleEvidence', () => ({
   sendGoogleMail: providers.google,
   validateGoogleMailDeliveryConnection: vi.fn(),
 }));
-vi.mock('@sendgrid/mail', () => ({ default: { setApiKey: vi.fn(), send: providers.send } }));
 vi.mock('nodemailer', () => ({ default: { createTransport: providers.smtp } }));
 
 type Briefing = Parameters<typeof generateMorningBriefingHtml>[0];
@@ -45,11 +44,12 @@ describe('outbound email rendering safety', () => {
     vi.stubEnv('SENDGRID_API_KEY', 'SG.synthetic');
     vi.stubEnv('SENDGRID_FROM_EMAIL', 'sender@example.invalid');
     vi.stubEnv('APP_URL', 'https://dashboard.example.invalid');
-    providers.send.mockResolvedValue(undefined);
+    providers.send.mockImplementation(async () => new Response(null, { status: 202 }));
+    vi.stubGlobal('fetch', providers.send);
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
   });
-  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+  afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
   it.each(['workerName', 'date', 'totalHours', 'highPriorityCount'] as const)(
     'escapes morning %s even when runtime numeric data is hostile', async field => {
@@ -144,7 +144,8 @@ describe('outbound email rendering safety', () => {
     const inviteUrl = `https://dashboard.example.invalid/invite?token=one&next='><img src=x>`;
     await expect(sendWorkerInvitationEmail({ email: 'worker@example.invalid', workerName: attack, inviteUrl, expiresAt: new Date('2026-10-22Z') })).resolves.toBe(true);
     expect(providers.send).toHaveBeenCalledTimes(1);
-    const message = providers.send.mock.calls[0][0];
+    const payload = JSON.parse(providers.send.mock.calls[0][1].body);
+    const message = { html: payload.content[1].value, text: payload.content[0].value };
     expect(message.html).toContain(encoded);
     expect(message.html).toContain('&amp;next=');
     const links = structure(message.html).filter(element => element.tagName === 'a');
@@ -173,7 +174,8 @@ describe('outbound email rendering safety', () => {
     await expect(send(authorized)).resolves.toBe(true);
     expect(authorized).toHaveBeenCalledTimes(1);
     expect(providers.send).toHaveBeenCalledTimes(1);
-    const message = providers.send.mock.calls[0][0];
+    const payload = JSON.parse(providers.send.mock.calls[0][1].body);
+    const message = { html: payload.content[1].value, text: payload.content[0].value };
     expect(message.html).toContain(`<strong>${encoded}</strong>`);
     expect(structure(message.html)).toEqual(structure(kind === 'morning'
       ? email.generateMorningBriefingHtml(briefing())

@@ -15,9 +15,6 @@ vi.mock("../googleEvidence", () => ({
   sendGoogleMail: controls.googleSend,
   validateGoogleMailDeliveryConnection: vi.fn(),
 }));
-vi.mock("@sendgrid/mail", () => ({
-  default: { setApiKey: vi.fn(), send: controls.sendgridSend },
-}));
 vi.mock("nodemailer", () => ({ default: { createTransport: controls.createTransport } }));
 
 const options = { to: "worker@example.invalid", subject: "Briefing", html: "<p>Work</p>" };
@@ -46,13 +43,14 @@ describe("email scheduled-job lease fencing", () => {
     vi.stubEnv("SENDGRID_FROM_EMAIL", "sender@example.invalid");
     controls.status.mockResolvedValue({ connected: true });
     controls.googleSend.mockResolvedValue(undefined);
-    controls.sendgridSend.mockResolvedValue(undefined);
+    controls.sendgridSend.mockImplementation(async () => new Response(null, { status: 202 }));
+    vi.stubGlobal('fetch', controls.sendgridSend);
     controls.smtpSend.mockResolvedValue(undefined);
     controls.createTransport.mockReturnValue({ sendMail: controls.smtpSend });
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
   });
-  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+  afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
   function expectNoSend() {
     expect(controls.googleSend).not.toHaveBeenCalled();
@@ -155,7 +153,7 @@ describe("email scheduled-job lease fencing", () => {
     const order: string[] = [];
     vi.mocked(state.context.assertOwnership).mockImplementation(async () => { order.push("ownership"); });
     const send = provider === "gmail_smtp" ? controls.smtpSend : controls.sendgridSend;
-    send.mockImplementation(async () => { order.push("send"); });
+    send.mockImplementation(async () => { order.push("send"); return new Response(null, { status: 202 }); });
     expect(await sendEmail(options, state.context)).toBe(true);
     expect(order.slice(-2)).toEqual(["ownership", "send"]);
     expect(send).toHaveBeenCalledTimes(1);
@@ -167,7 +165,7 @@ describe("email scheduled-job lease fencing", () => {
     expect(await sendEmail(options)).toBe(true);
     const send = provider === "gmail_api" ? controls.googleSend : provider === "gmail_smtp" ? controls.smtpSend : controls.sendgridSend;
     expect(send).toHaveBeenCalledTimes(1);
-    expect(send.mock.calls[0]).toHaveLength(1);
+    expect(send.mock.calls[0]).toHaveLength(provider === 'sendgrid' ? 2 : 1);
   });
 
   it("keeps disabled delivery disabled with a live context", async () => {
