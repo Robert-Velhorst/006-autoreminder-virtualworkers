@@ -1,6 +1,6 @@
 # Multi-stage build for VA Dashboard
 # Stage 1: Build frontend and backend
-FROM node:26.12.0-alpine AS builder
+FROM node:26.12.1-alpine AS builder
 
 # Install pnpm
 RUN npm install -g pnpm@12.14.0
@@ -22,7 +22,7 @@ COPY . .
 RUN pnpm build
 
 # Stage 2: Install only runtime dependencies
-FROM node:26.12.0-alpine AS production-deps
+FROM node:26.12.1-alpine AS production-deps
 
 RUN npm install -g pnpm@12.14.0
 
@@ -32,7 +32,7 @@ COPY patches ./patches
 RUN pnpm install --frozen-lockfile --prod
 
 # Stage 3: Minimal production image
-FROM node:26.12.0-alpine AS production
+FROM node:26.12.1-alpine AS production
 
 # Refresh runtime security fixes; installation tools stay in earlier stages.
 RUN apk upgrade --no-cache zlib musl musl-utils && \
