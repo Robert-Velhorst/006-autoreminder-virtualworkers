@@ -4,6 +4,10 @@ on:
   pull_request:
     paths:
       - dependency-refresh.json
+      - package.json
+      - pnpm-workspace.yaml
+      - pnpm-lock.yaml
+      - Dockerfile
       - .github/workflows/refresh-stable-lock.yml
 
 permissions:
@@ -52,7 +56,23 @@ jobs:
             manifest[item.group][item.name] = item.to;
           }
           fs.writeFileSync(path.join(output, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
+          const {execFileSync} = require('node:child_process');
+          const observedVersion = execFileSync('pnpm', ['--version'], {encoding: 'utf8'}).trim();
+          const readSetting = name => execFileSync('pnpm', ['config', 'get', name], {encoding: 'utf8'}).trim();
+          const releasePolicy = {
+            minimumReleaseAge: readSetting('minimumReleaseAge'),
+            minimumReleaseAgeStrict: readSetting('minimumReleaseAgeStrict'),
+            minimumReleaseAgeIgnoreMissingTime: readSetting('minimumReleaseAgeIgnoreMissingTime'),
+            minimumReleaseAgeExclude: readSetting('minimumReleaseAgeExclude'),
+            trustLockfile: readSetting('trustLockfile'),
+          };
+          if (observedVersion !== '12.16.1' || releasePolicy.minimumReleaseAge !== '1440' ||
+              releasePolicy.minimumReleaseAgeStrict !== 'true' ||
+              releasePolicy.minimumReleaseAgeIgnoreMissingTime !== 'false' ||
+              !['', 'undefined', 'null', '[]'].includes(releasePolicy.minimumReleaseAgeExclude) ||
+              releasePolicy.trustLockfile !== 'false') throw new Error('Actual manager or strict release policy differs');
           const receipt = {source_revision: process.env.GITHUB_SHA, source_metadata_sha256: hashes,
+            actual_package_manager_version: observedVersion, actual_release_policy: releasePolicy,
             updates: spec.updates, application_tree_or_credentials_copied: false,
             public_vendor_patch_inputs_copied: ['patches/wouter@3.13.0.patch'],
             package_lifecycle_scripts_enabled: false, application_tests_executed: false,

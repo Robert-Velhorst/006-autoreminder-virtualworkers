@@ -30,14 +30,8 @@ overrides:
   "@esbuild-kit/core-utils>esbuild": 0.28.2
   postcss-selector-parser: 7.1.7
 
-minimumReleaseAgeExclude:
-  # Current stable security fix GHSA-27r3-jxmh-p828; exact version only.
-  - body-parser@2.4.0
-  - "@aws-sdk/client-s3@3.1156.0"
-  - "@aws-sdk/s3-request-presigner@3.1156.0"
-  - "@tanstack/react-virtual@3.14.22"
-  - "@tanstack/virtual-core@3.19.7"
-  - dotenv@18.0.9
-  - nodemailer@10.2.1
-  - path-to-regexp@9.0.0
-  - react-resizable-panels@4.15.0
+# Enforce the normal one-day release age without exemptions or fallback.
+minimumReleaseAge: 1440
+minimumReleaseAgeStrict: true
+minimumReleaseAgeIgnoreMissingTime: false
+trustLockfile: false

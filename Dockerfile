@@ -3,7 +3,7 @@
 FROM node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797 AS builder
 
 # Install pnpm
-RUN npm install -g pnpm@12.15.0
+RUN npm install -g pnpm@12.16.1
 
 # Set working directory
 WORKDIR /app
@@ -24,7 +24,7 @@ RUN pnpm build
 # Stage 2: Install only runtime dependencies
 FROM node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797 AS production-deps
 
-RUN npm install -g pnpm@12.15.0
+RUN npm install -g pnpm@12.16.1
 
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
