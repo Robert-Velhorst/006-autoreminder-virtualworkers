@@ -17,6 +17,7 @@ import { isLocalRegistrationAllowed } from '../_core/localRegistration';
 import { PASSWORD_MIN_LENGTH, validatePassword } from '../passwordPolicy';
 import { selectWorkerProfile } from '../workerOperatorContext';
 import { DatabaseUnavailableError, isDatabaseUnavailable, respondDatabaseUnavailable } from '../databaseAvailability';
+import { logString } from '../logString';
 
 const router = express.Router();
 const TRELLO_LOGIN_REQUEST_TIMEOUT_MS = 15_000;
@@ -176,11 +177,11 @@ router.post('/register', async (req: Request, res: Response) => {
     // Check if user already exists
     const existing = await db.getUserByOpenId(username);
     if (existing) {
-      console.log('[LocalAuth] User already exists:', username);
+      console.log('[LocalAuth] User already exists:', logString(username));
       return res.status(409).json({ error: 'Username already taken' });
     }
 
-    console.log('[LocalAuth] Creating new user:', username);
+    console.log('[LocalAuth] Creating new user:', logString(username));
 
     // Hash password
     const passwordHash = await bcrypt.hash(password, 10);
