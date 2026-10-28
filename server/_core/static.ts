@@ -41,8 +41,8 @@ export function serveStatic(app: Express) {
     },
   }));
 
-  app.use("*", (_req, res) => {
+  app.use((_req, res) => {
     res.setHeader("Cache-Control", "no-cache");
-    res.sendFile(path.resolve(distPath, "index.html"));
+    res.sendFile("index.html", { root: distPath });
   });
 }

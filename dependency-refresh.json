@@ -1,0 +1,9 @@
+{
+  "purpose": "Resolve the four newly published stable direct targets for review",
+  "updates": [
+    { "group": "dependencies", "name": "react-hook-form", "from": "^7.90.0", "to": "^7.91.0" },
+    { "group": "dependencies", "name": "react-resizable-panels", "from": "^4.14.8", "to": "^4.15.0" },
+    { "group": "devDependencies", "name": "@babel/parser", "from": "8.0.7", "to": "8.0.8" },
+    { "group": "devDependencies", "name": "@babel/types", "from": "8.0.6", "to": "8.0.8" }
+  ]
+}

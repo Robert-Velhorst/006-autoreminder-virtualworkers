@@ -12,7 +12,7 @@ import { resolveCodexBridgePaths } from '../shared/codex-bridge-paths.mjs';
 
 test('relative bridge paths are canonicalized against one explicit workspace before child launch', () => {
   const root = resolve('mock-codex-workspace');
-  const paths = resolveCodexBridgePaths({ APTLSS_CODEX_BRIDGE_ROOT: root, APTLSS_CODEX_QUEUE_DIR: 'queue',
+  const paths = resolveCodexBridgePaths({ CODEX_HOME: join(root, 'synthetic-auth'), APTLSS_CODEX_BRIDGE_ROOT: root, APTLSS_CODEX_QUEUE_DIR: 'queue',
     APTLSS_CODEX_PRIVATE_DIR: 'private/manager', APTLSS_CODEX_LLM_PRIVATE_DIR: 'private/conversations' });
   assert.deepEqual(paths, { root, queue: join(root, 'queue'), managerWork: join(root, 'private/manager'), llmWork: join(root, 'private/conversations') });
 });

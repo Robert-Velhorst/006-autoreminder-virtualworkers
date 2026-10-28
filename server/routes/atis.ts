@@ -96,7 +96,7 @@ function analysisStart(mode?: AtisAnalysisSelection['mode']) {
     res.setHeader('Cache-Control', 'no-store');
     try {
       const actor = (req as AuthenticatedAtisRequest).user!;
-      if (req.params.cardId !== undefined && (!/^[1-9]\d*$/.test(req.params.cardId)
+      if (req.params.cardId !== undefined && (typeof req.params.cardId !== 'string' || !/^[1-9]\d*$/.test(req.params.cardId)
         || !Number.isSafeInteger(Number(req.params.cardId)))) return res.status(400).json({ error: 'Invalid card ID' });
       // The explicit preview endpoint cannot start work. Legacy confirmation
       // submits only the frozen preview identity, never a fresh filter selection.
@@ -118,7 +118,7 @@ function analysisStart(mode?: AtisAnalysisSelection['mode']) {
           ? { goal: interviewGoal, deliverable: interviewDeliverable, successCriteria: interviewSuccessCriteria } : undefined);
         let cardId = fields.cardId;
         if (req.params.cardId !== undefined) {
-          if (!/^[1-9]\d*$/.test(req.params.cardId)) return res.status(400).json({ error: 'Invalid card ID' });
+          if (typeof req.params.cardId !== 'string' || !/^[1-9]\d*$/.test(req.params.cardId)) return res.status(400).json({ error: 'Invalid card ID' });
           const pathId = analysisId.parse(Number(req.params.cardId));
           if (cardId !== undefined && cardId !== pathId) return res.status(400).json({ error: 'Conflicting card IDs' });
           cardId = pathId;
@@ -132,7 +132,7 @@ function analysisStart(mode?: AtisAnalysisSelection['mode']) {
 }
 
 router.post('/understanding/preview', analysisStart());
-router.get('/understanding/analyses/:id', async (req: Request, res: Response) => {
+router.get('/understanding/analyses/:id', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
     const id = analysisToken.parse(req.params.id);
@@ -164,7 +164,7 @@ router.get('/operations/active', async (_req: Request, res: Response) => {
   catch (error) { return operationFailure(res, error); }
 });
 
-router.get('/operations/:id', async (req: Request, res: Response) => {
+router.get('/operations/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: 'Invalid operation ID' });
   try {
@@ -187,7 +187,7 @@ function sendAtisFailure(res: Response, operation: string) {
  * GET /api/atis/stats
  * Get current ingestion statistics
  */
-router.get('/stats', async (req: Request, res: Response) => {
+router.get('/stats', async (req, res) => {
   try {
     const db = await getDb();
     if (!db) {
@@ -237,7 +237,7 @@ router.get('/stats', async (req: Request, res: Response) => {
  * GET /api/atis/jobs
  * Get list of ingestion jobs
  */
-router.get('/jobs', async (req: Request, res: Response) => {
+router.get('/jobs', async (req, res) => {
   try {
     const db = await getDb();
     if (!db) {
@@ -260,7 +260,7 @@ router.get('/jobs', async (req: Request, res: Response) => {
  * GET /api/atis/workspaces
  * Get all ingested workspaces
  */
-router.get('/workspaces', async (req: Request, res: Response) => {
+router.get('/workspaces', async (req, res) => {
   try {
     const db = await getDb();
     if (!db) {
@@ -282,7 +282,7 @@ router.get('/workspaces', async (req: Request, res: Response) => {
  * GET /api/atis/boards
  * Get all ingested boards (optionally filtered by workspace)
  */
-router.get('/boards', async (req: Request, res: Response) => {
+router.get('/boards', async (req, res) => {
   try {
     const db = await getDb();
     if (!db) {
@@ -309,7 +309,7 @@ router.get('/boards', async (req: Request, res: Response) => {
  * GET /api/atis/cards
  * Get all ingested cards (optionally filtered by board)
  */
-router.get('/cards', async (req: Request, res: Response) => {
+router.get('/cards', async (req, res) => {
   try {
     const db = await getDb();
     if (!db) {
@@ -340,7 +340,7 @@ router.get('/cards', async (req: Request, res: Response) => {
  * GET /api/atis/cards/:id
  * Get a single card with all its data
  */
-router.get('/cards/:id', async (req: Request, res: Response) => {
+router.get('/cards/:id', async (req, res) => {
   try {
     const db = await getDb();
     if (!db) {
@@ -391,7 +391,7 @@ router.get('/cards/:id', async (req: Request, res: Response) => {
  * GET /api/atis/cards-without-due-date
  * Get all cards that don't have a due date
  */
-router.get('/cards-without-due-date', async (req: Request, res: Response) => {
+router.get('/cards-without-due-date', async (req, res) => {
   try {
     const db = await getDb();
     if (!db) {
@@ -440,7 +440,7 @@ router.get('/cards-without-due-date', async (req: Request, res: Response) => {
  * GET /api/atis/understanding/stats
  * Get AI understanding statistics
  */
-router.get('/understanding/stats', async (req: Request, res: Response) => {
+router.get('/understanding/stats', async (req, res) => {
   try {
     const stats = await getUnderstandingStats();
     res.json(stats);
@@ -460,7 +460,7 @@ router.post('/understanding/process', analysisConfirmLimit, analysisStart('pendi
  * GET /api/atis/card/:id/understanding
  * Get AI understanding for a specific card
  */
-router.get('/card/:id/understanding', async (req: Request, res: Response) => {
+router.get('/card/:id/understanding', async (req, res) => {
   try {
     const db = await getDb();
     if (!db) {
@@ -509,7 +509,7 @@ router.post('/understanding/reprocess/:cardId', analysisConfirmLimit, analysisSt
  * POST /api/atis/cards/:trelloId/reingest
  * Re-ingest a single card from Trello (refresh data)
  */
-router.post('/cards/:trelloId/reingest', async (req: Request, res: Response) => {
+router.post('/cards/:trelloId/reingest', async (req, res) => {
   try {
     const { trelloId } = req.params;
     const encodedTrelloId = encodeTrelloPathSegment(trelloId);
@@ -613,7 +613,7 @@ router.post('/cards/:trelloId/reingest', async (req: Request, res: Response) => 
  * GET /api/atis/cards/by-trello/:trelloId
  * Get ATIS card ID by Trello ID
  */
-router.get('/cards/by-trello/:trelloId', async (req: Request, res: Response) => {
+router.get('/cards/by-trello/:trelloId', async (req, res) => {
   try {
     const { trelloId } = req.params;
     const db = await getDb();
@@ -643,7 +643,7 @@ router.get('/cards/by-trello/:trelloId', async (req: Request, res: Response) => 
  * Full sync: fetch all boards + cards from Trello and upsert into atis_boards / atis_cards.
  * This must be called at least once before the timeline will show any data.
  */
-router.post('/sync', async (req: Request, res: Response) => {
+router.post('/sync', async (req, res) => {
   const user = (req as any).user;
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -865,7 +865,7 @@ async function runAtisSync(apiKey: string, token: string, context: ScheduledJobC
  * GET /api/atis/timeline-tasks
  * Get tasks for the dashboard timeline with AI understanding and checklists
  */
-router.get('/timeline-tasks', async (req: Request, res: Response) => {
+router.get('/timeline-tasks', async (req, res) => {
   const maxRetries = 3;
   let lastError: any;
   
@@ -1369,7 +1369,7 @@ router.post('/checklist/sync-completion/:cardId', async (req: AuthenticatedAtisR
  * POST /api/atis/sync-checklist/:cardId
  * Sync APTLSS checklist to a single Trello card
  */
-router.post('/sync-checklist/:cardId', async (req: Request, res: Response) => {
+router.post('/sync-checklist/:cardId', async (req, res) => {
   try {
     const cardId = parseInt(req.params.cardId);
     const { replaceExisting = false, preserveCompleted = true } = req.body;
@@ -1438,7 +1438,7 @@ router.post('/sync-checklist/:cardId', async (req: Request, res: Response) => {
  * POST /api/atis/sync-checklists/bulk
  * Bulk sync APTLSS checklists to multiple Trello cards
  */
-router.post('/sync-checklists/bulk', async (req: Request, res: Response) => {
+router.post('/sync-checklists/bulk', async (req, res) => {
   try {
     const { replaceExisting = false, preserveCompleted = true } = req.body;
     if (req.body?.cardIds !== undefined && !Array.isArray(req.body.cardIds)) {
@@ -1510,7 +1510,7 @@ router.post('/sync-checklists/bulk', async (req: Request, res: Response) => {
  * GET /api/atis/sync-status/:cardId
  * Get sync status for a card
  */
-router.get('/sync-status/:cardId', async (req: Request, res: Response) => {
+router.get('/sync-status/:cardId', async (req, res) => {
   try {
     const cardId = parseInt(req.params.cardId);
 
@@ -1562,7 +1562,7 @@ router.get('/sync-status/:cardId', async (req: Request, res: Response) => {
  * GET /api/atis/task-types
  * Get available task types for filtering
  */
-router.get('/task-types', async (req: Request, res: Response) => {
+router.get('/task-types', async (req, res) => {
   try {
     const db = await getDb();
     if (!db) {
@@ -1592,7 +1592,7 @@ router.get('/task-types', async (req: Request, res: Response) => {
  * GET /api/atis/extraction/stats
  * Get attachment extraction statistics
  */
-router.get('/extraction/stats', async (req: Request, res: Response) => {
+router.get('/extraction/stats', async (req, res) => {
   try {
     const extractor = createAttachmentExtractor();
     const stats = await extractor.getExtractionStats();
@@ -1607,7 +1607,7 @@ router.get('/extraction/stats', async (req: Request, res: Response) => {
  * POST /api/atis/extraction/process
  * Process pending attachments for content extraction
  */
-router.post('/extraction/process', async (req: Request, res: Response) => {
+router.post('/extraction/process', async (req, res) => {
   try {
     const { limit } = parseLimitOffset({ limit: req.body?.limit }, { defaultLimit: 50, maxLimit: 100 });
     const extractor = createAttachmentExtractor();
@@ -1623,7 +1623,7 @@ router.post('/extraction/process', async (req: Request, res: Response) => {
  * GET /api/atis/extraction/card/:cardId
  * Get extracted content for a specific card
  */
-router.get('/extraction/card/:cardId', async (req: Request, res: Response) => {
+router.get('/extraction/card/:cardId', async (req, res) => {
   try {
     const cardId = parseInt(req.params.cardId);
     const extractor = createAttachmentExtractor();
@@ -1643,7 +1643,7 @@ router.get('/extraction/card/:cardId', async (req: Request, res: Response) => {
  * GET /api/atis/chatbot/stats
  * Get chatbot URL extraction statistics
  */
-router.get('/chatbot/stats', async (req: Request, res: Response) => {
+router.get('/chatbot/stats', async (req, res) => {
   try {
     const extractor = createChatbotExtractor();
     const stats = await extractor.getStats();
@@ -1658,7 +1658,7 @@ router.get('/chatbot/stats', async (req: Request, res: Response) => {
  * POST /api/atis/chatbot/scan
  * Scan cards and comments for chatbot URLs
  */
-router.post('/chatbot/scan', async (req: Request, res: Response) => {
+router.post('/chatbot/scan', async (req, res) => {
   try {
     const extractor = createChatbotExtractor();
     const detected = await extractor.scanForChatbotUrls();
@@ -1684,7 +1684,7 @@ router.post('/chatbot/scan', async (req: Request, res: Response) => {
  * POST /api/atis/chatbot/process
  * Process detected chatbot URLs and extract conversations
  */
-router.post('/chatbot/process', async (req: Request, res: Response) => {
+router.post('/chatbot/process', async (req, res) => {
   try {
     const { limit } = parseLimitOffset({ limit: req.body?.limit }, { defaultLimit: 20, maxLimit: 100 });
     const extractor = createChatbotExtractor();
@@ -1700,7 +1700,7 @@ router.post('/chatbot/process', async (req: Request, res: Response) => {
  * GET /api/atis/chatbot/card/:cardId
  * Get chatbot conversations for a specific card
  */
-router.get('/chatbot/card/:cardId', async (req: Request, res: Response) => {
+router.get('/chatbot/card/:cardId', async (req, res) => {
   try {
     const cardId = parseInt(req.params.cardId);
     const extractor = createChatbotExtractor();
@@ -1716,7 +1716,7 @@ router.get('/chatbot/card/:cardId', async (req: Request, res: Response) => {
  * POST /api/atis/chatbot/extract-url
  * Extract conversation from a single chatbot URL
  */
-router.post('/chatbot/extract-url', async (req: Request, res: Response) => {
+router.post('/chatbot/extract-url', async (req, res) => {
   try {
     const { url, cardId } = req.body;
     

@@ -96,6 +96,6 @@ if (-not (Test-Path -LiteralPath $tsx)) {
 }
 
 Write-Output "Starting local dashboard on http://127.0.0.1:${Port}/worker"
-Write-Output "Authentication bypass is loopback-only; public ngrok remains unchanged."
+Write-Output "Authentication bypass is loopback-only."
 & node $tsx "server/_core/index.ts"
 exit $LASTEXITCODE

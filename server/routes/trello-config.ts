@@ -264,7 +264,7 @@ router.get('/labels', requireAdmin, async (req: Request, res: Response) => {
  * GET /api/trello/completion-labels
  * Get the current completion labels configuration for the user
  */
-router.get('/completion-labels', async (req: Request, res: Response) => {
+router.get('/completion-labels', async (req, res) => {
   try {
     const user = requestUser(req)!;
     const labels = await getCompletionLabels(user.id);
@@ -283,7 +283,7 @@ router.get('/completion-labels', async (req: Request, res: Response) => {
  * POST /api/trello/completion-labels
  * Save the completion labels configuration for the user
  */
-router.post('/completion-labels', async (req: Request, res: Response) => {
+router.post('/completion-labels', async (req, res) => {
   try {
     const user = requestUser(req)!;
 
@@ -323,7 +323,7 @@ router.post('/completion-labels', async (req: Request, res: Response) => {
  * PUT /api/trello/tasks/:taskId/complete
  * Update task completion status via Trello checklist item
  */
-router.put('/tasks/:taskId/complete', async (req: Request, res: Response) => {
+router.put('/tasks/:taskId/complete', async (req, res) => {
   try {
     const { taskId } = req.params;
     const { isCompleted, cardId, checklistId, checkItemId } = req.body;
@@ -386,7 +386,7 @@ router.put('/tasks/:taskId/complete', async (req: Request, res: Response) => {
  * PUT /api/trello/cards/:cardId/status
  * Update card status directly (fallback when checklist data is unavailable)
  */
-router.put('/cards/:cardId/status', async (req: Request, res: Response) => {
+router.put('/cards/:cardId/status', async (req, res) => {
   try {
     const { cardId } = req.params;
     const { isCompleted } = req.body;
@@ -474,7 +474,7 @@ router.put('/cards/:cardId/status', async (req: Request, res: Response) => {
  * Update or clear a card due date. Worker access is checked by router.param;
  * admins may update any card visible to the configured Trello account.
  */
-router.put('/cards/:cardId/due', async (req: Request, res: Response) => {
+router.put('/cards/:cardId/due', async (req, res) => {
   try {
     const { cardId } = req.params;
     const rawDueDate = req.body?.dueDate;
@@ -542,7 +542,7 @@ router.get('/boards/list', requireAdmin, async (req: Request, res: Response) => 
  * PUT /api/trello/cards/:cardId/update
  * Update card details (name, desc, labels) in Trello
  */
-router.put('/cards/:cardId/update', async (req: Request, res: Response) => {
+router.put('/cards/:cardId/update', async (req, res) => {
   try {
     const { cardId } = req.params;
     const { name, desc, idLabels } = req.body ?? {};
@@ -598,7 +598,7 @@ router.put('/cards/:cardId/update', async (req: Request, res: Response) => {
  * PUT /api/trello/cards/:cardId/members
  * Update card members in Trello
  */
-router.put('/cards/:cardId/members', async (req: Request, res: Response) => {
+router.put('/cards/:cardId/members', async (req, res) => {
   try {
     if (requestUser(req)!.role !== 'admin') {
       return res.status(403).json({ error: 'Only an admin can change Trello card membership' });

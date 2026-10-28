@@ -116,7 +116,7 @@ router.post('/start', expensiveOperationRateLimiter, async (req: any, res: Respo
  * GET /api/batch-operations/:operationId/status
  * Get batch operation status
  */
-router.get('/:operationId/status', async (req: Request, res: Response) => {
+router.get('/:operationId/status', async (req, res) => {
   try {
     const { operationId } = req.params;
 
@@ -147,7 +147,7 @@ router.get('/:operationId/status', async (req: Request, res: Response) => {
  * POST /api/batch-operations/:operationId/cancel
  * Cancel a batch operation
  */
-router.post('/:operationId/cancel', async (req: Request, res: Response) => {
+router.post('/:operationId/cancel', async (req, res) => {
   try {
     const { operationId } = req.params;
 

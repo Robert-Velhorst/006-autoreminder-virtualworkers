@@ -133,7 +133,7 @@ function generateResolutionSuggestions(
  * POST /api/scheduling/reschedule
  * Reschedule a single task with conflict detection
  */
-router.post('/reschedule', async (req: Request, res: Response) => {
+router.post('/reschedule', async (req, res) => {
   try {
     const { taskId, cardTrelloId, newStartTime, newEndTime, reason } = req.body;
     const actor = getScheduleActor(req);
@@ -211,7 +211,7 @@ router.post('/reschedule', async (req: Request, res: Response) => {
  * POST /api/scheduling/undo/:taskId
  * Undo the last reschedule for a task
  */
-router.post('/undo/:taskId', async (req: Request, res: Response) => {
+router.post('/undo/:taskId', async (req, res) => {
   try {
     const { taskId } = req.params;
     const actor = getScheduleActor(req);
@@ -244,7 +244,7 @@ router.post('/undo/:taskId', async (req: Request, res: Response) => {
  * GET /api/scheduling/history/:taskId
  * Get schedule history for a task
  */
-router.get('/history/:taskId', async (req: Request, res: Response) => {
+router.get('/history/:taskId', async (req, res) => {
   try {
     const { taskId } = req.params;
     const actor = getScheduleActor(req);
@@ -275,7 +275,7 @@ router.get('/history/:taskId', async (req: Request, res: Response) => {
  * POST /api/scheduling/detect-conflicts
  * Detect conflicts for a proposed schedule
  */
-router.post('/detect-conflicts', async (req: Request, res: Response) => {
+router.post('/detect-conflicts', async (req, res) => {
   try {
     const { taskId, newStartTime, newEndTime } = req.body;
     const actor = getScheduleActor(req);
@@ -336,7 +336,7 @@ router.post('/detect-conflicts', async (req: Request, res: Response) => {
  * POST /api/scheduling/batch-start
  * Start a batch operation (re-analyze, reschedule, etc.)
  */
-router.post('/batch-start', async (req: Request, res: Response) => {
+router.post('/batch-start', async (req, res) => {
   try {
     const { operationType, taskIds, description } = req.body;
     const parameters = req.body?.parameters ?? req.body?.options;
@@ -416,7 +416,7 @@ router.post('/batch-start', async (req: Request, res: Response) => {
  * GET /api/scheduling/batch/:jobId
  * Get batch operation progress
  */
-router.get('/batch/:jobId', async (req: Request, res: Response) => {
+router.get('/batch/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
     const userOpenId = (req as any).user?.openId;
@@ -476,7 +476,7 @@ router.get('/batch/:jobId', async (req: Request, res: Response) => {
  * GET /api/scheduling/batch-history
  * Get persisted batch operations for the authenticated user.
  */
-router.get('/batch-history', async (req: Request, res: Response) => {
+router.get('/batch-history', async (req, res) => {
   try {
     const userOpenId = (req as any).user?.openId;
     if (!userOpenId) {
@@ -499,7 +499,7 @@ router.get('/batch-history', async (req: Request, res: Response) => {
  * GET /api/scheduling/shortcuts
  * Get enabled keyboard shortcuts for the authenticated user.
  */
-router.get('/shortcuts', async (req: Request, res: Response) => {
+router.get('/shortcuts', async (req, res) => {
   try {
     const userOpenId = (req as any).user?.openId;
     if (!userOpenId) {
@@ -518,7 +518,7 @@ router.get('/shortcuts', async (req: Request, res: Response) => {
  * POST /api/scheduling/shortcuts
  * Save one keyboard shortcut without affecting unrelated actions.
  */
-router.post('/shortcuts', async (req: Request, res: Response) => {
+router.post('/shortcuts', async (req, res) => {
   try {
     const userOpenId = (req as any).user?.openId;
     if (!userOpenId) {
@@ -543,7 +543,7 @@ router.post('/shortcuts', async (req: Request, res: Response) => {
  * GET /api/scheduling/metrics
  * Derive live scheduling metrics from persisted batch history.
  */
-router.get('/metrics', async (req: Request, res: Response) => {
+router.get('/metrics', async (req, res) => {
   try {
     const userOpenId = (req as any).user?.openId;
     if (!userOpenId) {
@@ -562,7 +562,7 @@ router.get('/metrics', async (req: Request, res: Response) => {
  * POST /api/scheduling/batch/:jobId/cancel
  * Cancel a batch operation
  */
-router.post('/batch/:jobId/cancel', async (req: Request, res: Response) => {
+router.post('/batch/:jobId/cancel', async (req, res) => {
   try {
     const { jobId } = req.params;
     const userOpenId = (req as any).user?.openId;
@@ -599,7 +599,7 @@ router.post('/batch/:jobId/cancel', async (req: Request, res: Response) => {
  * POST /api/scheduling/batch/:jobId/pause
  * Pause a running batch operation
  */
-router.post('/batch/:jobId/pause', async (req: Request, res: Response) => {
+router.post('/batch/:jobId/pause', async (req, res) => {
   try {
     const { jobId } = req.params;
     const userOpenId = (req as any).user?.openId;
@@ -634,7 +634,7 @@ router.post('/batch/:jobId/pause', async (req: Request, res: Response) => {
  * POST /api/scheduling/batch/:jobId/resume
  * Resume a paused batch operation
  */
-router.post('/batch/:jobId/resume', async (req: Request, res: Response) => {
+router.post('/batch/:jobId/resume', async (req, res) => {
   try {
     const { jobId } = req.params;
     const userOpenId = (req as any).user?.openId;
