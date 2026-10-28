@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const controls = vi.hoisted(() => ({
   getGoogleMailDeliveryStatus: vi.fn(),
@@ -6,9 +6,6 @@ const controls = vi.hoisted(() => ({
   sendgridSend: vi.fn(),
 }));
 
-vi.mock("@sendgrid/mail", () => ({
-  default: { setApiKey: vi.fn(), send: controls.sendgridSend },
-}));
 vi.mock("nodemailer", () => ({
   default: { createTransport: vi.fn() },
 }));
@@ -19,7 +16,9 @@ vi.mock("../googleEvidence", () => ({
 }));
 
 describe("email delivery outcome", () => {
+  beforeEach(() => { vi.stubGlobal('fetch', controls.sendgridSend); });
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     vi.resetModules();
     vi.clearAllMocks();

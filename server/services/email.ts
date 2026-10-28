@@ -1,4 +1,3 @@
-import sgMail from '@sendgrid/mail';
 import { convert } from 'html-to-text';
 import { areNotificationsEnabled } from './notificationPolicy';
 import nodemailer, { type Transporter } from 'nodemailer';
@@ -23,10 +22,6 @@ const GMAIL_SMTP_PORT = Number(process.env.GMAIL_SMTP_PORT || '465');
 const GMAIL_SMTP_SECURE = process.env.GMAIL_SMTP_SECURE
   ? process.env.GMAIL_SMTP_SECURE === 'true'
   : GMAIL_SMTP_PORT === 465;
-
-if (SENDGRID_API_KEY) {
-  sgMail.setApiKey(SENDGRID_API_KEY);
-}
 
 type EmailProvider = 'gmail_api' | 'sendgrid' | 'gmail_smtp';
 
@@ -146,6 +141,15 @@ interface EmailOptions {
   text?: string;
 }
 
+// Preserve the SDK's bare-address and "Name <address>" string forms without
+// exposing a separate sending API or accepting arbitrary provider options.
+function sendGridAddress(value: string) {
+  if (typeof value !== 'string') throw new Error('Invalid email address');
+  const bracket = value.indexOf('<');
+  if (bracket < 0) return { email: value };
+  return { name: value.slice(0, bracket).trim(), email: value.slice(bracket + 1).replace('>', '').trim() };
+}
+
 function escapeEmailHtml(value: string) {
   return value.replace(/[&<>"']/g, (character) => ({
     "&": "&amp;",
@@ -211,18 +215,37 @@ export async function sendEmailWithOutcome(
       else if (context) await sendGoogleMail(message, context);
       else await sendGoogleMail(message);
     } else if (status.provider === 'sendgrid') {
-      const message = {
-        to: options.to,
-        from: SENDGRID_FROM_EMAIL!,
-        subject: options.subject,
-        html: options.html,
-        text,
-      };
+      const subject = options.subject;
+      const html = options.html;
+      if (typeof subject !== 'string' || typeof html !== 'string' || typeof text !== 'string') {
+        throw new Error('Invalid email content');
+      }
+      const body = JSON.stringify({
+        personalizations: [{ to: [sendGridAddress(options.to)] }],
+        from: sendGridAddress(SENDGRID_FROM_EMAIL!),
+        subject,
+        content: [{ type: 'text/plain', value: text }, { type: 'text/html', value: html }],
+      });
+      const deadline = AbortSignal.timeout(15_000);
+      const signal = context ? AbortSignal.any([deadline, context.signal]) : deadline;
       await assertEmailOwnership(context);
       await assertEmailDispatchAllowed(beforeDispatch, context);
       if (context?.signal.aborted) throw new ScheduledJobLeaseLostError();
       dispatchStarted = true;
-      await sgMail.send(message);
+      try {
+        const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
+          body,
+          signal,
+          redirect: 'error',
+        });
+        // Never ingest provider-controlled bodies or leak request credentials.
+        void response.body?.cancel().catch(() => undefined);
+        if (response.status !== 202) throw new Error('SendGrid did not accept the message');
+      } catch {
+        throw new Error('SendGrid did not confirm message acceptance');
+      }
     } else {
       const transporter = getGmailTransporter();
       const message = {
