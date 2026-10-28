@@ -8,6 +8,7 @@ import { registerOAuthRoutes } from "./oauth";
 import localAuthRoutes from "../routes/local-auth.js";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
+import { logString } from "../logString";
 import { attachRequestAuthentication } from "./requestAuthentication";
 import { serveStatic } from "./static";
 import { configureCompression } from "./compression";
@@ -215,7 +216,7 @@ async function startServer() {
   // Add 404 handler for unmatched API routes before Vite middleware
   app.use("/api", (req, res) => {
     console.log(
-      `[Server] 404 - Unmatched API route: ${req.method} ${req.path}`
+      `[Server] 404 - Unmatched API route: ${logString(req.method)} ${logString(req.path)}`
     );
     res.status(404).json({ error: "API endpoint not found", path: req.path });
   });

@@ -200,8 +200,53 @@ class CommandTests(unittest.TestCase):
         self.assertIn("python3 -B -I deployment/hetzner/ssh_gate_test.py", (root / ".github/workflows/ci.yml").read_text())
 
 
+class CodexQueuePreflightTests(unittest.TestCase):
+    def fixtures(self):
+        root = Path('/srv/va-dashboard-bridge')
+        info = lambda uid, gid, mode: SimpleNamespace(st_uid=uid, st_gid=gid, st_mode=stat.S_IFDIR | mode)
+        paths = {root.parent: info(0, 0, 0o755), root: info(16006, 16006, 0o700)}
+        for child in ('', 'requests', 'replies', 'llm-v1', 'llm-v1/requests', 'llm-v1/replies', 'llm-v1/dispatch'):
+            paths[root / 'queue' / child] = info(16006, 16006, 0o2770)
+        account = SimpleNamespace(pw_uid=16006, pw_gid=16006, pw_shell='/usr/sbin/nologin')
+        return paths, account
+
+    def test_fixed_transport_metadata_passes_without_reading_credentials(self):
+        paths, account = self.fixtures()
+        with patch.object(gate.Path, 'lstat', lambda path: paths[path]), \
+                patch.object(gate, 'pwd', SimpleNamespace(getpwnam=lambda name: account)):
+            gate.codex_queue_preflight()
+
+    def test_wrong_permissions_identity_and_links_are_refused(self):
+        original, account = self.fixtures()
+        for path, expected in original.items():
+            for field, value in [('st_uid', 0 if expected.st_uid else 16006),
+                                 ('st_mode', stat.S_IFLNK | 0o777),
+                                 ('st_mode', stat.S_IFDIR | 0o777)]:
+                paths = dict(original)
+                paths[path] = SimpleNamespace(**{**vars(expected), field: value})
+                with self.subTest(path=str(path), field=field, value=value), \
+                        patch.object(gate.Path, 'lstat', lambda path: paths[path]), \
+                        patch.object(gate, 'pwd', SimpleNamespace(getpwnam=lambda name: account)), \
+                        self.assertRaises(gate.Refused):
+                    gate.codex_queue_preflight()
+        paths, _ = self.fixtures()
+        for field, value in [('pw_uid', 1000), ('pw_gid', 1000), ('pw_shell', '/bin/bash')]:
+            invalid = SimpleNamespace(**{**vars(account), field: value})
+            with self.subTest(field=field), patch.object(gate.Path, 'lstat', lambda path: paths[path]), \
+                    patch.object(gate, 'pwd', SimpleNamespace(getpwnam=lambda name: invalid)), \
+                    self.assertRaises(gate.Refused):
+                gate.codex_queue_preflight()
+
+    def test_missing_queue_is_refused(self):
+        with patch.object(gate.Path, 'lstat', side_effect=FileNotFoundError), self.assertRaises(gate.Refused):
+            gate.codex_queue_preflight()
+
+
 class GeneralServerTests(unittest.TestCase):
     def setUp(self):
+        queue = patch.object(gate, 'codex_queue_preflight')
+        queue.start()
+        self.addCleanup(queue.stop)
         firewall = patch.object(gate, "firewall_output", side_effect=lambda chain:
                                 FIREWALL_INPUT if chain == "INPUT" else FIREWALL_CHAIN)
         firewall.start()
@@ -217,6 +262,12 @@ class GeneralServerTests(unittest.TestCase):
                          b"create_host_path: false", b"target: /run/va-postgres-root.crt",
                          b"driver: json-file", b'max-size: "10m"', b'max-file: "3"']:
             self.assertIn(expected, source)
+        self.assertIn(b'group_add:\n      - "16006"', source)
+        self.assertIn(b'source: /srv/va-dashboard-bridge/queue', source)
+        self.assertIn(b'target: /app/codex-queue', source)
+        self.assertIn(b'APTLSS_CODEX_SHARED_QUEUE: ${APTLSS_CODEX_SHARED_QUEUE:-false}', source)
+        for forbidden in [b'/var/lib/va-dashboard-codex', b'/manager-private', b'/conversation-private', b'auth.json']:
+            self.assertNotIn(forbidden, source)
         for forbidden in [b"docker.sock", b"network_mode:", b"host-gateway", b"sslkey", b"build:", b"DATABASE_URL:"]:
             self.assertNotIn(forbidden, source)
         root = Path(__file__).parent

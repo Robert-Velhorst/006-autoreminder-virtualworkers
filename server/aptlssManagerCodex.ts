@@ -1,6 +1,6 @@
-import { confinedLocalPath } from "../shared/local-filesystem-policy.mjs";
+import { atomicWriteQueueFile, confinedLocalPath } from "../shared/local-filesystem-policy.mjs";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
@@ -73,7 +73,7 @@ export async function requestManagerCodexReview(input: string, signal: AbortSign
   const pending = localPath(requests, `${id}.pending`), path = localPath(requests, `${id}.json`), replyPath = localPath(replies, `${id}.json`);
   try {
     signal.throwIfAborted();
-    await writeFile(confinedLocalPath(pending), JSON.stringify(request), { flag: "wx", mode: 0o600 });
+    await atomicWriteQueueFile(pending, JSON.stringify(request));
     signal.throwIfAborted();
     await rename(confinedLocalPath(pending), confinedLocalPath(path));
     while (!signal.aborted && Date.now() < Date.parse(request.expiresAt)) {

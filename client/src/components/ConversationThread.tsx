@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { trelloCardUrl } from '@shared/trelloIdentifiers';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -50,6 +51,7 @@ interface ConversationThreadProps {
 }
 
 export function ConversationThread({ cardId, cardName, trigger }: ConversationThreadProps) {
+  const cardUrl = trelloCardUrl(cardId);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
@@ -233,13 +235,13 @@ export function ConversationThread({ cardId, cardName, trigger }: ConversationTh
         </ScrollArea>
 
         {/* Footer with card link */}
-        {cardId && (
+        {cardUrl && (
           <div className="pt-4 border-t flex items-center justify-between">
             <span className="text-xs text-muted-foreground">
               Card ID: {cardId.substring(0, 8)}...
             </span>
             <a
-              href={`https://trello.com/c/${cardId}`}
+              href={cardUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs text-primary hover:underline flex items-center gap-1"
