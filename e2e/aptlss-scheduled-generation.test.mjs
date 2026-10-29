@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
@@ -408,6 +408,9 @@ test('keyboard CTA proof still rejects a real focus cycle that cannot reach the 
 for (const theme of ['light', 'dark']) for (const width of [390, 1280]) test(`settled ${theme} scheduled UI at ${width}px has unobscured keyboard-reachable CTAs with app providers`, async t => {
   const f = await fixture(t, { width, theme }); await f.scheduledTab();
   assert.equal(await f.page.locator('html').evaluate(element => element.classList.contains('dark')), theme === 'dark');
+  const evidenceDirectory = await mkdtemp(join(tmpdir(), `va-scheduled-generation-${theme}-${width}-`));
+  await chmod(evidenceDirectory, 0o700);
+  const publishEvidence = (path, contents) => writeFile(path, contents, { flag: 'wx', mode: 0o600 });
   const evidence = {};
   const focusDiagnostic = stage => message => t.diagnostic(`Focus ${theme}/${width}/${stage}: ${message}`);
   const settle = async () => {
@@ -417,9 +420,11 @@ for (const theme of ['light', 'dark']) for (const width of [390, 1280]) test(`se
   const capture = async (name, element) => {
     const bounds = await element.boundingBox();
     const overflow = await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1);
-    const path = join(tmpdir(), `va-scheduled-generation-${name}-${theme}-${width}.png`);
+    const path = join(evidenceDirectory, `va-scheduled-generation-${name}-${theme}-${width}.png`);
     assert.equal(overflow, false); assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width + 1);
-    await f.page.screenshot({ path }); evidence[name] = { path, theme, viewport: { width, height: 900 }, bounds, documentOverflow: overflow };
+    const image = await f.page.screenshot({ type: 'png' });
+    await publishEvidence(path, image);
+    evidence[name] = { path, theme, viewport: { width, height: 900 }, bounds, documentOverflow: overflow };
   };
   const bootDialog = await f.review(); await f.approveForm(bootDialog);
   evidence.bootToastCTA = { ...(await visibleCta(f.page, bootDialog, 'Approve new run time', focusDiagnostic('boot-review'))), toastCount: await f.page.locator('[data-sonner-toast]').count() };
@@ -443,7 +448,13 @@ for (const theme of ['light', 'dark']) for (const width of [390, 1280]) test(`se
   await settle();
   await capture('create', create);
   evidence.create.cta = createCta;
-  const boundsPath = join(tmpdir(), `va-scheduled-generation-layout-${theme}-${width}.json`);
-  await writeFile(boundsPath, JSON.stringify(evidence, null, 2));
+  const boundsPath = join(evidenceDirectory, `va-scheduled-generation-layout-${theme}-${width}.json`);
+  const serializedEvidence = JSON.stringify(evidence, null, 2);
+  await publishEvidence(boundsPath, serializedEvidence);
+  const originalImage = await readFile(evidence.create.path);
+  await assert.rejects(() => capture('create', create), { code: 'EEXIST' });
+  assert.deepEqual(await readFile(evidence.create.path), originalImage);
+  await assert.rejects(() => publishEvidence(boundsPath, 'must not replace evidence'), { code: 'EEXIST' });
+  assert.equal(await readFile(boundsPath, 'utf8'), serializedEvidence);
   t.diagnostic(`Layout evidence: ${boundsPath}`);
 });
