@@ -1,0 +1,37 @@
+name: Exact source chatbot outbound boundary
+
+on:
+  push:
+    branches: [qualify/va-chatbot-outbound-boundary-20261029]
+
+permissions:
+  contents: read
+
+jobs:
+  boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '26.13.0'
+      - name: Bind exact source before execution
+        run: python .github/qualification/chatbot-outbound-source.py before
+      - name: Check owned case syntax
+        run: node --check .github/qualification/chatbot-outbound-cases.mjs
+      - name: Exercise actual outbound guard and original detector source
+        run: node .github/qualification/chatbot-outbound-cases.mjs
+      - name: Require all original source unchanged after execution
+        if: always()
+        run: python .github/qualification/chatbot-outbound-source.py after
+      - name: Retain exact source and all boundary results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: va-chatbot-outbound-boundary
+          path: ${{ runner.temp }}/va-chatbot-outbound-boundary/
+          if-no-files-found: error
+          retention-days: 14
