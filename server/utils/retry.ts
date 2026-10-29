@@ -10,6 +10,7 @@ export interface RetryOptions {
   retryableStatuses?: number[];
   timeoutMs?: number;
   onRetry?: (attempt: number, error: any, delayMs: number) => void;
+  chatbotPlatform?: 'chatgpt' | 'gemini' | 'claude' | null;
 }
 
 const DEFAULT_OPTIONS: Required<RetryOptions> = {
@@ -20,6 +21,7 @@ const DEFAULT_OPTIONS: Required<RetryOptions> = {
   retryableStatuses: [429, 500, 502, 503, 504], // Rate limit + server errors
   timeoutMs: 15_000,
   onRetry: () => {},
+  chatbotPlatform: null,
 };
 
 const ALLOWED_OUTBOUND_ORIGINS = new Map([
@@ -96,8 +98,21 @@ function parseAllowedOutboundUrl(input: string | URL): URL {
   return safeUrl;
 }
 
-async function fetchAllowedOutboundUrl(url: string, init?: RequestInit): Promise<Response> {
+function validateChatbotPlatform(url: URL, platform: RetryOptions['chatbotPlatform']): void {
+  if (!platform) return;
+  const hosts = {
+    chatgpt: ['chat.openai.com', 'chatgpt.com'],
+    gemini: ['g.co', 'gemini.google.com'],
+    claude: ['claude.ai'],
+  } as const;
+  if (!(hosts[platform] as readonly string[]).includes(url.hostname)) {
+    throw new UnsafeOutboundUrlError('Outbound URL does not match chatbot platform');
+  }
+}
+
+async function fetchAllowedOutboundUrl(url: string, init?: RequestInit, platform?: RetryOptions['chatbotPlatform']): Promise<Response> {
   let currentUrl = parseAllowedOutboundUrl(url);
+  validateChatbotPlatform(currentUrl, platform);
   let currentInit: RequestInit = { ...init, redirect: 'manual' };
 
   for (let redirectCount = 0; ; redirectCount++) {
@@ -115,6 +130,7 @@ async function fetchAllowedOutboundUrl(url: string, init?: RequestInit): Promise
     }
 
     const nextUrl = parseAllowedOutboundUrl(new URL(location, currentUrl));
+    validateChatbotPlatform(nextUrl, platform);
     if (nextUrl.origin !== currentUrl.origin) {
       const redirectPair = `${currentUrl.origin}>${nextUrl.origin}`;
       if (!ALLOWED_CROSS_ORIGIN_REDIRECTS.has(redirectPair)) {
@@ -207,8 +223,8 @@ export async function fetchWithRetry(
   init?: RequestInit,
   options?: RetryOptions
 ): Promise<Response> {
-  parseAllowedOutboundUrl(url);
   const opts = { ...DEFAULT_OPTIONS, ...options };
+  validateChatbotPlatform(parseAllowedOutboundUrl(url), opts.chatbotPlatform);
   let lastError: any;
 
   for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
@@ -218,7 +234,7 @@ export async function fetchWithRetry(
       const requestInit = init?.signal
         ? init
         : { ...init, signal: AbortSignal.timeout(opts.timeoutMs) };
-      const response = await fetchAllowedOutboundUrl(url, requestInit);
+      const response = await fetchAllowedOutboundUrl(url, requestInit, opts.chatbotPlatform);
 
       // If response is successful or non-retryable error, return immediately
       if (response.ok || !opts.retryableStatuses.includes(response.status)) {

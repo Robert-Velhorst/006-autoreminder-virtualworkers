@@ -89,7 +89,7 @@ export class ChatbotExtractorService {
           'User-Agent': 'Mozilla/5.0 (compatible; VADashboard/1.0)',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         },
-      });
+      }, { chatbotPlatform: 'chatgpt' });
 
       if (!response.ok) {
         return { success: false, error: `Failed to fetch: ${response.status}` };
@@ -179,7 +179,7 @@ export class ChatbotExtractorService {
           'User-Agent': 'Mozilla/5.0 (compatible; VADashboard/1.0)',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         },
-      });
+      }, { chatbotPlatform: 'gemini' });
 
       if (!response.ok) {
         return { success: false, error: `Failed to fetch: ${response.status}` };
@@ -217,7 +217,7 @@ export class ChatbotExtractorService {
           'User-Agent': 'Mozilla/5.0 (compatible; VADashboard/1.0)',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         },
-      });
+      }, { chatbotPlatform: 'claude' });
 
       if (!response.ok) {
         return { success: false, error: `Failed to fetch: ${response.status}` };
