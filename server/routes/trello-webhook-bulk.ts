@@ -147,7 +147,7 @@ router.post('/', requireAdmin, async (req: any, res: Response) => {
             isActive: 1,
           })
           .catch((err: any) =>
-            console.error(`[TrelloWebhookBulk] DB insert error for ${result.boardId}:`, err)
+            console.error('[TrelloWebhookBulk] DB insert error')
           );
       }
     }
@@ -167,7 +167,7 @@ router.post('/', requireAdmin, async (req: any, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error('[TrelloWebhookBulk] Error:', error);
+    console.error('[TrelloWebhookBulk] Error');
     res.status(500).json({
       error: 'Failed to process bulk registration',
     });
@@ -225,7 +225,7 @@ async function registerWebhookForBoard(
 
     return { boardId, success: true, webhookId: data.id };
   } catch (error) {
-    console.error('[TrelloWebhookBulk] Registration failed for %s:', boardId, error);
+    console.error('[TrelloWebhookBulk] Registration failed');
     return {
       boardId,
       success: false,

@@ -396,7 +396,7 @@ router.post('/', async (req: any, res: Response) => {
     const registeredModelId = payload?.model?.id ?? actionData?.board?.id ?? null;
     const sourceDate = typeof action?.date === 'string' ? action.date : null;
 
-    console.log('[TrelloWebhook] Received callback:', actionType);
+    console.log('[TrelloWebhook] Received callback');
 
     const db = await getDb();
     if (!db) {
@@ -470,7 +470,7 @@ router.post('/', async (req: any, res: Response) => {
     }
     return res.json(archiveResult === 'duplicate' ? { success: true, duplicate: true } : { success: true });
   } catch (error: unknown) {
-    console.error('[TrelloWebhook] Error processing callback:', error);
+    console.error('[TrelloWebhook] Error processing callback');
     res.status(500).json({ error: 'Trello webhook processing failed' });
   }
 });

@@ -847,6 +847,10 @@ router.get('/trello/boards', async (req: Request, res: Response) => {
 router.get('/trello/boards/:boardId/cards', async (req: Request, res: Response) => {
   try {
     const { boardId } = req.params;
+    const encodedBoardId = encodeTrelloPathSegment(boardId);
+    if (!encodedBoardId) {
+      return res.status(400).json({ error: 'Invalid Trello board ID' });
+    }
     const forceRefresh = req.query.refresh === 'true';
     const apiKey = process.env.TRELLO_API_KEY;
     const token = process.env.TRELLO_TOKEN;
@@ -867,7 +871,7 @@ router.get('/trello/boards/:boardId/cards', async (req: Request, res: Response) 
     // Skip expensive workspace validation - let Trello API validate the board directly
     // This avoids N+1 requests and rate limiting issues
     const response = await fetchWithRetry(
-      `https://api.trello.com/1/boards/${boardId}/cards?key=${apiKey}&token=${token}&checklists=all&list=true&board=true`,
+      `https://api.trello.com/1/boards/${encodedBoardId}/cards?key=${apiKey}&token=${token}&checklists=all&list=true&board=true`,
       undefined,
       {
         maxRetries: 3,
@@ -881,8 +885,8 @@ router.get('/trello/boards/:boardId/cards', async (req: Request, res: Response) 
     
     if (!response.ok) {
       const statusCode = response.status;
-      const errorText = await response.text().catch(() => response.statusText);
-      console.error(`Trello API error for board ${boardId}: ${statusCode} - ${errorText}`);
+      await response.body?.cancel().catch(() => undefined);
+      console.error('Trello API error fetching board cards:', statusCode);
       
       // Return appropriate error codes
       if (statusCode === 401 || statusCode === 403) {
@@ -894,7 +898,7 @@ router.get('/trello/boards/:boardId/cards', async (req: Request, res: Response) 
       if (statusCode === 429) {
         return res.status(429).json({ error: 'Rate limited by Trello - please try again later' });
       }
-      throw new Error(`Trello API error: ${statusCode} - ${errorText}`);
+      throw new Error(`Trello API error: ${statusCode}`);
     }
 
     const cards = await response.json();
@@ -919,7 +923,7 @@ router.get('/trello/boards/:boardId/cards', async (req: Request, res: Response) 
 
     res.set('X-Cache', 'MISS').json(formattedCards);
   } catch (error) {
-    console.error('Error fetching cards:', error);
+    console.error('Error fetching cards');
     res.status(500).json({ error: 'Failed to fetch cards from Trello' });
   }
 });
@@ -928,6 +932,9 @@ router.get('/trello/boards/:boardId/cards', async (req: Request, res: Response) 
 router.post('/trello/boards/:boardId/cache/clear', async (req: Request, res: Response) => {
   try {
     const { boardId } = req.params;
+    if (!encodeTrelloPathSegment(boardId)) {
+      return res.status(400).json({ error: 'Invalid Trello board ID' });
+    }
     invalidateBoardCache(boardId);
     console.log(`Cleared cache for board ${boardId}`);
     res.json({ message: 'Cache cleared successfully' });
@@ -965,7 +972,7 @@ router.post('/aptlss/generate', async (req: Request, res: Response) => {
       });
     }
 
-    console.log('Generating APTLSS for card %s with settings:', card.id, settings);
+    console.log('Generating APTLSS');
 
     const result = await generateAptlssForCard(card, {
       ...(settings && typeof settings === 'object' ? settings : {}),
@@ -978,7 +985,7 @@ router.post('/aptlss/generate', async (req: Request, res: Response) => {
     if (error instanceof ScheduledJobLeaseLostError) {
       return res.status(operation?.failureStatus ?? 409).json({ error: 'Generation authority changed or was cancelled; review before retrying.' });
     }
-    console.error('Error generating APTLSS:', error);
+    console.error('Error generating APTLSS');
     res.status(500).json({ error: 'Failed to generate APTLSS. Retry shortly or check the service configuration.' });
   } finally {
     operation?.dispose();
@@ -1171,7 +1178,7 @@ router.post('/aptlss/generate-batch', async (req: Request, res: Response) => {
     if (error instanceof ScheduledJobLeaseLostError) {
       return res.status(operation?.failureStatus ?? 409).json({ error: 'Generation authority changed or was cancelled; review before retrying.' });
     }
-    console.error('Error in batch generation:', error);
+    console.error('Error in batch generation');
     res.status(500).json({ error: 'Failed to batch generate APTLSS' });
   } finally { operation?.dispose(); }
 });
