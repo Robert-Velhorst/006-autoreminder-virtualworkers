@@ -162,6 +162,8 @@ jobs:
           if-no-files-found: warn
       - name: Install Chromium for browser smoke tests
         run: pnpm exec playwright install --with-deps chromium
+      - name: Verify calendar browser behavior
+        run: node --test e2e/calendar-browser.test.mjs
       - run: pnpm test
       - run: pnpm build
       - name: Verify exact timer identity browser contracts
