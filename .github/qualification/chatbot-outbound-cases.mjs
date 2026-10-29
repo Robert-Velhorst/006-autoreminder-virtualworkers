@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import vm from 'node:vm';
-import { stripTypeScriptTypes } from 'node:module';
+import { pathToFileURL } from 'node:url';
 
 assert.equal(process.env.GITHUB_ACTIONS, 'true');
 assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
@@ -15,9 +14,10 @@ const start = source.indexOf('export class ChatbotExtractorService {');
 const end = source.indexOf('  /**\n   * Extract conversation from ChatGPT share link', start);
 assert(start >= 0 && end > start);
 const detectorSource = source.slice(start, end) + '}\n';
-const detectorCode = stripTypeScriptTypes(detectorSource, { mode: 'strip' }).replace(/^export /, '');
-const detector = vm.runInNewContext(detectorCode + '\nnew ChatbotExtractorService();', {},
-  { timeout: 1000, contextCodeGeneration: { strings: false, wasm: false } });
+const detectorPath = path.join(output, 'exact-detector-prefix.mts');
+fs.writeFileSync(detectorPath, detectorSource);
+const { ChatbotExtractorService } = await import(pathToFileURL(detectorPath).href);
+const detector = new ChatbotExtractorService();
 const actualFetch = globalThis.fetch;
 const cases = [];
 const observations = [];
@@ -183,7 +183,7 @@ globalThis.fetch = actualFetch;
 const result = { actual_Node: process.version, cases, passed: cases.filter(row => row.passed).length,
   failed: cases.filter(row => !row.passed).length, skipped: 0, observations,
   production_source_modified: false, full_original_Vitest_or_application_suite_executed: false,
-  scope: 'Exact complete retry.ts imported with native Node TypeScript support; exact detector class prefix type-erased in memory for mining cases; fetch dispatcher intercepted, no provider/network/database/operator data access.',
+  scope: 'Exact complete retry.ts and exact detector class prefix imported with native TypeScript file support; temporary .mts excerpt preserves all original detector method bytes; fetch dispatcher intercepted, no provider/network/database/operator data access.',
   all_original_case_helpers_assertions_commands_unchanged: true, vulnerability_or_CodeQL_closure_claim: false };
 fs.writeFileSync(path.join(output, 'case-results.json'), JSON.stringify(result, null, 2) + '\n');
 console.log(JSON.stringify({ passed: result.passed, failed: result.failed, skipped: result.skipped }));
